@@ -1,0 +1,662 @@
+(ns synthigy.oauth.core
+  (:require
+   [buddy.core.codecs :as codecs]
+   [buddy.core.crypto :as crypto]
+   [buddy.hashers :as hashers]
+   [clojure.core.async :as async]
+   [clojure.data.json :as json]
+   clojure.pprint
+   [clojure.spec.alpha :as s]
+   [clojure.string :as str]
+   [clojure.tools.logging :as log]
+   [clojure.walk :refer [keywordize-keys]]
+   [nano-id.core :as nano-id]
+   [ring.util.codec :as codec]
+   [ring.util.response :as response]
+   [synthigy.dataset :as dataset]
+   [synthigy.dataset.core :as core]
+   [synthigy.dataset.id :as id]
+   [synthigy.env :as env]
+   [synthigy.iam :as iam]
+   [synthigy.iam.access :as access]
+   [synthigy.iam.encryption :as encryption]
+   [synthigy.oidc.ldap :as ldap]
+   [timing.core :as timing])
+  (:import
+   [java.util Base64]))
+
+(defn pprint [data] (with-out-str (clojure.pprint/pprint data)))
+
+(defonce ^:dynamic *resource-owners* (atom nil))
+(defonce ^:dynamic *clients* (atom nil))
+(defonce ^:dynamic *sessions* (atom nil))
+(defonce ^:dynamic *domain* nil)
+
+(defn domain+
+  ([] (domain+ ""))
+  ([path]
+   (str (or env/iam-root-url *domain*) path)))
+
+(defonce ^:dynamic *encryption-key* (nano-id/nano-id 32))
+(defonce ^:dynamic *initialization-vector* (nano-id/nano-id 12))
+
+(defn encrypt
+  [data]
+  (let [json-data (.getBytes (json/write-str data))]
+    (String.
+     (codecs/bytes->b64
+      (crypto/encrypt
+       json-data *encryption-key* *initialization-vector*
+       {:alg :aes256-gcm})))))
+
+(defn decrypt [encrypted-data]
+  (try
+    (json/read-str
+     (String.
+      (crypto/decrypt
+       (codecs/b64->bytes encrypted-data) *encryption-key* *initialization-vector*
+       {:alg :aes256-gcm}))
+     :key-fn keyword)
+    (catch Throwable _ nil)))
+
+; (comment
+;   (time
+;    (decrypt
+;     (encrypt
+;      {:device-code 100
+;       :user-code 200
+;       :ip "a"
+;       :user-agent "jfioq"}))))
+;
+(let [alphabet "ACDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"]
+  (def gen-session-id (nano-id/custom alphabet 30)))
+
+(let [default (timing/hours 2)]
+  (defn access-token-expiry
+    [{{{expiry "access"} "token-expiry"} :settings}]
+    (or expiry default)))
+
+(let [default (timing/days 1.5)]
+  (defn refresh-token-expiry
+    [{{{expiry "refresh"} "token-expiry"} :settings}]
+    (long (or expiry default))))
+
+(defn expired?
+  [token]
+  (try
+    (let [{:keys [exp]} (encryption/unsign-data token)]
+      (if (some? exp)
+        (< (* 1000 exp) (System/currentTimeMillis))
+        ;; If no exp claim, treat as invalid/expired
+        true))
+    (catch clojure.lang.ExceptionInfo ex
+      (let [{:keys [cause]} (ex-data ex)]
+        (if (= cause :exp)
+          true
+          (throw ex))))))
+
+(defn expires-at
+  [token]
+  (try
+    (let [{:keys [exp]} (encryption/unsign-data token)]
+      (java.util.Date. (* 1000 exp)))
+    (catch clojure.lang.ExceptionInfo ex
+      (let [{:keys [cause]} (ex-data ex)]
+        (if (= cause :exp)
+          (timing/value->date 0)
+          (throw ex))))))
+
+(defmulti sign-token (fn [_ token-key _] token-key))
+
+(defmethod sign-token :default
+  [session token-key data]
+  (log/errorf "[%s] Couldn't signt token `%s`" session token-key)
+  data)
+
+(defn get-session-client [session]
+  (let [euuid (get-in @*sessions* [session :client])]
+    (get @*clients* euuid)))
+
+(defprotocol LazyOAuth
+  (get-resource-owner [this]))
+
+(extend-protocol LazyOAuth
+  java.util.UUID
+  (get-resource-owner [this] (get @*resource-owners* this))
+  java.lang.String
+  (get-resource-owner [this]
+    (if-some [user-id (get-in @*resource-owners* [::name-mapping this])]
+      (get-resource-owner user-id)
+      (let [{name :name
+             :as resource-owner} (iam/get-user-details this)
+            user-id (id/extract resource-owner)]
+        (swap! *resource-owners*
+               (fn [resource-owners]
+                 (->
+                  resource-owners
+                  (assoc user-id resource-owner)
+                  (update ::name-mapping assoc name user-id))))
+        resource-owner))))
+
+(defn get-session-resource-owner [session]
+  (let [euuid (get-in @*sessions* [session :resource-owner])]
+    (get @*resource-owners* euuid)))
+
+(defmulti process-scope (fn [_ _ scope] scope))
+
+(defmethod process-scope :default
+  [session tokens scope]
+  (let [{:keys [roles]} (get-session-resource-owner session)
+        user-scopes (access/roles-scopes roles)]
+    (if (contains? user-scopes scope)
+      (update-in tokens [:access_token :scope] (fnil conj []) scope)
+      tokens)))
+
+(defn token-error [code & description]
+  ; (log/debugf "Returning error: %s\n%s" code (str/join "\n" description))
+  {:status 400
+   :headers {"Content-Type" "application/json;charset=UTF-8"
+             "Pragma" "no-cache"
+             "Cache-Control" "no-store"}
+   :body (json/write-str
+          {:error code
+           :error_description (str/join "\n" description)})})
+
+(defn get-base-uri
+  "Returns the base URI without query parameters from the given URL."
+  [url]
+  (when (not-empty url)
+    (let [uri (java.net.URI. url)]
+      (str (java.net.URI. (.getScheme uri) (.getAuthority uri) (.getPath uri) nil nil)))))
+
+(defn ldap-user
+  [username password]
+  (when (ldap/validate-credentials
+         {:username username
+          :password password})
+    (let [{:keys [_eid euuid groups roles]} (iam/get-user-details username)
+          user-context (when _eid
+                         {:synthigy/id _eid
+                          :synthigy/user euuid
+                          :synthigy/username username
+                          :synthigy/groups groups
+                          :synthigy/roles roles})]
+      (if user-context
+        (dissoc (iam/get-user-details username) :password)
+        (let [{:keys [_eid euuid]} (dataset/sync-entity
+                                    :iam/user
+                                    {:name username
+                                     :active true
+                                     :avatar nil
+                                     :type :PERSON})]
+          (dissoc (iam/get-user-details username) :password))))))
+
+(defn validate-resource-owner [username password]
+  (or
+   (ldap-user username password)
+   (let [{db-password :password
+          active :active
+          :as resource-owner} (iam/get-user-details username)]
+     (if-not active
+       nil
+       (when (iam/validate-password password db-password)
+         (dissoc resource-owner :password))))))
+
+(defn set-session-resource-owner
+  [session {username :name
+            :as resource-owner}]
+  (let [user-id (id/extract resource-owner)]
+    (swap! *sessions* assoc-in [session :resource-owner] user-id)
+    (swap! *resource-owners*
+           (fn [resource-owners]
+             (->
+              resource-owners
+              (update user-id (fn [current]
+                                (->
+                                 current
+                                 (merge resource-owner)
+                                 (update :sessions (fnil conj #{}) session))))
+              (update ::name-mapping assoc username user-id))))
+    nil))
+
+(defn remove-session-resource-owner [session]
+  (let [euuid (get-in @*sessions* [session :resource-owner])]
+    (swap! *sessions* update session dissoc :resource-owner)
+    (when euuid
+      (swap! *resource-owners*
+             (fn [resource-owners]
+               (let [{{:keys [sessions]} euuid
+                      :as resource-owners}
+                     (update-in resource-owners [euuid :sessions] (fnil disj #{}) session)]
+                 (if (empty? sessions)
+                   (dissoc resource-owners euuid)
+                   resource-owners)))))
+    nil))
+
+(defn set-session-audience-scope
+  ([session scope] (set-session-audience-scope session nil scope))
+  ([session audience scope]
+   (swap! *sessions* assoc-in [session :scopes audience] scope)))
+
+(defn get-session-audience-scope
+  ([session] (get-session-audience-scope session nil))
+  ([session audience]
+   (get-in @*sessions* [session :scopes audience])))
+
+(defn clients-match?
+  "Validates client credentials against session client.
+
+  Supports both hashed secrets (bcrypt) and plaintext secrets (for backward compatibility).
+
+  Args:
+    session - Session ID to look up client
+    params - Map with :client_id and :client_secret
+
+  Returns:
+    true if client ID matches and secret validates, false otherwise"
+  [session {:keys [client_id client_secret]}]
+  (let [{known-id :id
+         known-secret :secret} (get-session-client session)]
+    (cond
+      ;; Client IDs must match
+      (not= client_id known-id)
+      false
+
+      ;; If no secret is required (public client), allow
+      (nil? known-secret)
+      true
+
+      ;; If secret is required but not provided, reject
+      (nil? client_secret)
+      false
+
+      ;; Validate secret - use hash check if secret is hashed
+      :else
+      (if (re-matches #"^\$2[aby]\$.*|^bcrypt\+.*" known-secret)
+        ;; Hashed secret - use buddy hashers/check
+        (hashers/check client_secret known-secret)
+        ;; Plaintext secret - direct comparison (backward compatibility)
+        (= client_secret known-secret)))))
+
+(def clients-doesnt-match? (complement clients-match?))
+
+(defn get-client
+  [id]
+  (when-let [client (iam/get-client id)]
+    (swap! *clients* update (id/extract client) merge client)
+    client))
+
+(defn remove-session-client [session]
+  (let [euuid (get-in @*sessions* [session :client])]
+    (swap! *sessions* update session dissoc :client)
+    (when euuid
+      (swap! *clients* update euuid
+             (fn [current]
+               (update current :sessions (fnil disj #{}) session))))
+    nil))
+
+(defn get-session [id] (get @*sessions* id))
+(defn set-session [id data] (swap! *sessions* assoc id data))
+(defn remove-session [id]
+  (let [{client :client
+         resource-owner :resource-owner} (get-session id)
+        client-id (when client (id/extract client))
+        resource-owner-id (when resource-owner (id/extract resource-owner))]
+    (swap! *sessions* dissoc id)
+    ;; Remove session from resource owner
+    (when resource-owner
+      (swap! *resource-owners* update resource-owner-id
+             (fn [current]
+               (update current :sessions (fnil disj #{}) id))))
+    ;; Remove session from client
+    (when client
+      (swap! *clients* update client-id
+             (fn [current]
+               (update current :sessions (fnil disj #{}) id))))
+    nil))
+
+(defn get-session-tokens [session]
+  (reduce
+   (fn [r tokens]
+     (reduce
+      (fn [r [k token]] (update r k (fnil conj []) token))
+      r
+      (partition 2 (interleave (keys tokens) (vals tokens)))))
+   nil
+   (vals (:tokens (get-session session)))))
+
+(comment
+  (def session "YiSclFaUmCFKhSRrHNshCYDKlMjQKz"))
+
+(defn get-redirection-uris [session]
+  (let [{{:strs [redirections]} :settings} (get-session-client session)]
+    redirections))
+
+(def request-errors
+  (reduce-kv
+   (fn [r k v]
+     (assoc r k (str/join "\n" v)))
+   nil
+   {"invalid_request"
+    ["The request is missing a required parameter, includes an"
+     "invalid parameter value, includes a parameter more than"
+     "once, or is otherwise malformed."]
+     ;;
+    "unauthorized_client"
+    ["The client is not authorized to request an authorization"
+     "code using this method."]
+     ;;
+    "access_denied"
+    ["The resource owner or authorization server denied the"
+     "request."]
+     ;;
+    "unsupported_response_type"
+    ["The authorization server does not support obtaining an"
+     "authorization code using this method."]
+     ;;
+    "invalid_scope"
+    ["The requested scope is invalid, unknown, or malformed."]
+     ;;
+    "server_error"
+    ["The authorization server encountered an unexpected"
+     "condition that prevented it from fulfilling the request."]
+     ;;
+    "temporarily_unavailable"
+    ["The authorization server is currently unable to handle"
+     "the request due to a temporary overloading or maintenance"
+     "of the server."]}))
+
+(defn- render-error-page
+  "Renders an OAuth error page directly (400 Bad Request).
+
+  Used when redirect_uri is invalid/missing per OAuth 2.0 spec:
+  'the authorization server MUST inform the resource owner of the error
+   and MUST NOT automatically redirect the user-agent to the invalid
+   redirection URI' (RFC 6749 Section 4.1.2.1)"
+  [error-type]
+  (let [error-messages
+        {"no_redirections" "Client has no configured redirect URIs. Please contact application support."
+         "missing_redirect" "Authorization request did not specify redirect_uri. Please contact application support."
+         "redirect_missmatch" "The requested redirect_uri does not match any configured redirect URIs for this client. Please contact application support."
+         "missing_response_type" "Client did not specify response_type. Please contact application support."
+         "client_not_registered" "Client is not registered. Please contact application support."
+         "corrupt_session" "Session ID was not provided by authorization server. Please contact application support."
+         "unsupported_grant_type" "The requested grant type is not supported. Please contact application support."}
+        message (get error-messages error-type "An error occurred during authorization. Please contact application support.")]
+    {:status 400
+     :headers {"Content-Type" "text/html; charset=utf-8"
+               "Cache-Control" "no-cache"}
+     :body (str "<!DOCTYPE html>"
+                "<html><head>"
+                "<meta charset=\"UTF-8\">"
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+                "<title>OAuth Error</title>"
+                "<style>"
+                "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; "
+                "       background: #f5f5f5; display: flex; justify-content: center; align-items: center; "
+                "       min-height: 100vh; margin: 0; padding: 20px; }"
+                ".error-container { background: white; padding: 40px; border-radius: 8px; "
+                "                   box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 500px; text-align: center; }"
+                "h1 { color: #d32f2f; margin-top: 0; }"
+                "p { color: #666; line-height: 1.6; }"
+                ".error-code { color: #999; font-size: 14px; margin-top: 20px; }"
+                "</style>"
+                "</head><body>"
+                "<div class=\"error-container\">"
+                "<h1>Authentication Error</h1>"
+                "<p>" message "</p>"
+                "<p class=\"error-code\">Error: " error-type "</p>"
+                "</div>"
+                "</body></html>")}))
+
+(defn handle-request-error
+  "Handles OAuth authorization errors according to RFC 6749.
+
+  For errors where redirect_uri is invalid/missing/mismatched:
+  - Returns 400 Bad Request with error page (MUST NOT redirect to client)
+
+  For other errors:
+  - Redirects to client's redirect_uri with error parameters"
+  [{t :type
+    session :session
+    request :request
+    description :description}]
+  (let [{:keys [state redirect_uri]} (or
+                                      request
+                                      (:request (get-session session)))
+        base-redirect-uri (get-base-uri redirect_uri)]
+    (when session (remove-session session))
+    (case t
+      ;; OAuth 2.0 spec (RFC 6749 4.1.2.1): When redirect_uri is invalid/missing,
+      ;; MUST NOT redirect to client - show error page directly
+      ("no_redirections"
+       "missing_redirect"
+       "redirect_missmatch"
+       "missing_response_type"
+       "client_not_registered"
+       "corrupt_session"
+       "unsupported_grant_type")
+      (render-error-page t)
+
+      ;; For other errors with valid redirect_uri: redirect to client with error
+      {:status 302
+       :headers {"Location" (str base-redirect-uri "?"
+                                 (codec/form-encode
+                                  (cond->
+                                   {:error t}
+                                    description (assoc :error_description description)
+                                    state (assoc :state state))))
+                 "Cache-Control" "no-cache"}})))
+
+(defn set-session-authorized-at
+  [session timestamp]
+  (swap! *sessions* assoc-in [session :authorized-at] timestamp))
+
+(defn get-session-authorized-at
+  [session]
+  (get-in @*sessions* [session :authorized-at]))
+
+(defmulti session-kill-hook (fn [priority _] priority))
+
+(defn kill-session
+  [session]
+  (let [session-data (get-session session)]
+    (doseq [p (sort (keys (methods session-kill-hook)))]
+      (session-kill-hook p session))
+    (remove-session-resource-owner session)
+    (remove-session-client session)
+    (swap! *sessions* dissoc session)
+    (iam/publish
+     :oauth.session/killed
+     {:session session
+      :data session-data})))
+
+(defn kill-sessions
+  []
+  (doseq [[session] @*sessions*]
+    (kill-session session)))
+
+(s/def ::authorization-code-grant #{"authorization_code"})
+(s/def ::password-grant #{"password"})
+(s/def ::implict-grant #{"implicit"})
+(s/def ::refresh-token-grant #{"refresh_token"})
+(s/def ::client-credentials-grant #{"client_credentials"})
+
+(s/def ::grant_type
+  (s/or
+   :authorization-code ::authorization-code-grant
+   :password ::password-grant
+   :refresh-token ::refresh-token-grant
+   :implicit ::implict-grant))
+
+(defn json-error
+  [status & description]
+  (let [_status (if (number? status) status 400)
+        [code & description] (if (number? status)
+                               description
+                               (concat [status] description))]
+    {:status _status
+     :headers {"Content-Type" "application/json;charset=UTF-8"
+               "Pragma" "no-cache"
+               "Cache-Control" "no-store"}
+     :body (json/write-str
+            {:error code
+             :error_description (str/join "\n" description)})}))
+
+;; Interceptors
+(defn- decode-base64-credentials
+  [data]
+  (when data
+    (let [decoded-bytes (.decode (Base64/getDecoder) (.getBytes data "UTF-8"))
+          decoded (String. decoded-bytes)]
+      (str/split decoded #":" 2))))
+
+;; =============================================================================
+;; Ring Middleware (Pure Ring, no Pedestal dependencies)
+;; =============================================================================
+
+(defn wrap-basic-authorization
+  "Ring middleware to parse HTTP Basic Authorization header.
+
+   Extracts client_id and client_secret from Authorization header and
+   adds them to :params for OAuth client authentication.
+
+   Example:
+     Authorization: Basic base64(client_id:client_secret)
+     -> {:params {:client_id \"...\" :client_secret \"...\"}}"
+  [handler]
+  (fn [request]
+    (let [authorization (get-in request [:headers "authorization"])]
+      (if-not authorization
+        (handler request)
+        (let [[_ credentials] (re-find #"Basic\s+(.*)" authorization)
+              [id secret] (decode-base64-credentials credentials)]
+          (handler (update request :params assoc
+                           :client_id id
+                           :client_secret secret)))))))
+
+;; =============================================================================
+(defn original-uri
+  "Construct original URI from request, handling X-Forwarded-* headers.
+
+   Used by OAuth handlers to build absolute URIs for redirects and discovery."
+  [{original-uri :uri
+    {forwarded-host "x-forwarded-host"
+     forwarded-proto "x-forwarded-proto"
+     host "host"} :headers
+    :keys [scheme]}]
+  (format
+   "%s://%s"
+   (or forwarded-proto (name scheme))
+   (or forwarded-host host original-uri)))
+
+;; =============================================================================
+;; Ring Middleware (Pure Ring, no Pedestal dependencies)
+;; =============================================================================
+
+(defn wrap-keywordize-params
+  "Ring middleware to keywordize parameter keys.
+
+   Converts string keys in :params to keywords.
+   Example: {\"grant_type\" \"code\"} -> {:grant_type \"code\"}"
+  [handler]
+  (fn [request]
+    (handler (update request :params keywordize-keys))))
+
+(defn wrap-scope->set
+  "Ring middleware to convert scope string to set.
+
+   OAuth scopes are space-separated strings that need to be converted
+   to sets for processing.
+   Example: \"openid profile\" -> #{\"openid\" \"profile\"}"
+  [handler]
+  (fn [request]
+    (handler (update-in request [:params :scope]
+                        (fn [scope]
+                          (when scope
+                            (set (str/split scope #"\s+"))))))))
+
+(defn wrap-session-read
+  "Ring middleware to read session ID from cookie.
+
+   Reads 'idsrv.session' cookie and adds it to :params as :idsrv/session
+   for OAuth flows that require session tracking."
+  [handler]
+  (fn [request]
+    (let [idsrv-session (get-in request [:cookies "idsrv.session" :value])]
+      (if (empty? idsrv-session)
+        (handler request)
+        (handler (assoc-in request [:params :idsrv/session] idsrv-session))))))
+
+;; Maintenance
+(defn clean-sessions
+  "Function will clean all sessions that were issued
+  authorization code, but code wasn't used for more
+  than timeout value. Default timeout is 1 minute"
+  ([] (clean-sessions (timing/minutes 1)))
+  ([timeout]
+   (let [now (timing/time->value (timing/date))]
+     (doseq [[session {:keys [authorized-at tokens]}] @*sessions*
+             :let [authorized-at (when authorized-at (timing/time->value authorized-at))]
+             :when (or
+                    (nil? authorized-at)
+                    (and
+                     (< (+ authorized-at timeout) now)
+                     (every? empty? (vals tokens))))]
+       (log/debugf "[%s] Session timed out. No code or access token was assigned to this session" session)
+       (kill-session session)))))
+
+(defn reload-clients
+  []
+  (try
+    (let [ids (remove nil? (map :id (vals @*clients*)))
+          new-clients (iam/get-clients ids)]
+      (swap! *clients*
+             (fn [old-clients]
+               (merge-with
+                merge old-clients
+                (reduce
+                 (fn [r client]
+                   (assoc r (id/extract client) client))
+                 nil
+                 new-clients)))))
+    (catch Throwable ex
+      (log/errorf ex "[OAuth] Couldn't reload clients"))))
+
+(defn monitor-client-change
+  []
+  (let [delta-chan (async/chan (async/sliding-buffer 1))
+        close-chan (async/promise-chan)]
+    (async/sub core/*delta-publisher* :iam/app delta-chan)
+    ;; Start idle service that will listen on delta changes
+    (async/go-loop
+     [_ (async/<! delta-chan)]
+      (log/debugf "[IAM] Received client delta")
+      ;; When first delta change is received start inner loop
+      (loop [[idle-value] (async/alts!
+                           [;; That will check for new delta values
+                            delta-chan
+                             ;;
+                            close-chan
+                             ;; Or timeout
+                            (async/go
+                              (async/<! (async/timeout 5000))
+                              ::TIMEOUT)])]
+        (log/debugf "[IAM] Next idle value is: %s" idle-value)
+        ;; IF timeout is received than reload rules
+        (if (= ::TIMEOUT idle-value)
+          (do
+            (log/info "[IAM] Reloading clients!")
+            (reload-clients))
+          ;; Otherwise some other delta has been received and
+          ;; inner loop will be repeated
+          (recur (async/alts!
+                  [;; That will check for new delta values
+                   delta-chan
+                    ;; Or timeout
+                   (async/go
+                     (async/<! (async/timeout 5000))
+                     ::TIMEOUT)]))))
+      ;; when reloading is complete, wait for new delta value
+      ;; and repeat process
+      (recur (async/<! delta-chan)))))

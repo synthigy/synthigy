@@ -1,0 +1,34 @@
+#kaocha/v1
+{:tests
+ [{:id          :unit
+   :test-paths  ["test"]
+   :source-paths ["datasets" "iam" "lacinia" "resources" "server" "auth"]
+   :ns-patterns [".*-test$" ".*-test$"]}
+
+  {:id          :dataset
+   :test-paths  ["test"]
+   :source-paths ["datasets"]
+   :ns-patterns ["synthigy\\.dataset\\..*-test$"]}
+
+  {:id          :iam
+   :test-paths  ["test"]
+   :source-paths ["iam"]
+   :ns-patterns ["synthigy\\.iam.*-test$"]}
+
+  {:id          :oauth
+   :test-paths  ["test"]
+   :source-paths ["auth"]
+   :ns-patterns ["synthigy\\.oauth.*-test$"]}
+
+  {:id          :server
+   :test-paths  ["test"]
+   :source-paths ["server"]
+   :ns-patterns ["synthigy\\.server\\..*-test$"
+                 "synthigy\\.pedestal.*-test$"]}]
+
+ :plugins [:kaocha.plugin/filter
+           :kaocha.plugin/print-invocations]
+
+ :kaocha/fail-fast? false
+
+ :kaocha/reporter [kaocha.report/dots]}

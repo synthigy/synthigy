@@ -1,0 +1,96 @@
+{
+  "euuid": "c981312c-ed55-46dd-9513-69ff6866ee75",
+  "description": "This API is used to store and read data on EYWA hosted database. Usually this includes sync, stack, slice, search, get, delete, purge operations on modeled and deployed Datasets.",
+  "name": "Synthigy GraphQL",
+  "avatar": {
+    "type": "icons",
+    "options": {
+      "icon": ["boombox"],
+      "backgroundColor": ["545352"]
+    }
+  },
+  "audience": "https://www.eywaonline.com/graphql",
+  "configuration": null,
+  "scopes": [
+    {
+      "euuid": "6d167826-2548-444c-8578-8a8a7732d772",
+      "name": "dataset:deploy",
+      "description": "Allows user to deploy dataset models",
+      "xid": "EUJBCPVFsqMnfDiEnEAQr5"
+    },
+    {
+      "euuid": "660b2e57-a73b-4603-9e67-d756542a4a54",
+      "name": "dataset:delete",
+      "description": "Allows user to delete dataset, and all tables that are specific only to that dataset",
+      "xid": "Dbr3yWGb9wAcQvutHy6pfM"
+    },
+    {
+      "euuid": "2875edd3-50bc-4e0c-b732-ebe0d7686bbd",
+      "name": "dataset:subscription",
+      "description": "User can subscribe to dataset changes by using GraphQL \"refreshedGlobalDataset\" subscription endpoint",
+      "xid": "5znQGbRxjnu3n9gNckyW3e"
+    },
+    {
+      "euuid": "d9a948e0-e9ad-40ea-8f56-d3199b90a7ad",
+      "name": "robotics.location:add",
+      "description": "Allows user to add robotics location",
+      "xid": "TsuisTNF8r6d7CiDUFLGng"
+    },
+    {
+      "euuid": "6dc74437-5a88-4fc2-b35e-1087cd9b8c62",
+      "name": "robotics.git:remove",
+      "description": "Allows user to remove GIT repository",
+      "xid": "EZF4LULtoLifsyMa1UQXtM"
+    },
+    {
+      "euuid": "830fa207-749e-4b99-868e-818d29bf944b",
+      "name": "robotics.location:remove",
+      "description": "Allows user to remove robotics location",
+      "xid": "HBfuYjx2Budu4c351uA2RG"
+    },
+    {
+      "euuid": "72ce7ff6-2ca0-476c-bfc0-a6ac99886ccf",
+      "name": "robotics.robot:remove",
+      "description": "Allows user to remove robot",
+      "xid": "FBFoQfssHAohqPCH2jKz6S"
+    },
+    {
+      "euuid": "3f9ca42f-dc4a-40c3-bc7f-41f5f862ab75",
+      "name": "robotics.git:add",
+      "description": "Allows user to add new git repository",
+      "xid": "8rbSfuEvQS4QhZe4meXf72"
+    },
+    {
+      "euuid": "ae4e53ea-3a26-4416-ac02-19f8a939af6e",
+      "name": "robotics.robot:add",
+      "description": "User can add new robot",
+      "xid": "NXPtH9CNxfwptg56DMbids"
+    },
+    {
+      "euuid": "6c4c1092-1856-450e-864f-6a50dfd925da",
+      "name": "robotics.queue:remove",
+      "description": "Allows user to remove tasks from robot queue",
+      "xid": "ENdk2dwSBVt6g5MR7TNTaH"
+    },
+    {
+      "euuid": "a7ffb4bf-997f-4be4-aa85-247fd0cf7d2f",
+      "name": "dataset:save",
+      "description": "Allows user to save new dataset version",
+      "xid": "MkDuH915nDA8cRbwjnjfWe"
+    },
+    {
+      "euuid": "039deca3-9661-4cdf-a99f-0203668adee7",
+      "name": "dataset:load",
+      "description": "Allows user to view saved datasets",
+      "xid": "1SuTjA1tfZi5Z6kqrb3LMc"
+    },
+    {
+      "euuid": "66e06093-2ef7-45d2-a645-7da3d717a2fe",
+      "name": "dataset:graphiql",
+      "description": "Allows user to introspect GraphQL schema",
+      "xid": "DhoznhecdDhHYxCW7gVDJd"
+    }
+  ],
+  "xid": "RtCFQ86BSUfiC5YTTBt2eQ"
+}
+

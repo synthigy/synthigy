@@ -1,0 +1,239 @@
+{
+  "~:euuid": "~u962145ec-274b-4b01-a42f-2c7ce4b83702",
+  "~:name": "0.1.1",
+  "~:dataset": {
+    "~:euuid": "~uc441cc84-9ce4-4c40-9509-9934a62aa369",
+    "~:name": "Humanity"
+  },
+  "~:model": {
+    "~#neyho.eywa.dataset.core.ERDModel": {
+      "~:entities": {
+        "~uc39a54ab-f729-4c2d-af88-22cc130c9512": {
+          "~#neyho.eywa.dataset.core.ERDEntity": {
+            "~:name": "Human",
+            "~:width": 123.1875,
+            "~:original": null,
+            "~:type": "WEAK",
+            "~:active": null,
+            "~:euuid": "~uc39a54ab-f729-4c2d-af88-22cc130c9512",
+            "~:clone": null,
+            "~:claimed-by": null,
+            "~:position": {
+              "~#neyho.eywa.modeling.core.Coordinate": {
+                "~:x": 0,
+                "~:y": 0
+              }
+            },
+            "~:configuration": null,
+            "~:attributes": [
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u23757ee1-02ca-41f9-ab32-8db4d25677c6",
+                  "~:seq": 0,
+                  "~:name": "First Name",
+                  "~:constraint": "optional",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u1bcdadd5-f70a-4652-94f9-eeb1a97ae4c1",
+                  "~:seq": 1,
+                  "~:name": "Last Name",
+                  "~:constraint": "optional",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~uae559685-9305-4d33-b6b2-cd7014a6ef8d",
+                  "~:seq": 2,
+                  "~:name": "Gender",
+                  "~:constraint": "optional",
+                  "~:type": "enum",
+                  "~:configuration": {
+                    "~:values": [
+                      {
+                        "~:euuid": "~uf80429b0-8d4b-45dd-b4cc-f063c43b8329",
+                        "~:active": true,
+                        "~:name": "Male"
+                      },
+                      {
+                        "~:euuid": "~u36683e2a-5055-4a60-98d0-583c142030d8",
+                        "~:active": true,
+                        "~:name": "Female"
+                      }
+                    ]
+                  },
+                  "~:active": true
+                }
+              },
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u9ec3d13c-6c24-4d18-914d-3627da5efcea",
+                  "~:seq": 3,
+                  "~:name": "Birthday",
+                  "~:constraint": "optional",
+                  "~:type": "timestamp",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              }
+            ],
+            "~:height": 138
+          }
+        }
+      },
+      "~:relations": {
+        "~u1808b7e2-4f5f-4f58-9751-208ef30f53eb": {
+          "~#neyho.eywa.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#neyho.eywa.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 140,
+                      "~:y": -20
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": null,
+            "~:from": "~uc39a54ab-f729-4c2d-af88-22cc130c9512",
+            "~:active": null,
+            "~:to-label": "friends",
+            "~:euuid": "~u1808b7e2-4f5f-4f58-9751-208ef30f53eb",
+            "~:claimed-by": null,
+            "~:cardinality": "o2m",
+            "~:to": "~u39753e1f-575d-4731-8ae5-c23e6d0bd2b7"
+          }
+        },
+        "~u64f6e724-4455-48b4-b2b5-0ffa943c8b22": {
+          "~#neyho.eywa.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#neyho.eywa.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 140,
+                      "~:y": 20
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": null,
+            "~:from": "~uc39a54ab-f729-4c2d-af88-22cc130c9512",
+            "~:active": null,
+            "~:to-label": "siblings",
+            "~:euuid": "~u64f6e724-4455-48b4-b2b5-0ffa943c8b22",
+            "~:claimed-by": null,
+            "~:cardinality": "o2m",
+            "~:to": "~u39753e1f-575d-4731-8ae5-c23e6d0bd2b7"
+          }
+        },
+        "~u848bb235-fadc-452d-9992-97317c5e7d7b": {
+          "~#neyho.eywa.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#neyho.eywa.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": -61.59375,
+                      "~:y": -50
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": -150,
+                      "~:y": -80
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": -40,
+                      "~:y": -160
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": -30,
+                      "~:y": -69
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": null,
+            "~:from": "~uc39a54ab-f729-4c2d-af88-22cc130c9512",
+            "~:active": null,
+            "~:to-label": "mother",
+            "~:euuid": "~u848bb235-fadc-452d-9992-97317c5e7d7b",
+            "~:claimed-by": null,
+            "~:cardinality": "tree",
+            "~:to": "~uc39a54ab-f729-4c2d-af88-22cc130c9512"
+          }
+        },
+        "~u6a8e264a-5c1e-4b80-9280-376bee6a64a6": {
+          "~#neyho.eywa.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#neyho.eywa.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 41.59375,
+                      "~:y": -69
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 61.59375,
+                      "~:y": -149
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 141.59375,
+                      "~:y": -69
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 61.59375,
+                      "~:y": -49
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": null,
+            "~:from": "~uc39a54ab-f729-4c2d-af88-22cc130c9512",
+            "~:active": null,
+            "~:to-label": "father",
+            "~:euuid": "~u6a8e264a-5c1e-4b80-9280-376bee6a64a6",
+            "~:claimed-by": null,
+            "~:cardinality": "tree",
+            "~:to": "~uc39a54ab-f729-4c2d-af88-22cc130c9512"
+          }
+        }
+      },
+      "~:configuration": null,
+      "~:clones": {
+        "~u39753e1f-575d-4731-8ae5-c23e6d0bd2b7": {
+          "~:entity": "~uc39a54ab-f729-4c2d-af88-22cc130c9512",
+          "~:position": {
+            "~:x": 285,
+            "~:y": -2
+          }
+        }
+      },
+      "~:version": "1.0.0"
+    }
+  },
+  "~:deployed": false
+}

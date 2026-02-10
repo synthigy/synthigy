@@ -1,0 +1,199 @@
+{
+  "~:euuid": "~u2d88cb38-d749-4a46-9181-1f754bd6265e",
+  "~:name": "0.1.0",
+  "~:dataset": {
+    "~:euuid": "~uff5228e7-92d2-4cd5-8cdb-edd0df63d0e4",
+    "~:name": "Organization Hierarchy"
+  },
+  "~:model": {
+    "~#neyho.eywa.dataset.core.ERDModel": {
+      "~:entities": {
+        "~u74be523f-1992-4629-9ba2-9b07a4d8d836": {
+          "~#neyho.eywa.dataset.core.ERDEntity": {
+            "~:name": "Employee",
+            "~:width": 143.484375,
+            "~:original": null,
+            "~:type": "WEAK",
+            "~:active": null,
+            "~:euuid": "~u74be523f-1992-4629-9ba2-9b07a4d8d836",
+            "~:clone": null,
+            "~:claimed-by": null,
+            "~:position": {
+              "~#neyho.eywa.modeling.core.Coordinate": {
+                "~:x": 0,
+                "~:y": 0
+              }
+            },
+            "~:configuration": null,
+            "~:attributes": [
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~ua9122238-1388-42eb-864e-44f74e985981",
+                  "~:seq": 0,
+                  "~:name": "First Name",
+                  "~:constraint": "optional",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~uaa7f9d3e-6854-4cab-9176-7f20d2120b42",
+                  "~:seq": 1,
+                  "~:name": "Last Name",
+                  "~:constraint": "optional",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~uc9ca5a5d-b593-46db-9ca2-ace8ef06a847",
+                  "~:seq": 2,
+                  "~:name": "Title",
+                  "~:constraint": "optional",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~ub851de2e-dde6-4ca3-9c34-332a5b1433b1",
+                  "~:seq": 3,
+                  "~:name": "Hire Date",
+                  "~:constraint": "optional",
+                  "~:type": "timestamp",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u1c9fd1fe-7c2d-4e69-9a51-97863a658e40",
+                  "~:seq": 4,
+                  "~:name": "Email",
+                  "~:constraint": "optional",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#neyho.eywa.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u7d750a6f-45a5-4371-ba8a-3e186d76aa4e",
+                  "~:seq": 5,
+                  "~:name": "Department",
+                  "~:constraint": "optional",
+                  "~:type": "enum",
+                  "~:configuration": {
+                    "~:values": [
+                      {
+                        "~:euuid": "~u8613c6f9-4dfd-4cd8-b435-6f4fa49d950c",
+                        "~:active": true,
+                        "~:name": "engineering"
+                      },
+                      {
+                        "~:euuid": "~u46db0a97-5704-4285-a75f-10da6e37aa32",
+                        "~:active": true,
+                        "~:name": "sales"
+                      },
+                      {
+                        "~:euuid": "~u284c2ac3-a26c-4424-bb6e-776ce2020e12",
+                        "~:active": true,
+                        "~:name": "marketing"
+                      },
+                      {
+                        "~:euuid": "~u5cf84b48-7b74-49b2-9593-4bad160bf3c3",
+                        "~:active": true,
+                        "~:name": "human resources"
+                      },
+                      {
+                        "~:euuid": "~ua6224b2c-9ee1-4286-902f-68d3aea08245",
+                        "~:active": true,
+                        "~:name": "finance"
+                      }
+                    ]
+                  },
+                  "~:active": true
+                }
+              }
+            ],
+            "~:height": 170
+          }
+        }
+      },
+      "~:relations": {
+        "~ue7372d06-deeb-40f4-ba4f-98af5730b847": {
+          "~#neyho.eywa.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#neyho.eywa.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 51.7421875,
+                      "~:y": -85
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 71.7421875,
+                      "~:y": -165
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 151.7421875,
+                      "~:y": -85
+                    }
+                  },
+                  {
+                    "~#neyho.eywa.modeling.core.Coordinate": {
+                      "~:x": 71.7421875,
+                      "~:y": -65
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": null,
+            "~:from": "~u74be523f-1992-4629-9ba2-9b07a4d8d836",
+            "~:active": null,
+            "~:to-label": "manager",
+            "~:euuid": "~ue7372d06-deeb-40f4-ba4f-98af5730b847",
+            "~:claimed-by": null,
+            "~:cardinality": "tree",
+            "~:to": "~u74be523f-1992-4629-9ba2-9b07a4d8d836"
+          }
+        },
+        "~u5984053f-c5e9-4d93-bbcd-e8cae571f6fe": {
+          "~#neyho.eywa.dataset.core.ERDRelation": {
+            "~:path": null,
+            "~:from-label": null,
+            "~:from": "~u74be523f-1992-4629-9ba2-9b07a4d8d836",
+            "~:active": null,
+            "~:to-label": "mentees",
+            "~:euuid": "~u5984053f-c5e9-4d93-bbcd-e8cae571f6fe",
+            "~:claimed-by": null,
+            "~:cardinality": "o2m",
+            "~:to": "~u57f0a731-99c6-480a-9078-1b5c9c6a42d6"
+          }
+        }
+      },
+      "~:configuration": null,
+      "~:clones": {
+        "~u57f0a731-99c6-480a-9078-1b5c9c6a42d6": {
+          "~:entity": "~u74be523f-1992-4629-9ba2-9b07a4d8d836",
+          "~:position": {
+            "~:x": 293,
+            "~:y": 5.5
+          }
+        }
+      },
+      "~:version": "1.0.0"
+    }
+  },
+  "~:deployed": false
+}

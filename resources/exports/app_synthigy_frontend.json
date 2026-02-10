@@ -1,0 +1,33 @@
+{
+  "description": null,
+  "name": "Synthigy",
+  "settings": {
+    "logo-url": null,
+    "login-page": "",
+    "redirections": [
+      "https://www.synthigy.com/app/callback",
+      "https://www.synthigy.com/app/silent-callback"
+    ],
+    "token-expiry": {
+      "id": 600,
+      "access": 3600,
+      "refresh": 129600
+    },
+    "allowed-grants": [
+      "urn:ietf:params:oauth:grant-type:device_code",
+      "authorization_code",
+      "refresh_token"
+    ],
+    "logout-redirections": [
+      "https://www.synthigy.com/app",
+      "https://www.synthigy.com/app"
+    ]
+  },
+  "type": "public",
+  "secret": null,
+  "xid": "7Wzey8E7yCQU1Z5A529gsB",
+  "active": true,
+  "id": "MUMADPADAKQHSDFDGFAEJZJXUSFJGFOOYTWVAUDEFVPURUOP",
+  "euuid": "34c6eea5-3c95-4de1-a547-5e1b34ea16ea"
+}
+

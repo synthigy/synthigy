@@ -1,0 +1,627 @@
+{
+  "~:euuid": "~ud908a70f-a1fb-46bd-ac76-801bebe6ceed",
+  "~:name": "1.0.3",
+  "~:dataset": {
+    "~:euuid": "~u4ab2fe4f-9b74-4a23-8441-60b58be08e7e",
+    "~:name": "Datasets",
+    "~:xid": "AE18CKqkpn1txrdJxhU9v5"
+  },
+  "~:model": {
+    "~#synthigy.dataset.core.ERDModel": {
+      "~:entities": {
+        "MkEtt4vQAsruc44MGypn63": {
+          "~#synthigy.dataset.core.ERDEntity": {
+            "~:name": "Dataset",
+            "~:width": 107.859375,
+            "~:original": null,
+            "~:type": "STRONG",
+            "~:xid": "MkEtt4vQAsruc44MGypn63",
+            "~:active": true,
+            "~:euuid": "~ua800516e-9cfa-4414-9874-60f2285ec330",
+            "~:clone": null,
+            "~:claimed-by": null,
+            "~:position": {
+              "~#synthigy.modeling.core.Coordinate": {
+                "~:x": -1200,
+                "~:y": 940
+              }
+            },
+            "~:configuration": {
+              "~:constraints": {
+                "~:unique": [["Kf2YPYy4ztyDaASLNzikox"]]
+              }
+            },
+            "~:attributes": [
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u9713b57c-6a6b-40a3-a8d1-637172561f07",
+                  "~:xid": "Kf2YPYy4ztyDaASLNzikox",
+                  "~:seq": 0,
+                  "~:name": "Name",
+                  "~:constraint": "unique",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              }
+            ],
+            "~:height": 90
+          }
+        },
+        "Tp9i6E2m3kBNHtt7KwHgWX": {
+          "~#synthigy.dataset.core.ERDEntity": {
+            "~:name": "Dataset Version",
+            "~:width": 150.765625,
+            "~:original": null,
+            "~:type": "WEAK",
+            "~:xid": "Tp9i6E2m3kBNHtt7KwHgWX",
+            "~:active": true,
+            "~:euuid": "~ud922edda-f8de-486a-8407-e62ad67bf44c",
+            "~:clone": null,
+            "~:claimed-by": null,
+            "~:position": {
+              "~#synthigy.modeling.core.Coordinate": {
+                "~:x": -850,
+                "~:y": 940
+              }
+            },
+            "~:configuration": {
+              "~:constraints": {
+                "~:unique": [[]]
+              }
+            },
+            "~:attributes": [
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u9580fb5d-e405-42cc-982d-be882867d883",
+                  "~:xid": "KTm41tJGaCMPnoZWhebUpr",
+                  "~:seq": 0,
+                  "~:name": "Name",
+                  "~:constraint": "mandatory",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~uda1ca445-efdf-41e7-9d31-9e81d1310589",
+                  "~:xid": "Tw8uceFnCbdrfmcT8DTwSQ",
+                  "~:seq": 1,
+                  "~:name": "Deployed",
+                  "~:constraint": "mandatory",
+                  "~:type": "boolean",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u57a00954-6918-4ea7-baa9-8030bf815385",
+                  "~:xid": "BpaaUY35Eeuo9MywQesxWx",
+                  "~:seq": 2,
+                  "~:name": "Deployed On",
+                  "~:constraint": "optional",
+                  "~:type": "timestamp",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~ud36fde24-9142-435d-a612-7fc877b07551",
+                  "~:xid": "T7L9YeEqmotJUbEfFJmaTS",
+                  "~:seq": 3,
+                  "~:name": "Model",
+                  "~:constraint": "mandatory",
+                  "~:type": "transit",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u2fc5ab99-a875-4c4e-ada9-27d64c93254f",
+                  "~:xid": "6u9bu3vgQ1qth1aweWQowL",
+                  "~:seq": 4,
+                  "~:name": "Configuration",
+                  "~:constraint": "optional",
+                  "~:type": "transit",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              }
+            ],
+            "~:height": 138
+          }
+        },
+        "LrqagSaDABNV272TRWfx9G": {
+          "~#synthigy.dataset.core.ERDEntity": {
+            "~:name": "Dataset Entity",
+            "~:width": 150.765625,
+            "~:original": null,
+            "~:type": "STRONG",
+            "~:xid": "LrqagSaDABNV272TRWfx9G",
+            "~:active": true,
+            "~:euuid": "~ua0d304a7-afe3-4d9f-a2e1-35e174bb5d5b",
+            "~:clone": null,
+            "~:claimed-by": null,
+            "~:position": {
+              "~#synthigy.modeling.core.Coordinate": {
+                "~:x": -880,
+                "~:y": 630
+              }
+            },
+            "~:configuration": {
+              "~:constraints": {
+                "~:unique": [["9wShYG1a3ucawX12MS6N1Q"]]
+              }
+            },
+            "~:attributes": [
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u48631c43-1a57-4ed2-9d8e-57a286142a23",
+                  "~:xid": "9wShYG1a3ucawX12MS6N1Q",
+                  "~:seq": 0,
+                  "~:name": "Name",
+                  "~:constraint": "unique",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u32c94d8b-9a88-46fc-9385-9799af08ac28",
+                  "~:xid": "7GjhZa5JbVcMNfGBwFKTzf",
+                  "~:seq": 1,
+                  "~:name": "Configuration",
+                  "~:constraint": "optional",
+                  "~:type": "transit",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u3bdca84b-f416-496d-8c8d-3c7f90bcccb8",
+                  "~:xid": "8PjiT9Apwm6Snbts4LnrWj",
+                  "~:seq": 2,
+                  "~:name": "Active",
+                  "~:constraint": "optional",
+                  "~:type": "boolean",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              }
+            ],
+            "~:height": 122
+          }
+        },
+        "46uqZWNio5gQF6ZNU1QQDp": {
+          "~#synthigy.dataset.core.ERDEntity": {
+            "~:name": "Dataset Relation",
+            "~:width": 154.046875,
+            "~:original": null,
+            "~:type": "WEAK",
+            "~:xid": "46uqZWNio5gQF6ZNU1QQDp",
+            "~:active": true,
+            "~:euuid": "~u191eb26a-c68f-46e5-84ec-1ee887d22adb",
+            "~:clone": null,
+            "~:claimed-by": null,
+            "~:position": {
+              "~:x": -847,
+              "~:y": 1237
+            },
+            "~:configuration": {
+              "~:constraints": {
+                "~:unique": [[]]
+              }
+            },
+            "~:attributes": [
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u78e596e0-280b-4573-a152-b9be5bbfdf40",
+                  "~:xid": "Fvsg2mQjwdKpGEesoJopRu",
+                  "~:seq": 0,
+                  "~:name": "From",
+                  "~:constraint": "mandatory",
+                  "~:type": "uuid",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u03850b9e-7e98-4072-abd9-ea0b82eb3252",
+                  "~:xid": "1SD6FzsfGw42Jfzfb7538u",
+                  "~:seq": 1,
+                  "~:name": "To",
+                  "~:constraint": "mandatory",
+                  "~:type": "uuid",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u592e84b1-34ea-47e2-89e3-b78dc18263cf",
+                  "~:xid": "C1jBKY4hwpkZx7bWGJm8dU",
+                  "~:seq": 2,
+                  "~:name": "Cardinality",
+                  "~:constraint": "mandatory",
+                  "~:type": "enum",
+                  "~:configuration": {
+                    "~:values": [
+                      {
+                        "~:euuid": "~u3034ba57-b5b3-480f-8eff-c3062448288d",
+                        "~:active": true,
+                        "~:name": "o2o",
+                        "~:xid": "6xFp1HLmhUdN5jjkrj8ECc"
+                      },
+                      {
+                        "~:euuid": "~u231b67b3-83b7-438d-ba01-c3450f9aac37",
+                        "~:name": "o2m",
+                        "~:active": true,
+                        "~:xid": "5LSWNBHbbHtb4wFQCnQGzi"
+                      },
+                      {
+                        "~:euuid": "~ueda831c8-b9c3-4cc4-8ad0-3599996cf1b4",
+                        "~:name": "m2o",
+                        "~:active": true,
+                        "~:xid": "WM7yVofNcEGyRAvN6qSnMH"
+                      },
+                      {
+                        "~:euuid": "~u836a9356-a0cf-4ba4-97e9-55d3ab13c372",
+                        "~:name": "m2m",
+                        "~:active": true,
+                        "~:xid": "HEDUYnWLucZt4vBVxmdhzh"
+                      },
+                      {
+                        "~:euuid": "~ufe8a4ce6-7d20-4cd5-bbe9-9cebda9cc286",
+                        "~:active": true,
+                        "~:name": "tree",
+                        "~:xid": "YS3HV1wx2vmjgVfL8DZhv5"
+                      }
+                    ]
+                  },
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u81abc820-c39e-4ad2-a5ba-7b5f52e7db16",
+                  "~:xid": "H1iUrzAQVVbbyybrf364k5",
+                  "~:seq": 3,
+                  "~:name": "Active",
+                  "~:constraint": "optional",
+                  "~:type": "boolean",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              }
+            ],
+            "~:height": 138
+          }
+        },
+        "5FdHiW1BHsJSPFNcT1Dsd5": {
+          "~#synthigy.dataset.core.ERDEntity": {
+            "~:name": "Dataset Entity Attribute",
+            "~:width": 205.828125,
+            "~:original": null,
+            "~:type": "WEAK",
+            "~:xid": "5FdHiW1BHsJSPFNcT1Dsd5",
+            "~:active": true,
+            "~:euuid": "~u226f54b0-6af0-4c70-b090-d4fdf2579294",
+            "~:clone": null,
+            "~:claimed-by": null,
+            "~:position": {
+              "~#synthigy.modeling.core.Coordinate": {
+                "~:x": -560,
+                "~:y": 630
+              }
+            },
+            "~:configuration": {
+              "~:constraints": {
+                "~:unique": []
+              }
+            },
+            "~:attributes": [
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u53c66c3f-a45c-47cc-a5b2-f2f624464694",
+                  "~:xid": "BM1G8zzdNnfVan8zbHEiDH",
+                  "~:seq": 0,
+                  "~:name": "Name",
+                  "~:constraint": "mandatory",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u05585f5b-0382-4f8d-b549-19ed42bfefb3",
+                  "~:xid": "1fHQRW4LxMzNkHMWqkAXhL",
+                  "~:seq": 1,
+                  "~:name": "Seq",
+                  "~:constraint": "optional",
+                  "~:type": "int",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~uc6ba5078-dfb8-4658-a61e-f99c4d3ecc1f",
+                  "~:xid": "RYJjdpxsUKhUH8NoXNxPBU",
+                  "~:seq": 2,
+                  "~:name": "Type",
+                  "~:constraint": "mandatory",
+                  "~:type": "enum",
+                  "~:configuration": {
+                    "~:values": [
+                      {
+                        "~:euuid": "~u710cdb5b-df4c-424f-b2c8-acedcace2a01",
+                        "~:active": true,
+                        "~:name": "int",
+                        "~:xid": "ExgBaCtSrcRNjgLCDnKM92"
+                      },
+                      {
+                        "~:euuid": "~u8c52b560-6fcc-418a-93cd-dee92a488e7c",
+                        "~:name": "float",
+                        "~:active": true,
+                        "~:xid": "JL1Mg1Eegaqzr6GYu1rVU7"
+                      },
+                      {
+                        "~:euuid": "~u3205f5cc-1910-4814-8287-fd21097772fa",
+                        "~:name": "string",
+                        "~:active": true,
+                        "~:xid": "7BGj1mjemF43ysos2Yna25"
+                      },
+                      {
+                        "~:euuid": "~uaae82027-f55c-490b-a59f-852f9cf4e248",
+                        "~:name": "boolean",
+                        "~:active": true,
+                        "~:xid": "N73qomeHiEub44BKrUibwD"
+                      },
+                      {
+                        "~:euuid": "~ud511f67e-22e9-43e3-8545-0556b55392a7",
+                        "~:name": "timestamp",
+                        "~:active": true,
+                        "~:xid": "TK2aH1dL8pXDsh5xisUW9C"
+                      },
+                      {
+                        "~:euuid": "~u14b08c44-c20b-481d-8c52-15d3d16c8200",
+                        "~:name": "timeperiod",
+                        "~:active": true,
+                        "~:xid": "3ZBVv8zp4L7kfvsPCJmJKy"
+                      },
+                      {
+                        "~:euuid": "~u7bb24a11-9a24-485a-92c7-92595575bc62",
+                        "~:name": "uuid",
+                        "~:active": true,
+                        "~:xid": "GGvdkSEfzDZPMAJ4Maarss"
+                      },
+                      {
+                        "~:euuid": "~u6dceb05b-a6d3-4796-915e-a1549690bff0",
+                        "~:name": "transit",
+                        "~:active": true,
+                        "~:xid": "EZT6tm9TocJV4VGbffRWP1"
+                      },
+                      {
+                        "~:euuid": "~uf2122949-ab27-467d-9d25-6bbe5e4bdd1a",
+                        "~:name": "json",
+                        "~:active": true,
+                        "~:xid": "WtjXY4Mi6nqdHnrCBKAxZP"
+                      },
+                      {
+                        "~:euuid": "~u2d4715bc-aa21-4d0b-b71e-cad5a9343001",
+                        "~:name": "currency",
+                        "~:active": true,
+                        "~:xid": "6bHPstBFaYiDsgRPgPQJHe"
+                      },
+                      {
+                        "~:euuid": "~u359c95f0-ba28-425e-9fec-0bddd41ce271",
+                        "~:active": true,
+                        "~:name": "enum",
+                        "~:xid": "7cyLpR3EaewyMNh6Cf16At"
+                      },
+                      {
+                        "~:euuid": "~u02b3e9e8-abd7-4e19-9022-c5d97881b4eb",
+                        "~:name": "encrypted",
+                        "~:active": true,
+                        "~:xid": "1LMjyd21S9b2XZCRorC6Yi"
+                      },
+                      {
+                        "~:euuid": "~ubb35fb7f-6ffc-4fb2-b82a-21450b7036a1",
+                        "~:active": true,
+                        "~:name": "hashed",
+                        "~:xid": "Q7pbRxMu6pQCUoGG5FrSHv"
+                      },
+                      {
+                        "~:euuid": "~u644276b1-745c-41ce-9108-ecf3e5719112",
+                        "~:name": "user",
+                        "~:active": true,
+                        "~:xid": "DP4xLWWJmN4vroibCHbXaq"
+                      },
+                      {
+                        "~:euuid": "~u44bfd4c5-a097-4b58-86c4-52e711ded0c2",
+                        "~:name": "group",
+                        "~:active": true,
+                        "~:xid": "9VPYqkwnqddQJqgaBEducM"
+                      },
+                      {
+                        "~:euuid": "~u63457751-92b6-4088-a540-72d20f53ba30",
+                        "~:name": "role",
+                        "~:active": true,
+                        "~:xid": "DFzReZfS2oevqFx5x8RDGB"
+                      },
+                      {
+                        "~:euuid": "~udf28042c-3de3-4d5b-83dc-7e7f8328954c",
+                        "~:active": true,
+                        "~:name": "avatar",
+                        "~:xid": "UZGNSGYUPoCq71Zrv4sFkw"
+                      }
+                    ]
+                  },
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~ub41ceed4-ee89-40f5-98de-36d3a5e81aad",
+                  "~:xid": "PEz95wkAcZoWbG2uX8NNWp",
+                  "~:seq": 3,
+                  "~:name": "Constraint",
+                  "~:constraint": "mandatory",
+                  "~:type": "string",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u3911a55e-28f4-4bc0-abde-867bb9a41729",
+                  "~:xid": "83jVeYY7E7vjhRGGL7kzgQ",
+                  "~:seq": 4,
+                  "~:name": "Configuration",
+                  "~:constraint": "optional",
+                  "~:type": "transit",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              },
+              {
+                "~#synthigy.dataset.core.ERDEntityAttribute": {
+                  "~:euuid": "~u6cac3062-e279-4236-8bff-f88183af4c30",
+                  "~:xid": "ERKihUQ9rffSuNDbWZPCGo",
+                  "~:seq": 5,
+                  "~:name": "Active",
+                  "~:constraint": "mandatory",
+                  "~:type": "boolean",
+                  "~:configuration": null,
+                  "~:active": true
+                }
+              }
+            ],
+            "~:height": 170
+          }
+        }
+      },
+      "~:relations": {
+        "8Rq5Bu1E48EGKpFEPbUeh9": {
+          "~#synthigy.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#synthigy.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#synthigy.modeling.core.Coordinate": {
+                      "~:x": -1020,
+                      "~:y": 940
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": "dataset",
+            "~:xid": "8Rq5Bu1E48EGKpFEPbUeh9",
+            "~:from": "MkEtt4vQAsruc44MGypn63",
+            "~:active": true,
+            "~:to-label": "versions",
+            "~:euuid": "~u3c277257-916f-41ba-ac64-f591110c84a4",
+            "~:claimed-by": null,
+            "~:cardinality": "o2m",
+            "~:to": "Tp9i6E2m3kBNHtt7KwHgWX"
+          }
+        },
+        "DLmjxHPyY8Jq2UEQdAxP27": {
+          "~#synthigy.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#synthigy.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#synthigy.modeling.core.Coordinate": {
+                      "~:x": -920,
+                      "~:y": 810
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": "dataset versions",
+            "~:xid": "DLmjxHPyY8Jq2UEQdAxP27",
+            "~:from": "Tp9i6E2m3kBNHtt7KwHgWX",
+            "~:active": true,
+            "~:to-label": "entities",
+            "~:euuid": "~u63f05e2f-22fc-4bae-9889-1f03a2ff4540",
+            "~:claimed-by": null,
+            "~:cardinality": "m2m",
+            "~:to": "LrqagSaDABNV272TRWfx9G"
+          }
+        },
+        "5RZTLN852KqK2RjQJzUYqm": {
+          "~#synthigy.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#synthigy.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#synthigy.modeling.core.Coordinate": {
+                      "~:x": -850,
+                      "~:y": 1070
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": "dataset versions",
+            "~:xid": "5RZTLN852KqK2RjQJzUYqm",
+            "~:from": "Tp9i6E2m3kBNHtt7KwHgWX",
+            "~:active": true,
+            "~:to-label": "relations",
+            "~:euuid": "~u23d267d7-3ae2-4432-92cb-82581afb5f90",
+            "~:claimed-by": null,
+            "~:cardinality": "m2m",
+            "~:to": "46uqZWNio5gQF6ZNU1QQDp"
+          }
+        },
+        "Ccrw9PgsKh2PQ35KyGrcwz": {
+          "~#synthigy.dataset.core.ERDRelation": {
+            "~:path": {
+              "~#synthigy.modeling.core.Path": {
+                "~:coordinates": [
+                  {
+                    "~#synthigy.modeling.core.Coordinate": {
+                      "~:x": -840,
+                      "~:y": 820
+                    }
+                  },
+                  {
+                    "~#synthigy.modeling.core.Coordinate": {
+                      "~:x": -560,
+                      "~:y": 820
+                    }
+                  }
+                ]
+              }
+            },
+            "~:from-label": "entity",
+            "~:xid": "Ccrw9PgsKh2PQ35KyGrcwz",
+            "~:from": "LrqagSaDABNV272TRWfx9G",
+            "~:active": true,
+            "~:to-label": "attributes",
+            "~:euuid": "~u5e165470-6bfc-4ae4-a0eb-6f04004a2b79",
+            "~:claimed-by": null,
+            "~:cardinality": "o2m",
+            "~:to": "5FdHiW1BHsJSPFNcT1Dsd5"
+          }
+        }
+      },
+      "~:configuration": null,
+      "~:clones": null,
+      "~:version": "1.0.0"
+    }
+  },
+  "~:deployed": false,
+  "~:xid": "ToR56Krq2zEUmkKmtrfmNU"
+}

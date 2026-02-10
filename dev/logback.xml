@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <!-- Console appender with pattern -->
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Default log level: INFO -->
+  <root level="INFO">
+    <appender-ref ref="STDOUT" />
+  </root>
+
+  <!-- Synthigy-specific loggers -->
+  <logger name="synthigy" level="INFO" />
+  <logger name="synthigy.core" level="INFO" />
+  <logger name="synthigy.dataset" level="INFO" />
+  <logger name="synthigy.iam" level="INFO" />
+  <logger name="synthigy.oauth" level="INFO" />
+  <logger name="synthigy.lacinia" level="INFO" />
+
+  <!-- Debug level for specific components (uncomment as needed) -->
+  <!-- <logger name="synthigy.iam.access" level="DEBUG" /> -->
+  <!-- <logger name="synthigy.dataset.postgres" level="DEBUG" /> -->
+  <!-- <logger name="synthigy.oauth.core" level="DEBUG" /> -->
+
+  <!-- Reduce noise from third-party libraries -->
+  <logger name="org.postgresql" level="WARN" />
+  <logger name="com.zaxxer.hikari" level="WARN" />
+  <logger name="io.pedestal" level="INFO" />
+  <logger name="org.eclipse.jetty" level="WARN" />
+  <logger name="com.walmartlabs.lacinia" level="INFO" />
+
+  <!-- SLF4J -->
+  <logger name="org.slf4j" level="WARN" />
+</configuration>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <!-- Console appender with simpler pattern for tests -->
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{20} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Default log level for tests: INFO (less noise) -->
+  <root level="INFO">
+    <appender-ref ref="STDOUT" />
+  </root>
+
+  <!-- Synthigy test logging -->
+  <logger name="synthigy" level="INFO" />
+
+  <!-- Show test initialization/shutdown clearly -->
+  <logger name="synthigy.test-helper" level="INFO" />
+  <logger name="synthigy.core" level="INFO" />
+
+  <!-- Reduce noise during tests -->
+  <logger name="synthigy.iam.access" level="WARN" />
+  <logger name="synthigy.dataset.postgres.query" level="WARN" />
+
+  <!-- Third-party libraries - keep quiet during tests -->
+  <logger name="org.postgresql" level="ERROR" />
+  <logger name="com.zaxxer.hikari" level="ERROR" />
+  <logger name="io.pedestal" level="WARN" />
+  <logger name="org.eclipse.jetty" level="ERROR" />
+  <logger name="com.walmartlabs.lacinia" level="WARN" />
+  <logger name="org.slf4j" level="ERROR" />
+
+  <!-- Kaocha test runner -->
+  <logger name="kaocha" level="INFO" />
+</configuration>

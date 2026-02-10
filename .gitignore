@@ -1,0 +1,31 @@
+# Clojure
+target/
+.cpcache/
+.nrepl-port
+.nrepl-history
+.claude/
+.lsp/
+.git.backup/
+classes/
+
+# Build artifacts
+*.jar
+pom.xml
+pom.xml.asc
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# clj-kondo
+.clj-kondo/
+.clj-kondo/.cache/
+.lifecycle
+.versions
+.env
+
+CLAUDE.md

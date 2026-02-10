@@ -1,0 +1,92 @@
+type Query {
+
+  getDeployedModel:Transit
+  @resolve(fn: "synthigy.dataset.graphql/get-deployed-model")
+
+
+  getDeployedModelDocument:String
+  @resolve(fn: "synthigy.dataset.graphql/get-deployed-model-document")
+}
+
+
+type SSShare {
+  id: Int
+  value: String
+}
+
+
+enum EncryptionStatus {
+  INITIALIZED
+  WAITING_FOR_MORE_SHARES
+  ERROR
+}
+
+
+input SSShareInput {
+  id: Int
+  value: String
+}
+
+
+type EncryptionResponse {
+  status: EncryptionStatus
+  message: String
+}
+
+type Mutation {
+  deployDataset(version: DatasetVersionInput):DatasetVersion
+  @resolve(fn: "synthigy.dataset.graphql/deploy-dataset")
+  @protect(scopes: ["dataset:deploy"])
+
+  """Mutation can be used to import dataset through cli clients,
+  after completing device flow authorization. Given the authenticated
+  user has sufficient privileges"""
+  importDataset(dataset: Transit):DatasetVersion
+  @resolve(fn: "synthigy.dataset.graphql/import-dataset")
+  @protect(scopes: ["dataset:deploy"])
+
+
+  deleteDataset:Boolean
+  @hook(fn: "synthigy.dataset/destroy-dataset" metric: -1)
+  @protect(scopes: ["dataset:delete"])
+
+  deleteDatasetVersion:Boolean
+  @hook(fn: "synthigy.dataset/recall-version" metric: -1)
+  @protect(scopes: ["dataset:delete"])
+
+
+  """Calling this mutation, encryption will be initialized! You can
+  call this mutation only once, keep response in some safe location."""
+  unsealEncryptionWithShare(share: SSShareInput): EncryptionResponse
+  @resolve(fn: "synthigy.dataset.encryption/unseal-with-share")
+
+  """Calling this mutation, encryption will be initialized! You can
+  call this mutation only once, keep response in some safe location."""
+  unsealEncryptionWithMaster(master: String): EncryptionResponse
+  @resolve(fn: "synthigy.dataset.encryption/unseal-with-master")
+
+
+  initEncryptionShares(shares: Int=5, threshold: Int=3):[SSShare]
+  @resolve(fn: "synthigy.dataset.encryption/generate-shares")
+
+  initEncryptionMaster:String
+  @resolve(fn: "synthigy.dataset.encryption/generate-master")
+
+}
+
+type DatasetChange {
+  "Element is either Entity UUID or Relation UUID"
+  element:UUID
+  delta: JSON
+}
+
+type Subscription {
+  refreshedGlobalDataset:DatasetVersion
+  @resolve(fn: "synthigy.dataset.graphql/on-deploy")
+
+  """Subscribe to entity or relationship delta. List entity or relationship
+  UUIDS and for those UUIDS you will receive changes when something is changed,
+  deleted, sliced or purged!"""
+  datasetDelta(elements:[UUID]):DatasetChange
+  @resolve(fn: "synthigy.dataset.graphql/on-delta")
+}

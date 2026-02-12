@@ -3,14 +3,13 @@
     [buddy.core.crypto :as crypto]
     [buddy.core.nonce :as nonce]
     [clojure.data.json :as json]
-    [clojure.math.combinatorics :as combo]
+    clojure.java.io
     [clojure.string :as str]
     [clojure.tools.logging :as log]
     [com.walmartlabs.lacinia.resolve :as resolve]
     [environ.core :refer [env]]
     [next.jdbc :as jdbc]
     [patcho.lifecycle :as lifecycle]
-    [synthigy.dataset :as dataset]
     [synthigy.dataset.shamir
      :refer [create-shares
              reconstruct-secret]]
@@ -325,7 +324,7 @@
          ;;             {:topic :encryption/unsealed
          ;;              :master master})
          (catch Throwable ex
-           (log/errorf ex "[ENCRYPTION] Couldn't initialize dataset encryption")
+           (log/error ex "[ENCRYPTION] Couldn't initialize dataset encryption")
            nil))))))
 
 (defn ensure-initialized!
@@ -343,9 +342,12 @@
 
   Returns: {:initialized? bool :generated? bool :master string}"
   ([] (ensure-initialized! {}))
-  ([{:keys [save-to-env?] :or {save-to-env? true}}]
+  ([{:keys [save-to-env?]
+     :or {save-to-env? true}}]
    (if (initialized?)
-     {:initialized? true :generated? false :master nil}
+     {:initialized? true
+      :generated? false
+      :master nil}
      (let [master (or (env :synthigy-encryption-master-key)
                       (random-master))
            from-env? (some? (env :synthigy-encryption-master-key))]
@@ -357,7 +359,9 @@
            {:initialized? true
             :generated? (not from-env?)
             :master master})
-         {:initialized? false :generated? false :master nil})))))
+         {:initialized? false
+          :generated? false
+          :master nil})))))
 
 ;;316714828082109243757432512254285214989459387048765934065582062858114433024
 

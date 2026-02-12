@@ -10,12 +10,6 @@
   com.cognitect/transit-clj {:mvn/version "1.0.333"}
   org.clojure/tools.logging {:mvn/version "1.3.0"}
 
-  ;; Database
-  org.postgresql/postgresql {:mvn/version "42.7.4"}
-  org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
-  com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
-  com.zaxxer/HikariCP {:mvn/version "6.2.1"}
-
   ;; GraphQL
   com.walmartlabs/lacinia {:mvn/version "1.2.2"}
 
@@ -28,12 +22,11 @@
   nano-id/nano-id {:mvn/version "1.1.0"}
   version-clj/version-clj {:mvn/version "2.0.3"}
   dev.gersak/timing {:mvn/version "0.7.0"}
-  ; dev.gersak/patcho {:local/root "patcho"}
-  dev.gersak/patcho {:mvn/version "0.4.2"}
+  dev.gersak/patcho {:local/root "patcho"}
+  ; dev.gersak/patcho {:mvn/version "0.4.2"}
   camel-snake-kebab/camel-snake-kebab {:mvn/version "0.4.3"}
   org.clojure/data.codec {:mvn/version "0.2.0"}
   org.clojure/data.csv {:mvn/version "1.1.0"}
-  org.clojure/math.combinatorics {:mvn/version "0.3.0"}
   ring/ring-codec {:mvn/version "1.2.0"}
   ;; NOTE: Server adapters (Jetty, HTTP Kit, Pedestal) are NOT included here.
   ;; Users must add their preferred server implementation to their deps.
@@ -65,7 +58,12 @@
                 com.github.gersak/lacinia-pedestal {:mvn/version "1.3.1"}
                 ;; Server-side rendering (OAuth UI pages)
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                com.thheller/shadow-css {:mvn/version "0.6.2"}}}
+                com.thheller/shadow-css {:mvn/version "0.6.2"}
+                ;; Database
+                org.postgresql/postgresql {:mvn/version "42.7.4"}
+                org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
+                com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
+                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
 
   :test
   {:extra-paths ["test"]
@@ -79,7 +77,12 @@
                 com.github.gersak/lacinia-pedestal {:mvn/version "1.3.1"}
                 ;; Server-side rendering (OAuth UI pages)
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                com.thheller/shadow-css {:mvn/version "0.6.2"}}
+                com.thheller/shadow-css {:mvn/version "0.6.2"}
+                ;; Database
+                org.postgresql/postgresql {:mvn/version "42.7.4"}
+                org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
+                com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
+                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}
    :main-opts ["-m" "kaocha.runner"]}
 
   :repl

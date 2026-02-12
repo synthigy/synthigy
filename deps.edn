@@ -1,7 +1,9 @@
 {:mvn/repos {"rpl" {:url "https://nexus.redplanetlabs.com/repository/maven-public-releases"}
              "central" {:url "https://repo1.maven.org/maven2/"}
              "clojars" {:url "https://repo.clojars.org/"}}
- :paths ["datasets" "iam" "lacinia" "resources" "server" "auth"]
+
+ ;; Core paths - shared code that doesn't depend on a specific database
+ :paths ["core/src" "lacinia" "resources" "server" "auth"]
 
  :deps
  {org.clojure/clojure {:mvn/version "1.12.0"}
@@ -28,10 +30,10 @@
   org.clojure/data.codec {:mvn/version "0.2.0"}
   org.clojure/data.csv {:mvn/version "1.1.0"}
   ring/ring-codec {:mvn/version "1.2.0"}
-  ;; NOTE: Server adapters (Jetty, HTTP Kit, Pedestal) are NOT included here.
-  ;; Users must add their preferred server implementation to their deps.
-  ;; The admin service will auto-detect: io.pedestal/pedestal.jetty,
-  ;; ring/ring-jetty-adapter, or http-kit/http-kit
+
+  ;; Database (shared JDBC infrastructure - drivers are backend-specific)
+  com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
+  com.zaxxer/HikariCP {:mvn/version "6.2.1"}
 
   ;; Configuration
   environ/environ {:mvn/version "1.2.0"}
@@ -48,41 +50,56 @@
  :mvn/version "0.1.0-SNAPSHOT"
 
  :aliases
- {:dev
-  {:extra-paths ["dev" "test"]
-   :extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}
-                ;; Server dependencies (Pedestal)
-                io.pedestal/pedestal.service {:mvn/version "0.7.0"}
+ {;; =========================================================================
+  ;; Database Backends
+  ;; =========================================================================
+  ;; Choose ONE database backend - these provide synthigy.db namespace
+  ;; that shadows core and loads backend-specific implementations
+
+  :postgres
+  {:extra-paths ["postgres/src"]
+   :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}}}
+
+  :sqlite
+  {:extra-paths ["sqlite/src"]
+   :extra-deps {org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}}}
+
+  ;; Stub for compilation without a real database backend
+  :stub
+  {:extra-paths ["dummy/src"]}
+
+  ;; =========================================================================
+  ;; Server Adapters (FUTURE - not yet modularized)
+  ;; =========================================================================
+  ;; Server adapters are NOT included in base deps.
+  ;; Users must add their preferred server implementation.
+  ;; The admin service will auto-detect: io.pedestal/pedestal.jetty,
+  ;; ring/ring-jetty-adapter, or http-kit/http-kit
+
+  :pedestal
+  {:extra-deps {io.pedestal/pedestal.service {:mvn/version "0.7.0"}
                 io.pedestal/pedestal.route {:mvn/version "0.7.0"}
                 io.pedestal/pedestal.jetty {:mvn/version "0.7.0"}
                 com.github.gersak/lacinia-pedestal {:mvn/version "1.3.1"}
                 ;; Server-side rendering (OAuth UI pages)
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                com.thheller/shadow-css {:mvn/version "0.6.2"}
-                ;; Database
-                org.postgresql/postgresql {:mvn/version "42.7.4"}
-                org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
-                com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
-                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
+                com.thheller/shadow-css {:mvn/version "0.6.2"}}}
+
+  ;; =========================================================================
+  ;; Development & Testing
+  ;; =========================================================================
+  ;; Usage: clj -M:postgres:pedestal:dev
+  ;;    or: clj -M:sqlite:pedestal:dev
+
+  :dev
+  {:extra-paths ["dev" "test"]
+   :extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}}
 
   :test
   {:extra-paths ["test"]
    :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
                 nubank/matcher-combinators {:mvn/version "3.9.1"}
-                clj-http/clj-http {:mvn/version "3.13.0"}
-                ;; Server dependencies (Pedestal)
-                io.pedestal/pedestal.service {:mvn/version "0.7.0"}
-                io.pedestal/pedestal.route {:mvn/version "0.7.0"}
-                io.pedestal/pedestal.jetty {:mvn/version "0.7.0"}
-                com.github.gersak/lacinia-pedestal {:mvn/version "1.3.1"}
-                ;; Server-side rendering (OAuth UI pages)
-                hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                com.thheller/shadow-css {:mvn/version "0.6.2"}
-                ;; Database
-                org.postgresql/postgresql {:mvn/version "42.7.4"}
-                org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
-                com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
-                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}
+                clj-http/clj-http {:mvn/version "3.13.0"}}
    :main-opts ["-m" "kaocha.runner"]}
 
   :repl

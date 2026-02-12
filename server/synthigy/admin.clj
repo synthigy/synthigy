@@ -31,7 +31,7 @@
     [patcho.lifecycle :as lifecycle]
     [synthigy.admin.core :as admin.core]
     [synthigy.admin.server :as admin.server]
-    [synthigy.db :refer [require-backend!]]
+    synthigy.db  ;; Backend loaded via classpath (postgres/src or sqlite/src)
     [synthigy.env :as senv]))
 
 ;;; ============================================================================
@@ -207,15 +207,17 @@
     synthigy superuser add       # Create superuser
     synthigy doctor              # Health checks
 
+  Database backend selection via deps.edn aliases:
+    clj -M:postgres:pedestal -m synthigy.admin  # PostgreSQL
+    clj -M:sqlite:pedestal -m synthigy.admin    # SQLite
+
   Configuration via environment variables:
     SYNTHIGY_ADMIN_PORT - Fixed port (default: random)
-    SYNTHIGY_DATABASE_TYPE - Database backend (postgres/sqlite/mysql)
-    SYNTHIGY_SERVER_TYPE - HTTP server (pedestal/httpkit)
 
   See https://github.com/synthigy/synthigy for complete documentation."
-  [& args]
+  [& _args]
   (try
-    (require-backend!)
+    ;; Backend is loaded via classpath - just start the admin
     (log/info "Starting Synthigy admin control plane...")
     (lifecycle/start! :synthigy/admin)
     (log/info "Synthigy admin ready. Use synthigy CLI for management.")

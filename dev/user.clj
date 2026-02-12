@@ -1,7 +1,14 @@
 (ns user
   "REPL utilities for Synthigy development.
 
-  Available functions:
+  ## Starting the REPL
+
+  Use the appropriate backend alias:
+    clj -M:postgres:pedestal:dev
+    clj -M:sqlite:pedestal:dev
+
+  ## Available functions:
+
   - (start)        - Start full batteries-included server (OAuth, GraphQL, HTTP)
   - (start-core)   - Start core only (dataset + IAM, no server)
   - (stop)         - Stop all systems
@@ -15,11 +22,9 @@
   - (lifecycle/system-report)                             - Get status as data"
   (:require
     [patcho.lifecycle :as lifecycle]
-    [synthigy.db :as db]))
+    [synthigy.db :as db]))  ;; Backend loaded via classpath (postgres/src or sqlite/src)
 
-
-(db/require-backend!)
-
+;; No require-backend! needed - backend is loaded via deps.edn alias
 
 (comment
   ;; 1. Setup - ensure namespaces are loaded

@@ -17,7 +17,6 @@
     [clojure.tools.logging :as log]
     [synthigy.dataset :as dataset]
     [synthigy.dataset.id :as id]
-    [synthigy.dataset.postgres :as pg]
     [synthigy.db :as db]
     [synthigy.test-data]  ; Load test data registrations
     [synthigy.test-helper :as test-helper]

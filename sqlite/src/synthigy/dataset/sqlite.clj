@@ -31,6 +31,8 @@
     ;; directly (e.g., from tests) would register the SQLite lifecycle module but lack
     ;; the protocol implementations needed for dataset operations.
     synthigy.dataset.sqlite.query
+    ;; Load patch registration for :synthigy.dataset/model
+    synthigy.dataset.sqlite.patch
     [synthigy.db
      :refer [*db*
              sync-entity

@@ -3,14 +3,39 @@
   (:require
    clojure.instant
    clojure.string
-   [jsonista.core :as json])
-  (:import
-   [org.postgresql.util PGobject]))
+   [jsonista.core :as json]))
 
-(defn jsonb-field? [data]
-  (and
-   (instance? PGobject data)
-   (#{"jsonb" "json"} (.getType data))))
+;; Database-agnostic JSON field detection
+;; Uses duck-typing to avoid hard dependency on PGobject
+
+(defn- pgobject?
+  "Check if value is a PostgreSQL PGobject (without compile-time dependency)."
+  [data]
+  (when data
+    (let [class-name (.getName (class data))]
+      (= class-name "org.postgresql.util.PGobject"))))
+
+(defn- pgobject-type
+  "Get the type of a PGobject using reflection."
+  [data]
+  (when (pgobject? data)
+    (.invoke (.getMethod (class data) "getType" (into-array Class []))
+             data
+             (into-array Object []))))
+
+(defn- pgobject-value
+  "Get the value of a PGobject using reflection."
+  [data]
+  (when (pgobject? data)
+    (.invoke (.getMethod (class data) "getValue" (into-array Class []))
+             data
+             (into-array Object []))))
+
+(defn jsonb-field?
+  "Check if data is a JSON/JSONB database field."
+  [data]
+  (and (pgobject? data)
+       (#{"jsonb" "json"} (pgobject-type data))))
 
 (def write-mapper
   (json/object-mapper
@@ -21,12 +46,31 @@
                          (name k))
                        k))}))
 
-(defn data->json [data]
+(defn- create-pgobject
+  "Create a PGobject for JSONB storage (Postgres-specific, fails gracefully for other DBs)."
+  [json-str]
+  (try
+    (let [pg-class (Class/forName "org.postgresql.util.PGobject")
+          pg-obj (.newInstance pg-class)]
+      (.invoke (.getMethod pg-class "setType" (into-array Class [String]))
+               pg-obj
+               (into-array Object ["jsonb"]))
+      (.invoke (.getMethod pg-class "setValue" (into-array Class [String]))
+               pg-obj
+               (into-array Object [json-str]))
+      pg-obj)
+    (catch ClassNotFoundException _
+      ;; PostgreSQL driver not available - return plain JSON string
+      json-str)))
+
+(defn data->json
+  "Convert Clojure data to JSON format suitable for database storage.
+   For PostgreSQL, returns PGobject with type 'jsonb'.
+   For other databases, returns JSON string."
+  [data]
   (if (jsonb-field? data)
     data
-    (doto (PGobject.)
-      (.setType "jsonb")
-      (.setValue (json/write-value-as-string data write-mapper)))))
+    (create-pgobject (json/write-value-as-string data write-mapper))))
 
 (def uuid-pattern #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[34][0-9a-fA-F]{3}-[89ab][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")
 
@@ -74,12 +118,16 @@
   (json/object-mapper {:decode-key-fn pkey-fn}))
 
 (defn json->data
+  "Parse JSON from database field to Clojure data.
+   Handles both PGobject (PostgreSQL) and plain strings (SQLite, etc.)."
   ([v] (json->data v {}))
   ([v {:keys [keyfn valfn]
        :or {keyfn pkey-fn
             valfn synthigy-val-fn}}]
-   (if (jsonb-field? v)
-     (when-let [s (.getValue v)]
+   (cond
+     ;; Handle PGobject (PostgreSQL JSONB)
+     (jsonb-field? v)
+     (when-let [s (pgobject-value v)]
        (let [mapper (if (= keyfn pkey-fn)
                       default-read-mapper
                       (json/object-mapper {:decode-key-fn keyfn}))
@@ -87,7 +135,19 @@
          (if valfn
            (synthigy-val-fn nil result)
            result)))
-     v)))
+
+     ;; Handle plain string (SQLite JSON, etc.)
+     (string? v)
+     (let [mapper (if (= keyfn pkey-fn)
+                    default-read-mapper
+                    (json/object-mapper {:decode-key-fn keyfn}))
+           result (json/read-value v mapper)]
+       (if valfn
+         (synthigy-val-fn nil result)
+         result))
+
+     ;; Already parsed or nil
+     :else v)))
 
 (defn <-json
   "Parse JSON string to Clojure data structures."

@@ -1,4 +1,4 @@
-(ns synthigy.iam.audit.sqlite
+(ns synthigy.iam.audit
   "SQLite-specific audit enhancement implementation.
 
   Extends the dataset.enhance/AuditEnhancement protocol for SQLite databases.

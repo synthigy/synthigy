@@ -21,7 +21,38 @@
     [java.util Base64]
     [java.util Random]
     [javax.crypto.spec SecretKeySpec]
-    [org.postgresql.util PGobject]))
+    [synthigy.db Postgres SQLite]))
+
+;; Database-agnostic PGobject handling (avoids compile-time dependency)
+(defn- pgobject?
+  "Check if value is a PostgreSQL PGobject (without compile-time dependency)."
+  [data]
+  (when data
+    (= "org.postgresql.util.PGobject" (.getName (class data)))))
+
+(defn- pgobject-value
+  "Get the value of a PGobject using reflection."
+  [data]
+  (when (pgobject? data)
+    (.invoke (.getMethod (class data) "getValue" (into-array Class []))
+             data
+             (into-array Object []))))
+
+(defn- create-pgobject
+  "Create a PGobject for JSONB storage (fails gracefully if Postgres driver not available)."
+  [json-str]
+  (try
+    (let [pg-class (Class/forName "org.postgresql.util.PGobject")
+          pg-obj (.newInstance pg-class)]
+      (.invoke (.getMethod pg-class "setType" (into-array Class [String]))
+               pg-obj
+               (into-array Object ["jsonb"]))
+      (.invoke (.getMethod pg-class "setValue" (into-array Class [String]))
+               pg-obj
+               (into-array Object [json-str]))
+      pg-obj)
+    (catch ClassNotFoundException _
+      json-str)))
 
 (defn- json-value->str
   "Extracts JSON string from database value.
@@ -30,17 +61,15 @@
   (cond
     (nil? value) nil
     (string? value) value
-    (instance? PGobject value) (.getValue ^PGobject value)
+    (pgobject? value) (pgobject-value value)
     :else (str value)))
 
 (defn- str->json-value
   "Converts JSON string to database-appropriate format.
    Uses PGobject for Postgres, plain string for SQLite."
   [json-str]
-  (if (instance? synthigy.db.Postgres db/*db*)
-    (doto (PGobject.)
-      (.setType "jsonb")
-      (.setValue json-str))
+  (if (instance? Postgres db/*db*)
+    (create-pgobject json-str)
     json-str))
 
 (defonce ^:dynamic *master-key* nil)
@@ -65,11 +94,11 @@
     (instance? javax.crypto.spec.SecretKeySpec data) (.getEncoded data)
     :else data))
 
-(defmethod compose/prepare [::dek-exists? synthigy.db.Postgres]
+(defmethod compose/prepare [::dek-exists? Postgres]
   [_]
   ["SELECT to_regclass('public.__deks')"])
 
-(defmethod compose/prepare [::dek-exists? synthigy.db.SQLite]
+(defmethod compose/prepare [::dek-exists? SQLite]
   [_]
   ["SELECT name FROM sqlite_master WHERE type='table' AND name='__deks'"])
 
@@ -78,7 +107,7 @@
   (let [result (first (compose/execute! (compose/prepare ::dek-exists?)))]
     (boolean (or (:to_regclass result) (:name result)))))
 
-(defmethod compose/prepare [::create-dek-table synthigy.db.Postgres]
+(defmethod compose/prepare [::create-dek-table Postgres]
   [_]
   [(str/join
      "\n"
@@ -92,7 +121,7 @@
       "   active boolean default true"
       ");"])])
 
-(defmethod compose/prepare [::create-dek-table synthigy.db.SQLite]
+(defmethod compose/prepare [::create-dek-table SQLite]
   [_]
   [(str/join
      "\n"

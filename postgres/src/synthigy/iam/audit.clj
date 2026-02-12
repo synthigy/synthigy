@@ -1,4 +1,4 @@
-(ns synthigy.iam.audit.postgres
+(ns synthigy.iam.audit
   "Postgres-specific audit enhancement implementation.
 
   Extends the dataset.enhance/AuditEnhancement protocol for Postgres databases.

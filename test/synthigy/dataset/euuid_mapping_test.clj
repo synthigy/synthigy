@@ -12,7 +12,6 @@
    [synthigy.db :as db]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
-   ;; Backend loaded dynamically via test-helper → synthigy.core → require-backend-impl!
    [synthigy.dataset.sql.query :as sql-query]
    [synthigy.test-data]  ; Load test data registrations
    [synthigy.test-helper :as test-helper]))

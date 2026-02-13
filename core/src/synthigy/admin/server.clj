@@ -2,7 +2,7 @@
   "Protocol for admin server adapters.
 
   Provides a common interface for different HTTP server implementations
-  (Jetty, HTTP Kit, etc.).")
+  (Pedestal, HTTP Kit, etc.).")
 
 (defprotocol AdminServer
   "Protocol for admin HTTP server implementations."

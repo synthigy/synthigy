@@ -1,14 +1,10 @@
 (ns synthigy.admin
-  "Admin service with auto-detected server adapter.
+  "Pedestal-based admin service.
 
-  Provides localhost-only HTTP API for system administration.
-  Automatically detects and uses available server from:
-    1. Pedestal (io.pedestal/pedestal.jetty)
-    2. Ring Jetty (ring/ring-jetty-adapter)
-    3. HTTP Kit (http-kit/http-kit)
+  Provides localhost-only HTTP API for system administration using Pedestal.
 
   Usage:
-    ;; Start (auto-detects available server)
+    ;; Start
     (start)
 
     ;; Stop
@@ -17,10 +13,9 @@
     ;; Get current port
     (port)
 
-  Required Dependencies (add ONE to your project):
-    - Pedestal users: io.pedestal/pedestal.service + io.pedestal/pedestal.jetty
-    - Ring users: ring/ring-jetty-adapter
-    - HTTP Kit users: http-kit/http-kit
+  Required Dependencies:
+    - io.pedestal/pedestal.service
+    - io.pedestal/pedestal.jetty
 
   Environment Variables:
     SYNTHIGY_ADMIN_PORT - Fixed port (default: random)"
@@ -30,6 +25,7 @@
     [environ.core :refer [env]]
     [patcho.lifecycle :as lifecycle]
     [synthigy.admin.core :as admin.core]
+    [synthigy.admin.pedestal :as admin.pedestal]
     [synthigy.admin.server :as admin.server]
     synthigy.db  ;; Backend loaded via classpath (postgres/src or sqlite/src)
     [synthigy.env :as senv]))
@@ -65,56 +61,13 @@
       (log/error e "[ADMIN] Failed to delete port file"))))
 
 ;;; ============================================================================
-;;; Server Adapter Auto-Detection
-;;; ============================================================================
-
-(defn- detect-and-create-server
-  "Auto-detect available server implementation and create instance.
-
-  Tries in order:
-    1. Pedestal (via io.pedestal.http)
-    2. Ring Jetty (via ring.adapter.jetty)
-    3. HTTP Kit (via org.httpkit.server)
-
-  Throws exception if none are available."
-  []
-  ;; Try Pedestal first (if using Pedestal for main app)
-  (try
-    (require 'io.pedestal.http)
-    (require 'synthigy.admin.pedestal)
-    (let [create-fn (resolve 'synthigy.admin.pedestal/create)]
-      (log/info "[ADMIN] Using Pedestal server adapter")
-      (create-fn))
-    (catch Exception _
-      ;; Try Ring Jetty (standalone Ring apps)
-      (try
-        (require 'ring.adapter.jetty)
-        (require 'synthigy.admin.jetty)
-        (let [create-fn (resolve 'synthigy.admin.jetty/create)]
-          (log/info "[ADMIN] Using Ring Jetty adapter")
-          (create-fn))
-        (catch Exception _
-          ;; Try HTTP Kit (HTTP Kit apps)
-          (try
-            (require 'org.httpkit.server)
-            (require 'synthigy.admin.httpkit)
-            (let [create-fn (resolve 'synthigy.admin.httpkit/create)]
-              (log/info "[ADMIN] Using HTTP Kit adapter")
-              (create-fn))
-            (catch Exception _
-              (throw (ex-info "No admin server implementation available"
-                              {:message "Add one of: io.pedestal/pedestal.jetty, ring/ring-jetty-adapter, or http-kit/http-kit to dependencies"
-                               :available-adapters [:pedestal :jetty :httpkit]
-                               :documentation "See https://github.com/synthigy/core#admin-service"})))))))))
-
-;;; ============================================================================
 ;;; Lifecycle Functions
 ;;; ============================================================================
 
 (declare stop)
 
 (defn start
-  "Start the admin server.
+  "Start the admin server using Pedestal.
 
   Options:
     :port - Port to bind to (default: random)"
@@ -131,9 +84,9 @@
                             (catch Exception _
                               (log/warnf "[ADMIN] Invalid port in SYNTHIGY_ADMIN_PORT: %s" env-port)
                               nil))))
-         server-instance (detect-and-create-server)]
+         server-instance (admin.pedestal/create)]
 
-     (log/info "[ADMIN] Starting admin service...")
+     (log/info "[ADMIN] Starting admin service (Pedestal)...")
      (try
        (admin.server/start-server server-instance
                                   {:handler admin.core/app
@@ -202,7 +155,7 @@
     synthigy init encryption     # Initialize encryption with generated key
     synthigy init datasets       # Initialize dataset tables
     synthigy init iam            # Initialize IAM tables
-    synthigy server start        # Start HTTP server (Pedestal/HTTP Kit)
+    synthigy server start        # Start HTTP server (Pedestal)
     synthigy server stop         # Stop HTTP server
     synthigy superuser add       # Create superuser
     synthigy doctor              # Health checks
@@ -218,7 +171,7 @@
   [& _args]
   (try
     ;; Backend is loaded via classpath - just start the admin
-    (log/info "Starting Synthigy admin control plane...")
+    (log/info "Starting Synthigy admin control plane (Pedestal)...")
     (lifecycle/start! :synthigy/admin)
     (log/info "Synthigy admin ready. Use synthigy CLI for management.")
     (catch Throwable ex

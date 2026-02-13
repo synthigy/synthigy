@@ -22,9 +22,7 @@
   - (lifecycle/system-report)                             - Get status as data"
   (:require
     [patcho.lifecycle :as lifecycle]
-    [synthigy.db :as db]))  ;; Backend loaded via classpath (postgres/src or sqlite/src)
-
-;; No require-backend! needed - backend is loaded via deps.edn alias
+    [synthigy.db :as db]))
 
 (comment
   ;; 1. Setup - ensure namespaces are loaded

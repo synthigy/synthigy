@@ -1,4 +1,4 @@
-(ns synthigy.pedestal
+(ns synthigy.server
   "Pedestal HTTP server implementation for Synthigy.
 
   Provides a pluggable Pedestal server adapter that integrates:
@@ -14,7 +14,7 @@
     io.pedestal/pedestal.jetty (or .tomcat, .immutant, etc.)
 
   Usage:
-    (require '[synthigy.pedestal :as server])
+    (require '[synthigy.server :as server])
 
     ;; Start server with defaults (localhost:8080)
     (server/start)
@@ -471,8 +471,8 @@
   Configuration via environment variables:
 
   Database backend:
-    SYNTHIGY_DATABASE_TYPE - Database type ('postgres', 'sqlite', 'mysql')
-    DB_TYPE - Alternative database type variable (default: 'postgres')
+    Selected via deps.edn alias at build time (:postgres or :sqlite)
+    Run with: clj -M:postgres:pedestal or clj -M:sqlite:pedestal
 
   HTTP server:
     SYNTHIGY_HOST - Bind address (default: 'localhost')
@@ -494,7 +494,7 @@
   Database-specific (SQLite):
     SQLITE_PATH - SQLite database file path
 
-  See synthigy.db and synthigy.pedestal docstrings for details."
+  See synthigy.db and synthigy.server docstrings for details."
   [& _]
   (try
     ;; Start everything (core system + HTTP server)

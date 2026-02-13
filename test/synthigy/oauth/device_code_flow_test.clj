@@ -30,7 +30,6 @@
     [synthigy.dataset.access :as dataset.access]
     [synthigy.dataset.access.protocol :as access.protocol]
     [synthigy.dataset.id :as id]
-    ;; Backend loaded dynamically via test-helper → synthigy.core → require-backend-impl!
     [synthigy.db :as db]
     [synthigy.iam :as iam]
     [synthigy.iam.encryption :as encryption]

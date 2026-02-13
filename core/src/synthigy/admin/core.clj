@@ -364,36 +364,16 @@
       (error-response 500 (.getMessage e)))))
 
 (defn handle-server-start
-  "POST /__admin/server/start - Start HTTP server (Pedestal or HTTP Kit).
+  "POST /__admin/server/start - Start HTTP server.
 
-  Dynamically loads server implementation based on SYNTHIGY_SERVER_TYPE env var."
+  Starts the server via lifecycle."
   [_request]
   (try
-    (let [server-type (or (System/getenv "SYNTHIGY_SERVER_TYPE") "pedestal")
-          server-ns (symbol (str "synthigy." server-type))]
-      (log/infof "[ADMIN] Loading server implementation: %s" server-type)
-      ;; Require server namespace
-      (try
-        (require server-ns)
-        (catch java.io.FileNotFoundException e
-          (throw (ex-info (str "Server implementation not found: " server-type)
-                          {:type :server-not-found
-                           :server-type server-type}
-                          e))))
+    (log/info "[ADMIN] Starting server via admin API")
+    (patcho.lifecycle/start! :synthigy/server)
 
-      ;; Start via lifecycle (starts all dependencies)
-      (log/infof "[ADMIN] Starting server: %s" server-type)
-      (patcho.lifecycle/start! :synthigy/server)
-
-      (json-response {:success true
-                      :message (str "Server started: " server-type)
-                      :server_type server-type}))
-    (catch clojure.lang.ExceptionInfo e
-      (if (= :server-not-found (:type (ex-data e)))
-        (error-response 404 (str (.getMessage e) " (supported: pedestal, httpkit)"))
-        (do
-          (log/error e "[ADMIN] Error starting server")
-          (error-response 500 (.getMessage e)))))
+    (json-response {:success true
+                    :message "Server started"})
     (catch Exception e
       (log/error e "[ADMIN] Error starting server")
       (error-response 500 (.getMessage e)))))

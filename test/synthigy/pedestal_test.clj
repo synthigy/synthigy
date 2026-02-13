@@ -11,7 +11,7 @@
    [clojure.data.json :as json]
    [clojure.test :refer [deftest testing is use-fixtures]]
    [clj-http.client :as http]
-   [synthigy.pedestal :as pedestal]
+   [synthigy.server :as server]
    [synthigy.test-helper :as test-helper]))
 
 ;; =============================================================================
@@ -30,10 +30,10 @@
   [f]
   ;; Start server without SPA (simpler for testing)
   ;; Note: Encryption is initialized by system-fixture
-  (pedestal/start {:host "localhost"
-                   :port test-port
-                   :spa-root nil
-                   :info {:test true :version "test-1.0"}})
+  (server/start {:host "localhost"
+                 :port test-port
+                 :spa-root nil
+                 :info {:test true :version "test-1.0"}})
 
   ;; Give server time to start
   (Thread/sleep 500)
@@ -41,7 +41,7 @@
   (try
     (f)
     (finally
-      (pedestal/stop))))
+      (server/stop))))
 
 (use-fixtures :once test-helper/system-fixture)
 (use-fixtures :each server-fixture)
@@ -57,7 +57,7 @@
 
 (deftest test-server-start-stop
   (testing "Server starts and stops cleanly"
-    (is (some? @pedestal/server) "Server should be running")
+    (is (some? @server/server) "Server should be running")
 
     ;; Server should respond to requests
     (let [response (http/get (str test-base-url "/info") {:throw-exceptions false})]

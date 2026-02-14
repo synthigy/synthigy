@@ -1,56 +1,37 @@
 (ns synthigy.server
-  "http-kit HTTP server implementation for Synthigy.
+  "Undertow HTTP server implementation for Synthigy.
 
-  Provides a pluggable http-kit server adapter that integrates:
-  - OAuth 2.0 + OpenID Connect endpoints
-  - GraphQL API (using synthigy.graphql)
-  - Authentication middleware
-  - CORS configuration
-  - SPA serving
+   Provides a pluggable Undertow server adapter that integrates:
+   - OAuth 2.0 + OpenID Connect endpoints
+   - GraphQL API (using synthigy.graphql)
+   - GraphQL Subscriptions (WebSocket)
+   - Authentication middleware
+   - CORS configuration
+   - SPA serving
 
-  ## Quick Start
+   Uses ring-undertow-adapter (Luminus/Kit compatible).
 
-  ```clojure
-  (require '[synthigy.server :as server])
+   ## Quick Start
 
-  ;; Start with defaults (localhost:8080)
-  (server/start)
+   ```clojure
+   (require '[synthigy.server :as server])
 
-  ;; Custom port
-  (server/start {:port 3000})
+   ;; Start with defaults (localhost:8080)
+   (server/start)
 
-  ;; Stop
-  (server/stop)
-  ```
+   ;; Custom port
+   (server/start {:port 3000})
 
-  ## Custom Routing
-
-  For custom routing with reitit, compojure, or other libraries,
-  use the provided handlers directly:
-
-  ```clojure
-  (require '[synthigy.server :as server])
-  (require '[reitit.ring :as reitit])
-
-  (def app
-    (reitit/ring-handler
-      (reitit/router
-        [[\"/oauth\" oauth-routes]    ; Use server/oauth-routes
-         [\"/graphql\" {:handler (server/make-graphql-handler)}]
-         [\"/api\" my-api-routes]])
-      (server/make-default-handler)))
-  ```
-
-  See individual handler functions for details."
+   ;; Stop
+   (server/stop)
+   ```"
   (:require
-    :as
     [clojure.data.json :as json]
     [clojure.tools.logging :as log]
     [environ.core :refer [env]]
-    ldap
-    [org.httpkit.server :as httpkit]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
+    [ring.adapter.undertow :refer [run-undertow]]
     [ring.middleware.keyword-params :refer [wrap-keyword-params]]
     [ring.middleware.params :refer [wrap-params]]
     synthigy.admin
@@ -59,8 +40,8 @@
     synthigy.dataset.lacinia
     [synthigy.graphql :as gql]
     [synthigy.graphql.cache :as cache]
-    synthigy.lacinia
     [synthigy.iam.access :as access]
+    synthigy.lacinia
     synthigy.oauth
     [synthigy.oauth.handlers :as oauth]
     synthigy.oauth.persistence
@@ -74,45 +55,63 @@
 ;;; ============================================================================
 
 (defn make-graphql-handler
-  "Creates a GraphQL Ring handler with IAM context bindings.
-
-  The handler authenticates requests and binds IAM access vars (*user*,
-  *roles*, *groups*) during GraphQL execution for resolver authorization.
-
-  IAM data is passed through both:
-  - Dynamic vars (convenient for sync resolvers)
-  - Context map (async-safe, use auth/get-user etc in resolvers)
-
-  Args:
-    opts - Optional configuration:
-           :cache          - ParsedQueryCache (default: LRU cache 500)
-           :tracing-header - Header name to enable tracing (default: nil)
-
-  Returns:
-    Ring handler function"
+  "Creates a GraphQL Ring handler with IAM context bindings."
   ([] (make-graphql-handler {}))
   ([{:keys [cache tracing-header]
      :or {cache (cache/lru-cache 500)}}]
    (let [schema-fn (fn [] @synthigy.lacinia/compiled)
-         ;; Context function that adds IAM data from pre-authenticated request
          context-fn (fn [request]
                       (auth/assoc-iam {} (::auth/iam request)))
-         base-handler (gql/graphql-handler
+         base-handler (gql/handler
                         schema-fn
                         {:cache cache
                          :tracing-header tracing-header
                          :context-fn context-fn})]
-     ;; Wrap with authentication and IAM bindings
      (fn [request]
        (let [iam (auth/authenticate-request request)]
          (binding [access/*user* (:user iam)
                    access/*roles* (:roles iam)
                    access/*groups* (:groups iam)]
-           ;; Pass IAM in request for context-fn to pick up
            (base-handler (assoc request ::auth/iam iam))))))))
 
 ;;; ============================================================================
-;;; Simple Router (No External Dependencies)
+;;; WebSocket Handler
+;;; ============================================================================
+
+(defn- ws-context-fn
+  "Build GraphQL context from WebSocket connection params."
+  [connection-params]
+  (let [token (:access_token connection-params)]
+    (if token
+      (let [iam (auth/get-token-context token)]
+        (auth/assoc-iam {} iam))
+      {})))
+
+(defn- ws-on-connect
+  "Authenticate WebSocket connection via access_token query param.
+
+  Returns:
+    - {} if IAM not started (no auth required)
+    - {:token t} if valid token
+    - nil if IAM started but invalid/missing token (triggers 401)"
+  [request]
+  (if-not (lifecycle/started? :synthigy/iam)
+    {}  ; IAM not active, allow anonymous
+    (let [token (get-in request [:params :access_token])]
+      (when (auth/valid-token? token)
+        {:token token}))))
+
+(defn make-websocket-handler
+  "Creates WebSocket handler for GraphQL subscriptions."
+  []
+  (ws/handler
+    (fn [] @synthigy.lacinia/compiled)
+    {:context-fn ws-context-fn
+     :on-connect ws-on-connect
+     :keep-alive-ms 25000}))
+
+;;; ============================================================================
+;;; Simple Router
 ;;; ============================================================================
 
 (defn- match-route
@@ -128,20 +127,7 @@
           routes)))
 
 (defn make-router
-  "Creates a simple router from route definitions.
-
-  Routes are vectors of [uri method handler]:
-    [[\"/oauth/token\" :post oauth/token]
-     [\"/graphql\" :any graphql-handler]]
-
-  For complex routing needs, use reitit or compojure directly
-  with the individual handlers.
-
-  Args:
-    routes - Vector of route definitions
-
-  Returns:
-    Ring handler that dispatches to matching route or returns nil"
+  "Creates a simple router from route definitions."
   [routes]
   (fn [request]
     (when-let [handler (match-route request routes)]
@@ -152,25 +138,12 @@
 ;;; ============================================================================
 
 (defn default-routes
-  "Returns default route definitions for Synthigy.
-
-  Includes:
-  - OAuth 2.0 endpoints (/oauth/*)
-  - OpenID Connect endpoints (/.well-known/*, /oauth/userinfo, /oauth/jwks)
-  - GraphQL endpoint (/graphql)
-  - Info endpoint (/info)
-
-  Args:
-    opts - Configuration options:
-           :graphql-opts - Options for GraphQL handler
-           :info         - Server info map for /info endpoint
-
-  Returns:
-    Vector of route definitions for make-router"
+  "Returns default route definitions for Synthigy."
   [{:keys [graphql-opts info]
     :or {graphql-opts {}
          info {}}}]
   (let [graphql-handler (make-graphql-handler graphql-opts)
+        websocket-handler (make-websocket-handler)
         info-handler (fn [_]
                        {:status 200
                         :headers {"Content-Type" "application/json"}
@@ -197,18 +170,19 @@
      ["/oauth/jwks" :get oauth/jwks]
      ["/.well-known/openid-configuration" :get oauth/openid-configuration]
 
-     ;; GraphQL (both GET and POST)
+     ;; GraphQL HTTP
      ["/graphql" :get graphql-handler]
-     ["/graphql" :post graphql-handler]]))
+     ["/graphql" :post graphql-handler]
+
+     ;; GraphQL WebSocket
+     ["/graphql-ws" :get websocket-handler]]))
 
 ;;; ============================================================================
 ;;; Middleware Stack
 ;;; ============================================================================
 
 (defn wrap-cors
-  "Simple CORS middleware allowing all origins.
-
-  For production, configure specific origins."
+  "Simple CORS middleware allowing all origins."
   [handler]
   (fn [request]
     (let [response (handler request)
@@ -233,63 +207,19 @@
                  "Access-Control-Allow-Credentials" "true"}}
       (handler request))))
 
-(defn- ws-context-fn
-  "Build GraphQL context from WebSocket connection params.
-  Extracts IAM context from access_token."
-  [connection-params]
-  (let [token (:access_token connection-params)]
-    (if token
-      (let [iam (auth/get-token-context token)]
-        (auth/assoc-iam {} iam))
-      {})))
-
-(defn- ws-on-connect
-  "Authenticate WebSocket connection via access_token query param.
-
-  Returns:
-    - {} if IAM not started (no auth required)
-    - {:token t} if valid token
-    - nil if IAM started but invalid/missing token (triggers 401)"
-  [request]
-  (if-not (lifecycle/started? :synthigy/iam)
-    {}  ; IAM not active, allow anonymous
-    (let [token (get-in request [:params :access_token])]
-      (when (auth/valid-token? token)
-        {:token token}))))
-
 (defn make-handler
-  "Creates the complete Ring handler with all middleware.
-
-  Args:
-    opts - Configuration:
-           :routes   - Custom routes (default: default-routes)
-           :spa-root - Filesystem path for SPA (optional)
-           :info     - Server info map
-
-  Returns:
-    Ring handler"
+  "Creates the complete Ring handler with all middleware."
   [{:keys [routes spa-root info graphql-opts]
     :or {info {}}}]
-  (let [routes (or routes
-                   (default-routes {:info info
-                                    :graphql-opts graphql-opts}))
+  (let [routes (or routes (default-routes {:info info
+                                           :graphql-opts graphql-opts}))
         router (make-router routes)]
-    (spa/wrap-spa
-      (->
-        router
+    (-> router
+        (spa/wrap-spa {:root spa-root})
         wrap-cors
         wrap-options
         wrap-keyword-params
-        wrap-params
-
-      ;; WebSocket for GraphQL subscriptions (first to intercept upgrade)
-        (ws/wrap-websocket
-          {:schema (fn [] @synthigy.lacinia/compiled)
-           :path "/graphql-ws"
-           :context-fn ws-context-fn
-           :on-connect ws-on-connect
-           :keep-alive-ms 25000}))
-      {:root spa-root})))
+        wrap-params)))
 
 ;;; ============================================================================
 ;;; Server Lifecycle
@@ -298,30 +228,16 @@
 (defonce server (atom nil))
 
 (defn stop
-  "Stops the http-kit server.
-
-  Returns:
-    nil"
+  "Stops the Undertow server."
   []
-  (when-let [stop-fn @server]
-    (log/info "[http-kit] Stopping HTTP server")
-    (stop-fn :timeout 100)
+  (when-let [s @server]
+    (log/info "[Undertow] Stopping HTTP server")
+    (.stop s)
     (reset! server nil))
   nil)
 
 (defn start
-  "Starts the http-kit HTTP server.
-
-  Args:
-    opts - Configuration map:
-           :host     - Bind address (default: localhost or SYNTHIGY_HOST)
-           :port     - Port number (default: 8080 or SYNTHIGY_PORT)
-           :spa-root - SPA static files directory (default: SYNTHIGY_SERVE)
-           :info     - Server info for /info endpoint
-           :routes   - Custom routes (replaces defaults)
-
-  Returns:
-    nil"
+  "Starts the Undertow HTTP server."
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
   ([{:keys [host port spa-root info routes]
      :or {host (or (env :synthigy-host) "localhost")
@@ -329,17 +245,17 @@
           spa-root (env :synthigy-serve)}}]
 
    (stop)
-   (log/infof "[http-kit] Starting HTTP server on %s:%s" host port)
+   (log/infof "[Undertow] Starting HTTP server on %s:%s" host port)
 
    (let [handler (make-handler {:routes routes
                                 :spa-root spa-root
                                 :info info})
-         stop-fn (httpkit/run-server handler {:ip host
-                                              :port port})]
-     (reset! server stop-fn)
-     (log/infof "[http-kit] Server started on %s:%s" host port)
+         s (run-undertow handler {:host host
+                                  :port port})]
+     (reset! server s)
+     (log/infof "[Undertow] Server started on %s:%s" host port)
      (when spa-root
-       (log/infof "[http-kit] SPA static files from: %s" spa-root))
+       (log/infof "[Undertow] SPA static files from: %s" spa-root))
      nil)))
 
 ;;; ============================================================================
@@ -347,18 +263,13 @@
 ;;; ============================================================================
 
 (defn -main
-  "Main entry point for http-kit server.
-
-  Configuration via environment variables:
-    SYNTHIGY_HOST - Bind address (default: localhost)
-    SYNTHIGY_PORT - Port (default: 8080)
-    SYNTHIGY_SERVE - SPA static files directory"
+  "Main entry point for Undertow server."
   [& _]
   (try
     (start)
-    (log/info "Synthigy http-kit server running. Press Ctrl+C to stop.")
+    (log/info "Synthigy Undertow server running. Press Ctrl+C to stop.")
     (catch Throwable ex
-      (log/error ex "Failed to start http-kit server")
+      (log/error ex "Failed to start Undertow server")
       (.printStackTrace ex)
       (System/exit 1))))
 
@@ -374,17 +285,22 @@
                 :synthigy/ldap
                 :synthigy/audit]
    :start (fn []
-            (log/info "[SERVER] Starting http-kit server...")
+            (log/info "[SERVER] Starting Undertow server...")
             (stop)
             (start)
-            (log/info "[SERVER] http-kit server started"))
+            (log/info "[SERVER] Undertow server started"))
    :stop (fn []
-           (log/info "[SERVER] Stopping http-kit server...")
+           (log/info "[SERVER] Stopping Undertow server...")
            (stop)
-           (log/info "[SERVER] http-kit server stopped"))})
+           (log/info "[SERVER] Undertow server stopped"))})
+
 
 (comment
-  (lifecycle/print-topology-layers)
-  (lifecycle/system-report)
-  (start {:port 8080})
-  (stop))
+  (lifecycle/print-system-report)
+  (do
+    (lifecycle/start! :synthigy/dataset)
+    (lifecycle/start! :synthigy/graphql)
+    (lifecycle/start! :synthigy/server)
+
+    (lifecycle/stop! :synthigy/server)
+    (start)))

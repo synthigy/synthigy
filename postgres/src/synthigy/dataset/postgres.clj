@@ -2183,13 +2183,13 @@
           (string? value) (<-json value {:keyfn identity})
           :else value))
 
-      ;; encrypted - decode and decrypt, preserving string keys
+      ;; encrypted - decode and decrypt with keyword keys (decrypt-data expects :data :dek :iv)
       "encrypted"
       (when value
         (let [encrypted-data (cond
                                (or (map? value) (vector? value)) value
-                               (instance? PGobject value) (<-json (.getValue ^PGobject value) {:keyfn identity})
-                               (string? value) (<-json value {:keyfn identity})
+                               (instance? PGobject value) (<-json (.getValue ^PGobject value) {:keyfn keyword})
+                               (string? value) (<-json value {:keyfn keyword})
                                :else value)]
           (decrypt-data encrypted-data)))
 

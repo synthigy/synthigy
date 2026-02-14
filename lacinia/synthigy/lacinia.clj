@@ -367,15 +367,15 @@
 ;;; ============================================================================
 
 (lifecycle/register-module!
-  :synthigy/lacinia
+  :synthigy/graphql
   {:depends-on [:synthigy/dataset]
    :start (fn []
             ;; Runtime: Initialize GraphQL system, start model listener
-            (log/info "[LACINIA] Starting Lacinia GraphQL system...")
+            (log/info "[GRAPHQL] Starting GraphQL system...")
             (start)
-            (log/info "[LACINIA] Lacinia GraphQL system started"))
+            (log/info "[GRAPHQL] GraphQL system started"))
    :stop (fn []
            ;; Runtime: Stop model listener
-           (log/info "[LACINIA] Stopping Lacinia GraphQL system...")
+           (log/info "[GRAPHQL] Stopping GraphQL system...")
            (stop-model-listener!)
-           (log/info "[LACINIA] Lacinia GraphQL system stopped"))})
+           (log/info "[GRAPHQL] GraphQL system stopped"))})

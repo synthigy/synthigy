@@ -4,8 +4,6 @@
   Copied from EYWA's working implementation."
   (:require
     [camel-snake-kebab.core :as csk]
-    [clojure.data.csv :as csv]
-    [clojure.java.io :as io]
     [clojure.string :as str]
     [clojure.tools.logging :as log]
     [com.walmartlabs.lacinia.executor :as executor]
@@ -17,17 +15,17 @@
     [synthigy.dataset.lacinia.audit]  ; Auto-loads audit enhancements if available
     [synthigy.dataset.lacinia.enhance :as enhance]
     [synthigy.db :refer [*db*
-                          sync-entity
-                          stack-entity
-                          slice-entity
-                          get-entity
-                          get-entity-tree
-                          purge-entity
-                          search-entity-tree
-                          search-entity
-                          aggregate-entity
-                          aggregate-entity-tree
-                          delete-entity]]
+                         sync-entity
+                         stack-entity
+                         slice-entity
+                         get-entity
+                         get-entity-tree
+                         purge-entity
+                         search-entity-tree
+                         search-entity
+                         aggregate-entity
+                         aggregate-entity-tree
+                         delete-entity]]
     [synthigy.lacinia]))
 
 (def npattern #"[\s\_\-\.\$\[\]\{\}\#]+")
@@ -80,8 +78,7 @@
 (defn scalar-attribute? [{t :type}]
   (contains?
     #{"int" "float" "boolean" "string" "avatar" "hashed"
-      "encrypted" "timestamp" "timeperiod" "currency"
-      "transit" "json" "uuid" "enum"}
+      "encrypted" "timestamp" "timeperiod" "transit" "json" "uuid" "enum"}
     t))
 
 (defn reference-attribute? [{t :type}]
@@ -159,7 +156,6 @@
     "hashed" 'Hash
     "timestamp" 'Timestamp
     "timeperiod" 'TimePeriod
-    "currency" 'Currency
     "json" 'JSON
     "transit" 'Transit
     "uuid" 'UUID
@@ -176,7 +172,6 @@
     "encrypted" {:type :StringQueryOperator}
     "timestamp" {:type :TimestampQueryOperator}
     "timeperiod" {:type :TimePeriodQueryOperator}
-    "currency" {:type :CurrencyQueryOperator}
     "transit" {:type :StringQueryOperator}
     "uuid" {:type :UUIDQueryOperator}
     "enum" {:type (entity-attribute->enum-operator entity attribute)}
@@ -193,16 +188,6 @@
 
 (defn entity->relation-enum [{n :name}]
   (csk/->PascalCaseKeyword (str n " relations enum")))
-
-(def currency-codes
-  (let [table (with-open [reader (io/reader (io/resource "lacinia/currency.csv"))]
-                (doall
-                  (csv/read-csv reader)))]
-    (distinct
-      (keep
-        (fn [[_ _ code]]
-          (when (not-empty code) code))
-        (rest table)))))
 
 (defn normalized-enum-value [value]
   (clojure.string/replace value #"-|\s" "_"))
@@ -235,7 +220,6 @@
     (merge
       (model->enums)
       {:SQLJoinType {:values [:LEFT :RIGTH :INNER]}
-       :currency_enum {:values currency-codes}
        :order_by_enum {:values [:asc :desc]}
        :is_null_enum {:values [:is_null :is_not_null]}})))
 
@@ -351,13 +335,6 @@
                                                                     (concat
                                                                       (repeat 4 {:type 'String})
                                                                       (repeat 4 {:type (list 'list 'String)}))))
-                                                          (= t 'Currency)
-                                                          (assoc
-                                                            :args (assoc
-                                                                    (zipmap
-                                                                      [:_gt :_lt :_neq :_eq :_ge :_le]
-                                                                      (repeat {:type 'Float}))
-                                                                    :in_currencies {:type (list 'list :currency_enum)}))
                                                           (= t 'Timestamp)
                                                           (assoc
                                                             :args (zipmap
@@ -508,30 +485,7 @@
                                {:count {:type 'Int}}
                                (numerics? entity))
                              to-relations))}))))))
-        {:Currency
-         {:fields
-          {:currency {:type :currency_enum
-                      :args (zipmap
-                              [:_neq :_eq :_in :_nin]
-                              (repeat {:type 'String}))}
-           :amount {:type 'Float
-                    :args (zipmap
-                            [:_gt :_lt :_eq :_neq :_ge :_le]
-                            (repeat {:type 'Float}))}}}
-         ;;
-         :TimePeriod
-         {:fields
-          {:start {:type 'Timestamp}
-           :end {:type 'Timestamp}}
-          :args (merge
-                  (zipmap
-                    [:_gt :_lt :_neq :_eq :_ge :_le]
-                    (repeat {:type 'TimePeriod}))
-                  (zipmap
-                    [:_contains :_exclude]
-                    (repeat {:type 'Timestamp})))}
-        ;;
-         :IntAggregate
+        {:IntAggregate
          {:fields
           {:min {:type 'Int}
            :max {:type 'Int}
@@ -604,9 +558,6 @@
                                  (assoc fields
                                    (keyword (normalize-name aname))
                                    {:type (let [t (case atype
-                                                    "currency"
-                                                    'CurrencyInput
-                                                         ;;
                                                     "timeperiod"
                                                     'TimePeriodInput
                                                          ;;
@@ -753,14 +704,6 @@
                    :_not_in {:type (list 'list 'UUID)}}}
          :BooleanQueryOperator
          {:fields {:_boolean {:type 'BooleanCondition}}}
-         :CurrencyInput
-         {:fields
-          {:amount {:type 'Float}
-           :currency {:type :currency_enum}}}
-         :TimePeriodInput
-         {:fields
-          {:start {:type 'Timestamp}
-           :end {:type 'Timestamp}}}
          :StringQueryOperator
          {:fields
           (zipmap
@@ -782,27 +725,12 @@
             (concat
               (repeat 6 {:type 'Float})
               (repeat 6 {:type (list 'list 'Float)})))}
-         :CurrencyQueryOperator
-         {:fields
-          (assoc
-            (zipmap
-              [:_gt :_lt :_neq :_eq :_ge :_le]
-              (repeat {:type 'Float}))
-            :in_currencies {:type (list 'list 'String)})}
+
          :TimestampQueryOperator
          {:fields
           (zipmap
             [:_gt :_lt :_neq :_eq :_ge :_le]
-            (repeat {:type 'Timestamp}))}
-         :TimePeriodQueryOperator
-         {:fields
-          (merge
-            (zipmap
-              [:_gt :_lt :_neq :_eq :_ge :_le]
-              (repeat {:type 'TimePeriodInput}))
-            (zipmap
-              [:_contains :_exclude]
-              (repeat {:type 'Timestamp})))}}
+            (repeat {:type 'Timestamp}))}}
         entities))))
 
 ;;
@@ -895,7 +823,7 @@
                    (try
                      (get-entity *db* (id/extract entity) data (executor/selections-tree context))
                      (catch Throwable e
-                       (log/errorf e "Couldn't resolve SYNC")
+                       (log/error e "Couldn't resolve SYNC")
                        (throw e))))}
                      ;; SEARCH
                 (csk/->camelCaseKeyword (str "search " ename))
@@ -952,7 +880,7 @@
                               :selection selection})
                            (aggregate-entity *db* entity-id data selection))
                          (catch Throwable e
-                           (log/errorf e "Couldn't resolve AGGREGATE")
+                           (log/error e "Couldn't resolve AGGREGATE")
                            (throw e))))}
                     args (assoc :args args))))
               ;; Add recursive getters

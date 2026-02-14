@@ -19,15 +19,12 @@
     synthigy.dataset.core
     synthigy.dataset.encryption
     synthigy.dataset.enhance
+    synthigy.dataset.graphql
     synthigy.dataset.operations
     synthigy.dataset.sql.naming
+    synthigy.dataset.sqlite
+    synthigy.dataset.sqlite.query
     synthigy.db
-    synthigy.iam
-    synthigy.iam.access
-    synthigy.iam.context
-    synthigy.iam.encryption
-    synthigy.transit
     ;; SQLite-specific namespaces
     synthigy.db.sqlite
-    synthigy.dataset.sqlite
-    synthigy.iam.audit))
+    synthigy.transit))

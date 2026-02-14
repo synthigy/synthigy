@@ -1,5 +1,5 @@
 (ns synthigy.admin
-  "Pedestal admin service.
+  "Undertow admin service.
 
   Provides localhost-only HTTP API for system administration.
 
@@ -15,8 +15,8 @@
     [babashka.fs :as fs]
     [clojure.tools.logging :as log]
     [environ.core :refer [env]]
-    [io.pedestal.http :as http]
     [patcho.lifecycle :as lifecycle]
+    [ring.adapter.undertow :refer [run-undertow]]
     [synthigy.admin.core :as admin.core]
     synthigy.db
     [synthigy.env :as senv])
@@ -28,6 +28,7 @@
 ;;; ============================================================================
 
 (defonce ^:private server (atom nil))
+(defonce ^:private port-atom (atom nil))
 
 ;;; ============================================================================
 ;;; Port File Management
@@ -73,27 +74,17 @@
    (let [actual-port (or port
                          (when-let [p (env :synthigy-admin-port)]
                            (try (Integer/parseInt p) (catch Exception _ nil)))
-                         (find-free-port))
-         ;; Wrap Ring handler as interceptor
-         ring-interceptor {:name ::ring-handler
-                           :enter (fn [ctx]
-                                    (assoc ctx :response (admin.core/app (:request ctx))))}
-         routes `#{["/*path" :any [~ring-interceptor]]}
-         service-map {::http/routes routes
-                      ::http/type :jetty
-                      ::http/host "127.0.0.1"
-                      ::http/port actual-port
-                      ::http/join? false
-                      ::http/resource-path nil}]
-
-     (log/infof "[ADMIN] Starting on 127.0.0.1:%d (pedestal)" actual-port)
+                         (find-free-port))]
+     (log/infof "[ADMIN] Starting on 127.0.0.1:%d (undertow)" actual-port)
      (try
-       (reset! server (http/start (http/create-server service-map)))
+       (reset! server (run-undertow admin.core/app {:host "127.0.0.1" :port actual-port}))
+       (reset! port-atom actual-port)
        (write-port-file! actual-port)
        (log/infof "[ADMIN] Ready: http://127.0.0.1:%d/admin/info" actual-port)
        (catch Exception e
          (log/error e "[ADMIN] Failed to start")
          (reset! server nil)
+         (reset! port-atom nil)
          (throw e))))))
 
 (defn stop
@@ -101,21 +92,16 @@
   []
   (when-let [s @server]
     (log/info "[ADMIN] Stopping...")
-    (try
-      (http/stop s)
-      (catch Exception e
-        (log/error e "[ADMIN] Error stopping")))
+    (.stop s)
     (reset! server nil)
+    (reset! port-atom nil)
     (delete-port-file!)
     (log/info "[ADMIN] Stopped")))
 
 (defn port
   "Get the current admin server port (or nil if not running)."
   []
-  (when-let [s @server]
-    (try
-      (some-> s (get ::http/server) .getConnectors first .getLocalPort)
-      (catch Exception _ nil))))
+  @port-atom)
 
 ;;; ============================================================================
 ;;; Module Registration

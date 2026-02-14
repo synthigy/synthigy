@@ -259,46 +259,73 @@
 (defn init-deks
   []
   (reset! deks nil)
-  (try
-    ;; If there are some DEK in deks table
-    ;; that means that some data has may have been
-    ;; encrypted... So we check if master key can
-    ;; can decrypt deks and encryption_barrier as well
-    (if-let [known-deks (not-empty (db-deks))]
-      (reduce
-        (fn [r {id :__deks/id
-                dek :__deks/dek
-                encryption_barrier :__deks/encryption_barrier
-                active? :__deks/active}]
-          (let [db-dek (json/read-str (json-value->str dek) :key-fn keyword)
-                _encryption-barrier (json/read-str (json-value->str encryption_barrier) :key-fn keyword)
-                dek (decrypt-dek db-dek)
-                _ (swap! deks assoc id dek)
-                valid? (= encryption-barrier
-                          (try
-                            (binding [*dek* dek]
-                              (decrypt-data _encryption-barrier))
-                            (catch Throwable _
-                              (log/errorf "[ENCRYPTION] Couldn't decrypt encryption barrier: %s" id)
-                              nil)))]
-            (if-not valid? r
-                    (do
-                      (when active?
-                        (alter-var-root #'*dek* (fn [_] id)))
-                      (assoc r id dek)))))
-        nil
-        known-deks)
-      ;; If there are no encrypted deks, than create new DEK
-      ;; and mark it active...
+  ;; Check if __deks table exists - if not, create it and initial DEK
+  (if-not (dek-table-exists?)
+    (do
+      (log/info "[ENCRYPTION] No __deks table found, creating table and first DEK...")
+      (create-dek-table)
       (create-dek))
-    (catch Throwable ex
-      (log/errorf
-        ex "[ENCRYPTION] [%s] DEK initialized! Couldn't initialize all DEKs... Master key not valid"
-        (count (keys @deks)))
-      (reset! deks nil)
-      (throw ex))))
+    ;; Table exists - try to load existing DEKs
+    (try
+      ;; If there are some DEK in deks table
+      ;; that means that some data has may have been
+      ;; encrypted... So we check if master key can
+      ;; can decrypt deks and encryption_barrier as well
+      (if-let [known-deks (not-empty (db-deks))]
+        (reduce
+          (fn [r {id :__deks/id
+                  dek :__deks/dek
+                  encryption_barrier :__deks/encryption_barrier
+                  active? :__deks/active}]
+            (let [db-dek (json/read-str (json-value->str dek) :key-fn keyword)
+                  _encryption-barrier (json/read-str (json-value->str encryption_barrier) :key-fn keyword)
+                  dek (decrypt-dek db-dek)
+                  _ (swap! deks assoc id dek)
+                  valid? (= encryption-barrier
+                            (try
+                              (binding [*dek* dek]
+                                (decrypt-data _encryption-barrier))
+                              (catch Throwable _
+                                (log/errorf "[ENCRYPTION] Couldn't decrypt encryption barrier: %s" id)
+                                nil)))]
+              (if-not valid? r
+                      (do
+                        (when active?
+                          (alter-var-root #'*dek* (fn [_] id)))
+                        (assoc r id dek)))))
+          nil
+          known-deks)
+        ;; If there are no encrypted deks, than create new DEK
+        ;; and mark it active...
+        (create-dek))
+      (catch Throwable ex
+        (log/errorf
+          ex "[ENCRYPTION] [%s] DEK initialized! Couldn't initialize all DEKs... Master key not valid"
+          (count (keys @deks)))
+        (reset! deks nil)
+        (throw ex)))))
 
 (defn initialized? [] (some? *master-key*))
+
+(defn encryption-required?
+  "Check if encryption is required (DEK table exists with data).
+  Returns true if __deks table exists and has entries, meaning
+  encrypted data may exist in the database."
+  []
+  (and (dek-table-exists?)
+       (not-empty (db-deks))))
+
+(defn encryption-state
+  "Get detailed encryption state.
+  Returns one of:
+    :not-configured - No __deks table, encryption not set up
+    :configured-not-initialized - __deks exists but master key invalid/missing
+    :initialized - Encryption ready to use"
+  []
+  (cond
+    (initialized?) :initialized
+    (encryption-required?) :configured-not-initialized
+    :else :not-configured))
 
 (defn save-master-to-env!
   "Save master key to .env file for persistence.

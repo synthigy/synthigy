@@ -12,8 +12,7 @@
   com.cognitect/transit-clj {:mvn/version "1.0.333"}
   org.clojure/tools.logging {:mvn/version "1.3.0"}
 
-  ;; GraphQL
-  com.walmartlabs/lacinia {:mvn/version "1.2.2"}
+
 
   ;; Auth/Crypto
   buddy/buddy-sign {:mvn/version "3.6.1-359"}
@@ -22,35 +21,25 @@
 
   ;; Utilities
   nano-id/nano-id {:mvn/version "1.1.0"}
-  version-clj/version-clj {:mvn/version "2.0.3"}
   dev.gersak/timing {:mvn/version "0.7.0"}
   dev.gersak/patcho {:local/root "patcho"}
   ; dev.gersak/patcho {:mvn/version "0.4.2"}
   camel-snake-kebab/camel-snake-kebab {:mvn/version "0.4.3"}
-  org.clojure/data.codec {:mvn/version "0.2.0"}
-  org.clojure/data.csv {:mvn/version "1.1.0"}
-  ring/ring-codec {:mvn/version "1.2.0"}
 
-  ;; Database (shared JDBC infrastructure - drivers are backend-specific)
-  com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
-  com.zaxxer/HikariCP {:mvn/version "6.2.1"}
 
   ;; Configuration
   environ/environ {:mvn/version "1.2.0"}
 
   ;; Logging
-  ch.qos.logback/logback-classic {:mvn/version "1.5.12"}
-
-  ;; LDAP (for OIDC)
-  org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}
-
-  ;; Storage
-  babashka/fs {:mvn/version "0.5.22"}}
-
- :mvn/version "0.1.0-SNAPSHOT"
+  ch.qos.logback/logback-classic {:mvn/version "1.5.12"}}
 
  :aliases
- {;; =========================================================================
+ {;; GraphQL
+  :graphql
+  {:extra-paths ["lacinia"]
+   :extra-deps {com.walmartlabs/lacinia {:mvn/version "1.2.2"}}}
+
+  ;; =========================================================================
   ;; Database Backends
   ;; =========================================================================
   ;; Choose ONE database backend - these provide synthigy.db namespace
@@ -58,11 +47,17 @@
 
   :postgres
   {:extra-paths ["postgres/src"]
-   :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}}}
+   :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}
+                ;; Database (shared JDBC infrastructure - drivers are backend-specific)
+                com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
+                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
 
   :sqlite
   {:extra-paths ["sqlite/src"]
-   :extra-deps {org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}}}
+   :extra-deps {org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
+                ;; Database (shared JDBC infrastructure - drivers are backend-specific)
+                com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
+                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
 
   ;; Stub for compilation without a real database backend
   :stub
@@ -80,13 +75,28 @@
                 io.pedestal/pedestal.route {:mvn/version "0.7.0"}
                 io.pedestal/pedestal.jetty {:mvn/version "0.7.0"}
                 com.github.gersak/lacinia-pedestal {:mvn/version "1.3.1"}
-                ;; Server-side rendering (OAuth UI pages)
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                com.thheller/shadow-css {:mvn/version "0.6.2"}}}
+                com.thheller/shadow-css {:mvn/version "0.6.2"}
+                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}
+                babashka/fs {:mvn/version "0.5.22"}}}
 
   :httpkit
   {:extra-paths ["httpkit/src"]
-   :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}}}
+   :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}
+                ring/ring-core {:mvn/version "1.12.2"}
+                hiccup/hiccup {:mvn/version "2.0.0-RC3"}
+                com.thheller/shadow-css {:mvn/version "0.6.2"}
+                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}
+                babashka/fs {:mvn/version "0.5.22"}}}
+
+  :undertow
+  {:extra-paths ["undertow/src"]
+   :extra-deps {luminus/ring-undertow-adapter {:mvn/version "1.3.1"}
+                ring/ring-core {:mvn/version "1.12.2"}
+                hiccup/hiccup {:mvn/version "2.0.0-RC3"}
+                com.thheller/shadow-css {:mvn/version "0.6.2"}
+                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}
+                babashka/fs {:mvn/version "0.5.22"}}}
 
   ;; =========================================================================
   ;; Development & Testing
@@ -96,7 +106,8 @@
 
   :dev
   {:extra-paths ["dev" "test"]
-   :extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}}
+   :extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}
+                clj-http/clj-http {:mvn/version "3.13.0"}}}
 
   :test
   {:extra-paths ["test"]

@@ -3,7 +3,6 @@
     [buddy.core.codecs]
     [buddy.core.hash]
     [buddy.hashers :as hashers]
-    clojure.data.json
     clojure.pprint
     clojure.set
     [clojure.tools.logging :as log]
@@ -11,6 +10,7 @@
     [com.walmartlabs.lacinia.selection :as selection]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
+    synthigy.core
     [synthigy.data
      :refer [*SYNTHIGY*
              *ROOT*
@@ -23,6 +23,7 @@
     [synthigy.dataset.sql.naming :refer [entity->table-name]]
     [synthigy.db :refer [*db*]]
     [synthigy.iam.access :as access :refer [*user*]]
+    [synthigy.iam.audit]
     [synthigy.iam.context :as context]
     synthigy.iam.encryption
     [synthigy.iam.events :as events]

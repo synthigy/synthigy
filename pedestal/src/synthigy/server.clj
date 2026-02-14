@@ -3,7 +3,7 @@
 
   Provides a pluggable Pedestal server adapter that integrates:
   - OAuth 2.0 + OpenID Connect endpoints
-  - GraphQL API with Lacinia-Pedestal
+  - GraphQL API (using synthigy.graphql)
   - Authentication interceptors
   - CORS configuration
 
@@ -32,7 +32,6 @@
     clojure.set
     [clojure.string :as str]
     [clojure.tools.logging :as log]
-    [com.walmartlabs.lacinia.pedestal2 :as lp]
     [environ.core :refer [env]]
     [io.pedestal.http :as http]
     [io.pedestal.http.content-negotiation :as conneg]
@@ -44,80 +43,27 @@
     synthigy.admin
     synthigy.core
     synthigy.dataset.graphql
-    [synthigy.dataset.id :as id]
     synthigy.dataset.lacinia
-    [synthigy.iam.access :as access]
-    [synthigy.iam.context :as iam.context]
-    [synthigy.iam.encryption :as encryption]
+    [synthigy.graphql :as gql]
+    [synthigy.graphql.cache :as cache]
     synthigy.lacinia
+    [synthigy.iam.access :as access]
     synthigy.oauth
     [synthigy.oauth.handlers :as oauth.handlers]
-    synthigy.oauth.store
-    [synthigy.oauth.token :as token]
+    synthigy.oauth.persistence
     [synthigy.oidc.ldap :as ldap]
-    [synthigy.server.spa :as spa]))
+    [synthigy.server.auth :as auth]
+    [synthigy.server.spa :as spa]
+    [synthigy.ws :as ws])
+  (:import
+    [jakarta.websocket Session]))
 
 ;;; ============================================================================
-;;; Authentication Interceptors
+;;; Authentication
 ;;; ============================================================================
 
-(def authenticate
-  "Pedestal interceptor for OAuth token-based authentication.
-
-  Extracts and validates Bearer token from Authorization header.
-  Binds user context (user, roles, groups) to context map for use
-  by downstream interceptors and resolvers.
-
-  Authentication flow:
-  1. Extract Bearer token from Authorization header
-  2. Verify token exists in active tokens registry
-  3. Unsign JWT to get claims (sub, sub:uuid)
-  4. Load user context from IAM
-  5. Bind user/roles/groups to context
-
-  If no valid token, continues without authentication (nil context).
-  Individual routes/resolvers are responsible for checking authorization."
-  {:name ::authenticate
-   :enter
-   (fn [ctx]
-     (let [{{authorization "authorization"} :headers} (:request ctx)
-           bearer-token (when authorization
-                          (second (re-find #"Bearer\s+(.+)" authorization)))
-           has-token? (and bearer-token (> (count bearer-token) 6))]
-       (if (and has-token?
-                ;; Verify token exists in active tokens registry
-                (contains? (get @token/*tokens* :access_token) bearer-token))
-         (try
-           ;; Unsign JWT to get claims
-           (if-let [claims (encryption/unsign-data bearer-token)]
-             (let [{:keys [sub]
-                    sub-uuid "sub:uuid"} claims
-                   ;; Extract user UUID from claims
-                   user-uuid (or (when sub-uuid
-                                   (try
-                                     (java.util.UUID/fromString sub-uuid)
-                                     (catch Exception _
-                                       nil)))
-                                 sub)
-                   ;; Load full user context
-                   user-ctx (when user-uuid
-                              (iam.context/get-user-context user-uuid))]
-               (if user-ctx
-                 (assoc ctx
-                   ::user (id/extract user-ctx)
-                   ::roles (:roles user-ctx)
-                   ::groups (:groups user-ctx))
-                 (do
-                   (log/warnf "User not found for token sub: %s" user-uuid)
-                   ctx)))
-             (do
-               (log/warn "Failed to unsign bearer token")
-               ctx))
-           (catch Exception e
-             (log/errorf e "Error during authentication")
-             ctx))
-         ;; No valid token - continue without authentication
-         ctx)))})
+;; Authentication is provided by synthigy.server.auth
+;; Use auth/authenticate-interceptor in route definitions
 
 (def coerce-body
   "Pedestal interceptor for parsing request body based on Content-Type.
@@ -294,42 +240,100 @@
      [(ring-handler->pedestal-interceptor oauth.handlers/openid-configuration ::oidc-discovery)]
      :route-name ::oidc-discovery]})
 
+(defn- make-iam-execute-interceptor
+  "Creates execute interceptor that binds IAM access vars during execution.
+
+  The IAM access module uses dynamic vars (*user*, *roles*, *groups*) that
+  resolvers check for authorization. This interceptor binds those vars from
+  the authenticated user context before executing the GraphQL query."
+  [schema-provider opts]
+  (let [execute (gql/execute-interceptor schema-provider opts)]
+    {:name ::iam-graphql-execute
+     :enter
+     (fn [ctx]
+       (binding [access/*user* (::auth/user ctx)
+                 access/*roles* (::auth/roles ctx)
+                 access/*groups* (::auth/groups ctx)]
+         ((:enter execute) ctx)))}))
+
+(defn- make-iam-context-interceptor
+  "Creates context interceptor that adds IAM data to GraphQL context.
+
+  This provides async-safe access to user/roles/groups via the context map,
+  complementing the dynamic var bindings in make-iam-execute-interceptor."
+  []
+  (gql/context-interceptor
+    (fn [ctx]
+      ;; The authenticate-interceptor has already put ::auth/user etc on ctx
+      ;; Pass them through to GraphQL context for async-safe access
+      (auth/assoc-iam {} {:user (::auth/user ctx)
+                          :roles (::auth/roles ctx)
+                          :groups (::auth/groups ctx)}))))
+
 (defn graphql-routes
-  "Creates GraphQL API routes using Lacinia-Pedestal.
+  "Creates GraphQL API routes using synthigy.graphql.
 
   Returns:
     Set of Pedestal route vectors with GraphQL query/mutation endpoint"
   []
-  (let [_schema (fn [] @synthigy.lacinia/compiled)
-        options {:api-path "/graphql"}
-        ;; Wrap query executor to bind user context from authentication
-        wrapped-query-executor
-        {:name ::graphql-query-executor
-         :enter
-         (fn [ctx]
-           (let [user (::user ctx)
-                 roles (::roles ctx)
-                 groups (::groups ctx)]
-             (binding [access/*user* user
-                       access/*roles* roles
-                       access/*groups* groups]
-               ((:enter lp/query-executor-handler) ctx))))}
+  (let [schema-fn (fn [] @synthigy.lacinia/compiled)
+        query-cache (cache/lru-cache 500)
+        opts {:cache query-cache
+              :tracing-header "lacinia-tracing"}
+        ;; Use split interceptors with IAM-aware execute
+        ;; IAM is passed both via dynamic vars (sync convenience)
+        ;; and context map (async-safe)
         interceptors
-        [authenticate
-         lp/initialize-tracing-interceptor
-         json-response
-         lp/error-response-interceptor
-         lp/body-data-interceptor
-         lp/graphql-data-interceptor
-         lp/status-conversion-interceptor
-         lp/missing-query-interceptor
-         (lp/query-parser-interceptor _schema (:parsed-query-cache options))
-         lp/disallow-subscriptions-interceptor
-         lp/prepare-query-interceptor
-         (lp/inject-app-context-interceptor nil)
-         lp/enable-tracing-interceptor
-         wrapped-query-executor]]
-    #{["/graphql" :post interceptors :route-name ::graphql-api]}))
+        [auth/authenticate-interceptor
+         gql/parse-request-interceptor
+         (make-iam-context-interceptor)
+         (make-iam-execute-interceptor schema-fn opts)]]
+    #{["/graphql" :post interceptors :route-name ::graphql-api]
+      ["/graphql" :get interceptors :route-name ::graphql-api-get]}))
+
+;;; ============================================================================
+;;; WebSocket GraphQL Subscriptions
+;;; ============================================================================
+
+(defn- authenticate-ws-session
+  "Authenticate WebSocket session via access_token query parameter.
+
+  Behavior:
+    - IAM not started: allow anonymous
+    - IAM started + valid token: allow
+    - IAM started + invalid/missing token: close session"
+  [^Session session _config]
+  (when (lifecycle/started? :synthigy/iam)
+    (let [token (ws/get-session-param session "access_token")]
+      (when-not (auth/valid-token? token)
+        (log/trace ::ws-auth-failed {:session-id (.getId session)})
+        (.close session)))))
+
+(defn- ws-context-fn
+  "Build GraphQL context from WebSocket connection params.
+  Extracts IAM context from access_token."
+  [connection-params]
+  (let [token (:access_token connection-params)]
+    (if token
+      (let [iam (auth/get-token-context token)]
+        (auth/assoc-iam {} iam))
+      {})))
+
+(defn graphql-websocket-endpoint
+  "Creates WebSocket endpoint for GraphQL subscriptions.
+
+  Authenticates via access_token query parameter or connection_init payload.
+  Binds IAM context for resolver authorization.
+
+  Returns:
+    Endpoint map for ::http/websockets"
+  []
+  (ws/endpoint
+    (fn [] @synthigy.lacinia/compiled)
+    {:app-context {}
+     :context-fn ws-context-fn
+     :session-initializer authenticate-ws-session
+     :keep-alive-ms 25000}))
 
 ;;; ============================================================================
 ;;; Server Lifecycle
@@ -443,7 +447,9 @@
           ::http/join? false
           ::http/host host
           ::http/port port
-          ::http/interceptors interceptors}
+          ::http/interceptors interceptors
+          ;; WebSocket endpoint for GraphQL subscriptions
+          ::http/websockets {"/graphql-ws" (graphql-websocket-endpoint)}}
 
          ;; Apply user-provided service initializer
          final-service-map (service-initializer service-map)
@@ -512,8 +518,8 @@
 (lifecycle/register-module!
   :synthigy/server
   {:depends-on [:synthigy/admin
-                :synthigy/oauth.store
-                :synthigy/lacinia
+                :synthigy/oauth.persistence
+                :synthigy/graphql
                 :synthigy/ldap
                 :synthigy/audit]
    :start (fn []

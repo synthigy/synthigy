@@ -19,15 +19,12 @@
     synthigy.dataset.core
     synthigy.dataset.encryption
     synthigy.dataset.enhance
+    synthigy.dataset.graphql
     synthigy.dataset.operations
+    synthigy.dataset.postgres
+    synthigy.dataset.postgres.query
     synthigy.dataset.sql.naming
     synthigy.db
-    synthigy.iam
-    synthigy.iam.access
-    synthigy.iam.context
-    synthigy.iam.encryption
-    synthigy.transit
     ;; PostgreSQL-specific namespaces
     synthigy.db.postgres
-    synthigy.dataset.postgres
-    synthigy.iam.audit))
+    synthigy.transit))

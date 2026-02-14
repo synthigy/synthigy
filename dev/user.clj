@@ -21,8 +21,7 @@
   - (lifecycle/print-system-report)                       - Show system status
   - (lifecycle/system-report)                             - Get status as data"
   (:require
-    [patcho.lifecycle :as lifecycle]
-    [synthigy.db :as db]))
+    [synthigy.iam]))
 
 (comment
   ;; 1. Setup - ensure namespaces are loaded

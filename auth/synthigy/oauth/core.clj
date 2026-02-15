@@ -152,6 +152,77 @@
       (update-in tokens [:access_token :scope] (fnil conj []) scope)
       tokens)))
 
+;; =============================================================================
+;; Scope → Claims Mapping (OIDC Discovery + Resolution)
+;; =============================================================================
+
+(defmulti claims-for
+  "Returns scope descriptor: {:claims [...] :resolve (fn [session] {...})}.
+   If :resolve is nil, claims are looked up from user's person_info."
+  identity)
+
+(defmethod claims-for :default [_] nil)
+
+(defmacro defscope
+  "Define an OIDC scope with its claims and token target.
+
+   Options:
+     :token       - Target token(s): :id_token, :access_token, or #{:id_token :access_token}
+                    Defaults to :id_token
+     :resolve     - Custom resolution fn (fn [session] -> claims-map)
+                    If nil, claims are looked up from person_info
+     :description - Human-readable description for consent UI
+
+   Generates both claims-for method (discovery) and process-scope method (token generation)."
+  [scope-name claims & {:keys [resolve description token] :or {token :id_token}}]
+  (let [scope-str (name scope-name)
+        tokens (if (coll? token) token #{token})
+        claims-vec (vec (map keyword claims))]
+    `(do
+       ;; Discovery: claims-for multimethod
+       (defmethod claims-for ~scope-str [~'_]
+         (hash-map :claims ~claims-vec
+                   :token ~tokens
+                   ~@(when resolve [:resolve resolve])
+                   ~@(when description [:description description])))
+
+       ;; Token generation: process-scope multimethod
+       (defmethod process-scope ~scope-str [~'session ~'tokens ~'_]
+         (let [~'claims (resolve-scope-claims ~scope-str ~'session)]
+           ~(if (= 1 (count tokens))
+              `(update ~'tokens ~(first tokens) merge ~'claims)
+              `(-> ~'tokens
+                   ~@(for [t tokens]
+                       `(update ~t merge ~'claims)))))))))
+
+(defn resolve-scope-claims
+  "Resolve claims for a scope. Uses :resolve fn if provided,
+   otherwise looks up claims from person_info."
+  [scope session]
+  (when-let [{:keys [claims resolve]} (claims-for scope)]
+    (if resolve
+      (resolve session)
+      (select-keys (:person_info (get-session-resource-owner session))
+                   claims))))
+
+(defn all-supported-scopes []
+  (vec (remove #{:default} (keys (methods claims-for)))))
+
+(defn all-supported-claims []
+  (into #{}
+        (mapcat (comp :claims claims-for)
+                (all-supported-scopes))))
+
+(defn scope-info-for-consent
+  "Returns scope info for consent UI: [{:scope 'email' :description '...' :claims [...]}]"
+  [requested-scopes]
+  (for [scope requested-scopes
+        :let [{:keys [claims description]} (claims-for scope)]
+        :when claims]
+    {:scope scope
+     :description (or description scope)
+     :claims claims}))
+
 (defn token-error [code & description]
   ; (log/debugf "Returning error: %s\n%s" code (str/join "\n" description))
   {:status 400

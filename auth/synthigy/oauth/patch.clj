@@ -48,12 +48,12 @@
                    :type nil})
 
         ;; Filter to confidential clients with plaintext secrets
-        ;; Bcrypt hashes start with "$2a$", "$2b$", or "$2y$"
+        ;; Bcrypt hashes start with "$2a$", "$2b$", "$2y$" or "bcrypt+sha512$" (synthigy format)
         plaintext-clients (filter
                             (fn [{:keys [secret type]}]
                               (and secret
                                    (#{"confidential" :confidential} type)
-                                   (not (re-matches #"^\$2[aby]\$.*" secret))))
+                                   (not (re-matches #"^\$2[aby]\$.*|^bcrypt\+sha512\$.*" secret))))
                             clients)
 
         total-count (count clients)

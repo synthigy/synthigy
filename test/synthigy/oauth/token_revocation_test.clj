@@ -196,35 +196,35 @@
         (println "❌ FAIL: Failed to revoke without hint")))))
 
 ;; =============================================================================
-;; Test 4: Invalid Token
+;; Test 4: Invalid/Unknown Token (RFC 7009 Section 2.2)
 ;; =============================================================================
 
 (deftest test-revoke-invalid-token
-  (testing "Revoke invalid token"
-    (println "\n=== REVOKE INVALID TOKEN ===")
+  (testing "Revoke invalid/unknown token returns 200 per RFC 7009"
+    (println "\n=== REVOKE INVALID TOKEN (RFC 7009) ===")
 
     (let [fake-token "invalid-token-that-doesnt-exist"
 
           ;; Try to revoke invalid token
-          _ (println "  → Trying to revoke invalid token...")
+          _ (println "  → Trying to revoke unknown token...")
           revoke-response (handlers/revoke
                            (test-helper/request :post "/oauth/revoke"
                                                 {:token fake-token
                                                  :client_id test-client-id
-                                                 :client_secret test-client-secret}))
-
-          error-data (test-helper/parse-json-body revoke-response)]
+                                                 :client_secret test-client-secret}))]
 
       (println "  Revoke response status:" (:status revoke-response))
-      (println "  Error:" (:error error-data))
 
       (println "\n--- Results ---")
-      (is (= 400 (:status revoke-response)) "Should return 400")
-      (is (= "invalid_token" (:error error-data)) "Should return invalid_token error")
+      ;; RFC 7009 Section 2.2: "The authorization server responds with HTTP status
+      ;; code 200 if the token has been revoked successfully or if the client
+      ;; submitted an invalid token."
+      (is (= 200 (:status revoke-response))
+          "RFC 7009: Unknown/invalid tokens should return 200 OK")
 
-      (if (= 400 (:status revoke-response))
-        (println "✅ PASS: Invalid token rejected")
-        (println "❌ FAIL: Invalid token accepted!")))))
+      (if (= 200 (:status revoke-response))
+        (println "✅ PASS: RFC 7009 compliant - unknown token returns 200")
+        (println "❌ FAIL: Not RFC 7009 compliant - should return 200 for unknown tokens")))))
 
 ;; =============================================================================
 ;; Test 5: Client Mismatch
@@ -260,12 +260,12 @@
         (println "❌ FAIL: Client mismatch not detected!")))))
 
 ;; =============================================================================
-;; Test 6: Token Already Revoked (Idempotent)
+;; Test 6: Token Already Revoked - Idempotent (RFC 7009)
 ;; =============================================================================
 
 (deftest test-revoke-already-revoked
-  (testing "Revoke already revoked token (idempotent)"
-    (println "\n=== REVOKE ALREADY REVOKED TOKEN ===")
+  (testing "Revoke already revoked token is idempotent per RFC 7009"
+    (println "\n=== REVOKE ALREADY REVOKED TOKEN (RFC 7009) ===")
 
     (let [tokens (get-tokens)
           access-token (:access_token tokens)
@@ -286,47 +286,50 @@
                             (test-helper/request :post "/oauth/revoke"
                                                  {:token access-token
                                                   :client_id test-client-id
-                                                  :client_secret test-client-secret}))
-
-          error-data (test-helper/parse-json-body revoke2-response)]
+                                                  :client_secret test-client-secret}))]
 
       (println "  Second revoke status:" (:status revoke2-response))
 
       (println "\n--- Results ---")
       (is (= 200 (:status revoke1-response)) "First revocation should succeed")
-      ;; RFC 7009: The server responds with 200 even if token was already revoked
-      ;; OR returns invalid_token - both are acceptable per spec
-      (is (or (= 200 (:status revoke2-response))
-              (= 400 (:status revoke2-response)))
-          "Second revocation should be handled gracefully")
+      ;; RFC 7009 Section 2.2: Returns 200 for already-revoked tokens
+      ;; (they are now "invalid" tokens, which still get 200)
+      (is (= 200 (:status revoke2-response))
+          "RFC 7009: Already revoked tokens should return 200 OK")
 
-      (if (= 200 (:status revoke1-response))
-        (println "✅ PASS: Token revocation is idempotent")
+      (if (and (= 200 (:status revoke1-response))
+               (= 200 (:status revoke2-response)))
+        (println "✅ PASS: Token revocation is idempotent (RFC 7009 compliant)")
         (println "❌ FAIL: Idempotency issue")))))
 
 ;; =============================================================================
-;; Test 7: Missing Token Parameter
+;; Test 7: Missing Token Parameter (RFC 7009 Section 2.1)
 ;; =============================================================================
 
 (deftest test-revoke-missing-token
-  (testing "Revoke with missing token parameter"
-    (println "\n=== REVOKE MISSING TOKEN ===")
+  (testing "Revoke with missing token parameter returns 400"
+    (println "\n=== REVOKE MISSING TOKEN (RFC 7009) ===")
 
     (let [;; Try to revoke without token parameter
           _ (println "  → Trying to revoke without token parameter...")
           revoke-response (handlers/revoke
                            (test-helper/request :post "/oauth/revoke"
                                                 {:client_id test-client-id
-                                                 :client_secret test-client-secret}))
-
-          error-data (test-helper/parse-json-body revoke-response)]
+                                                 :client_secret test-client-secret}))]
 
       (println "  Revoke response status:" (:status revoke-response))
-      (println "  Error:" (:error error-data))
 
       (println "\n--- Results ---")
-      (is (= 400 (:status revoke-response)) "Should return 400")
-      (is (some? (:error error-data)) "Should return error")
+      ;; RFC 7009 Section 2.1: "token" parameter is REQUIRED
+      ;; Missing required parameter should return 400 invalid_request
+      (is (= 400 (:status revoke-response))
+          "RFC 7009: Missing token parameter must return 400")
+
+      (when (= 400 (:status revoke-response))
+        (let [error-data (test-helper/parse-json-body revoke-response)]
+          (println "  Error:" (:error error-data))
+          (is (= "invalid_request" (:error error-data))
+              "Should return invalid_request error")))
 
       (if (= 400 (:status revoke-response))
         (println "✅ PASS: Missing token parameter rejected")

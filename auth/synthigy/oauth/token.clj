@@ -22,6 +22,7 @@
             access-token-expiry
             refresh-token-expiry
             process-scope
+            defscope
             sign-token]]
    [timing.core :as timing]))
 
@@ -427,41 +428,61 @@
   (token-endpoint request))
 
 (defn revoke-token-handler
-  "OAuth 2.0 token revocation endpoint handler.
+  "OAuth 2.0 token revocation endpoint handler (RFC 7009).
 
    Revokes access_token or refresh_token based on token_type_hint.
-   Returns 200 OK on success, or appropriate error response."
+
+   Per RFC 7009 Section 2.2: 'The authorization server responds with
+   HTTP status code 200 if the token has been revoked successfully
+   or if the client submitted an invalid token.'
+
+   Returns 200 OK for valid revocation OR unknown/invalid tokens.
+   Returns 400 for missing required parameters or client auth failures."
   [request]
   (let [invalid-client (core/json-error "invalid_client" "Client ID is not valid")
-        invalid-token (core/json-error "invalid_token" "Token is not valid")
+        invalid-request (core/json-error "invalid_request" "Missing required parameter: token")
         {:keys [token_type_hint token] :as params} (:params request)
-        token-key (when token_type_hint (keyword token_type_hint))
-        tokens @*tokens*
-        [token-key session] (some
-                             (fn [tk]
-                               (when-some [s (get-in tokens [tk token])]
-                                 [tk s]))
-                             [token-key :access_token :refresh_token])]
+        ;; RFC 7009 compliant success response
+        ok-response {:status 200
+                     :body ""
+                     :headers {"Content-Type" "application/json"
+                               "Cache-Control" "no-store"
+                               "Pragma" "no-cache"}}]
     (cond
-      (nil? session)
+      ;; Missing token parameter - RFC 7009 Section 2.1: token is REQUIRED
+      (or (nil? token) (empty? token))
       (do
-        (log/errorf "Couldn't revoke token - token not found")
-        invalid-token)
+        (log/debugf "Missing required token parameter")
+        invalid-request)
 
-      (core/clients-doesnt-match? session params)
-      (do
-        (log/errorf "[%s] Couldn't revoke token - client mismatch" session)
-        invalid-client)
-
+      ;; Lookup token
       :else
-      (do
-        (log/debugf "[%s] Revoking token %s %s" session token-key token)
-        (revoke-token token-key token)
-        {:status 200
-         :body ""
-         :headers {"Content-Type" "application/json"
-                   "Cache-Control" "no-store"
-                   "Pragma" "no-cache"}}))))
+      (let [token-key (when token_type_hint (keyword token_type_hint))
+            tokens @*tokens*
+            [token-key session] (some
+                                 (fn [tk]
+                                   (when-some [s (get-in tokens [tk token])]
+                                     [tk s]))
+                                 [token-key :access_token :refresh_token])]
+        (cond
+          ;; Token not found - RFC 7009 requires 200 OK
+          (nil? session)
+          (do
+            (log/debugf "Token not found (already revoked or never existed) - returning 200 per RFC 7009")
+            ok-response)
+
+          ;; Client mismatch - this is an authentication error, return 400
+          (core/clients-doesnt-match? session params)
+          (do
+            (log/errorf "[%s] Couldn't revoke token - client mismatch" session)
+            invalid-client)
+
+          ;; Valid revocation
+          :else
+          (do
+            (log/debugf "[%s] Revoking token %s %s" session token-key token)
+            (revoke-token token-key token)
+            ok-response))))))
 
 (defn delete [tokens]
   (swap! *tokens*
@@ -472,24 +493,52 @@
             state
             tokens))))
 
-;; SCOPES
-(defmethod process-scope "roles"
-  [session tokens _]
-  (let [{:keys [roles]} (core/get-session-resource-owner session)
-        dataset-roles (dataset/search-entity
-                       :iam/user-role
-                       {(id/key) {:_in roles}}
-                       {:name nil})]
-    (assoc-in tokens [:access_token :roles] (map (comp csk/->snake_case_keyword :name) dataset-roles))))
+;; =============================================================================
+;; Custom Scopes (access_token)
+;; =============================================================================
 
-(defmethod process-scope "groups"
-  [session tokens _]
-  (let [{:keys [groups]} (core/get-session-resource-owner session)
-        dataset-groups (dataset/search-entity
-                        :iam/user-group
-                        {(id/key) {:_in groups}}
-                        {:name nil})]
-    (assoc-in tokens [:access_token :groups] (map (comp csk/->snake_case_keyword :name) dataset-groups))))
+(defscope roles [:roles]
+  :token :access_token
+  :description "Your assigned roles"
+  :resolve (fn [session]
+             (let [{:keys [roles]} (core/get-session-resource-owner session)
+                   dataset-roles (dataset/search-entity
+                                  :iam/user-role
+                                  {(id/key) {:_in roles}}
+                                  {:name nil})]
+               {:roles (map (comp csk/->snake_case_keyword :name) dataset-roles)})))
+
+(defscope groups [:groups]
+  :token :access_token
+  :description "Your group memberships"
+  :resolve (fn [session]
+             (let [{:keys [groups]} (core/get-session-resource-owner session)
+                   dataset-groups (dataset/search-entity
+                                   :iam/user-group
+                                   {(id/key) {:_in groups}}
+                                   {:name nil})]
+               {:groups (map (comp csk/->snake_case_keyword :name) dataset-groups)})))
+
+(defscope permissions [:permissions]
+  :token :access_token
+  :description "Your permissions"
+  :resolve (fn [session]
+             (let [{:keys [roles]} (core/get-session-resource-owner session)]
+               {:permissions (access/roles-scopes roles)})))
+
+(defscope super [:super]
+  :token :access_token
+  :description "Superuser status"
+  :resolve (fn [session]
+             (let [{:keys [roles]} (core/get-session-resource-owner session)]
+               {:super (access/superuser? roles)})))
+
+;; NOTE: process-scope methods for roles, groups, permissions, super
+;; are auto-generated by defscope macro above
+
+;; =============================================================================
+;; Special UUID Scopes (manual - different claim keys)
+;; =============================================================================
 
 (defmethod process-scope "sub:uuid"
   [session tokens _]
@@ -506,16 +555,6 @@
   [session tokens _]
   (let [{:keys [groups]} (core/get-session-resource-owner session)]
     (assoc-in tokens [:access_token :groups] groups)))
-
-(defmethod process-scope "permissions"
-  [session tokens _]
-  (let [{:keys [roles]} (core/get-session-resource-owner session)]
-    (assoc-in tokens [:access_token :permissions] (access/roles-scopes roles))))
-
-(defmethod process-scope "super"
-  [session tokens _]
-  (let [{:keys [roles]} (core/get-session-resource-owner session)]
-    (assoc-in tokens [:access_token :super] (access/superuser? roles))))
 
 (comment
   (def tokens nil)

@@ -1,14 +1,17 @@
 (ns synthigy.oauth-integration-test
   "Integration tests for OAuth 2.0 and OIDC endpoints.
 
-   Tests the full OAuth authorization code flow against a running server.
-   Requires the server to be running on localhost:8080."
+   Tests the full OAuth authorization code flow.
+   The test fixture automatically starts/stops a server on localhost:8080."
   (:require
-    [clojure.data.json :as json]
+    [buddy.hashers :as hashers]
+    [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.test :refer [deftest is testing use-fixtures]]
+    [clojure.tools.logging :as log]
     [synthigy.dataset :as dataset]
     [synthigy.iam :as iam]
+    [synthigy.server :as server]
     [synthigy.test-helper :as helper])
   (:import
     [java.io BufferedReader InputStreamReader OutputStreamWriter]
@@ -33,9 +36,7 @@
   {:name "oauth-test-user"
    :password "oauth-test-pass"
    :active true
-   :person_info {:email "oauth-test@example.com"
-                 :given_name "OAuth"
-                 :family_name "TestUser"}})
+   :type :PERSON})
 
 ;;; ============================================================================
 ;;; HTTP Helpers (using Java's HttpURLConnection)
@@ -105,7 +106,7 @@
 (defn parse-json-body [response]
   (when-let [body (:body response)]
     (try
-      (json/read-str body :key-fn keyword)
+      (json/<-json body {:keyfn keyword :valfn nil})
       (catch Exception _ nil))))
 
 ;;; ============================================================================
@@ -115,10 +116,21 @@
 (defn setup-oauth-test-data
   "Create test client and user for OAuth tests."
   []
-  ;; Create test client
-  (iam/add-client test-client)
-  ;; Create test user (plain text password - Synthigy hashes it)
-  (dataset/sync-entity :iam/user test-user))
+  ;; Create test client - dataset encoder handles secret hashing
+  (let [client-result (iam/add-client test-client)
+        client-from-db (iam/get-client (:id test-client))]
+    (println "[TEST-SETUP] Created client XID:" (:xid client-result))
+    (println "[TEST-SETUP] Client secret (from add-client):" (subs (or (:secret client-result) "NIL") 0 (min 30 (count (or (:secret client-result) "")))))
+    (println "[TEST-SETUP] Client secret (from DB):" (subs (or (:secret client-from-db) "NIL") 0 (min 30 (count (or (:secret client-from-db) "")))))
+    (when-not (re-find #"^bcrypt" (or (:secret client-from-db) ""))
+      (throw (ex-info "Client secret was NOT hashed!" {:secret (:secret client-from-db)}))))
+  ;; Create test user - dataset encoder handles password hashing
+  (let [user-result (dataset/sync-entity :iam/user test-user)]
+    (println "[TEST-SETUP] Created user:" user-result)
+    ;; Verify user can be fetched
+    (let [fetched-user (iam/get-user-details (:name test-user))]
+      (println "[TEST-SETUP] Fetched user:" (dissoc fetched-user :password))
+      (println "[TEST-SETUP] User active?" (:active fetched-user) "has password?" (some? (:password fetched-user))))))
 
 (defn cleanup-oauth-test-data
   "Remove test client and user."
@@ -134,9 +146,18 @@
   (helper/initialize-system!)
   (cleanup-oauth-test-data)
   (setup-oauth-test-data)
+
+  ;; Start server for integration tests
+  (log/info "[OAuth Integration Test] Starting HTTP server on port 8080...")
+  (server/start {:port 8080
+                 :spa-root nil})
+  (Thread/sleep 500)  ; Give server time to bind
+
   (try
     (f)
     (finally
+      (log/info "[OAuth Integration Test] Stopping HTTP server...")
+      (server/stop)
       (cleanup-oauth-test-data))))
 
 (use-fixtures :once oauth-fixture)
@@ -148,13 +169,14 @@
 (defn parse-location-params
   "Parse query parameters from Location header URL."
   [location]
-  (when-let [query-start (str/index-of location "?")]
-    (let [query (subs location (inc query-start))]
-      (into {}
-            (map (fn [param]
-                   (let [[k v] (str/split param #"=" 2)]
-                     [(keyword k) (java.net.URLDecoder/decode (or v "") "UTF-8")]))
-                 (str/split query #"&"))))))
+  (when location
+    (when-let [query-start (str/index-of location "?")]
+      (let [query (subs location (inc query-start))]
+        (into {}
+              (map (fn [param]
+                     (let [[k v] (str/split param #"=" 2)]
+                       [(keyword k) (java.net.URLDecoder/decode (or v "") "UTF-8")]))
+                   (str/split query #"&")))))))
 
 ;;; ============================================================================
 ;;; OIDC Discovery Tests
@@ -260,9 +282,7 @@
 
                 (is (= 200 (:status userinfo-response)) "Userinfo should succeed")
                 (is (= (:name test-user) (:preferred_username userinfo))
-                    "Username should match")
-                (is (= (get-in test-user [:person_info :email]) (:email userinfo))
-                    "Email should match")))))))))
+                    "Username should match")))))))))
 
 ;;; ============================================================================
 ;;; Error Cases

@@ -9,7 +9,7 @@
   5. Client exchanges code for tokens"
   (:require
    [buddy.hashers :as hashers]
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [clojure.string :as str]
    [clojure.test :refer [deftest testing is use-fixtures]]
    [synthigy.oauth.handlers :as handlers]
@@ -66,7 +66,7 @@
 
 (defn parse-json-body [response]
   (when-let [body (:body response)]
-    (json/read-str body :key-fn keyword)))
+    (json/<-json body {:keyfn keyword :valfn nil})))
 
 (defn get-cookie-value [response cookie-name]
   ;; Ring's wrap-cookies middleware converts :cookies to Set-Cookie headers

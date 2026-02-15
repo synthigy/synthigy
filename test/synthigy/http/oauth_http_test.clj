@@ -158,13 +158,15 @@
         (is (some? (:status auth-response)))))))
 
 (deftest test-token-revocation-unknown-token
-  (testing "Revocation of unknown token returns response"
+  (testing "Revocation of unknown token returns 200 per RFC 7009"
     (let [response (h/POST-form "/oauth/revoke"
                                 {:token "unknown-token-12345"
                                  :client_id h/test-client-id
                                  :client_secret h/test-client-secret})]
-      (is (or (= 200 (:status response))
-              (= 400 (:status response)))))))
+      ;; RFC 7009 Section 2.2: "responds with HTTP status code 200 if the token
+      ;; has been revoked successfully or if the client submitted an invalid token"
+      (is (= 200 (:status response))
+          "RFC 7009: Unknown tokens must return 200 OK"))))
 
 ;;; ============================================================================
 ;;; Error Handling Tests

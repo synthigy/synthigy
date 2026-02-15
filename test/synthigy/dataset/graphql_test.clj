@@ -8,10 +8,13 @@
   4. SQL execution → Results
   5. Results → GraphQL response"
   (:require
+    [clojure.core.async :as async]
+    [clojure.string :as str]
     [clojure.test :refer [deftest is testing use-fixtures]]
     [clojure.tools.logging :as log]
     [com.walmartlabs.lacinia :as lacinia]
     [synthigy.dataset :as dataset]
+    [synthigy.dataset.graphql :as dataset-graphql]
     [synthigy.dataset.core :as core]
     [synthigy.dataset.id :as id]
     [synthigy.dataset.lacinia :as lac]
@@ -586,6 +589,502 @@ query {
           "Query with invalid argument type should return errors"))))
 
 ;;; ============================================================================
+;;; Test Data Helpers
+;;; ============================================================================
+
+(defn- unique-name
+  "Generates a unique test name with prefix."
+  [prefix]
+  (str prefix "-" (subs (str (random-uuid)) 0 8)))
+
+(defn- create-test-user!
+  "Creates a test user and returns the result data."
+  [name-val]
+  (let [mutation (str "mutation { syncUser(data: { name: \"" name-val "\", active: true }) { " (id/field) " name active } }")
+        result (execute-query mutation)]
+    (when (successful? result)
+      (:syncUser (get-data result)))))
+
+(defn- delete-test-user!
+  "Deletes a test user by ID."
+  [user-id]
+  (execute-query (str "mutation { deleteUser(" (id/field) ": \"" user-id "\") }")))
+
+;;; ============================================================================
+;;; Mutation Tests
+;;; ============================================================================
+
+(deftest test-sync-mutation-create
+  (testing "syncUser creates new user"
+    (let [test-name (unique-name "test-sync")
+          mutation (str "mutation { syncUser(data: { name: \"" test-name "\", active: true, priority: 5 }) { " (id/field) " name active priority } }")
+          result (execute-query mutation)]
+
+      (is (successful? result)
+          "syncUser mutation should execute without errors")
+
+      (let [user (:syncUser (get-data result))]
+        (is (some? (id/extract user))
+            "Created user should have an ID")
+        (is (= test-name (:name user))
+            "User name should match input")
+        (is (true? (:active user))
+            "User should be active")
+        (is (= 5 (:priority user))
+            "User priority should be 5")
+
+        ;; Cleanup
+        (delete-test-user! (str (id/extract user)))))))
+
+(deftest test-sync-mutation-update
+  (testing "syncUser updates existing user"
+    (let [test-name (unique-name "test-sync-update")
+          ;; Create user first
+          created (create-test-user! test-name)
+          _ (is (some? created) "User should be created")]
+
+      (when created
+        (let [user-id (str (id/extract created))
+              ;; Update with same ID
+              update-mutation (str "mutation { syncUser(data: { " (id/field) ": \"" user-id "\", name: \"" test-name "-updated\", active: false }) { " (id/field) " name active } }")
+              update-result (execute-query update-mutation)]
+
+          (is (successful? update-result)
+              "syncUser update should succeed")
+
+          (let [updated-user (:syncUser (get-data update-result))]
+            (is (= user-id (str (id/extract updated-user)))
+                "ID should remain the same")
+            (is (= (str test-name "-updated") (:name updated-user))
+                "Name should be updated")
+            (is (false? (:active updated-user))
+                "Active should be updated to false"))
+
+          ;; Cleanup
+          (delete-test-user! user-id))))))
+
+(deftest test-stack-mutation
+  (testing "stackUser creates new user"
+    (let [test-name (unique-name "test-stack")
+          mutation (str "mutation { stackUser(data: { name: \"" test-name "\", active: true }) { " (id/field) " name active } }")
+          result (execute-query mutation)]
+
+      (is (successful? result)
+          "stackUser mutation should execute without errors")
+
+      (let [user (:stackUser (get-data result))]
+        (is (some? (id/extract user))
+            "Created user should have an ID")
+        (is (= test-name (:name user))
+            "User name should match input")
+
+        ;; Cleanup
+        (delete-test-user! (str (id/extract user)))))))
+
+(deftest test-batch-sync-mutation
+  (testing "syncUserList creates multiple users"
+    (let [names [(unique-name "batch-1") (unique-name "batch-2") (unique-name "batch-3")]
+          data-str (str/join ", " (map #(str "{ name: \"" % "\", active: true }") names))
+          mutation (str "mutation { syncUserList(data: [" data-str "]) { " (id/field) " name } }")
+          result (execute-query mutation)]
+
+      (is (successful? result)
+          "syncUserList mutation should execute without errors")
+
+      (let [users (:syncUserList (get-data result))]
+        (is (= 3 (count users))
+            "Should create 3 users")
+        (is (= (set names) (set (map :name users)))
+            "User names should match input")
+
+        ;; Cleanup
+        (doseq [user users]
+          (delete-test-user! (str (id/extract user))))))))
+
+(deftest test-delete-mutation
+  (testing "deleteUser soft deletes user"
+    (let [test-name (unique-name "test-delete")
+          created (create-test-user! test-name)
+          _ (is (some? created) "User should be created")]
+
+      (when created
+        (let [user-id (str (id/extract created))
+              mutation (str "mutation { deleteUser(" (id/field) ": \"" user-id "\") }")
+              result (execute-query mutation)]
+
+          (is (successful? result)
+              "deleteUser mutation should execute without errors")
+
+          (is (true? (:deleteUser (get-data result)))
+              "deleteUser should return true")
+
+          ;; Verify user no longer appears in normal search
+          (let [search (execute-query (str "query { getUser(" (id/field) ": \"" user-id "\") { " (id/field) " } }"))]
+            (is (nil? (:getUser (get-data search)))
+                "Deleted user should not be found")))))))
+
+(deftest test-purge-mutation
+  (testing "purgeUser hard deletes matching users"
+    (let [pattern (unique-name "purge-test")
+          ;; Create 3 users with pattern
+          names [(str pattern "-a") (str pattern "-b") (str pattern "-c")]
+          _ (doseq [n names] (create-test-user! n))
+          ;; Purge by name pattern
+          mutation (str "mutation { purgeUser(_where: { name: { _like: \"" pattern "%\" } }) { " (id/field) " name } }")
+          result (execute-query mutation)]
+
+      (is (successful? result)
+          "purgeUser mutation should execute without errors")
+
+      (let [purged (:purgeUser (get-data result))]
+        (is (>= (count purged) 3)
+            "Should purge at least 3 users")))))
+
+(deftest test-slice-mutation
+  (testing "sliceUser deletes relations matching filter"
+    (let [pattern (unique-name "slice-test")
+          ;; Create users with pattern
+          names [(str pattern "-1") (str pattern "-2")]
+          created-users (doall (map create-test-user! names))
+          _ (is (every? some? created-users) "Users should be created")]
+
+      (when (every? some? created-users)
+        (let [;; Slice - slice returns relation deletion status
+              mutation (str "mutation { sliceUser(_where: { name: { _like: \"" pattern "%\" } }) { roles groups } }")
+              result (execute-query mutation)]
+
+          (is (successful? result)
+              "sliceUser mutation should execute without errors")
+
+          (let [sliced (:sliceUser (get-data result))]
+            (is (map? sliced)
+                "sliceUser should return a map"))
+
+          ;; Cleanup created users
+          (doseq [user created-users]
+            (delete-test-user! (str (id/extract user)))))))))
+
+;;; ============================================================================
+;;; Aggregation Tests
+;;; ============================================================================
+
+(deftest test-count-aggregation
+  (testing "aggregateUser returns count"
+    (let [query "query { aggregateUser { count } }"
+          result (execute-query query)]
+
+      (is (successful? result)
+          "Count aggregation should execute without errors")
+
+      (let [agg (:aggregateUser (get-data result))]
+        (is (integer? (:count agg))
+            "Count should be an integer")
+        (is (>= (:count agg) 0)
+            "Count should be non-negative")))))
+
+(deftest test-count-aggregation-with-filter
+  (testing "aggregateUser with _where filter"
+    (let [query "query { aggregateUser(_where: { active: { _boolean: TRUE } }) { count } }"
+          result (execute-query query)]
+
+      (is (successful? result)
+          "Filtered count should execute without errors")
+
+      (let [agg (:aggregateUser (get-data result))]
+        (is (integer? (:count agg))
+            "Filtered count should be an integer")))))
+
+(deftest test-numeric-aggregations
+  (testing "aggregateUser returns numeric aggregations for priority field"
+    (let [query "query { aggregateUser { count priority { min max sum avg } } }"
+          result (execute-query query)]
+
+      (is (successful? result)
+          "Numeric aggregations should execute without errors")
+
+      (let [agg (:aggregateUser (get-data result))
+            priority (:priority agg)]
+        (is (map? priority)
+            "Priority aggregations should be a map")
+        (is (contains? priority :min)
+            "Should contain min")
+        (is (contains? priority :max)
+            "Should contain max")
+        (is (contains? priority :sum)
+            "Should contain sum")
+        (is (contains? priority :avg)
+            "Should contain avg")))))
+
+(deftest test-numeric-aggregations-with-filter
+  (testing "aggregateUser numeric aggregations with filter"
+    (let [query "query { aggregateUser(_where: { active: { _boolean: TRUE } }) { count priority { min max } } }"
+          result (execute-query query)]
+
+      (is (successful? result)
+          "Filtered numeric aggregations should execute without errors")
+
+      (let [agg (:aggregateUser (get-data result))]
+        (is (integer? (:count agg))
+            "Count should be present")
+        (is (map? (:priority agg))
+            "Priority aggregations should be present")))))
+
+(deftest test-nested-count
+  (testing "User _count returns relation counts"
+    (let [query (str "query { searchUser(_limit: 3) { " (id/field) " name _count { roles } } }")
+          result (execute-query query)]
+
+      (is (successful? result)
+          "_count field should execute without errors")
+
+      (let [users (:searchUser (get-data result))]
+        (when (seq users)
+          (doseq [user users]
+            (is (map? (:_count user))
+                "User should have _count field")
+            (is (integer? (get-in user [:_count :roles]))
+                "_count roles should be an integer")))))))
+
+(deftest test-nested-count-multiple-relations
+  (testing "User _count with multiple relations"
+    (let [query (str "query { searchUser(_limit: 1) { " (id/field) " _count { roles groups } } }")
+          result (execute-query query)]
+
+      (is (successful? result)
+          "_count with multiple relations should execute without errors")
+
+      (when-let [user (first (:searchUser (get-data result)))]
+        (is (map? (:_count user))
+            "User should have _count field")
+        (when (contains? (:_count user) :roles)
+          (is (integer? (get-in user [:_count :roles]))
+              "_count roles should be an integer"))
+        (when (contains? (:_count user) :groups)
+          (is (integer? (get-in user [:_count :groups]))
+              "_count groups should be an integer"))))))
+
+;;; ============================================================================
+;;; Advanced Query Features Tests
+;;; ============================================================================
+
+(deftest test-distinct-query
+  (testing "searchUser with _distinct executes successfully"
+    (let [query (str "query { searchUser(_distinct: { attributes: [active] }, _limit: 10) { " (id/field) " active } }")
+          result (execute-query query)]
+
+      (is (successful? result)
+          "_distinct query should execute without errors")
+
+      (let [users (:searchUser (get-data result))]
+        (is (vector? users)
+            "Should return a vector")
+        (is (<= (count users) 10)
+            "Should respect limit")))))
+
+(deftest test-join-type-left
+  (testing "Nested relation with explicit LEFT join"
+    (let [query (str "query { searchUser(_limit: 1) { " (id/field) " name roles(_join: LEFT) { " (id/field) " name } } }")
+          result (execute-query query)]
+
+      (is (successful? result)
+          "Query with LEFT join should execute without errors")
+
+      (let [users (:searchUser (get-data result))]
+        (when (seq users)
+          (let [user (first users)]
+            (is (contains? user :roles)
+                "User should have roles field even with LEFT join")))))))
+
+(deftest test-join-type-inner
+  (testing "Nested relation with explicit INNER join"
+    (let [query (str "query { searchUser(_limit: 5) { " (id/field) " name roles(_join: INNER) { " (id/field) " name } } }")
+          result (execute-query query)]
+
+      (is (successful? result)
+          "Query with INNER join should execute without errors")
+
+      (let [users (:searchUser (get-data result))]
+        (is (vector? users)
+            "Should return a vector")
+        ;; Just verify query executes - INNER join behavior depends on data
+        (is (every? #(contains? % :roles) users)
+            "All users should have roles field")))))
+
+(deftest test-combined-features
+  (testing "Query combining multiple advanced features"
+    (let [query (str "query {
+  searchUser(
+    _where: { active: { _boolean: TRUE } }
+    _order_by: { name: asc }
+    _limit: 5
+  ) {
+    " (id/field) "
+    name
+    active
+    roles(_limit: 2) {
+      " (id/field) "
+      name
+    }
+    _count {
+      roles
+    }
+  }
+}")
+          result (execute-query query)]
+
+      (is (successful? result)
+          "Combined query should execute without errors")
+
+      (let [users (:searchUser (get-data result))]
+        (is (vector? users)
+            "Should return a vector")
+        (doseq [user users]
+          (is (true? (:active user))
+              "All users should be active")
+          (is (contains? user :roles)
+              "All users should have roles field")
+          (is (contains? user :_count)
+              "All users should have _count field"))))))
+
+;;; ============================================================================
+;;; Subscription Tests
+;;; ============================================================================
+
+(deftest test-subscription-on-deploy-initial
+  (testing "refreshedGlobalDataset sends initial model on subscribe"
+    (let [received (atom [])
+          upstream (fn [data] (swap! received conj data))
+          context {:username "test-user"}
+          ;; Call the streamer directly
+          cleanup-fn (dataset-graphql/on-deploy context {} upstream)]
+
+      ;; Wait briefly for async initial send
+      (Thread/sleep 100)
+
+      (is (fn? cleanup-fn)
+          "on-deploy should return a cleanup function")
+
+      (is (= 1 (count @received))
+          "Should receive exactly one initial message")
+
+      (let [initial-msg (first @received)]
+        (is (= "Global" (:name initial-msg))
+            "Initial message should have name 'Global'")
+        (is (some? (:model initial-msg))
+            "Initial message should include the model"))
+
+      ;; Cleanup
+      (cleanup-fn))))
+
+(deftest test-subscription-on-deploy-publish
+  (testing "refreshedGlobalDataset receives published events"
+    (let [received (atom [])
+          upstream (fn [data] (swap! received conj data))
+          context {:username "test-user"}
+          cleanup-fn (dataset-graphql/on-deploy context {} upstream)]
+
+      ;; Wait for initial message
+      (Thread/sleep 100)
+      (reset! received []) ; Clear initial message
+
+      ;; Publish an event
+      (let [test-model {:test "model"}
+            test-event {:topic :refreshedGlobalDataset
+                        :data {:name "TestDeploy" :model test-model}}]
+        (async/put! dataset/subscription test-event)
+
+        ;; Wait for event to propagate
+        (Thread/sleep 100)
+
+        (is (= 1 (count @received))
+            "Should receive the published event")
+
+        (when (seq @received)
+          (let [event (first @received)]
+            (is (= "TestDeploy" (:name event))
+                "Should receive event with correct name")
+            (is (= test-model (:model event))
+                "Should receive event with correct model"))))
+
+      ;; Cleanup
+      (cleanup-fn))))
+
+(deftest test-subscription-on-deploy-cleanup
+  (testing "refreshedGlobalDataset cleanup stops receiving events"
+    (let [received (atom [])
+          upstream (fn [data] (swap! received conj data))
+          context {:username "test-user"}
+          cleanup-fn (dataset-graphql/on-deploy context {} upstream)]
+
+      ;; Wait for initial message
+      (Thread/sleep 100)
+      (reset! received [])
+
+      ;; Call cleanup
+      (cleanup-fn)
+
+      ;; Publish an event after cleanup
+      (let [test-event {:topic :refreshedGlobalDataset
+                        :data {:name "AfterCleanup" :model {}}}]
+        (async/put! dataset/subscription test-event)
+
+        ;; Wait
+        (Thread/sleep 100)
+
+        (is (empty? @received)
+            "Should not receive events after cleanup")))))
+
+(deftest test-subscription-multiple-subscribers
+  (testing "refreshedGlobalDataset supports multiple concurrent subscribers"
+    (let [received-1 (atom [])
+          received-2 (atom [])
+          upstream-1 (fn [data] (swap! received-1 conj data))
+          upstream-2 (fn [data] (swap! received-2 conj data))
+          context {:username "test-user"}
+          cleanup-1 (dataset-graphql/on-deploy context {} upstream-1)
+          cleanup-2 (dataset-graphql/on-deploy context {} upstream-2)]
+
+      ;; Wait for initial messages
+      (Thread/sleep 100)
+
+      (is (= 1 (count @received-1))
+          "Subscriber 1 should receive initial message")
+      (is (= 1 (count @received-2))
+          "Subscriber 2 should receive initial message")
+
+      ;; Clear and publish
+      (reset! received-1 [])
+      (reset! received-2 [])
+
+      (let [test-event {:topic :refreshedGlobalDataset
+                        :data {:name "MultiTest" :model {}}}]
+        (async/put! dataset/subscription test-event)
+        (Thread/sleep 100)
+
+        (is (= 1 (count @received-1))
+            "Subscriber 1 should receive published event")
+        (is (= 1 (count @received-2))
+            "Subscriber 2 should receive published event"))
+
+      ;; Cleanup one subscriber
+      (cleanup-1)
+      (reset! received-1 [])
+      (reset! received-2 [])
+
+      (let [test-event {:topic :refreshedGlobalDataset
+                        :data {:name "AfterPartialCleanup" :model {}}}]
+        (async/put! dataset/subscription test-event)
+        (Thread/sleep 100)
+
+        (is (empty? @received-1)
+            "Cleaned up subscriber should not receive events")
+        (is (= 1 (count @received-2))
+            "Active subscriber should still receive events"))
+
+      ;; Cleanup remaining subscriber
+      (cleanup-2))))
+
+;;; ============================================================================
 ;;; Performance Tests (Optional)
 ;;; ============================================================================
 
@@ -638,6 +1137,35 @@ query {
   ;; Schema introspection
   (test-schema-introspection)
   (test-type-introspection)
+
+  ;; Mutation tests
+  (test-sync-mutation-create)
+  (test-sync-mutation-update)
+  (test-stack-mutation)
+  (test-batch-sync-mutation)
+  (test-delete-mutation)
+  (test-purge-mutation)
+  (test-slice-mutation)
+
+  ;; Aggregation tests
+  (test-count-aggregation)
+  (test-count-aggregation-with-filter)
+  (test-numeric-aggregations)
+  (test-numeric-aggregations-with-filter)
+  (test-nested-count)
+  (test-nested-count-multiple-relations)
+
+  ;; Advanced query features
+  (test-distinct-query)
+  (test-join-type-left)
+  (test-join-type-inner)
+  (test-combined-features)
+
+  ;; Subscription tests
+  (test-subscription-on-deploy-initial)
+  (test-subscription-on-deploy-publish)
+  (test-subscription-on-deploy-cleanup)
+  (test-subscription-multiple-subscribers)
 
   ;; Performance tests
   (test-query-performance))

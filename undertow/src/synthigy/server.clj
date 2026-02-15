@@ -159,6 +159,7 @@
      ["/oauth/logout" :get oauth/logout]
      ["/oauth/logout" :post oauth/logout]
      ["/oauth/revoke" :post oauth/revoke]
+     ["/oauth/introspect" :post oauth/introspect]
 
      ;; Device Flow (RFC 8628)
      ["/oauth/device/auth" :post oauth/device-authorization]

@@ -249,6 +249,8 @@
                   :jwks_uri (domain+ "/oauth/jwks")
                   :end_session_endpoint (domain+ "/oauth/logout")
                   :revocation_endpoint (domain+ "/oauth/revoke")
+                  :introspection_endpoint (domain+ "/oauth/introspect")
+                  :introspection_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
                   :response_types_supported ["urn:ietf:params:oauth:grant-type:device_code"
                                              "code"]
                   :subject_types_supported ["public"]

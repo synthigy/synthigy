@@ -69,6 +69,7 @@
    [synthigy.oauth :as oauth]
    [synthigy.oauth.core :as core]
    [synthigy.oauth.device-code :as device]
+   [synthigy.oauth.introspect :as introspect]
    [synthigy.oauth.login :as login]
    [synthigy.oauth.ring :as ring]
    [synthigy.oauth.token :as token-ns]
@@ -141,6 +142,23 @@
    - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
   (-> token-ns/revoke-token-handler
       core/wrap-session-read
+      core/wrap-basic-authorization
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def introspect
+  "OAuth 2.0 token introspection endpoint with complete middleware stack (RFC 7662).
+
+   Allows resource servers to query the authorization server about
+   token validity and metadata.
+
+   Middleware stack:
+   - wrap-cookies (session tracking)
+   - wrap-keyword-params (parameter normalization)
+   - wrap-params (query string + form body parsing)
+   - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
+  (-> introspect/introspect-handler
       core/wrap-basic-authorization
       wrap-keyword-params
       wrap-params
@@ -329,6 +347,7 @@
    "/oauth/login" {:get login :post login}
    "/oauth/logout" {:get logout :post logout}
    "/oauth/revoke" {:get revoke :post revoke}
+   "/oauth/introspect" {:post introspect}
    "/oauth/device/auth" {:post device-authorization}
    "/oauth/device/activate" {:get device-activation :post device-activation}})
 

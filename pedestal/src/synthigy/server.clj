@@ -214,6 +214,10 @@
      [(ring-handler->pedestal-interceptor oauth.handlers/revoke ::oauth-revoke)]
      :route-name ::oauth-revoke]
 
+    ["/oauth/introspect" :post
+     [(ring-handler->pedestal-interceptor oauth.handlers/introspect ::oauth-introspect)]
+     :route-name ::oauth-introspect]
+
     ;; Device Flow (RFC 8628)
     ["/oauth/device/auth" :post
      [(ring-handler->pedestal-interceptor oauth.handlers/device-authorization ::oauth-device-auth)]

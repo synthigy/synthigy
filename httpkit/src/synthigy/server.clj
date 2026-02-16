@@ -43,11 +43,9 @@
 
   See individual handler functions for details."
   (:require
-    :as
     [clojure.data.json :as json]
     [clojure.tools.logging :as log]
     [environ.core :refer [env]]
-    ldap
     [org.httpkit.server :as httpkit]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]

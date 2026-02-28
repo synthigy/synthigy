@@ -254,7 +254,7 @@
           (if (empty? attributes) r
               (let [numerics (get-numerics entity)
                     scalars (filter scalar-attribute? attributes)
-                    references (filter reference-attribute? attributes)
+                    references (filter #(and (reference-attribute? %) (:active %)) attributes)
                     entity-relations (core/focus-entity-relations model entity)
                     to-relations (filter #(not-empty (:to-label %)) entity-relations)]
                 (if (nil? ename) r
@@ -482,7 +482,7 @@
                                            :args (zipmap
                                                    [:_gt :_lt :_eq :_neq :_ge :_le]
                                                    (repeat {:type 'Float}))})))
-                               {:count {:type 'Int}}
+                               {}
                                (numerics? entity))
                              to-relations))}))))))
         {:IntAggregate
@@ -490,7 +490,7 @@
           {:min {:type 'Int}
            :max {:type 'Int}
            :sum {:type 'Int}
-           :avg {:type 'Int}}}
+           :avg {:type 'Float}}}
          :FloatAggregate
          {:fields
           {:min {:type 'Float}
@@ -617,12 +617,17 @@
                                           atype :type
                                           active :active
                                           :as attribute}]
-                               (if (or
-                                     (not active)
-                                     (ignored-field-type? atype)
-                                     (reference-attribute? attribute))
+                               (cond
+                                 ;; Skip inactive and ignored types
+                                 (or (not active) (ignored-field-type? atype))
                                  fields
-                                 ;;
+                                 ;; Handle reference attributes with their entity's search operator
+                                 (reference-attribute? attribute)
+                                 (assoc fields
+                                   (keyword (normalize-name aname))
+                                   {:type (entity->search-operator (referenced-entity attribute))})
+                                 ;; Regular scalar attributes
+                                 :else
                                  (assoc
                                    fields
                                    (keyword (normalize-name aname))

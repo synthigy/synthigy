@@ -14,7 +14,9 @@
     clojure.data
     clojure.set
     [clojure.string :as str]
-    [synthigy.dataset.id :as id]))
+    [synthigy.dataset.id :as id]
+    #?(:cljs [goog.string :as gstring])
+    #?(:cljs [goog.string.format])))
 
 (defn deep-merge
   "Recursively merges maps."
@@ -508,8 +510,9 @@
                  (not= found-id new-id))
         (throw
           (ex-info
-            (format "Attribute name conflict: '%s' already exists with different ID"
-                    (:name new-attribute))
+            (#?(:clj format :cljs gstring/format)
+             "Attribute name conflict: '%s' already exists with different ID"
+             (:name new-attribute))
             {:type ::attribute-name-conflict
              :new-attribute new-attribute
              :existing-attribute found
@@ -953,3 +956,250 @@
   Validates the database is supported."
   [db]
   db)
+
+;; =============================================================================
+;; RLS Configuration Helpers
+;; =============================================================================
+
+(defn get-rls-config
+  "Get RLS configuration from entity"
+  [entity]
+  (get-in entity [:configuration :rls]))
+
+(defn set-rls-config
+  "Set RLS configuration on entity"
+  [entity rls-config]
+  (assoc-in entity [:configuration :rls] rls-config))
+
+(defn rls-enabled?
+  "Check if RLS is enabled for entity"
+  [entity]
+  (get-in entity [:configuration :rls :enabled] false))
+
+(defn set-rls-enabled
+  "Enable or disable RLS for entity"
+  [entity enabled]
+  (assoc-in entity [:configuration :rls :enabled] enabled))
+
+(defn get-rls-guards
+  "Get RLS guards from entity"
+  [entity]
+  (get-in entity [:configuration :rls :guards] []))
+
+(defn set-rls-guards
+  "Set RLS guards on entity"
+  [entity guards]
+  (assoc-in entity [:configuration :rls :guards] guards))
+
+(defn add-rls-guard
+  "Add a new RLS guard to entity"
+  [entity guard]
+  (update-in entity [:configuration :rls :guards]
+             (fnil conj [])
+             guard))
+
+(defn remove-rls-guard
+  "Remove an RLS guard by id"
+  [entity guard-id]
+  (update-in entity [:configuration :rls :guards]
+             (fn [guards]
+               (vec (remove #(= (:id %) guard-id) guards)))))
+
+(defn find-guard-index
+  "Find the index of a guard by id"
+  [guards guard-id]
+  (first (keep-indexed
+           (fn [idx g] (when (= (:id g) guard-id) idx))
+           guards)))
+
+(defn toggle-rls-operation
+  "Toggle a Read/Write operation on a guard"
+  [entity guard-id operation]
+  (let [guards (get-rls-guards entity)
+        guard-idx (find-guard-index guards guard-id)]
+    (if guard-idx
+      (let [current-ops (get-in guards [guard-idx :operation] #{})
+            new-ops (if (contains? current-ops operation)
+                      (disj current-ops operation)
+                      (conj current-ops operation))]
+        (assoc-in entity [:configuration :rls :guards guard-idx :operation] new-ops))
+      entity)))
+
+(defn- path->condition
+  "Convert a discovered path to a minimal condition for storage.
+   Only stores UUIDs - no names that can go stale.
+
+   Stored structure:
+   - :ref      {:type :ref :attribute <uuid>}
+   - :relation {:type :relation :steps [{:relation <uuid> :entity <uuid>}]}
+   - :hybrid   {:type :hybrid :steps [{:relation <uuid> :entity <uuid>}] :attribute <uuid>}"
+  [path]
+  (case (:type path)
+    :ref
+    {:type :ref
+     :attribute (:attribute-euuid path)}
+
+    :relation
+    {:type :relation
+     :steps (mapv #(select-keys % [:relation-euuid :entity-euuid])
+                  (:steps path))}
+
+    :hybrid
+    {:type :hybrid
+     :steps (mapv #(select-keys % [:relation-euuid :entity-euuid])
+                  (:steps path))
+     :attribute (:attribute-euuid path)}))
+
+(defn condition-matches-path?
+  "Check if a stored condition matches a discovered path by comparing UUIDs.
+   This is stable across model changes that don't affect the actual path structure."
+  [condition path]
+  (case (:type condition)
+    :ref
+    (= (:attribute condition) (:attribute-euuid path))
+
+    :relation
+    (let [condition-steps (mapv :relation-euuid (:steps condition))
+          path-steps (mapv :relation-euuid (:steps path))]
+      (= condition-steps path-steps))
+
+    :hybrid
+    (and (= (:attribute condition) (:attribute-euuid path))
+         (let [condition-steps (mapv :relation-euuid (:steps condition))
+               path-steps (mapv :relation-euuid (:steps path))]
+           (= condition-steps path-steps)))
+
+    ;; Legacy: fallback to path-id for old configs
+    (= (:path-id condition) (:id path))))
+
+(defn toggle-rls-condition
+  "Toggle a path condition on a guard. If guard doesn't exist, creates a new one.
+   Auto-removes guard if all conditions are removed.
+   Matches conditions by structure (UUIDs), not ephemeral path-id."
+  [entity guard-id path]
+  (let [guards (get-rls-guards entity)
+        guard-idx (find-guard-index guards guard-id)]
+    (if guard-idx
+      ;; Toggle condition on existing guard
+      (let [conditions (get-in guards [guard-idx :conditions] [])
+            matching-condition (some #(when (condition-matches-path? % path) %) conditions)
+            new-conditions (if matching-condition
+                             (vec (remove #(condition-matches-path? % path) conditions))
+                             (conj conditions (path->condition path)))]
+        ;; Auto-remove guard if no conditions left
+        (if (empty? new-conditions)
+          (remove-rls-guard entity guard-id)
+          (assoc-in entity [:configuration :rls :guards guard-idx :conditions] new-conditions)))
+      ;; Guard not found - create new guard with this condition
+      (let [new-guard {:id (id/generate)
+                       :operation #{}
+                       :conditions [(path->condition path)]}]
+        (add-rls-guard entity new-guard)))))
+
+;;; RLS Guards - Modal UI Support Functions
+
+(defn paths->euuid-set
+  "Convert paths to a set of identifying UUIDs for comparison.
+   Used for duplicate detection - two path selections are duplicates
+   if they produce the same euuid set."
+  [paths]
+  (set
+    (map
+      (fn [path]
+        (case (:type path)
+          :ref (:attribute-euuid path)
+          :relation (mapv :relation-euuid (:steps path))
+          :hybrid [(:attribute-euuid path) (mapv :relation-euuid (:steps path))]))
+      paths)))
+
+(defn conditions->euuid-set
+  "Convert stored conditions to euuid set for comparison."
+  [conditions]
+  (set
+    (map
+      (fn [condition]
+        (case (:type condition)
+          :ref (:attribute condition)
+          :relation (mapv :relation-euuid (:steps condition))
+          :hybrid [(:attribute condition) (mapv :relation-euuid (:steps condition))]))
+      conditions)))
+
+(defn guard-matches-paths?
+  "Check if a guard's conditions match exactly the given paths.
+   Used for duplicate detection when adding/editing guards."
+  [guard paths]
+  (= (conditions->euuid-set (:conditions guard))
+     (paths->euuid-set paths)))
+
+(defn validate-guard-paths
+  "Validate guard conditions against current model state.
+   Returns a map with:
+   - :valid - vector of valid conditions
+   - :invalid - vector of invalid conditions (referencing removed entities/relations/attributes)
+
+   A condition is invalid if:
+   - :ref type: attribute no longer exists on entity
+   - :relation type: any relation in the path no longer exists
+   - :hybrid type: any relation or the final attribute no longer exists"
+  [guard model entity]
+  (let [entity-attrs (set (map :euuid (filter :active (:attributes entity))))
+        model-relations (set (map :euuid (filter :active (get-relations model))))]
+    (reduce
+      (fn [acc condition]
+        (let [valid?
+              (case (:type condition)
+                :ref
+                (contains? entity-attrs (:attribute condition))
+
+                :relation
+                (every? #(contains? model-relations (:relation-euuid %))
+                        (:steps condition))
+
+                :hybrid
+                (and
+                  ;; All relations in path exist
+                  (every? #(contains? model-relations (:relation-euuid %))
+                          (:steps condition))
+                  ;; Final entity's attribute exists
+                  ;; Note: We'd need to traverse to check the final entity's attrs
+                  ;; For now, just check relations - attr check requires model traversal
+                  true)
+
+                ;; Unknown type - treat as invalid
+                false)]
+          (update acc (if valid? :valid :invalid) conj condition)))
+      {:valid []
+       :invalid []}
+      (:conditions guard))))
+
+(defn paths->conditions
+  "Convert a collection of paths to conditions for storage."
+  [paths]
+  (mapv path->condition paths))
+
+(defn add-rls-guard-with-paths
+  "Add a new RLS guard with the given paths and default READ permission.
+   Returns nil if paths would create a duplicate guard."
+  [entity paths]
+  (let [guards (get-rls-guards entity)
+        ;; Check for duplicates
+        duplicate? (some #(guard-matches-paths? % paths) guards)]
+    (when-not duplicate?
+      (let [new-guard {:id (id/generate)
+                       :operation #{:read}
+                       :conditions (paths->conditions paths)}]
+        (add-rls-guard entity new-guard)))))
+
+(defn update-rls-guard-paths
+  "Update an existing guard's paths (conditions).
+   Returns nil if the new paths would create a duplicate with another guard."
+  [entity guard-id paths]
+  (let [guards (get-rls-guards entity)
+        guard-idx (find-guard-index guards guard-id)
+        ;; Check for duplicates with OTHER guards (not this one)
+        other-guards (remove #(= (:id %) guard-id) guards)
+        duplicate? (some #(guard-matches-paths? % paths) other-guards)]
+    (when (and guard-idx (not duplicate?))
+      (assoc-in entity
+                [:configuration :rls :guards guard-idx :conditions]
+                (paths->conditions paths)))))

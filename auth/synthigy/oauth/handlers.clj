@@ -322,7 +322,7 @@
 (def openid-configuration
   "OpenID Connect Discovery handler with complete middleware stack.
 
-   Returns OIDC configuration metadata (RFC 8414).
+   Returns OIDC configuration metadata (RFC 8414 + OpenID Connect Discovery 1.0).
    Provides endpoint URLs and supported features for OIDC clients.
 
    Middleware stack:
@@ -330,6 +330,21 @@
    - wrap-keyword-params (parameter normalization)
    - wrap-params (query string + form body parsing)"
   (-> oidc/openid-configuration-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def oauth-authorization-server
+  "OAuth 2.0 Authorization Server Metadata handler (RFC 8414).
+
+   Returns OAuth server metadata at /.well-known/oauth-authorization-server.
+   This is the OAuth-specific metadata endpoint (vs OIDC discovery).
+
+   Middleware stack:
+   - wrap-cookies (session tracking)
+   - wrap-keyword-params (parameter normalization)
+   - wrap-params (query string + form body parsing)"
+  (-> oidc/oauth-authorization-server-handler
       wrap-keyword-params
       wrap-params
       wrap-cookies))
@@ -349,7 +364,9 @@
    "/oauth/revoke" {:get revoke :post revoke}
    "/oauth/introspect" {:post introspect}
    "/oauth/device/auth" {:post device-authorization}
-   "/oauth/device/activate" {:get device-activation :post device-activation}})
+   "/oauth/device/activate" {:get device-activation :post device-activation}
+   ;; RFC 8414 - OAuth 2.0 Authorization Server Metadata
+   "/.well-known/oauth-authorization-server" {:get oauth-authorization-server}})
 
 (def oidc-routes
   "Map of OpenID Connect endpoint paths to handlers.
@@ -357,6 +374,7 @@
    Use this for quick integration with routing libraries."
   {"/oauth/userinfo" {:get userinfo}
    "/oauth/jwks" {:get jwks}
+   ;; OpenID Connect Discovery 1.0
    "/.well-known/openid-configuration" {:get openid-configuration}})
 
 (def all-routes

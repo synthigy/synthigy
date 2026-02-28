@@ -170,13 +170,16 @@
 ;; OIDC Standard Scopes (RFC 5.4)
 ;; =============================================================================
 
-(defscope openid [:sub :iss :aud :exp :iat :auth_time :nonce :sid]
+(defscope openid [:sub :iss :aud :exp :iat :auth_time :nonce :sid :acr :amr]
   :description "Your identity"
   :resolve (fn [session]
              (let [{:keys [name]} (get-session-resource-owner session)
                    {:keys [authorized-at code]} (get-session session)
                    {:keys [nonce]} (ac/get-code-request code)
-                   client (get-session-client session)]
+                   client (get-session-client session)
+                   ;; Get authentication context (acr/amr)
+                   amr (core/get-session-amr session)
+                   acr (core/get-session-acr session)]
                {:iss (domain+)
                 :aud (:id client)
                 :sub name
@@ -188,7 +191,10 @@
                          to-timestamp)
                 :sid session
                 :auth_time authorized-at
-                :nonce nonce})))
+                :nonce nonce
+                ;; OIDC Core 1.0 Section 2 - acr/amr claims
+                :acr acr   ; Authentication Context Class Reference
+                :amr amr})))  ; Authentication Methods References
 
 (defscope profile
   [:name :family_name :given_name :middle_name :nickname
@@ -220,50 +226,102 @@
      {:alg :rs256})))
 
 (defn get-access-token
-  [{{{authorization "authorization"
-      :as headers} :headers} :request}]
-  (let [access-token (if (.startsWith authorization "Bearer")
-                       (subs authorization 7)
-                       (throw
-                        (ex-info
-                         "Authorization header doesn't contain access token"
-                         headers)))]
-    access-token))
+  "Extracts access token from request per RFC 6750.
+
+   Supports three methods (in order of preference):
+   1. Authorization header: Bearer <token>
+   2. Form body parameter: access_token (for POST requests)
+   3. Query parameter: access_token (least secure, not recommended)
+
+   Returns the access token string or throws exception if not found."
+  [{:keys [headers params form-params] :as request}]
+  (let [authorization (get headers "authorization" "")
+        ;; Method 1: Authorization header (preferred)
+        header-token (when (and authorization (.startsWith authorization "Bearer"))
+                       (subs authorization 7))
+        ;; Method 2: Form body parameter (for POST with application/x-www-form-urlencoded)
+        form-token (or (:access_token form-params)
+                       (get form-params "access_token"))
+        ;; Method 3: Query parameter (least secure)
+        query-token (or (:access_token params)
+                        (get params "access_token"))]
+    (or header-token
+        form-token
+        query-token
+        (throw
+         (ex-info
+          "Access token not found in Authorization header, form body, or query parameters"
+          {:headers headers :has-params (some? params)})))))
 
 ;; =============================================================================
 ;; Ring Handlers (Pure Ring, no Pedestal dependencies)
 ;; =============================================================================
 
+(defn- base-server-metadata
+  "Returns base OAuth 2.0 server metadata shared between OIDC and OAuth endpoints."
+  []
+  {:issuer (domain+)
+   :authorization_endpoint (domain+ "/oauth/authorize")
+   :device_authorization_endpoint (domain+ "/oauth/device")
+   :token_endpoint (domain+ "/oauth/token")
+   :revocation_endpoint (domain+ "/oauth/revoke")
+   :introspection_endpoint (domain+ "/oauth/introspect")
+   :jwks_uri (domain+ "/oauth/jwks")
+   ;; RFC 7636 PKCE support
+   :code_challenge_methods_supported ["S256" "plain"]
+   ;; Token endpoint auth methods
+   :token_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
+   :introspection_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
+   :revocation_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
+   ;; Response types and grant types
+   :response_types_supported ["code"]
+   :response_modes_supported ["query" "fragment"]
+   :grant_types_supported ["authorization_code"
+                           "refresh_token"
+                           "client_credentials"
+                           "urn:ietf:params:oauth:grant-type:device_code"]
+   :scopes_supported (all-supported-scopes)})
+
+(defn oauth-authorization-server-handler
+  "OAuth 2.0 Authorization Server Metadata handler (RFC 8414).
+
+   Returns OAuth server metadata at /.well-known/oauth-authorization-server.
+   This is the OAuth-specific metadata endpoint (vs OIDC discovery)."
+  [request]
+  (binding [core/*domain* (core/original-uri request)]
+    (let [config (base-server-metadata)]
+      {:status 200
+       :headers {"Content-Type" "application/json"
+                 "Cache-Control" "max-age=3600"}
+       :body (json/write-str config :escape-slash false)})))
+
 (defn openid-configuration-handler
   "OpenID Connect Discovery handler.
 
-   Returns OIDC configuration metadata (RFC 8414).
+   Returns OIDC configuration metadata (RFC 8414 + OpenID Connect Discovery 1.0).
    Provides endpoint URLs and supported features for OIDC clients."
   [request]
   (binding [core/*domain* (core/original-uri request)]
-    (let [config {:issuer (domain+)
-                  :authorization_endpoint (domain+ "/oauth/authorize")
-                  :device_authorization_endpoint (domain+ "/oauth/device")
-                  :token_endpoint (domain+ "/oauth/token")
-                  :userinfo_endpoint (domain+ "/oauth/userinfo")
-                  :jwks_uri (domain+ "/oauth/jwks")
-                  :end_session_endpoint (domain+ "/oauth/logout")
-                  :revocation_endpoint (domain+ "/oauth/revoke")
-                  :introspection_endpoint (domain+ "/oauth/introspect")
-                  :introspection_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
-                  :response_types_supported ["urn:ietf:params:oauth:grant-type:device_code"
-                                             "code"]
-                  :subject_types_supported ["public"]
-                  :token_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
-                  :scopes_supported (all-supported-scopes)
-                  :id_token_signing_alg_values_supported ["RS256"]
-                  :grant_types_supported ["authorization_code"
-                                          "refresh_token"
-                                          "client_credentials"
-                                          "urn:ietf:params:oauth:grant-type:device_code"]
-                  :claims_supported (mapv name (all-supported-claims))}]
+    (let [config (merge
+                   (base-server-metadata)
+                   ;; OIDC-specific fields
+                   {:userinfo_endpoint (domain+ "/oauth/userinfo")
+                    :end_session_endpoint (domain+ "/oauth/logout")
+                    :subject_types_supported ["public"]
+                    :id_token_signing_alg_values_supported ["RS256"]
+                    :claims_supported (mapv name (all-supported-claims))
+                    ;; ACR/AMR support (OIDC Core 1.0 Section 2)
+                    :acr_values_supported ["0" "1" "2"
+                                           "urn:mace:incommon:iap:bronze"
+                                           "urn:mace:incommon:iap:silver"
+                                           "urn:mace:incommon:iap:gold"]
+                    ;; OIDC optional features
+                    :claims_parameter_supported false
+                    :request_parameter_supported false
+                    :request_uri_parameter_supported false})]
       {:status 200
-       :headers {"Content-Type" "application/json"}
+       :headers {"Content-Type" "application/json"
+                 "Cache-Control" "max-age=3600"}
        :body (json/write-str config :escape-slash false)})))
 
 (defn userinfo-handler

@@ -17,6 +17,54 @@
    [timing.core :as timing]))
 
 ;; =============================================================================
+;; Response Mode Helpers
+;; =============================================================================
+
+(defn- form-post-response
+  "Generate an HTML page that auto-submits a form via POST (response_mode=form_post)."
+  [redirect-uri params]
+  (let [hidden-inputs (str/join "\n"
+                        (for [[k v] params]
+                          (format "      <input type=\"hidden\" name=\"%s\" value=\"%s\"/>"
+                                  (name k) (str v))))]
+    {:status 200
+     :headers {"Content-Type" "text/html;charset=UTF-8"
+               "Cache-Control" "no-cache, no-store"
+               "Pragma" "no-cache"}
+     :body (str "<!DOCTYPE html>\n"
+                "<html>\n"
+                "<head><title>Submitting Authorization</title></head>\n"
+                "<body onload=\"document.forms[0].submit()\">\n"
+                "  <noscript>\n"
+                "    <p>JavaScript is required. Please click the button below.</p>\n"
+                "  </noscript>\n"
+                "  <form method=\"post\" action=\"" redirect-uri "\">\n"
+                hidden-inputs "\n"
+                "    <noscript><button type=\"submit\">Continue</button></noscript>\n"
+                "  </form>\n"
+                "</body>\n"
+                "</html>")}))
+
+(defn- authorization-response
+  "Generate authorization response based on response_mode with cookies."
+  [redirect-uri params response-mode cookies]
+  (let [base-response
+        (case response-mode
+          "form_post"
+          (form-post-response redirect-uri params)
+
+          "fragment"
+          {:status 302
+           :headers {"Location" (str redirect-uri "#" (codec/form-encode params))}}
+
+          ;; Default: query
+          {:status 302
+           :headers {"Location" (str redirect-uri "?" (codec/form-encode params))}})]
+    (if cookies
+      (assoc base-response :cookies cookies)
+      base-response)))
+
+;; =============================================================================
 ;; Security Checks
 ;; =============================================================================
 
@@ -68,7 +116,9 @@
    This is the most delicate conversion because it merges :enter/:leave logic
    for session cookie management. The cookie is set inline with response creation."
   [request]
-  (let [{:keys [params request-method form-params]} request
+  ;; Bind *domain* for proper issuer identification (RFC 9207)
+  (binding [core/*domain* (core/original-uri request)]
+    (let [{:keys [params request-method form-params]} request
         data (merge params form-params)
         {:keys [username password]
          {:keys [flow device-code authorization-code] :as flow-state} :state}
@@ -88,7 +138,7 @@
           "authorization_code"
           (let [{{response_type :response_type
                   redirect-uri :redirect_uri
-                  :keys [state audience scope]} :request
+                  :keys [state audience scope response_mode]} :request
                  :keys [client]
                  :as prepared-code}
                 (get @ac/*authorization-codes* authorization-code)
@@ -121,6 +171,11 @@
                 (core/set-session-audience-scope session audience scope)
                 (core/set-session-resource-owner session resource-owner)
                 (core/set-session-authorized-at session now)
+                ;; Set authentication context (OIDC acr/amr claims)
+                ;; Currently only password auth, so amr=["pwd"], acr="1"
+                ;; When MFA is added, update this to include additional methods
+                (core/set-session-amr session ["pwd"])
+                (core/set-session-acr session (core/derive-acr-from-amr ["pwd"]))
                 (ac/mark-code-issued session authorization-code)
                 (log/debugf "[%s] Validating resource owner: %s" session username)
                 (iam/publish
@@ -132,18 +187,20 @@
                   :scope scope
                   :user resource-owner})
                 ;; CRITICAL: Set cookie inline with redirect response
-                {:status 302
-                 :headers {"Location" (str redirect-uri "?"
-                                           (codec/form-encode
-                                            (if (empty? state) {:code authorization-code}
-                                                {:state state
-                                                 :code authorization-code})))}
-                 :cookies {"idsrv.session" {:value session
-                                            :path "/"
-                                            :http-only true
-                                            :secure true
-                                            :same-site :none
-                                            :expires "Session"}}})
+                ;; Support response_mode: query (default), fragment, or form_post
+                (authorization-response
+                  redirect-uri
+                  (cond->
+                    {:code authorization-code
+                     :iss (core/domain+)}  ; RFC 9207 - Issuer Identification
+                    (not-empty state) (assoc :state state))
+                  response_mode
+                  {"idsrv.session" {:value session
+                                    :path "/"
+                                    :http-only true
+                                    :secure true
+                                    :same-site :none
+                                    :expires "Session"}}))
 
               ;; Unknown error
               :else
@@ -205,6 +262,9 @@
                 (core/set-session-audience-scope session audience scope)
                 (core/set-session-resource-owner session resource-owner)
                 (core/set-session-authorized-at session now)
+                ;; Set authentication context (OIDC acr/amr claims)
+                (core/set-session-amr session ["pwd"])
+                (core/set-session-acr session (core/derive-acr-from-amr ["pwd"]))
                 (iam/publish
                  :oauth.session/created
                  {:session session
@@ -220,7 +280,7 @@
 
           ;; Unknown flow
           {:status 302
-           :headers {"Location" "/oauth/status?value=error&error=broken_flow"}})))))
+           :headers {"Location" "/oauth/status?value=error&error=broken_flow"}}))))))  ; Extra paren for binding
 
 (defn logout-handler
   "OAuth logout handler.

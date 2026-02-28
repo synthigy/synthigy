@@ -345,3 +345,193 @@
       (if (= 200 (:status token-response))
         (println "✅ PASS: PKCE plain method works")
         (println "❌ FAIL: PKCE plain method failed!")))))
+
+;; =============================================================================
+;; Test 5: Public Client MUST Use PKCE (OAuth 2.1)
+;; =============================================================================
+
+(def public-client-id "test-public-client-pkce")
+
+(defn setup-public-client! []
+  "Create a public OAuth client (no secret)"
+  (let [client-euuid (id/data :test/oauth-pkce-public-client)]
+    (swap! core/*clients* assoc public-client-id
+           {:id public-client-id
+            :euuid client-euuid
+            :secret nil  ;; PUBLIC CLIENT - no secret
+            :type :public
+            :settings {"allowed-grants" ["authorization_code" "refresh_token"]
+                       "redirections" [test-redirect-uri]
+                       "logout-redirections" [test-redirect-uri]}})
+    client-euuid))
+
+(deftest test-public-client-requires-pkce
+  (testing "Public client (no secret) MUST use PKCE per OAuth 2.1"
+    (println "\n=== PUBLIC CLIENT REQUIRES PKCE ===")
+
+    ;; Setup public client
+    (setup-public-client!)
+
+    ;; Step 1: Get authorization code WITHOUT PKCE
+    (let [auth-response (handlers/authorize
+                          (request :get "/oauth/authorize"
+                                   {:client_id public-client-id
+                                    :redirect_uri test-redirect-uri
+                                    :response_type "code"
+                                    :scope "openid profile"
+                                    :state "public-no-pkce-test"
+                                    ;; NO code_challenge!
+                                    }))
+
+          login-params (parse-location-params (get-in auth-response [:headers "Location"]))
+          _ (println "  Auth response status:" (:status auth-response))
+          _ (println "  Redirected to login")
+
+          ;; Complete login
+          login-response (handlers/login
+                           (-> (request :post "/oauth/login")
+                               (assoc :params {:username test-username
+                                               :password test-password
+                                               :state (:state login-params)})
+                               (assoc :form-params {:username test-username
+                                                    :password test-password
+                                                    :state (:state login-params)})))
+
+          callback-params (parse-location-params (get-in login-response [:headers "Location"]))
+          code (:code callback-params)
+          _ (println "  Got code:" code)]
+
+      ;; Step 2: Try token exchange - should FAIL for public client without PKCE
+      (println "\n  → Attempting token exchange for public client WITHOUT PKCE...")
+
+      (let [token-response (handlers/token
+                             (request :post "/oauth/token"
+                                      {:grant_type "authorization_code"
+                                       :code code
+                                       :client_id public-client-id
+                                       ;; NO client_secret (public client)
+                                       :redirect_uri test-redirect-uri
+                                       ;; NO code_verifier (no PKCE was used)
+                                       }))
+            error-data (parse-json-body token-response)]
+
+        (println "  Token response status:" (:status token-response))
+        (println "  Error:" (:error error-data))
+        (println "  Error description:" (:error_description error-data))
+
+        (println "\n--- Results ---")
+        (is (= 400 (:status token-response)) "Should reject with 400")
+        (is (= "invalid_request" (:error error-data)) "Should return invalid_request error")
+        (is (str/includes? (str (:error_description error-data)) "PKCE")
+            "Error should mention PKCE requirement")
+
+        (if (= 400 (:status token-response))
+          (println "✅ PASS: Public client without PKCE rejected")
+          (println "❌ FAIL: Public client without PKCE accepted!"))))))
+
+(deftest test-public-client-with-pkce-succeeds
+  (testing "Public client with PKCE should succeed"
+    (println "\n=== PUBLIC CLIENT WITH PKCE ===")
+
+    ;; Setup public client
+    (setup-public-client!)
+
+    ;; Get authorization code WITH PKCE
+    (let [auth-response (handlers/authorize
+                          (request :get "/oauth/authorize"
+                                   {:client_id public-client-id
+                                    :redirect_uri test-redirect-uri
+                                    :response_type "code"
+                                    :scope "openid profile"
+                                    :state "public-with-pkce-test"
+                                    :code_challenge code-challenge
+                                    :code_challenge_method "S256"}))
+
+          login-params (parse-location-params (get-in auth-response [:headers "Location"]))
+          _ (println "  Auth with PKCE challenge")
+
+          login-response (handlers/login
+                           (-> (request :post "/oauth/login")
+                               (assoc :params {:username test-username
+                                               :password test-password
+                                               :state (:state login-params)})
+                               (assoc :form-params {:username test-username
+                                                    :password test-password
+                                                    :state (:state login-params)})))
+
+          callback-params (parse-location-params (get-in login-response [:headers "Location"]))
+          code (:code callback-params)
+          _ (println "  Got code:" code)]
+
+      ;; Token exchange WITH code_verifier
+      (println "\n  → Token exchange with code_verifier...")
+
+      (let [token-response (handlers/token
+                             (request :post "/oauth/token"
+                                      {:grant_type "authorization_code"
+                                       :code code
+                                       :client_id public-client-id
+                                       ;; NO client_secret (public client)
+                                       :redirect_uri test-redirect-uri
+                                       :code_verifier code-verifier}))
+            token-data (parse-json-body token-response)]
+
+        (println "  Token response status:" (:status token-response))
+        (println "  Has access_token:" (some? (:access_token token-data)))
+
+        (println "\n--- Results ---")
+        (is (= 200 (:status token-response)) "Should succeed with 200")
+        (is (some? (:access_token token-data)) "Should return access_token")
+
+        (if (= 200 (:status token-response))
+          (println "✅ PASS: Public client with PKCE works")
+          (println "❌ FAIL: Public client with PKCE failed!"))))))
+
+;; =============================================================================
+;; Test 6: RFC 9207 - Issuer Identification in Authorization Response
+;; =============================================================================
+
+(deftest test-authorization-response-includes-iss
+  (testing "Authorization response includes 'iss' parameter per RFC 9207"
+    (println "\n=== RFC 9207 ISSUER IDENTIFICATION ===")
+
+    (let [auth-response (handlers/authorize
+                          (request :get "/oauth/authorize"
+                                   {:client_id test-client-id
+                                    :redirect_uri test-redirect-uri
+                                    :response_type "code"
+                                    :scope "openid profile"
+                                    :state "iss-test"
+                                    :code_challenge code-challenge
+                                    :code_challenge_method "S256"}))
+
+          login-params (parse-location-params (get-in auth-response [:headers "Location"]))
+          _ (println "  Completing login flow...")
+
+          login-response (handlers/login
+                           (-> (request :post "/oauth/login")
+                               (assoc :params {:username test-username
+                                               :password test-password
+                                               :state (:state login-params)})
+                               (assoc :form-params {:username test-username
+                                                    :password test-password
+                                                    :state (:state login-params)})))
+
+          location (get-in login-response [:headers "Location"])
+          callback-params (parse-location-params location)]
+
+      (println "  Redirect location:" location)
+      (println "  Callback params:" callback-params)
+
+      (println "\n--- Results ---")
+      (is (some? (:code callback-params)) "Should have authorization code")
+      (is (some? (:iss callback-params)) "Should have 'iss' parameter (RFC 9207)")
+      (is (= "iss-test" (:state callback-params)) "Should preserve state")
+
+      (when-let [iss (:iss callback-params)]
+        (println "  Issuer (iss):" iss)
+        (is (str/starts-with? iss "http") "Issuer should be a URL"))
+
+      (if (some? (:iss callback-params))
+        (println "✅ PASS: Authorization response includes 'iss' parameter")
+        (println "❌ FAIL: Authorization response missing 'iss' parameter!")))))

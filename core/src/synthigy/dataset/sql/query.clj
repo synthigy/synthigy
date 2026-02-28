@@ -39,6 +39,7 @@
                                           relation->table-name
                                           entity->relation-field]]
     [synthigy.dataset.sql.protocol :as proto]
+    [synthigy.dataset.sql.rls :as rls]
     [synthigy.db :refer [*db*]]
     [synthigy.db.sql :as sql]
     [synthigy.json :refer [<-json]]
@@ -851,22 +852,28 @@
                                       (when (#{"mandatory" "unique+mandatory"} constraint)
                                         (keyword (normalize-name name))))
                                     (:attributes entity))
+             ;; Compile RLS guards (if enabled for this entity)
+             compiled-rls (rls/compile-entity-rls model entity)
              ;; Build entity schema (audit fields and relations already merged above)
-             entity-schema {:table table
-                            :name (:name entity)
-                            :constraints (cond->
-                                           (get-in entity [:configuration :constraints])
+             entity-schema (cond->
+                             {:table table
+                              :name (:name entity)
+                              :constraints (cond->
+                                             (get-in entity [:configuration :constraints])
 
-                                           (not-empty mandatory-attributes)
-                                           (assoc :mandatory mandatory-attributes))
-                            :fields fields
-                            :field->attribute (reduce-kv
-                                                (fn [r a {field :key}]
-                                                  (assoc r field a))
-                                                nil
-                                                fields)
-                            :recursions recursions
-                            :relations relations}]
+                                             (not-empty mandatory-attributes)
+                                             (assoc :mandatory mandatory-attributes))
+                              :fields fields
+                              :field->attribute (reduce-kv
+                                                  (fn [r a {field :key}]
+                                                    (assoc r field a))
+                                                  nil
+                                                  fields)
+                              :recursions recursions
+                              :relations relations}
+                             ;; Add :rls only if entity has RLS configured
+                             compiled-rls
+                             (assoc :rls compiled-rls))]
          (assoc schema euuid entity-schema)))
      {}
      (core/get-entities model))))

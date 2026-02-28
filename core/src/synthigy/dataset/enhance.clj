@@ -8,6 +8,7 @@
    [clojure.tools.logging :as log]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.access :as access]
+   [synthigy.dataset.rls :as rls]
    [synthigy.db :refer [*db*]])
   (:import
    [synthigy.db Postgres SQLite]))
@@ -135,7 +136,7 @@
 
 (defmethod args ::default
   [_ schema current-stack]
-  current-stack)
+  (rls/enhance-args schema current-stack rls/*operation*))
 
 (defn explain-enhancement
   "Returns a human-readable explanation of what enhancements were applied.

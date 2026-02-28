@@ -21,6 +21,11 @@
 (defonce ^:dynamic *rules* nil)
 (defonce ^:dynamic *scopes* nil)
 
+(defonce ^{:dynamic true
+           :doc "RLS context with user/groups/roles _eid values for SQL injection.
+   Structure: {:user <_eid> :groups #{<_eid>...} :roles #{<_eid>...}}"}
+  *rls* nil)
+
 ;; Store delta channel subscription for cleanup
 (defonce ^:private delta-subscription-state (atom {:chan nil
                                                    :subscribed-elements #{}}))

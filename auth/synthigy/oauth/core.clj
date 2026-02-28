@@ -527,6 +527,77 @@
   [session]
   (get-in @*sessions* [session :authorized-at]))
 
+;; =============================================================================
+;; ACR/AMR (Authentication Context/Methods) - OIDC Core 1.0
+;; =============================================================================
+
+(def ^:const acr-levels
+  "Standard ACR (Authentication Context Class Reference) levels.
+   Higher number = stronger authentication."
+  {"0" {:level 0 :name "No assurance" :methods #{}}
+   "1" {:level 1 :name "Password-based" :methods #{"pwd"}}
+   "2" {:level 2 :name "Multi-factor" :methods #{"pwd" "otp" "sms" "hwk" "bio"}}
+   "urn:mace:incommon:iap:bronze" {:level 1 :name "Bronze" :methods #{"pwd"}}
+   "urn:mace:incommon:iap:silver" {:level 2 :name "Silver" :methods #{"pwd" "otp"}}
+   "urn:mace:incommon:iap:gold"   {:level 3 :name "Gold" :methods #{"pwd" "hwk"}}})
+
+(defn set-session-amr
+  "Set authentication methods references for session.
+
+   amr is a vector of method strings used during authentication.
+   Standard values: pwd, otp, sms, mfa, hwk, bio, pin, wia, kba"
+  [session amr]
+  (swap! *sessions* assoc-in [session :amr] (vec amr)))
+
+(defn get-session-amr
+  "Get authentication methods references for session.
+   Returns vector of method strings, e.g. [\"pwd\"] or [\"pwd\" \"otp\"]"
+  [session]
+  (get-in @*sessions* [session :amr] ["pwd"]))  ; Default to password
+
+(defn set-session-acr
+  "Set authentication context class reference for session.
+
+   acr is a string indicating the authentication assurance level.
+   Standard values: 0, 1, 2, or URN like urn:mace:incommon:iap:silver"
+  [session acr]
+  (swap! *sessions* assoc-in [session :acr] acr))
+
+(defn get-session-acr
+  "Get authentication context class reference for session.
+   Returns acr string, defaults to '1' (password-based)."
+  [session]
+  (get-in @*sessions* [session :acr] "1"))  ; Default to level 1 (password)
+
+(defn derive-acr-from-amr
+  "Derive ACR level from AMR methods.
+
+   - Single password → '1' (basic)
+   - Password + any second factor → '2' (multi-factor)"
+  [amr]
+  (let [methods (set amr)]
+    (cond
+      ;; Multi-factor: password + another factor
+      (and (contains? methods "pwd")
+           (some methods #{"otp" "sms" "hwk" "bio" "mfa"}))
+      "2"
+
+      ;; Hardware key alone is strong
+      (contains? methods "hwk")
+      "2"
+
+      ;; Biometric alone is strong
+      (contains? methods "bio")
+      "2"
+
+      ;; Password only
+      (contains? methods "pwd")
+      "1"
+
+      ;; No recognized method
+      :else
+      "0")))
+
 (defmulti session-kill-hook (fn [priority _] priority))
 
 (defn kill-session

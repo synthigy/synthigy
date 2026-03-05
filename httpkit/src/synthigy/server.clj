@@ -57,8 +57,8 @@
     synthigy.dataset.lacinia
     [synthigy.graphql :as gql]
     [synthigy.graphql.cache :as cache]
-    synthigy.lacinia
     [synthigy.iam.access :as access]
+    synthigy.lacinia
     synthigy.oauth
     [synthigy.oauth.handlers :as oauth]
     synthigy.oauth.persistence

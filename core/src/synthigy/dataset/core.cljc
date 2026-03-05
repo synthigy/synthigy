@@ -11,12 +11,12 @@
   - synthigy.dataset.projection: Projection protocol implementations
   - synthigy.dataset.operations: Model operations (join, merge, etc.)"
   (:require
+    #?(:cljs [goog.string :as gstring])
+    #?(:cljs [goog.string.format])
     clojure.data
     clojure.set
     [clojure.string :as str]
-    [synthigy.dataset.id :as id]
-    #?(:cljs [goog.string :as gstring])
-    #?(:cljs [goog.string.format])))
+    [synthigy.dataset.id :as id]))
 
 (defn deep-merge
   "Recursively merges maps."
@@ -511,8 +511,8 @@
         (throw
           (ex-info
             (#?(:clj format :cljs gstring/format)
-             "Attribute name conflict: '%s' already exists with different ID"
-             (:name new-attribute))
+              "Attribute name conflict: '%s' already exists with different ID"
+              (:name new-attribute))
             {:type ::attribute-name-conflict
              :new-attribute new-attribute
              :existing-attribute found
@@ -647,7 +647,7 @@
                     []
                     unique-bindings)))))))
 
-(defrecord ERDModel [entities relations configuration clones version]
+(defrecord ERDModel [id-key entities relations configuration clones version]
   AuditConfigurationProtocol
   (set-who-field
     [this name]

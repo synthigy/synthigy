@@ -117,7 +117,8 @@
 (defn deployed-model
   "Returns the currently deployed model."
   []
-  @_model)
+  (some-> @_model
+          (assoc :id-key (id/key))))
 
 (defonce subscription (async/chan 100))
 

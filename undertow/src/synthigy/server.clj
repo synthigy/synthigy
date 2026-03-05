@@ -284,7 +284,7 @@
                 :synthigy/oauth.persistence
                 :synthigy/graphql
                 :synthigy/ldap
-                :synthigy/audit]
+                #_:synthigy/audit]
    :start (fn []
             (log/info "[SERVER] Starting Undertow server...")
             (stop)

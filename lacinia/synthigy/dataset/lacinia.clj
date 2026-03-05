@@ -1095,7 +1095,18 @@
                :args {:data {:type (list 'non-null t)}}
                :resolve
                (fn sync [context data value]
-                 (sync-mutation (assoc context :eywa/entity entity) data value))}
+                 (try
+                   (sync-mutation (assoc context :eywa/entity entity) data value)
+                   (catch Throwable e
+                     (let [id-key (id/key)
+                           entity-id (get-in data [:data id-key])]
+                       (log/error e "Couldn't resolve SYNC")
+                       (lacinia.resolve/resolve-as nil
+                         {:message (.getMessage e)
+                          :extensions (cond-> {:field-name (csk/->camelCaseString (str "sync " ename))
+                                               :entity ename
+                                               :arguments data}
+                                        entity-id (assoc (keyword (name id-key)) entity-id))})))))}
                    ;; SYNC LIST
               (csk/->camelCaseKeyword (str "sync " ename " List"))
               {:type (list 'list (entity->gql-object ename))
@@ -1105,8 +1116,15 @@
                  (try
                    (sync-list-mutation (assoc context :eywa/entity entity) data value)
                    (catch Throwable e
-                     (log/error e "Couldn't resolve SYNC list")
-                     (throw e))))}
+                     (let [id-key (id/key)
+                           entity-id (get-in data [:data 0 id-key])]
+                       (log/error e "Couldn't resolve SYNC list")
+                       (lacinia.resolve/resolve-as nil
+                         {:message (.getMessage e)
+                          :extensions (cond-> {:field-name (csk/->camelCaseString (str "sync " ename " List"))
+                                               :entity ename
+                                               :arguments data}
+                                        entity-id (assoc (keyword (name id-key)) entity-id))})))))}
                    ;;
               (csk/->camelCaseKeyword (str "stack " ename " List"))
               {:type (list 'list (entity->gql-object ename))
@@ -1116,8 +1134,15 @@
                  (try
                    (stack-list-mutation (assoc context :eywa/entity entity) data value)
                    (catch Throwable e
-                     (log/error e "Couldn't resolve STACK list")
-                     (throw e))))}
+                     (let [id-key (id/key)
+                           entity-id (get-in data [:data 0 id-key])]
+                       (log/error e "Couldn't resolve STACK list")
+                       (lacinia.resolve/resolve-as nil
+                         {:message (.getMessage e)
+                          :extensions (cond-> {:field-name (csk/->camelCaseString (str "stack " ename " List"))
+                                               :entity ename
+                                               :arguments data}
+                                        entity-id (assoc (keyword (name id-key)) entity-id))})))))}
                    ;;
               (csk/->camelCaseKeyword (str "stack" ename))
               {:type (entity->gql-object ename)
@@ -1127,8 +1152,15 @@
                  (try
                    (stack-mutation (assoc context :eywa/entity entity) data value)
                    (catch Throwable e
-                     (log/error e "Couldn't resolve STACK")
-                     (throw e))))}
+                     (let [id-key (id/key)
+                           entity-id (get-in data [:data id-key])]
+                       (log/error e "Couldn't resolve STACK")
+                       (lacinia.resolve/resolve-as nil
+                         {:message (.getMessage e)
+                          :extensions (cond-> {:field-name (csk/->camelCaseString (str "stack " ename))
+                                               :entity ename
+                                               :arguments data}
+                                        entity-id (assoc (keyword (name id-key)) entity-id))})))))}
                    ;;
               (csk/->camelCaseKeyword (str "delete " ename))
               (let [allowed? (set (map id/extract (:attributes entity)))
@@ -1155,7 +1187,18 @@
                 {:type 'Boolean
                  :args args
                  :resolve (fn delete [context data value]
-                            (delete-mutation (assoc context :eywa/entity entity) data value))})
+                            (try
+                              (delete-mutation (assoc context :eywa/entity entity) data value)
+                              (catch Throwable e
+                                (let [id-key (id/key)
+                                      entity-id (get data id-key)]
+                                  (log/error e "Couldn't resolve DELETE")
+                                  (lacinia.resolve/resolve-as nil
+                                    {:message (.getMessage e)
+                                     :extensions (cond-> {:field-name (csk/->camelCaseString (str "delete " ename))
+                                                          :entity ename
+                                                          :arguments data}
+                                                   entity-id (assoc (keyword (name id-key)) entity-id))})))))})
                    ;;
               (csk/->camelCaseKeyword (str "purge " ename))
               {:type (list 'list (entity->gql-object ename))
@@ -1165,8 +1208,15 @@
                  (try
                    (purge-mutation (assoc context :eywa/entity entity) data value)
                    (catch Throwable e
-                     (log/error e "Couldn't resolve purge")
-                     (throw e))))})
+                     (let [id-key (id/key)
+                           entity-id (get-in data [:_where id-key :_eq])]
+                       (log/error e "Couldn't resolve purge")
+                       (lacinia.resolve/resolve-as nil
+                         {:message (.getMessage e)
+                          :extensions (cond-> {:field-name (csk/->camelCaseString (str "purge " ename))
+                                               :entity ename
+                                               :arguments data}
+                                        entity-id (assoc (keyword (name id-key)) entity-id))})))))})
             ;;
             (not-empty to-relations)
             (assoc
@@ -1179,8 +1229,15 @@
                  (try
                    (slice-mutation (assoc context :eywa/entity entity) data value)
                    (catch Throwable e
-                     (log/error e "Couldn't resolve SLICE")
-                     (throw e))))}))))
+                     (let [id-key (id/key)
+                           entity-id (get-in data [:_where id-key :_eq])]
+                       (log/error e "Couldn't resolve SLICE")
+                       (lacinia.resolve/resolve-as nil
+                         {:message (.getMessage e)
+                          :extensions (cond-> {:field-name (csk/->camelCaseString (str "slice " ename))
+                                               :entity ename
+                                               :arguments data}
+                                        entity-id (assoc (keyword (name id-key)) entity-id))})))))}))))
       {}
       entities)))
 

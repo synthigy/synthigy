@@ -3,21 +3,20 @@
 
   Copied from EYWA: neyho.eywa.dataset.graphql"
   (:require
-   [clojure.core.async :as async]
-   [clojure.string :as str]
-   [clojure.tools.logging :as log]
-   [com.walmartlabs.lacinia.executor :as executor]
-   [com.walmartlabs.lacinia.resolve :as resolve]
-   [synthigy.dataset
-    :refer [publisher
-            subscription
-            deployed-model]]
-   [synthigy.dataset.core :as core]
-   [synthigy.dataset.core :as dataset]
-   [synthigy.dataset.id :as id]
-   [synthigy.dataset.sql.naming :refer [normalize-name]]
-   [synthigy.db :as db :refer [*db*]]
-   [synthigy.dataset.access :as access]))
+    [clojure.core.async :as async]
+    [clojure.string :as str]
+    [clojure.tools.logging :as log]
+    [com.walmartlabs.lacinia.executor :as executor]
+    [com.walmartlabs.lacinia.resolve :as resolve]
+    [synthigy.dataset
+     :refer [publisher
+             subscription
+             deployed-model]]
+    [synthigy.dataset.access :as access]
+    [synthigy.dataset.core :as dataset]
+    [synthigy.dataset.id :as id]
+    [synthigy.dataset.sql.naming :refer [normalize-name]]
+    [synthigy.db :as db :refer [*db*]]))
 
 (defn- protect-dataset
   "Filters the dataset model based on IAM permissions.
@@ -28,26 +27,26 @@
   [model]
   (as-> model m
     (reduce
-     (fn [m entity]
-       (if (access/entity-allows? (id/extract entity) #{:read :write})
-         m
-         (dataset/remove-entity m entity)))
-     m
-     (dataset/get-entities m))
+      (fn [m entity]
+        (if (access/entity-allows? (id/extract entity) #{:read :write})
+          m
+          (dataset/remove-entity m entity)))
+      m
+      (dataset/get-entities m))
     (reduce
-     (fn [m {from :from
-             to :to
-             :as relation}]
-       (let [from-id (id/extract from)
-             to-id (id/extract to)
-             relation-id (id/extract relation)]
-         (if (or
-              (access/relation-allows? relation-id [from-id to-id] #{:read :write})
-              (access/relation-allows? relation-id [to-id from-id] #{:read :write}))
-           m
-           (dataset/remove-relation m relation))))
-     m
-     (dataset/get-relations m))))
+      (fn [m {from :from
+              to :to
+              :as relation}]
+        (let [from-id (id/extract from)
+              to-id (id/extract to)
+              relation-id (id/extract relation)]
+          (if (or
+                (access/relation-allows? relation-id [from-id to-id] #{:read :write})
+                (access/relation-allows? relation-id [to-id from-id] #{:read :write}))
+            m
+            (dataset/remove-relation m relation))))
+      m
+      (dataset/get-relations m))))
 
 (defn get-deployed-model
   "Returns the currently deployed dataset model as Transit.
@@ -77,8 +76,8 @@
     (let [model (dataset/get-model *db*)
           protected-model (protect-dataset model)]
       (upstream
-       {:name "Global"
-        :model protected-model}))
+        {:name "Global"
+         :model protected-model}))
     (fn []
       (async/unsub publisher :refreshedGlobalDataset sub)
       (async/close! sub))))
@@ -97,8 +96,8 @@
       (async/sub dataset/*delta-publisher* element sub))
     ;; Start idle service that will listen on delta changes
     (async/go-loop
-     [{:keys [element]
-       :as data} (async/<! sub)]
+      [{:keys [element]
+        :as data} (async/<! sub)]
       (log/debugf "[DELTA SUBSCRIPTION::%s] Received something at delta channel" username)
       (when data
         (when (or (access/entity-allows? element #{:read :write})
@@ -234,50 +233,50 @@ mutation {
   ([model]
    (let [entities (dataset/get-entities model)
          txt-entities (reduce
-                       (fn [result {:keys [attributes]
-                                    entity-name :name
-                                    :as entity}]
-                         (let [relations (dataset/focus-entity-relations model entity)]
-                           (conj result
-                                 (str "Entity: " entity-name \newline
-                                      "Attributes:" \newline
-                                      (str/join "\n" (map (fn [{:keys [constraint name type configuration]}]
-                                                            (str
-                                                             (case constraint
-                                                               "optional" "o"
-                                                               "mandatory" "*"
-                                                               "unique" "#"
-                                                               "o")
-                                                             "\t"
-                                                             name
-                                                             \[
-                                                             type
-                                                             \]
-                                                             (when (= type "enum")
-                                                               (str
-                                                                \{
-                                                                (str/join ","
-                                                                          (keep
-                                                                           (fn [{:keys [active name]}]
-                                                                             (when active name))
-                                                                           (:values configuration)))
-                                                                \}))))
-                                                          attributes))
-                                      (when (not-empty relations)
-                                        (str
-                                         "\nRelations:\n"
-                                         (str/join
-                                          "\n"
-                                          (keep
-                                           (fn [{:keys [from to-label to cardinality]}]
-                                             (when to-label
-                                               (str
-                                                (:name from)
-                                                "---" (normalize-name to-label) \[ cardinality \] "--->"
-                                                (:name to))))
-                                           relations))))))))
-                       []
-                       entities)]
+                        (fn [result {:keys [attributes]
+                                     entity-name :name
+                                     :as entity}]
+                          (let [relations (dataset/focus-entity-relations model entity)]
+                            (conj result
+                                  (str "Entity: " entity-name \newline
+                                       "Attributes:" \newline
+                                       (str/join "\n" (map (fn [{:keys [constraint name type configuration]}]
+                                                             (str
+                                                               (case constraint
+                                                                 "optional" "o"
+                                                                 "mandatory" "*"
+                                                                 "unique" "#"
+                                                                 "o")
+                                                               "\t"
+                                                               name
+                                                               \[
+                                                               type
+                                                               \]
+                                                               (when (= type "enum")
+                                                                 (str
+                                                                   \{
+                                                                   (str/join ","
+                                                                             (keep
+                                                                               (fn [{:keys [active name]}]
+                                                                                 (when active name))
+                                                                               (:values configuration)))
+                                                                   \}))))
+                                                           attributes))
+                                       (when (not-empty relations)
+                                         (str
+                                           "\nRelations:\n"
+                                           (str/join
+                                             "\n"
+                                             (keep
+                                               (fn [{:keys [from to-label to cardinality]}]
+                                                 (when to-label
+                                                   (str
+                                                     (:name from)
+                                                     "---" (normalize-name to-label) \[ cardinality \] "--->"
+                                                     (:name to))))
+                                               relations))))))))
+                        []
+                        entities)]
      (str dataset-txt-prelude "\n\n" (str/join "\n----\n" txt-entities)))))
 
 (defn get-deployed-model-document
@@ -311,7 +310,7 @@ mutation {
      (log/infof "User %s deploying dataset %s@%s"
                 (:name (access/current-user)) (-> version :dataset :name) (:name version))
      (try
-       (let [deployed (core/deploy! *db* version)
+       (let [deployed (dataset/deploy! *db* version)
              deployed-id (id/extract deployed)]
          (async/put! subscription
                      {:topic :refreshedGlobalDataset
@@ -320,7 +319,7 @@ mutation {
          (when (not-empty selection)
            (db/get-entity *db* :dataset/version {(id/key) deployed-id} selection)))
        (catch Throwable e
-         (log/errorf e "Couldn't deploy dataset version")
+         (log/error e "Couldn't deploy dataset version")
          (resolve/resolve-as nil {:message (.getMessage e)}))))))
 
 (defn import-dataset

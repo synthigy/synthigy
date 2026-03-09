@@ -5,8 +5,8 @@
     "logo-url": null,
     "login-page": "",
     "redirections": [
-      "https://www.synthigy.com/app/callback",
-      "https://www.synthigy.com/app/silent-callback"
+      "https://www.synthigy.com/synthigy/callback",
+      "https://www.synthigy.com/synthigy/silent-callback"
     ],
     "token-expiry": {
       "id": 600,
@@ -19,8 +19,8 @@
       "refresh_token"
     ],
     "logout-redirections": [
-      "https://www.synthigy.com/app",
-      "https://www.synthigy.com/app"
+      "https://www.synthigy.com/synthigy",
+      "https://www.synthigy.com/synthigy/"
     ]
   },
   "type": "public",
@@ -30,4 +30,3 @@
   "id": "MUMADPADAKQHSDFDGFAEJZJXUSFJGFOOYTWVAUDEFVPURUOP",
   "euuid": "34c6eea5-3c95-4de1-a547-5e1b34ea16ea"
 }
-

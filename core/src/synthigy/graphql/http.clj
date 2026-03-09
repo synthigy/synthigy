@@ -107,8 +107,8 @@
       ;; POST with wrong content type
       (= :post request-method)
       (core/error-response 415
-        (str "Unsupported Content-Type: " (get headers "content-type")
-             ". Expected application/json or application/graphql"))
+                           (str "Unsupported Content-Type: " (get headers "content-type")
+                                ". Expected application/json or application/graphql"))
 
       ;; Other methods
       :else
@@ -144,13 +144,15 @@
     (core/error-response "Missing or blank 'query' field")
     (let [cache-key (core/cache-key query operation-name)]
       (if-let [cached (cache/cache-get cache cache-key)]
-        {:parsed cached :cached? true}
+        {:parsed cached
+         :cached? true}
         (let [parsed (do-parse-query schema query operation-name timing-start)]
           (if (core/early-error? parsed)
             parsed
             (do
               (cache/cache-put cache cache-key parsed)
-              {:parsed parsed :cached? false})))))))
+              {:parsed parsed
+               :cached? false})))))))
 
 ;;; ============================================================================
 ;;; Operation Type Checks (Step 4)
@@ -177,11 +179,11 @@
     (cond
       (= :subscription op-type)
       (core/error-response 400
-        "Subscriptions not supported over HTTP. Use WebSocket endpoint.")
+                           "Subscriptions not supported over HTTP. Use WebSocket endpoint.")
 
       (and (= :get request-method) (= :mutation op-type))
       (core/error-response 405
-        "Mutations not allowed over GET. Use POST.")
+                           "Mutations not allowed over GET. Use POST.")
 
       :else nil)))
 
@@ -193,7 +195,7 @@
   [parsed-query]
   (when (= :subscription (get-operation-type parsed-query))
     (core/error-response 400
-      "Subscriptions not supported over HTTP. Use WebSocket endpoint.")))
+                         "Subscriptions not supported over HTTP. Use WebSocket endpoint.")))
 
 ;;; ============================================================================
 ;;; Prepare & Validate (Step 5)
@@ -250,8 +252,8 @@
     (let [;; Build execution context with schema and prepared query
           ;; executor/execute-query takes a single context map containing everything
           exec-context (assoc context
-                              constants/parsed-query-key prepared
-                              constants/schema-key schema)
+                         constants/parsed-query-key prepared
+                         constants/schema-key schema)
           ;; Execute - returns ResolverResult
           resolver-result (executor/execute-query exec-context)
           ;; Await delivery
@@ -259,11 +261,13 @@
       ;; Handle Throwable results (since Lacinia 0.36.0, for timeouts)
       ;; Include :data nil to indicate execution error (returns 200 per spec)
       (if (instance? Throwable result)
-        {:data nil :errors [(core/throwable->error result)]}
+        {:data nil
+         :errors [(core/throwable->error result)]}
         result))
     (catch Throwable t
       ;; Include :data nil to indicate execution error (returns 200 per spec)
-      {:data nil :errors [(core/throwable->error t)]})))
+      {:data nil
+       :errors [(core/throwable->error t)]})))
 
 ;;; ============================================================================
 ;;; Response Formatting (Step 7)
@@ -427,6 +431,7 @@
   [schema-provider {:keys [context-fn cache tracing-header]
                     :or {context-fn (constantly {})}}]
   (fn [request]
+    (def request request)
     (let [;; Parse HTTP request
           parsed (parse-request request)]
       (if (core/early-error? parsed)

@@ -18,6 +18,16 @@
 (defn import-app [path] (import-data path :iam/app))
 
 (comment
-  ()
-  (<-json (slurp (io/resource "exports/app_synthigy_frontend.json")) {:keyfn keyword})
+  (dataset/stack-entity
+    :iam/app
+    (->
+      (<-json (slurp (io/resource "exports/app_synthigy_frontend.json")) {:keyfn keyword})
+      (update-in
+        [:settings :redirections] conj
+        "http://localhost:8000/synthigy/callback"
+        "http://localhost:8000/synthigy/silent-callback")
+      (update-in
+        [:settings :logout-redirections] conj
+        "http://localhost:8000/synthigy/"
+        "http://localhost:8000/synthigy")))
   (import-role "roles/role_dataset_developer.json"))

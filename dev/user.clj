@@ -21,7 +21,8 @@
   - (lifecycle/print-system-report)                       - Show system status
   - (lifecycle/system-report)                             - Get status as data"
   (:require
-    [synthigy.iam]))
+    [synthigy.data :as data]
+    [synthigy.iam :as iam]))
 
 (comment
   ;; 1. Setup - ensure namespaces are loaded
@@ -39,4 +40,9 @@
   (xid/migrate-to-xid!)
 
   ;; 5. Reset migration (if needed)
-  (xid/reset-xid-migration!))
+  (xid/reset-xid-migration!)
+
+  (iam/set-user {:name "admin"
+                 :password "admin"
+                 :active true
+                 :roles [data/*ROOT*]}))

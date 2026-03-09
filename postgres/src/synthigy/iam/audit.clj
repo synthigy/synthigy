@@ -24,6 +24,7 @@
     [synthigy.dataset.core :as core]
     [synthigy.dataset.enhance :as enhance]
     [synthigy.dataset.id :as id]
+    [synthigy.dataset.lacinia.enhance :as lacinia-enhance]
     [synthigy.dataset.sql.naming :refer [entity->table-name normalize-name]]
     [synthigy.db :refer [*db*]]
     [synthigy.db.postgres]  ; Load Postgres JDBCBackend implementation
@@ -236,6 +237,46 @@
     (augment-schema-impl db entity))
   (audit [_ entity-id data _]
     (enhance-audit-data entity-id data)))
+
+;; ============================================================================
+;; Lacinia GraphQL Schema Enhancement (Postgres)
+;; ============================================================================
+
+(extend-protocol lacinia-enhance/SchemaEnhancement
+  synthigy.db.Postgres
+  (get-audit-fields [_ _]
+    {:modified_by
+     {:type 'User
+      :description "User who last modified this record"}
+     :modified_on
+     {:type '(non-null Timestamp)
+      :description "Timestamp when this record was last modified"}
+     :created_by
+     {:type 'User
+      :description "User who created this record"}
+     :created_on
+     {:type '(non-null Timestamp)
+      :description "Timestamp when this record was created"}})
+
+  (get-search-operators [_ _]
+    [{:name "modified_by" :type "user" :active true}
+     {:name "modified_on" :type "timestamp" :active true}
+     {:name "created_by" :type "user" :active true}
+     {:name "created_on" :type "timestamp" :active true}])
+
+  (get-order-operators [_ entity]
+    [{:to (deployed-entity (id/entity :iam/user))
+      :to-label "modified_by"
+      :cardinality "o2o"}
+     {:to (deployed-entity (id/entity :iam/user))
+      :to-label "created_by"
+      :cardinality "o2o"}])
+
+  (get-query-args [_ _]
+    [{:name "modified_on" :type "timestamp" :active true}
+     {:name "modified_by" :type "user" :active true}
+     {:name "created_on" :type "timestamp" :active true}
+     {:name "created_by" :type "user" :active true}]))
 
 ;; ============================================================================
 ;; Migration Utilities

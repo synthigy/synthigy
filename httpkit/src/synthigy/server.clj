@@ -44,6 +44,7 @@
   See individual handler functions for details."
   (:require
     [clojure.data.json :as json]
+    [clojure.string :as str]
     [clojure.tools.logging :as log]
     [environ.core :refer [env]]
     [org.httpkit.server :as httpkit]
@@ -51,6 +52,7 @@
     [patcho.patch :as patch]
     [ring.middleware.keyword-params :refer [wrap-keyword-params]]
     [ring.middleware.params :refer [wrap-params]]
+    [ring.util.response :as response]
     synthigy.admin
     synthigy.core
     synthigy.dataset.graphql
@@ -232,6 +234,47 @@
                  "Access-Control-Allow-Credentials" "true"}}
       (handler request))))
 
+;;; ============================================================================
+;;; Static Resource Serving
+;;; ============================================================================
+
+(def ^:private content-type-map
+  "Map of file extensions to MIME content types."
+  {"css"  "text/css"
+   "js"   "application/javascript"
+   "png"  "image/png"
+   "jpg"  "image/jpeg"
+   "jpeg" "image/jpeg"
+   "gif"  "image/gif"
+   "svg"  "image/svg+xml"
+   "ico"  "image/x-icon"
+   "woff" "font/woff"
+   "woff2" "font/woff2"})
+
+(defn- get-extension [path]
+  (when-let [idx (str/last-index-of path ".")]
+    (subs path (inc idx))))
+
+(defn wrap-static-resources
+  "Middleware to serve static resources from classpath.
+   Handles /oauth/css/*, /oauth/js/*, /oauth/images/* paths."
+  [handler]
+  (fn [request]
+    (let [uri (:uri request)]
+      (if (and (= :get (:request-method request))
+               (or (str/starts-with? uri "/oauth/css/")
+                   (str/starts-with? uri "/oauth/js/")
+                   (str/starts-with? uri "/oauth/images/")))
+        ;; Try to serve from classpath
+        (let [resource-path (subs uri 1) ; remove leading /
+              resp (response/resource-response resource-path)]
+          (if resp
+            (let [ext (get-extension uri)
+                  content-type (get content-type-map ext "application/octet-stream")]
+              (assoc-in resp [:headers "Content-Type"] content-type))
+            (handler request)))
+        (handler request)))))
+
 (defn- ws-context-fn
   "Build GraphQL context from WebSocket connection params.
   Extracts IAM context from access_token."
@@ -276,6 +319,7 @@
     (spa/wrap-spa
       (->
         router
+        wrap-static-resources
         wrap-cors
         wrap-options
         wrap-keyword-params

@@ -40,6 +40,7 @@
     [io.pedestal.http.route :as route]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
+    [ring.util.response :as response]
     synthigy.admin
     synthigy.core
     synthigy.dataset.graphql
@@ -244,6 +245,43 @@
      [(ring-handler->pedestal-interceptor oauth.handlers/openid-configuration ::oidc-discovery)]
      :route-name ::oidc-discovery]})
 
+(def ^:private content-type-map
+  "Map of file extensions to MIME content types."
+  {"css"  "text/css"
+   "js"   "application/javascript"
+   "png"  "image/png"
+   "jpg"  "image/jpeg"
+   "jpeg" "image/jpeg"
+   "gif"  "image/gif"
+   "svg"  "image/svg+xml"
+   "ico"  "image/x-icon"
+   "woff" "font/woff"
+   "woff2" "font/woff2"})
+
+(defn- get-extension [path]
+  (when-let [idx (str/last-index-of path ".")]
+    (subs path (inc idx))))
+
+(def serve-resource
+  "Interceptor to serve static resources from classpath.
+   Maps URI directly to classpath resource path (without leading slash)."
+  {:name ::serve-resource
+   :enter (fn [{{:keys [uri]} :request :as ctx}]
+            (let [resource-path (subs uri 1) ; remove leading /
+                  resp (response/resource-response resource-path)]
+              (if resp
+                (let [ext (get-extension uri)
+                      content-type (get content-type-map ext "application/octet-stream")]
+                  (assoc ctx :response
+                         (assoc-in resp [:headers "Content-Type"] content-type)))
+                (assoc ctx :response {:status 404 :body "Not found"}))))})
+
+(def static-routes
+  "Routes for serving static OAuth resources (CSS, JS, images)."
+  #{["/oauth/css/*" :get [serve-resource] :route-name ::static-css]
+    ["/oauth/js/*" :get [serve-resource] :route-name ::static-js]
+    ["/oauth/images/*" :get [serve-resource] :route-name ::static-images]})
+
 (defn- make-iam-execute-interceptor
   "Creates execute interceptor that binds IAM access vars during execution.
 
@@ -430,6 +468,7 @@
                       (clojure.set/union
                         (default-routes info)
                         oauth-routes
+                        static-routes
                         (graphql-routes)
                         routes))
          router (route/router all-routes :map-tree)

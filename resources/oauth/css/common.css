@@ -1,0 +1,64 @@
+/* Synthigy OAuth - Common Styles */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Shared centered container */
+.oauth-container {
+  position: absolute;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+}
+
+/* Shared card styling */
+.oauth-card {
+  padding: 2rem;
+  max-width: 440px;
+}
+
+.oauth-card .header {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 1rem 0;
+  user-select: none;
+}
+
+.oauth-card .logo {
+  width: 2.5rem;
+  height: 2.5rem;
+  margin-right: 1rem;
+  border-radius: 0.375rem;
+}
+
+.oauth-card .logo img {
+  width: 100%;
+  height: 100%;
+}
+
+.oauth-card h1,
+.oauth-card h2,
+.oauth-card button {
+  user-select: none;
+  color: #4d4e4f;
+}
+
+/* User select none utility */
+.select-none {
+  user-select: none;
+}

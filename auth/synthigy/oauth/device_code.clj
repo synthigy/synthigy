@@ -253,12 +253,14 @@
                  device-code))
              @*device-codes*))
           (redirect-to-login [{:keys [device-code] :as state}]
-            (let [challenge (nano-id/nano-id 20)]
+            (let [challenge (nano-id/nano-id 20)
+                  client (get-code-client device-code)
+                  login-url (core/get-client-login-url client)]
               (swap! *device-codes* update device-code
                      (fn [data]
                        (assoc-in data [:challenges challenge] (dissoc state :device-code))))
               {:status 302
-               :headers {"Location" (str "/oauth/login?"
+               :headers {"Location" (str login-url "?"
                                          (codec/form-encode
                                           {:state (encrypt
                                                    (assoc state

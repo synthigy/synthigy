@@ -20,6 +20,7 @@
    [synthigy.iam :as iam]
    [synthigy.iam.access :as access]
    [synthigy.iam.encryption :as encryption]
+   [synthigy.oauth.page.error :as error-page]
    [synthigy.oidc.ldap :as ldap]
    [timing.core :as timing])
   (:import
@@ -357,6 +358,39 @@
     (swap! *clients* update (id/extract client) merge client)
     client))
 
+(defn get-client-login-url
+  "Returns the login URL for a client.
+
+   If client has a custom 'login-page' setting that is a valid relative path,
+   returns that path. If no custom page is set, returns '/oauth/login'.
+
+   Security: Only relative paths (starting with '/') are allowed.
+   Throws an exception if an invalid URL is configured (absolute URLs,
+   path traversal, etc.) to prevent credential phishing attacks."
+  [client]
+  (let [custom-page (get-in client [:settings "login-page"])
+        client-name (:name client)]
+    (cond
+      ;; No custom page configured - use default
+      (or (nil? custom-page) (empty? custom-page))
+      "/oauth/login"
+
+      ;; Valid relative path
+      (and (string? custom-page)
+           (str/starts-with? custom-page "/")
+           (not (str/includes? custom-page "..")))
+      custom-page
+
+      ;; Invalid configuration - throw error
+      :else
+      (throw
+        (ex-info
+          (str "Client '" client-name "' has invalid login-page setting. "
+               "Only relative URLs starting with '/' are allowed.")
+          {:type "invalid_login_page"
+           :client-name client-name
+           :invalid-value custom-page})))))
+
 (defn remove-session-client [session]
   (let [euuid (get-in @*sessions* [session :client])]
     (swap! *sessions* update session dissoc :client)
@@ -444,41 +478,9 @@
   'the authorization server MUST inform the resource owner of the error
    and MUST NOT automatically redirect the user-agent to the invalid
    redirection URI' (RFC 6749 Section 4.1.2.1)"
-  [error-type]
-  (let [error-messages
-        {"no_redirections" "Client has no configured redirect URIs. Please contact application support."
-         "missing_redirect" "Authorization request did not specify redirect_uri. Please contact application support."
-         "redirect_missmatch" "The requested redirect_uri does not match any configured redirect URIs for this client. Please contact application support."
-         "missing_response_type" "Client did not specify response_type. Please contact application support."
-         "client_not_registered" "Client is not registered. Please contact application support."
-         "corrupt_session" "Session ID was not provided by authorization server. Please contact application support."
-         "unsupported_grant_type" "The requested grant type is not supported. Please contact application support."}
-        message (get error-messages error-type "An error occurred during authorization. Please contact application support.")]
-    {:status 400
-     :headers {"Content-Type" "text/html; charset=utf-8"
-               "Cache-Control" "no-cache"}
-     :body (str "<!DOCTYPE html>"
-                "<html><head>"
-                "<meta charset=\"UTF-8\">"
-                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-                "<title>OAuth Error</title>"
-                "<style>"
-                "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; "
-                "       background: #f5f5f5; display: flex; justify-content: center; align-items: center; "
-                "       min-height: 100vh; margin: 0; padding: 20px; }"
-                ".error-container { background: white; padding: 40px; border-radius: 8px; "
-                "                   box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 500px; text-align: center; }"
-                "h1 { color: #d32f2f; margin-top: 0; }"
-                "p { color: #666; line-height: 1.6; }"
-                ".error-code { color: #999; font-size: 14px; margin-top: 20px; }"
-                "</style>"
-                "</head><body>"
-                "<div class=\"error-container\">"
-                "<h1>Authentication Error</h1>"
-                "<p>" message "</p>"
-                "<p class=\"error-code\">Error: " error-type "</p>"
-                "</div>"
-                "</body></html>")}))
+  ([error-type] (render-error-page error-type nil))
+  ([error-type context]
+   (error-page/render-error-page error-type context)))
 
 (defn handle-request-error
   "Handles OAuth authorization errors according to RFC 6749.
@@ -487,27 +489,35 @@
   - Returns 400 Bad Request with error page (MUST NOT redirect to client)
 
   For other errors:
-  - Redirects to client's redirect_uri with error parameters"
+  - Redirects to client's redirect_uri with error parameters
+
+  Optional context map provides dynamic data for certain error types
+  (e.g., client-name and invalid-value for invalid_login_page)."
   [{t :type
     session :session
     request :request
-    description :description}]
+    description :description
+    :as error-data}]
   (let [{:keys [state redirect_uri]} (or
                                       request
                                       (:request (get-session session)))
-        base-redirect-uri (get-base-uri redirect_uri)]
+        base-redirect-uri (get-base-uri redirect_uri)
+        ;; Extract context for error page (client-name, invalid-value, etc.)
+        context (select-keys error-data [:client-name :invalid-value])]
     (when session (remove-session session))
     (case t
       ;; OAuth 2.0 spec (RFC 6749 4.1.2.1): When redirect_uri is invalid/missing,
       ;; MUST NOT redirect to client - show error page directly
+      ;; Also includes configuration errors that prevent safe redirect
       ("no_redirections"
        "missing_redirect"
        "redirect_missmatch"
        "missing_response_type"
        "client_not_registered"
        "corrupt_session"
-       "unsupported_grant_type")
-      (render-error-page t)
+       "unsupported_grant_type"
+       "invalid_login_page")
+      (render-error-page t context)
 
       ;; For other errors with valid redirect_uri: redirect to client with error
       {:status 302

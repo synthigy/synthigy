@@ -275,8 +275,9 @@
                 (let [code (gen-authorization-code)
                       client (validate-client req-params)
                       client-id (id/extract client)
+                      login-url (core/get-client-login-url client)
                       ;; Include prompt in state so login handler knows to force re-auth
-                      location (str "/oauth/login?"
+                      location (str login-url "?"
                                     (codec/form-encode
                                       {:state (core/encrypt
                                                 {:authorization-code code
@@ -307,7 +308,8 @@
                 (let [code (gen-authorization-code)
                       client (validate-client req-params)
                       client-id (id/extract client)
-                      location (str "/oauth/login?"
+                      login-url (core/get-client-login-url client)
+                      location (str login-url "?"
                                     (codec/form-encode
                                       {:state (core/encrypt
                                                 {:authorization-code code
@@ -333,7 +335,8 @@
                 (let [code (gen-authorization-code)
                       client (validate-client req-params)
                       client-id (id/extract client)
-                      location (str "/oauth/login?"
+                      login-url (core/get-client-login-url client)
+                      location (str login-url "?"
                                     (codec/form-encode
                                       {:state (core/encrypt
                                                 {:authorization-code code

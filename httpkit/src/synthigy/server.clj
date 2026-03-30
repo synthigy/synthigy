@@ -66,6 +66,7 @@
     synthigy.oauth.persistence
     synthigy.oidc.ldap
     [synthigy.server.auth :as auth]
+    [synthigy.server.data :as data]
     [synthigy.server.spa :as spa]
     [synthigy.ws :as ws]))
 
@@ -200,7 +201,10 @@
 
      ;; GraphQL (both GET and POST)
      ["/graphql" :get graphql-handler]
-     ["/graphql" :post graphql-handler]]))
+     ["/graphql" :post graphql-handler]
+
+     ;; Data API (direct dataset operations, service-to-service)
+     ["/data" :post data/handler]]))
 
 ;;; ============================================================================
 ;;; Middleware Stack
@@ -324,6 +328,7 @@
         wrap-options
         wrap-keyword-params
         wrap-params
+        data/wrap-preserve-body
 
       ;; WebSocket for GraphQL subscriptions (first to intercept upgrade)
         (ws/wrap-websocket

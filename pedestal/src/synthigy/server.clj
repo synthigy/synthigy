@@ -54,6 +54,7 @@
     synthigy.oauth.persistence
     [synthigy.oidc.ldap :as ldap]
     [synthigy.server.auth :as auth]
+    [synthigy.server.data :as data]
     [synthigy.server.spa :as spa]
     [synthigy.ws :as ws])
   (:import
@@ -162,7 +163,12 @@
     Set of Pedestal route vectors"
   [info]
   #{["/info" :get [coerce-body content-negotiation (make-info-interceptor info)]
-     :route-name ::info]})
+     :route-name ::info]
+
+    ;; Data API (direct dataset operations, service-to-service)
+    ["/data" :post [coerce-body
+                    (ring-handler->pedestal-interceptor data/handler ::data-api)]
+     :route-name ::data-api]})
 
 (def oauth-routes
   "OAuth 2.0 and OpenID Connect endpoint routes.

@@ -49,6 +49,7 @@
     synthigy.oauth.persistence
     synthigy.oidc.ldap
     [synthigy.server.auth :as auth]
+    [synthigy.server.data :as data]
     [synthigy.server.spa :as spa]
     [synthigy.ws :as ws]))
 
@@ -178,7 +179,10 @@
      ["/graphql" :post graphql-handler]
 
      ;; GraphQL WebSocket
-     ["/graphql-ws" :get websocket-handler]]))
+     ["/graphql-ws" :get websocket-handler]
+
+     ;; Data API (direct dataset operations, service-to-service)
+     ["/data" :post data/handler]]))
 
 ;;; ============================================================================
 ;;; Middleware Stack

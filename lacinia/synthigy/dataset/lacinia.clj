@@ -481,7 +481,8 @@
                                            :args (zipmap
                                                    [:_gt :_lt :_eq :_neq :_ge :_le]
                                                    (repeat {:type 'Float}))})))
-                               {}
+                               ;; Always include :count so aggregate objects are never empty
+                               {:count {:type 'Int}}
                                (numerics? entity))
                              to-relations))}))))))
         {:IntAggregate

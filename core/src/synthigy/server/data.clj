@@ -33,86 +33,17 @@
 
    See SDK.md for full specification."
   (:require
-    [clojure.core.async :as async]
-    [clojure.data.json :as json]
-    [clojure.java.io :as io]
-    [clojure.string :as str]
-    [clojure.tools.logging :as log]
-    [patcho.lifecycle :as lifecycle]
-    [synthigy.dataset :as dataset]
-    [synthigy.iam.access :as access]
-    [synthigy.iam.context :as iam.context]
-    [synthigy.server.auth :as auth]))
-
-;;; ============================================================================
-;;; Entity Resolution (cached, rebuilt on model deploy)
-;;; ============================================================================
-
-(defn- normalize-name
-  "Normalize entity name to snake_case for matching.
-   'Dataset Version' -> 'dataset_version'
-   'DatasetVersion'  -> 'dataset_version'
-   'dataset_version' -> 'dataset_version'
-   'dataset-version' -> 'dataset_version'"
-  [s]
-  (-> s
-      (str/replace #"([a-z])([A-Z])" "$1_$2")
-      str/lower-case
-      (str/replace #"[\s-]+" "_")))
-
-(defn- build-entity-index
-  "Build lookup index from model: {normalized-name -> entity-xid}"
-  [model]
-  (into {}
-    (for [[xid entity] (:entities model)]
-      [(normalize-name (:name entity)) xid])))
-
-(defonce ^:private entity-index (atom nil))
-
-(defn rebuild-entity-index!
-  "Rebuild entity index from current deployed model."
-  []
-  (when-let [model (dataset/deployed-model)]
-    (let [index (build-entity-index model)]
-      (reset! entity-index index)
-      (log/infof "[DATA] Entity index rebuilt: %d entities" (count index))
-      index)))
-
-(defn init-entity-index!
-  "Initialize entity index and subscribe to model deploy events."
-  []
-  (rebuild-entity-index!)
-  (let [ch (async/chan (async/sliding-buffer 1))]
-    (async/sub dataset/publisher :model/deployed ch)
-    (async/go-loop []
-      (when-let [{:keys [model]} (async/<! ch)]
-        (let [index (build-entity-index model)]
-          (reset! entity-index index)
-          (log/infof "[DATA] Entity index updated: %d entities" (count index)))
-        (recur)))))
-
-(defonce ^:private index-initialized? (atom false))
-
-(defn- ensure-entity-index!
-  "Lazily initialize entity index on first use."
-  []
-  (when (compare-and-set! index-initialized? false true)
-    (init-entity-index!)))
-
-(defn- resolve-entity
-  "Resolve user-provided entity name to entity XID.
-   Uses cached index (rebuilt on model deploy).
-
-   Accepts: 'Dataset Version', 'dataset_version', 'DatasetVersion', 'dataset-version'
-
-   Returns entity XID or throws if not found."
-  [entity-name]
-  (ensure-entity-index!)
-  (let [index @entity-index
-        normalized (normalize-name entity-name)]
-    (or (get index normalized)
-        (throw (ex-info (str "Unknown entity: " entity-name)
-                        {:code "UNKNOWN_ENTITY" :entity entity-name})))))
+   [clojure.data.json :as json]
+   [clojure.java.io :as io]
+   [clojure.tools.logging :as log]
+   [patcho.lifecycle :as lifecycle]
+   [synthigy.dataset :as dataset]
+   [synthigy.dataset.sql.query :as sql-query]
+   [synthigy.dataset.sql.template :as template]
+   [synthigy.iam.access :as access]
+   [synthigy.iam.context :as iam.context]
+   [synthigy.oauth.core :as oauth]
+   [synthigy.server.auth :as auth]))
 
 ;;; ============================================================================
 ;;; Operation Dispatch
@@ -126,20 +57,25 @@
 
    Returns:
      {:data <result> :ok true} or {:error {:message <msg>} :ok false}"
-  [{:keys [op entity args data selection]}]
+  [{:keys [op entity args data selection template params]
+    :as operation}]
   (try
-    (let [entity-id (resolve-entity entity)
-          result (case op
-                   "search"    (dataset/search-entity entity-id args selection)
-                   "get"       (dataset/get-entity entity-id args selection)
-                   "sync"      (dataset/sync-entity entity-id data)
-                   "stack"     (dataset/stack-entity entity-id data)
-                   "slice"     (dataset/slice-entity entity-id args selection)
-                   "delete"    (dataset/delete-entity entity-id data)
-                   "purge"     (dataset/purge-entity entity-id args selection)
-                   "aggregate" (dataset/aggregate-entity entity-id args selection)
-                   (throw (ex-info (str "Unknown operation: " op)
-                                   {:code "UNKNOWN_OP" :op op})))]
+    (let [result (if (= op "query")
+                   ;; Query operation — SQL template
+                   (template/execute-template template params)
+                   ;; Dataset operations — resolve entity from deployed schema
+                   (let [entity-id (sql-query/resolve-entity entity)]
+                     (case op
+                       "search"    (dataset/search-entity entity-id args selection)
+                       "get"       (dataset/get-entity entity-id args selection)
+                       "sync"      (dataset/sync-entity entity-id data)
+                       "stack"     (dataset/stack-entity entity-id data)
+                       "slice"     (dataset/slice-entity entity-id args selection)
+                       "delete"    (dataset/delete-entity entity-id data)
+                       "purge"     (dataset/purge-entity entity-id args selection)
+                       "aggregate" (dataset/aggregate-entity entity-id args selection)
+                       (throw (ex-info (str "Unknown operation: " op)
+                                       {:code "UNKNOWN_OP" :op op})))))]
       {:data result :ok true})
     (catch clojure.lang.ExceptionInfo e
       (let [data (ex-data e)]
@@ -251,7 +187,16 @@
                                           :code "NO_OPERATIONS"}})
               ;; Resolve user context
               (try
-                (let [user-ctx (if acting_as
+                (let [;; Check trusted flag for impersonation
+                      _ (when acting_as
+                          (let [client_id (get-in iam [:claims :client_id])
+                                client (when client_id (oauth/get-client client_id))]
+                            (when (and client_id
+                                       (not (get-in client [:settings "trusted"])))
+                              (throw (ex-info "Client not authorized for impersonation"
+                                              {:code "NOT_TRUSTED"
+                                               :client-id client_id})))))
+                      user-ctx (if acting_as
                                  ;; Impersonation: load acting_as user
                                  (resolve-acting-as acting_as)
                                  ;; Direct: use token owner
@@ -264,5 +209,5 @@
                       (json-response 200 {:results results}))))
                 (catch clojure.lang.ExceptionInfo e
                   (json-response 403
-                    {:error {:message (ex-message e)
-                             :code (:code (ex-data e))}}))))))))))
+                                 {:error {:message (ex-message e)
+                                          :code (:code (ex-data e))}}))))))))))

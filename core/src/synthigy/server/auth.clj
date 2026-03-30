@@ -26,6 +26,7 @@
     [synthigy.dataset.id :as id]
     [synthigy.iam.context :as iam.context]
     [synthigy.iam.encryption :as encryption]
+    [synthigy.oauth.core :as oauth]
     [synthigy.oauth.token :as token]))
 
 ;;; ============================================================================
@@ -45,7 +46,11 @@
     (second (re-find #"Bearer\s+(.+)" authorization))))
 
 (defn validate-token
-  "Validate token exists in active tokens registry.
+  "Validate token — check registry first, then verify JWT signature.
+
+   Two validation paths (per RFC 7519 / RFC 6750):
+   1. Registry lookup: for session-bound tokens (authorization_code flow)
+   2. JWT signature verification: for stateless tokens (client_credentials)
 
    Args:
      token - Bearer token string
@@ -55,33 +60,51 @@
   [token]
   (and token
        (> (count token) 6)
-       (contains? (get @token/*tokens* :access_token) token)))
+       (or
+         ;; Path 1: Session-bound token in registry
+         (contains? (get @token/*tokens* :access_token) token)
+         ;; Path 2: Valid JWT signature (client_credentials, cross-instance)
+         (try
+           (some? (encryption/unsign-data token))
+           (catch Exception _ false)))))
 
 (defn token->user-context
-  "Extract user context from valid token.
+  "Extract user/service context from valid token.
+
+   Handles both user tokens (authorization_code) and service tokens
+   (client_credentials). Both resolve to a user identity via IAM —
+   service tokens resolve to the linked service user.
+
+   Additionally verifies that the client_id in the token (if present)
+   maps to an active client. This is the server-side validation
+   equivalent to session checking for stateless tokens.
 
    Args:
      token - Valid bearer token
 
    Returns:
-     Map with :user, :roles, :groups or nil on failure"
+     Map with :user, :roles, :groups, :claims or nil on failure"
   [token]
   (try
     (when-let [claims (encryption/unsign-data token)]
-      (let [{:keys [sub]
+      (let [{:keys [sub client_id]
              sub-uuid "sub:uuid"} claims
-            ;; Extract user UUID from claims
-            user-uuid (or (when sub-uuid
-                            (try
-                              (java.util.UUID/fromString sub-uuid)
-                              (catch Exception _ nil)))
-                          sub)]
-        (when-let [user-ctx (and user-uuid (iam.context/get-user-context user-uuid))]
-          {:user (id/extract user-ctx)
-           :roles (:roles user-ctx)
-           :groups (:groups user-ctx)})))
+            ;; Extract user identifier from claims
+            user-id (or (when sub-uuid
+                          (try
+                            (java.util.UUID/fromString sub-uuid)
+                            (catch Exception _ nil)))
+                        sub)]
+        ;; If client_id present, verify client is still active
+        (when (or (nil? client_id)
+                  (:active (oauth/get-client client_id)))
+          (when-let [user-ctx (and user-id (iam.context/get-user-context user-id))]
+            {:user (id/extract user-ctx)
+             :roles (:roles user-ctx)
+             :groups (:groups user-ctx)
+             :claims claims}))))
     (catch Exception e
-      (log/errorf e "Error extracting user context from token")
+      (log/errorf e "Error extracting context from token")
       nil)))
 
 (defn authenticate-request

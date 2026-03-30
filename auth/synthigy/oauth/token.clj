@@ -197,12 +197,14 @@
 
 (defn generate
   [{{allowed-grants "allowed-grants"} :settings
-    :as client} session {:keys [audience scope client_id]}]
+    :as client} session {:keys [audience scope client_id sub]}]
   (let [access-exp (->
                     (System/currentTimeMillis)
                     (quot 1000)
                     (+ (access-token-expiry client)))
-        {user-name :name} (core/get-session-resource-owner session)
+        ;; Use explicit :sub override (client_credentials) or derive from session
+        user-name (or sub
+                      (:name (core/get-session-resource-owner session)))
         access-token {:session session
                       :aud audience
                       :exp access-exp
@@ -327,13 +329,21 @@
 
 (defn validate-client-credentials
   "Validates client credentials for client_credentials grant.
-   Returns the client if valid, nil otherwise."
+   Returns the client if valid, nil otherwise.
+   Public clients are explicitly blocked from client_credentials grant."
   [{:keys [client_id client_secret]}]
   (when-let [client (get-client client_id)]
     (let [{client-secret :secret
+           client-type :type
            {allowed-grants "allowed-grants"} :settings} client
           grants (set allowed-grants)]
       (cond
+        ;; Public clients cannot use client_credentials grant
+        (#{:public "public"} client-type)
+        (do
+          (log/debugf "[%s] Public clients cannot use client_credentials grant" client_id)
+          nil)
+
         ;; Check if client_credentials grant is allowed
         (not (contains? grants "client_credentials"))
         (do
@@ -365,11 +375,13 @@
   (log/debugf "[%s] Processing client credentials grant request" client_id)
   (if-let [client (validate-client-credentials request)]
     (let [;; Process the requested scope
-          ;; In client credentials, scope is typically limited to what the client is allowed
           processed-scope (or scope "")
 
-          ;; Create request context for token generation
-          token-request (assoc request :scope processed-scope)]
+          ;; Service user has the same name as the client id
+          ;; This is set as sub claim in the JWT for identity resolution
+          token-request (assoc request
+                          :scope processed-scope
+                          :sub (:id client))]
 
       (try
         (let [tokens (generate client nil token-request)

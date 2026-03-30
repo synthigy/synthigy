@@ -68,14 +68,25 @@
 ;;; ============================================================================
 
 (defonce ^:private _deployed-schema (atom nil))
+(defonce ^:private _entity-index (atom nil))
 
 (defn deploy-schema
   "Caches the runtime schema (from model->schema) for fast access.
+  Also rebuilds the entity name index.
 
   This should be called when a new model is deployed to avoid
   regenerating the schema on every query."
   [schema]
-  (reset! _deployed-schema schema))
+  (reset! _deployed-schema schema)
+  (reset! _entity-index
+          (into {}
+                (for [[id {:keys [name]}] schema
+                      :when name]
+                  [(-> name
+                       (str/replace #"([a-z])([A-Z])" "$1_$2")
+                       str/lower-case
+                       (str/replace #"[\s]+" "_"))
+                   id]))))
 
 (defn deployed-schema
   "Returns the currently deployed runtime schema.
@@ -83,6 +94,27 @@
   Returns nil if no schema has been deployed yet."
   []
   @_deployed-schema)
+
+(defn entity-index
+  "Returns {normalized-entity-name -> entity-id} index.
+   Built automatically when schema is deployed."
+  []
+  @_entity-index)
+
+(defn resolve-entity
+  "Resolve user-provided entity name to entity ID from deployed schema.
+
+   Accepts: 'Dataset Version', 'dataset_version', 'DatasetVersion'
+
+   Returns entity ID or throws if not found."
+  [entity-name]
+  (let [normalized (-> entity-name
+                       (str/replace #"([a-z])([A-Z])" "$1_$2")
+                       str/lower-case
+                       (str/replace #"[\s]+" "_"))]
+    (or (get @_entity-index normalized)
+        (throw (ex-info (str "Unknown entity: " entity-name)
+                        {:code "UNKNOWN_ENTITY" :entity entity-name})))))
 
 (defn deployed-schema-entity
   "Gets a specific entity from the deployed schema by UUID.

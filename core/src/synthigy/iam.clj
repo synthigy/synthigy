@@ -174,17 +174,26 @@
 (defn add-client [{:keys [id name secret settings type]
                    :or {id (gen/client-id)
                         type :public}}]
-  (let [secret (or secret
-                   (when (#{:confidential "confidential"} type)
-                     (gen/client-secret)))]
-    (dataset/sync-entity
-      :iam/app
-      {:id id
-       :name name
-       :type type
-       :settings settings
-       :secret secret
-       :active true})))
+  (let [confidential? (#{:confidential "confidential"} type)
+        secret (or secret
+                   (when confidential?
+                     (gen/client-secret)))
+        client (dataset/sync-entity
+                 :iam/app
+                 {:id id
+                  :name name
+                  :type type
+                  :settings settings
+                  :secret secret
+                  :active true})]
+    ;; Auto-create linked service user for confidential clients
+    (when confidential?
+      (dataset/stack-entity
+        :iam/user
+        {:name id
+         :type :SERVICE
+         :active true}))
+    client))
 
 (defn remove-client [client]
   (dataset/delete-entity :iam/app {(id/key) (id/extract client)}))

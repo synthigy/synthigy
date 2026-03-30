@@ -1,7 +1,7 @@
 (ns synthigy.graphql.http-test
   "HTTP handler tests using stub Lacinia schema."
   (:require
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     [clojure.test :refer [deftest testing is use-fixtures]]
     [com.walmartlabs.lacinia.schema :as schema]
     [synthigy.graphql.cache :as cache]
@@ -238,12 +238,12 @@
     (let [resp (http/format-response {:data {:hello "world"}})]
       (is (= 200 (:status resp)))
       (is (= "application/json" (get-in resp [:headers "Content-Type"])))
-      (is (= {:data {:hello "world"}} (json/read-str (:body resp) :key-fn keyword)))))
+      (is (= {:data {:hello "world"}} (json/read-str (:body resp))))))
 
   (testing "formats error response"
     (let [resp (http/format-response {:errors [{:message "Error"}]})]
       (is (= 400 (:status resp)))
-      (let [body (json/read-str (:body resp) :key-fn keyword)]
+      (let [body (json/read-str (:body resp))]
         (is (= [{:message "Error"}] (:errors body))))))
 
   (testing "formats early error"
@@ -257,7 +257,7 @@
                             :extensions {:status 404}}]})]
       (is (= 404 (:status resp)))
       ;; Status should be removed from extensions in response
-      (let [body (json/read-str (:body resp) :key-fn keyword)]
+      (let [body (json/read-str (:body resp))]
         (is (nil? (get-in body [:errors 0 :extensions :status]))))))
 
   (testing "uses max status from multiple errors"
@@ -270,7 +270,7 @@
 
   (testing "preserves extensions in response"
     (let [resp (http/format-response {:data {:x 1} :extensions {:timing 123}})]
-      (let [body (json/read-str (:body resp) :key-fn keyword)]
+      (let [body (json/read-str (:body resp))]
         (is (= 123 (get-in body [:extensions :timing])))))))
 
 ;;; ============================================================================
@@ -286,7 +286,7 @@
                            :body "{\"query\": \"{ hello }\"}"})]
         (is (= 200 (:status resp)))
         (is (= {:data {:hello "world"}}
-               (json/read-str (:body resp) :key-fn keyword)))))
+               (json/read-str (:body resp))))))
 
     (testing "query with variables"
       (let [resp (handler {:request-method :post
@@ -294,7 +294,7 @@
                            :body "{\"query\": \"query E($m: String) { echo(message: $m) }\", \"variables\": {\"m\": \"test\"}}"})]
         (is (= 200 (:status resp)))
         (is (= {:data {:echo "test"}}
-               (json/read-str (:body resp) :key-fn keyword)))))
+               (json/read-str (:body resp))))))
 
     (testing "mutation"
       (let [resp (handler {:request-method :post
@@ -302,7 +302,7 @@
                            :body "{\"query\": \"mutation { setMessage(msg: \\\"hello\\\") }\"}"})]
         (is (= 200 (:status resp)))
         (is (= {:data {:setMessage "hello"}}
-               (json/read-str (:body resp) :key-fn keyword)))))
+               (json/read-str (:body resp))))))
 
     (testing "subscription rejected"
       (let [resp (handler {:request-method :post
@@ -322,7 +322,7 @@
                            :params {:query "{ hello }"}})]
         (is (= 200 (:status resp)))
         (is (= {:data {:hello "world"}}
-               (json/read-str (:body resp) :key-fn keyword)))))))
+               (json/read-str (:body resp))))))))
 
 ;;; ============================================================================
 ;;; Context Tests
@@ -337,7 +337,7 @@
                          :body "{\"query\": \"{ contextValue }\"}"})]
       (is (= 200 (:status resp)))
       (is (= {:data {:contextValue "from-context"}}
-             (json/read-str (:body resp) :key-fn keyword)))))
+             (json/read-str (:body resp))))))
 
   (testing "request is available in context"
     (let [captured-request (atom nil)
@@ -362,7 +362,7 @@
       (let [resp (handler {:request-method :post
                            :headers {"content-type" "application/json"}
                            :body "{\"query\": \"{ hello }\"}"})
-            body (json/read-str (:body resp) :key-fn keyword)]
+            body (json/read-str (:body resp))]
         (is (not (contains? body :extensions)))))
 
     (testing "tracing enabled with header"
@@ -370,7 +370,7 @@
                            :headers {"content-type" "application/json"
                                      "x-trace" "true"}
                            :body "{\"query\": \"{ hello }\"}"})
-            body (json/read-str (:body resp) :key-fn keyword)]
+            body (json/read-str (:body resp))]
         (is (contains? (:extensions body) :tracing))
         (is (= 1 (get-in body [:extensions :tracing :version])))))))
 
@@ -404,7 +404,7 @@
       (let [resp (handler {:request-method :post
                            :headers {"content-type" "application/json"}
                            :body "{\"query\": \"{ throwError }\"}"})
-            body (json/read-str (:body resp) :key-fn keyword)]
+            body (json/read-str (:body resp))]
         ;; Still returns 200 for execution errors per GraphQL spec
         (is (= 200 (:status resp)))
         (is (some? (:errors body)))))))

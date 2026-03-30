@@ -4,7 +4,7 @@
    [buddy.core.crypto :as crypto]
    [buddy.hashers :as hashers]
    [clojure.core.async :as async]
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    clojure.pprint
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
@@ -43,7 +43,7 @@
 
 (defn encrypt
   [data]
-  (let [json-data (.getBytes (json/write-str data))]
+  (let [json-data (.getBytes (json/->json data))]
     (String.
      (codecs/bytes->b64
       (crypto/encrypt
@@ -56,8 +56,7 @@
      (String.
       (crypto/decrypt
        (codecs/b64->bytes encrypted-data) *encryption-key* *initialization-vector*
-       {:alg :aes256-gcm}))
-     :key-fn keyword)
+       {:alg :aes256-gcm})))
     (catch Throwable _ nil)))
 
 ; (comment

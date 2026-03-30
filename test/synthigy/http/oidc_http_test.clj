@@ -10,7 +10,7 @@
 
   These tests use clj-http to make real HTTP requests to the server."
   (:require
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.test :refer [deftest testing is use-fixtures]]
     [synthigy.http.http-test-helper :as h]))
@@ -165,7 +165,7 @@
                   padding (- 4 (mod (count payload-b64) 4))
                   padded (str payload-b64 (apply str (repeat (if (= 4 padding) 0 padding) "=")))
                   payload-json (String. (.decode (java.util.Base64/getUrlDecoder) padded))
-                  claims (json/read-str payload-json :key-fn keyword)]
+                  claims (json/read-str payload-json)]
 
               ;; Required claims per OpenID Connect Core 1.0 Section 2
               (testing "ID Token contains REQUIRED claims (OpenID Connect Core 1.0 Section 2)"
@@ -224,7 +224,7 @@
                   padding (- 4 (mod (count payload-b64) 4))
                   padded (str payload-b64 (apply str (repeat (if (= 4 padding) 0 padding) "=")))
                   payload-json (String. (.decode (java.util.Base64/getUrlDecoder) padded))
-                  claims (json/read-str payload-json :key-fn keyword)]
+                  claims (json/read-str payload-json)]
 
               (testing "'nonce' claim matches request nonce"
                 (is (= test-nonce (:nonce claims))

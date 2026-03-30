@@ -11,7 +11,7 @@
   - Token revocation"
   (:require
    [buddy.hashers :as hashers]
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [clojure.test :refer [deftest testing is use-fixtures]]
    [synthigy.oauth.handlers :as handlers]
    [synthigy.oauth.core :as core]
@@ -191,7 +191,7 @@
   "Parse JSON response body"
   [response]
   (when-let [body (:body response)]
-    (json/read-str body :key-fn keyword)))
+    (json/read-str body)))
 
 (defn get-cookie-value
   "Extract cookie value from response.

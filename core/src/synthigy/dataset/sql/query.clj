@@ -19,6 +19,7 @@
    [buddy.hashers :as hashers]
    [camel-snake-kebab.core :as csk]
    [clojure.core.async :as async]
+   [clojure.core.cache :as cache]
    [clojure.pprint]
    [clojure.set]
    [clojure.string :as str]
@@ -69,6 +70,8 @@
 
 (defonce ^:private _deployed-schema (atom nil))
 (defonce ^:private _entity-index (atom nil))
+(defonce ^:private _template-cache
+  (atom (cache/ttl-cache-factory {} :ttl (* 30 60 1000))))
 
 (defn deploy-schema
   "Caches the runtime schema (from model->schema) for fast access.
@@ -78,6 +81,7 @@
   regenerating the schema on every query."
   [schema]
   (reset! _deployed-schema schema)
+  (reset! _template-cache (cache/ttl-cache-factory {} :ttl (* 30 60 1000)))
   (reset! _entity-index
           (into {}
                 (for [[id {:keys [name]}] schema
@@ -94,6 +98,21 @@
   Returns nil if no schema has been deployed yet."
   []
   @_deployed-schema)
+
+(defn cache-template
+  "Cache a resolved template. Returns the cached value.
+   TTL 30 minutes. Cleared on schema deploy."
+  [template-key resolved]
+  (swap! _template-cache assoc template-key resolved)
+  resolved)
+
+(defn cached-template
+  "Get a cached template resolution, or nil if expired/missing."
+  [template-key]
+  (let [c @_template-cache]
+    (when (cache/has? c template-key)
+      (swap! _template-cache cache/hit template-key)
+      (cache/lookup c template-key))))
 
 (defn entity-index
   "Returns {normalized-entity-name -> entity-id} index.

@@ -5,23 +5,23 @@
    and resolves them to physical SQL using the deployed schema.
    FROM clause and JOINs are generated automatically.
 
-   ## Placeholder Syntax
+   ## Join Syntax
 
-   | Form | Example | Resolves to |
-   |------|---------|-------------|
-   | `{Entity.attr}` | `{User.name}` | `e1.name` |
-   | `{Entity._eid}` | `{User._eid}` | `e1._eid` |
-   | `{Entity -> rel.attr}` | `{User -> roles.name}` | `e2.name` |
-   | `{Entity -> rel._eid}` | `{User -> roles._eid}` | `e2._eid` |
-   | `{E -> r1 -> r2.attr}` | `{User -> groups -> projects.name}` | chained |
+   | Operator | Join Type | Example |
+   |----------|-----------|---------|
+   | `-` | INNER | `{User - roles.name}` |
+   | `->` | LEFT | `{User -> roles.name}` |
+   | `<-` | RIGHT | `{User <- roles.name}` |
+   | `=>` | FULL OUTER | `{User => roles.name}` |
 
    FROM and JOINs are inferred — never written by the user.
+   Raw SQL and {placeholders} can coexist freely.
 
    ## Usage
 
    ```clojure
    (execute-template
-     \"SELECT {User.name}, COUNT({User -> roles._eid}) as cnt
+     \"SELECT {User.name}, COUNT({User - roles._eid}) as cnt
       WHERE {User.active} = ?
       GROUP BY {User.name}\"
      [true])
@@ -31,19 +31,13 @@
    [clojure.tools.logging :as log]
    [synthigy.dataset.sql.query :as sql-query]
    [synthigy.db :refer [*db*]]
-   [synthigy.db.sql :as sql]
-))
+   [synthigy.db.sql :as sql]))
 
 ;;; ============================================================================
 ;;; Placeholder Parsing
 ;;; ============================================================================
 
 (def ^:private join-pattern
-  "Regex matching join operators. Order matters — check multi-char before single-char.
-   =>  full outer join
-   ->  left join
-   <-  right join
-   -   inner join"
   #"\s*(=>|->|<-|-)\s*")
 
 (def ^:private join-type-map
@@ -54,8 +48,7 @@
 
 (defn- split-on-joins
   "Split a placeholder string on join operators.
-   Returns {:root \"entity\" :chain [{:label \"rel\" :join \"INNER\"} ...]}
-   The join type belongs to the segment AFTER the operator."
+   Returns {:root \"entity\" :chain [{:label \"rel\" :join \"INNER\"} ...]}"
   [s]
   (let [matcher (re-matcher join-pattern s)]
     (loop [last-end 0
@@ -65,7 +58,6 @@
         (recur (.end matcher)
                (conj segments (str/trim (subs s last-end (.start matcher))))
                (conj join-types (get join-type-map (.group matcher 1))))
-        ;; Done — collect final segment
         (let [final (str/trim (subs s last-end))
               all-segments (conj segments final)]
           {:root (first all-segments)
@@ -75,46 +67,28 @@
                         join-types)})))))
 
 (defn- parse-placeholder
-  "Parse a single placeholder string (without braces) into a structured form.
-
-   Join operators:
-     -   inner join
-     ->  left join
-     <-  right join
-     =>  full outer join
-
-   'User.name'                     → {:type :field :entity \"User\" :field \"name\"}
-   'User - roles.name'             → {:type :relation-field ... :joins [{:label \"roles\" :join \"INNER\"}]}
-   'User -> roles.name'            → {:type :relation-field ... :joins [{:label \"roles\" :join \"LEFT\"}]}
-   'User - roles - permissions.x'  → chained joins"
+  "Parse a single placeholder string (without braces) into a structured form."
   [s]
   (let [s (str/trim s)
         {:keys [root chain]} (split-on-joins s)]
     (if (empty? chain)
-      ;; No join operators — entity.field or bare entity
       (let [[entity field] (str/split root #"\." 2)]
         (if field
           {:type :field :entity entity :field field}
           {:type :entity :entity entity}))
-      ;; Has join operators — relation chain
       (let [entity root
-            ;; Last segment may have .field suffix
             last-item (last chain)
-            last-label (:label last-item)
-            [last-rel field] (str/split last-label #"\." 2)
-            ;; Rebuild chain with corrected last label
+            [last-rel field] (str/split (:label last-item) #"\." 2)
             joins (conj (vec (butlast chain))
-                        (assoc last-item :label last-rel))
-            path (mapv :label joins)]
+                        (assoc last-item :label last-rel))]
         (if field
-          {:type :relation-field :entity entity :path path :field field
-           :joins joins}
-          {:type :relation :entity entity :path path
+          {:type :relation-field :entity entity :path (mapv :label joins)
+           :field field :joins joins}
+          {:type :relation :entity entity :path (mapv :label joins)
            :joins joins})))))
 
 (defn- extract-placeholders
-  "Extract all {placeholder} occurrences from template string.
-   Returns vector of {:raw, :inner, :parsed, :start, :end}"
+  "Extract all {placeholder} occurrences from template string."
   [template]
   (let [matcher (re-matcher #"\{([^}]+)\}" template)]
     (loop [results []]
@@ -130,15 +104,6 @@
 ;;; ============================================================================
 ;;; Entity & Schema Resolution
 ;;; ============================================================================
-
-(defn- resolve-entity-id
-  "Resolve entity name to entity ID using sql-query/resolve-entity."
-  [entity-name]
-  (try
-    (sql-query/resolve-entity entity-name)
-    (catch clojure.lang.ExceptionInfo e
-      (throw (ex-info (str "Unknown entity in template: " entity-name)
-                      {:code "UNKNOWN_TEMPLATE_ENTITY" :entity entity-name})))))
 
 (defn- resolve-relation
   [entity-id relation-label]
@@ -157,183 +122,148 @@
     rel))
 
 ;;; ============================================================================
-;;; Alias Management
+;;; Alias Resolution (pure — returns updated state)
 ;;; ============================================================================
 
-(defn- make-alias-manager []
-  (let [counter (volatile! 0)
-        aliases (volatile! {})]
-    {:get-alias
-     (fn [key]
-       (or (get @aliases key)
-           (let [alias (str "e" (vswap! counter inc))]
-             (vswap! aliases assoc key alias)
-             alias)))
-     :all-aliases (fn [] @aliases)}))
+(defn- get-alias
+  "Get or create an alias for a key. Returns [alias updated-state]."
+  [state key]
+  (if-let [existing (get-in state [:aliases key])]
+    [existing state]
+    (let [n (inc (:counter state 0))
+          alias (str "e" n)
+          state (-> state
+                    (assoc-in [:aliases key] alias)
+                    (assoc :counter n))]
+      [alias state])))
 
 ;;; ============================================================================
-;;; Relation Chain Walker
+;;; Relation Chain Walker (pure — returns updated state)
 ;;; ============================================================================
 
 (defn- walk-relation-chain
-  "Walk a relation chain from an entity, collecting JOINs.
-   Each step can have a different join type (INNER, LEFT, RIGHT, FULL OUTER).
-   Returns {:current-uuid :current-alias} of the final entity."
-  [entity-id entity-alias joins-spec
-   {:keys [get-alias entities joins join-keys-seen]}]
+  "Walk a relation chain, collecting JOINs. Returns [final-alias updated-state]."
+  [entity-id entity-alias joins-spec state]
   (reduce
-   (fn [{:keys [current-uuid current-alias]} {:keys [label join]}]
-     (let [join-type (or join "INNER")
-           rel (resolve-relation current-uuid label)
-           target-uuid (:to rel)
-           {:keys [table]} (sql-query/deployed-schema-entity target-uuid)
-           target-alias (get-alias [:relation current-uuid label])
-           link-alias (get-alias [:link current-uuid label])
-           join-key [current-uuid label]]
-       (vswap! entities conj target-uuid)
-       (when-not (contains? @join-keys-seen join-key)
-         (vswap! join-keys-seen conj join-key)
-         (vswap! joins conj
-                (format "%s JOIN \"%s\" %s ON %s._eid=%s.%s"
-                        join-type
-                        (:table rel) link-alias
-                        current-alias link-alias
-                        (:from/field rel)))
-         (vswap! joins conj
-                (format "%s JOIN \"%s\" %s ON %s.%s=%s._eid"
-                        join-type
-                        table target-alias
-                        link-alias (:to/field rel)
-                        target-alias)))
-       {:current-uuid target-uuid
-        :current-alias target-alias}))
-   {:current-uuid entity-id
-    :current-alias entity-alias}
-   joins-spec))
+    (fn [[current-id current-alias state] {:keys [label join]}]
+      (let [join-type (or join "INNER")
+            rel (resolve-relation current-id label)
+            target-id (:to rel)
+            {:keys [table]} (sql-query/deployed-schema-entity target-id)
+            [target-alias state] (get-alias state [:relation current-id label])
+            [link-alias state] (get-alias state [:link current-id label])
+            join-key [current-id label]
+            state (update state :entities conj target-id)]
+        (if (contains? (:join-keys-seen state) join-key)
+          [target-id target-alias state]
+          (let [state (-> state
+                          (update :join-keys-seen conj join-key)
+                          (update :joins conj
+                                  (format "%s JOIN \"%s\" %s ON %s._eid=%s.%s"
+                                          join-type (:table rel) link-alias
+                                          current-alias link-alias (:from/field rel)))
+                          (update :joins conj
+                                  (format "%s JOIN \"%s\" %s ON %s.%s=%s._eid"
+                                          join-type table target-alias
+                                          link-alias (:to/field rel) target-alias)))]
+            [target-id target-alias state]))))
+    [entity-id entity-alias state]
+    joins-spec))
 
 ;;; ============================================================================
-;;; Template Resolution
+;;; Template Resolution (pure reduce)
 ;;; ============================================================================
 
 (defn resolve-template
   "Resolve a SQL template: parse placeholders, resolve to physical names,
-   auto-generate FROM + JOINs.
-
-   The template should NOT contain FROM — it is generated automatically
-   from the entities and relations referenced in the placeholders.
-   If FROM is present, JOINs are injected after it (backward compatible).
-
-   Args:
-     template     - SQL string with {Entity.field} placeholders
-     entity-index - Optional {normalized-name -> entity-id} map.
-                    If nil, builds from deployed schema.
-
-   Returns:
-   {:sql       - Resolved SQL with physical names + auto FROM/JOINs
-    :entities  - Set of entity UUIDs referenced
-    :errors    - Resolution errors with position info}"
+   auto-generate FROM + JOINs. Pure function — no mutation."
   [template]
   (let [placeholders (extract-placeholders template)
-        alias-mgr (make-alias-manager)
-        get-alias (:get-alias alias-mgr)
-        all-aliases (:all-aliases alias-mgr)
-        entities (volatile! #{})
-        joins (volatile! [])
-        join-keys-seen (volatile! #{})
-        ;; Track root entities (referenced directly, not via relation)
-        root-entities (volatile! {}) ;; {uuid -> alias}
+        init-state {:aliases {}
+                    :counter 0
+                    :entities #{}
+                    :joins []
+                    :join-keys-seen #{}
+                    :root-entities {}
+                    :replacements []
+                    :errors []}
 
-        ctx {:get-alias get-alias
-             :entities entities
-             :joins joins
-             :join-keys-seen join-keys-seen}
+        final-state
+        (reduce
+          (fn [state {:keys [raw parsed start]}]
+            (try
+              (let [resolve-root
+                    (fn [state entity-name]
+                      (let [id (sql-query/resolve-entity entity-name)
+                            [alias state] (get-alias state [:entity id])]
+                        [id alias (-> state
+                                      (update :entities conj id)
+                                      (update :root-entities assoc id alias))]))]
+                (case (:type parsed)
+                  ;; {User} — bare entity
+                  :entity
+                  (let [[id alias state] (resolve-root state (:entity parsed))
+                        {:keys [table]} (sql-query/deployed-schema-entity id)]
+                    (update state :replacements conj
+                            {:raw raw :replacement (format "\"%s\" %s" table alias)}))
 
-        replacements
-        (mapv
-         (fn [{:keys [raw parsed start]}]
-           (try
-             (case (:type parsed)
-                ;; {User} — bare entity (backward compat, or in FROM)
-               :entity
-               (let [uuid (resolve-entity-id (:entity parsed))
-                     {:keys [table]} (sql-query/deployed-schema-entity uuid)
-                     alias (get-alias [:entity uuid])]
-                 (vswap! entities conj uuid)
-                 (vswap! root-entities assoc uuid alias)
-                 {:raw raw :replacement (format "\"%s\" %s" table alias)})
+                  ;; {User.name} → e1.name
+                  :field
+                  (let [[id alias state] (resolve-root state (:entity parsed))]
+                    (update state :replacements conj
+                            {:raw raw :replacement (format "%s.%s" alias (:field parsed))}))
 
-                ;; {User.name} → e1.name
-               :field
-               (let [uuid (resolve-entity-id (:entity parsed))
-                     {:keys [table]} (sql-query/deployed-schema-entity uuid)
-                     alias (get-alias [:entity uuid])]
-                 (vswap! entities conj uuid)
-                 (vswap! root-entities assoc uuid alias)
-                 {:raw raw :replacement (format "%s.%s" alias (:field parsed))})
+                  ;; {User - roles} → target alias
+                  :relation
+                  (let [[id alias state] (resolve-root state (:entity parsed))
+                        joins-spec (or (:joins parsed)
+                                       (mapv #(hash-map :label % :join "INNER") (:path parsed)))
+                        [_ target-alias state] (walk-relation-chain id alias joins-spec state)]
+                    (update state :replacements conj
+                            {:raw raw :replacement target-alias}))
 
-                ;; {User - roles} or {User -> roles} → target alias
-               :relation
-               (let [uuid (resolve-entity-id (:entity parsed))
-                     alias (get-alias [:entity uuid])]
-                 (vswap! entities conj uuid)
-                 (vswap! root-entities assoc uuid alias)
-                 (let [joins-spec (or (:joins parsed)
-                                      (mapv #(hash-map :label % :join "INNER") (:path parsed)))
-                       result (walk-relation-chain uuid alias joins-spec ctx)]
-                   {:raw raw :replacement (:current-alias result)}))
+                  ;; {User - roles.name} → e2.name
+                  :relation-field
+                  (let [[id alias state] (resolve-root state (:entity parsed))
+                        joins-spec (or (:joins parsed)
+                                       (mapv #(hash-map :label % :join "INNER") (:path parsed)))
+                        [_ target-alias state] (walk-relation-chain id alias joins-spec state)]
+                    (update state :replacements conj
+                            {:raw raw :replacement (format "%s.%s" target-alias (:field parsed))}))))
+              (catch Exception e
+                (update state :errors conj
+                        {:raw raw :error (ex-message e) :position start}))))
+          init-state
+          placeholders)]
 
-                ;; {User - roles.name} or {User -> roles.name} → e2.name
-               :relation-field
-               (let [uuid (resolve-entity-id (:entity parsed))
-                     alias (get-alias [:entity uuid])]
-                 (vswap! entities conj uuid)
-                 (vswap! root-entities assoc uuid alias)
-                 (let [joins-spec (or (:joins parsed)
-                                      (mapv #(hash-map :label % :join "INNER") (:path parsed)))
-                       result (walk-relation-chain uuid alias joins-spec ctx)]
-                   {:raw raw :replacement (format "%s.%s"
-                                                  (:current-alias result)
-                                                  (:field parsed))})))
-             (catch Exception e
-               {:raw raw :error (ex-message e) :position start})))
-         placeholders)
-        errors (filterv :error replacements)]
-    (if (not-empty errors)
-      {:errors errors}
-      (let [;; Apply replacements
+    (if (not-empty (:errors final-state))
+      {:errors (:errors final-state)}
+      (let [{:keys [replacements root-entities joins]} final-state
+            ;; Apply replacements to template
             resolved-sql (reduce
-                          (fn [sql {:keys [raw replacement]}]
-                            (str/replace-first sql raw replacement))
-                          template
-                          replacements)
+                           (fn [sql {:keys [raw replacement]}]
+                             (str/replace-first sql raw replacement))
+                           template
+                           replacements)
 
-              ;; Build FROM clause from root entities
+            ;; Build FROM clause from root entities
             from-parts (mapv
-                        (fn [[uuid alias]]
-                          (let [{:keys [table]} (sql-query/deployed-schema-entity uuid)]
-                            (format "\"%s\" %s" table alias)))
-                        @root-entities)
+                         (fn [[id alias]]
+                           (let [{:keys [table]} (sql-query/deployed-schema-entity id)]
+                             (format "\"%s\" %s" table alias)))
+                         root-entities)
             from-clause (str "FROM " (str/join ", " from-parts))
-
-              ;; Check if template already has FROM (backward compat)
             has-from? (re-find #"(?i)\bFROM\b" resolved-sql)
+            join-str (when (not-empty joins) (str/join "\n" joins))
 
-              ;; Build JOIN string
-            join-str (when (not-empty @joins) (str/join "\n" @joins))
-
-              ;; Build final SQL
             ;; What needs injecting
-            inject-str (if has-from?
-                         ;; FROM present — only inject JOINs
-                         join-str
-                         ;; No FROM — inject FROM + JOINs
-                         (str from-clause
-                              (when join-str (str "\n" join-str))))
+            inject-str (if has-from? join-str
+                           (str from-clause
+                                (when join-str (str "\n" join-str))))
 
             final-sql
             (if-not inject-str
               resolved-sql
-              ;; Find WHERE/GROUP BY/HAVING/ORDER BY/LIMIT to insert before
               (let [insert-point (re-find #"(?i)\b(WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|UNION)"
                                           resolved-sql)]
                 (if insert-point
@@ -347,7 +277,7 @@
                   (str resolved-sql "\n" inject-str))))]
 
         {:sql final-sql
-         :entities @entities}))))
+         :entities (:entities final-state)}))))
 
 ;;; ============================================================================
 ;;; Validation
@@ -372,15 +302,23 @@
    FROM and JOINs are generated automatically from entity references.
 
    Args:
-     template     - SQL string with {Entity.field} placeholders (no FROM needed)
-     params       - Vector of query parameters (for ? placeholders)
-     entity-index - Optional {normalized-name -> entity-id} map from data handler
+     template - SQL string with {Entity.field} placeholders (no FROM needed)
+     params   - Vector of query parameters (for ? placeholders)
 
    Returns:
      Vector of result maps"
-  [template params]
+  ([template params] (execute-template template params nil))
+  ([template params opts]
   (validate-select-only! template)
-  (let [{:keys [sql entities errors]} (resolve-template template)]
+  (let [cached? (get opts :cached true)
+        {:keys [sql entities errors]}
+        (if cached?
+          (or (sql-query/cached-template template)
+              (let [resolved (resolve-template template)]
+                (when-not (:errors resolved)
+                  (sql-query/cache-template template resolved))
+                resolved))
+          (resolve-template template))]
     (when errors
       (throw (ex-info (str "Template resolution failed: "
                            (str/join "; "
@@ -393,6 +331,6 @@
     (log/debugf "[TEMPLATE] Resolved SQL:\n%s\nParams: %s\nEntities: %s"
                 sql (pr-str params) (pr-str entities))
     (sql/execute!
-     (:datasource *db*)
-     (into [sql] (or params []))
-     :edn)))
+      (:datasource *db*)
+      (into [sql] (or params []))
+      :edn))))

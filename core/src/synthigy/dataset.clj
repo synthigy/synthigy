@@ -7,7 +7,6 @@
     [clojure.core.async :as async]
     [clojure.java.io :as io]
     [clojure.tools.logging :as log]
-    [com.walmartlabs.lacinia.selection :as selection]
     [patcho.patch :as patch]
     synthigy.dataset.access
     [synthigy.dataset.core :as core]
@@ -459,7 +458,7 @@
     (let [hooks (keep
                   (fn [definition]
                     (let [{resolver :fn
-                           :as hook} (selection/arguments definition)]
+                           :as hook} ((requiring-resolve 'com.walmartlabs.lacinia.selection/arguments) definition)]
                       (if-some [resolved (try
                                            (resolve (symbol resolver))
                                            (catch Throwable e

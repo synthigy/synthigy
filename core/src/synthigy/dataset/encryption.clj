@@ -2,11 +2,10 @@
   (:require
     [buddy.core.crypto :as crypto]
     [buddy.core.nonce :as nonce]
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     clojure.java.io
     [clojure.string :as str]
     [clojure.tools.logging :as log]
-    [com.walmartlabs.lacinia.resolve :as resolve]
     [environ.core :refer [env]]
     [next.jdbc :as jdbc]
     [patcho.lifecycle :as lifecycle]
@@ -234,7 +233,7 @@
                           (jdbc/execute-one!
                             con
                             ["insert into __deks (dek, key_algorithm, active) values (?, ?, ?) returning id"
-                             (str->json-value (json/write-str encrypted :key-fn name))
+                             (str->json-value (json/write-str encrypted))
                              "aes256-gcm"
                              true]))]
     id))
@@ -277,8 +276,8 @@
                   dek :__deks/dek
                   encryption_barrier :__deks/encryption_barrier
                   active? :__deks/active}]
-            (let [db-dek (json/read-str (json-value->str dek) :key-fn keyword)
-                  _encryption-barrier (json/read-str (json-value->str encryption_barrier) :key-fn keyword)
+            (let [db-dek (json/read-str (json-value->str dek))
+                  _encryption-barrier (json/read-str (json-value->str encryption_barrier))
                   dek (decrypt-dek db-dek)
                   _ (swap! deks assoc id dek)
                   valid? (= encryption-barrier
@@ -434,6 +433,11 @@
 ;;; GraphQL Resolver Functions
 ;;; ============================================================================
 
+;; Lazy resolve to avoid hard dependency on lacinia (alias-gated)
+(defn- resolve-as
+  ([v] ((requiring-resolve 'com.walmartlabs.lacinia.resolve/resolve-as) v))
+  ([v err] ((requiring-resolve 'com.walmartlabs.lacinia.resolve/resolve-as) v err)))
+
 (defn generate-master
   "GraphQL resolver: Generates a new master encryption key
 
@@ -442,10 +446,10 @@
   (try
     (let [master (random-master)]
       (log/info "Generated new master encryption key")
-      (resolve/resolve-as master))
+      (resolve-as master))
     (catch Throwable e
       (log/error e "Failed to generate master key")
-      (resolve/resolve-as nil {:message "Failed to generate master key"}))))
+      (resolve-as nil {:message "Failed to generate master key"}))))
 
 (defn generate-shares
   "GraphQL resolver: Generates Shamir secret shares from a master key
@@ -467,10 +471,10 @@
                                 :value share})
                              share-data)]
       (log/infof "Generated %d Shamir shares (threshold: %d)" shares threshold)
-      (resolve/resolve-as formatted-shares))
+      (resolve-as formatted-shares))
     (catch Throwable e
       (log/error e "Failed to generate shares")
-      (resolve/resolve-as nil {:message "Failed to generate shares"}))))
+      (resolve-as nil {:message "Failed to generate shares"}))))
 
 (defn unseal-with-master
   "GraphQL resolver: Unseals encryption using master key
@@ -482,7 +486,7 @@
   [context {:keys [master]} value]
   (try
     (if (initialized?)
-      (resolve/resolve-as
+      (resolve-as
         {:status :ERROR
          :message "Encryption already initialized"})
       (do
@@ -490,15 +494,15 @@
         (if (initialized?)
           (do
             (log/info "Encryption unsealed successfully with master key")
-            (resolve/resolve-as
+            (resolve-as
               {:status :INITIALIZED
                :message "Encryption unsealed successfully"}))
-          (resolve/resolve-as
+          (resolve-as
             {:status :ERROR
              :message "Failed to initialize encryption"}))))
     (catch Throwable e
       (log/error e "Failed to unseal with master key")
-      (resolve/resolve-as
+      (resolve-as
         {:status :ERROR
          :message (str "Error: " (.getMessage e))}))))
 
@@ -514,7 +518,7 @@
   [context {:keys [share]} value]
   (try
     (if (initialized?)
-      (resolve/resolve-as
+      (resolve-as
         {:status :ERROR
          :message "Encryption already initialized"})
       (do
@@ -531,26 +535,26 @@
                   (do
                     (reset! available-shares nil)
                     (log/info "Encryption unsealed successfully with shares")
-                    (resolve/resolve-as
+                    (resolve-as
                       {:status :INITIALIZED
                        :message "Encryption unsealed successfully"}))
                   (do
                     (reset! available-shares nil)
-                    (resolve/resolve-as
+                    (resolve-as
                       {:status :ERROR
                        :message "Failed to initialize encryption"}))))
               (catch Throwable e
                 (log/error e "Failed to reconstruct secret from shares")
                 (reset! available-shares nil)
-                (resolve/resolve-as
+                (resolve-as
                   {:status :ERROR
                    :message "Failed to reconstruct secret"})))
-            (resolve/resolve-as
+            (resolve-as
               {:status :WAITING_FOR_MORE_SHARES
                :message (str "Waiting for more shares (" share-count "/3)")})))))
     (catch Throwable e
       (log/error e "Failed to unseal with share")
-      (resolve/resolve-as
+      (resolve-as
         {:status :ERROR
          :message (str "Error: " (.getMessage e))}))))
 

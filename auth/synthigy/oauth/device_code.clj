@@ -1,6 +1,6 @@
 (ns synthigy.oauth.device-code
   (:require
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    clojure.java.io
    clojure.pprint
    [clojure.string :as str]

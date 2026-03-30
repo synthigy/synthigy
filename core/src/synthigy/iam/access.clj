@@ -1,15 +1,14 @@
 (ns synthigy.iam.access
   (:require
-    [clojure.core.async :as async]
-    [clojure.set :as set]
-    [clojure.tools.logging :as log]
-    [environ.core :refer [env]]
-    [synthigy.data :refer [*ROOT* *SYNTHIGY*]]
-    [synthigy.dataset :as dataset]
-    [synthigy.dataset.access :as dataset.access]
-    [synthigy.dataset.access.protocol :as access.protocol]
-    [synthigy.dataset.core :as core]
-    [synthigy.dataset.id :as id]))
+   [clojure.core.async :as async]
+   [clojure.set :as set]
+   [clojure.tools.logging :as log]
+   [environ.core :refer [env]]
+   [synthigy.data :refer [*ROOT* *SYNTHIGY*]]
+   [synthigy.dataset :as dataset]
+   [synthigy.dataset.access.protocol :as access.protocol]
+   [synthigy.dataset.core :as core]
+   [synthigy.dataset.id :as id]))
 
 ;;; ============================================================================
 ;;; Dynamic Context Vars
@@ -37,22 +36,22 @@
 (defn get-roles-access-data
   []
   (dataset/search-entity
-    :iam/user-role
-    nil
-    {(id/key) nil
-     :name nil
+   :iam/user-role
+   nil
+   {(id/key) nil
+    :name nil
      ;; Entities
-     :write_entities [{:selections {(id/key) nil}}]
-     :read_entities [{:selections {(id/key) nil}}]
-     :delete_entities [{:selections {(id/key) nil}}]
-     :owned_entities [{:selections {(id/key) nil}}]
+    :write_entities [{:selections {(id/key) nil}}]
+    :read_entities [{:selections {(id/key) nil}}]
+    :delete_entities [{:selections {(id/key) nil}}]
+    :owned_entities [{:selections {(id/key) nil}}]
      ;; Relations
-     :to_read_relations [{:selections {(id/key) nil}}]
-     :to_write_relations [{:selections {(id/key) nil}}]
-     :to_delete_relations [{:selections {(id/key) nil}}]
-     :from_read_relations [{:selections {(id/key) nil}}]
-     :from_write_relations [{:selections {(id/key) nil}}]
-     :from_delete_relations [{:selections {(id/key) nil}}]}))
+    :to_read_relations [{:selections {(id/key) nil}}]
+    :to_write_relations [{:selections {(id/key) nil}}]
+    :to_delete_relations [{:selections {(id/key) nil}}]
+    :from_read_relations [{:selections {(id/key) nil}}]
+    :from_write_relations [{:selections {(id/key) nil}}]
+    :from_delete_relations [{:selections {(id/key) nil}}]}))
 
 (comment
   (dataset/search-entity :iam/user nil {(id/key) nil
@@ -64,46 +63,46 @@
   [data]
   (letfn [(x-entity [result role rule entities]
             (reduce
-              (fn [r entity]
-                (update-in r [:entity entity rule] (fnil conj #{}) role))
-              result
-              entities))
+             (fn [r entity]
+               (update-in r [:entity entity rule] (fnil conj #{}) role))
+             result
+             entities))
           (x-relation [result role direction rule relations]
             (reduce
-              (fn [r relation]
-                (let [{:keys [from to]} (dataset/deployed-relation relation)
-                      from-id (id/extract from)
-                      to-id (id/extract to)
-                      k (if (= direction :to)
-                          [to-id from-id]
-                          [from-id to-id])]
-                  (update-in r [:relation relation k rule] (fnil conj #{}) role)))
-              result
-              relations))]
+             (fn [r relation]
+               (let [{:keys [from to]} (dataset/deployed-relation relation)
+                     from-id (id/extract from)
+                     to-id (id/extract to)
+                     k (if (= direction :to)
+                         [to-id from-id]
+                         [from-id to-id])]
+                 (update-in r [:relation relation k rule] (fnil conj #{}) role)))
+             result
+             relations))]
     (reduce
-      (fn [r role-data]
-        (let [role-id (id/extract role-data)
-              {:keys [write_entities read_entities delete_entities owned_entities
-                      to_read_relations to_write_relations to_delete_relations
-                      from_read_relations from_write_relations from_delete_relations]} role-data]
-          (-> r
-              (x-entity role-id :read (map id/extract read_entities))
-              (x-entity role-id :write (map id/extract write_entities))
-              (x-entity role-id :delete (map id/extract delete_entities))
-              (x-entity role-id :owners (map id/extract owned_entities))
+     (fn [r role-data]
+       (let [role-id (id/extract role-data)
+             {:keys [write_entities read_entities delete_entities owned_entities
+                     to_read_relations to_write_relations to_delete_relations
+                     from_read_relations from_write_relations from_delete_relations]} role-data]
+         (-> r
+             (x-entity role-id :read (map id/extract read_entities))
+             (x-entity role-id :write (map id/extract write_entities))
+             (x-entity role-id :delete (map id/extract delete_entities))
+             (x-entity role-id :owners (map id/extract owned_entities))
               ;; From and to refer to entities. There is no from and to, both are
               ;; from. Because of modeling and how relations are stored, users
               ;; that read model, read it in inverted... This is why at this point
               ;; we have to invert back rules, so that they follow first mindfuck
               ;; logic... donno
-              (x-relation role-id :to :read (map id/extract from_read_relations))
-              (x-relation role-id :to :write (map id/extract from_write_relations))
-              (x-relation role-id :to :delete (map id/extract from_delete_relations))
-              (x-relation role-id :from :read (map id/extract to_read_relations))
-              (x-relation role-id :from :write (map id/extract to_write_relations))
-              (x-relation role-id :from :delete (map id/extract to_delete_relations)))))
-      nil
-      data)))
+             (x-relation role-id :to :read (map id/extract from_read_relations))
+             (x-relation role-id :to :write (map id/extract from_write_relations))
+             (x-relation role-id :to :delete (map id/extract from_delete_relations))
+             (x-relation role-id :from :read (map id/extract to_read_relations))
+             (x-relation role-id :from :write (map id/extract to_write_relations))
+             (x-relation role-id :from :delete (map id/extract to_delete_relations)))))
+     nil
+     data)))
 
 (comment
   (dataset/deployed-relation #uuid "7efa7244-ae20-4248-9792-7623d12cea9e")
@@ -117,17 +116,17 @@
   ([] (superuser? *roles*))
   ([roles]
    (or
-     (nil? *user*)
+    (nil? *user*)
     ;; Check if *user* is directly the SYNTHIGY _eid
-     (and (some? *user*) (some? (:_eid *SYNTHIGY*)) (= *user* (:_eid *SYNTHIGY*)))
+    (and (some? *user*) (some? (:_eid *SYNTHIGY*)) (= *user* (:_eid *SYNTHIGY*)))
     ;; Check if *user* is the SYNTHIGY entity ID (can be UUID or map with entity ID)
-     (let [user-id (if (map? *user*) (id/extract *user*) *user*)
-           synthigy-id (id/extract *SYNTHIGY*)]
-       (and (some? user-id) (some? synthigy-id) (= user-id synthigy-id)))
+    (let [user-id (if (map? *user*) (id/extract *user*) *user*)
+          synthigy-id (id/extract *SYNTHIGY*)]
+      (and (some? user-id) (some? synthigy-id) (= user-id synthigy-id)))
     ;; Check if both have _eid and they match
-     (and (map? *user*) (some? (:_eid *user*)) (some? (:_eid *SYNTHIGY*)) (= (:_eid *user*) (:_eid *SYNTHIGY*)))
+    (and (map? *user*) (some? (:_eid *user*)) (some? (:_eid *SYNTHIGY*)) (= (:_eid *user*) (:_eid *SYNTHIGY*)))
     ;; Check if user has ROOT role
-     (contains? roles (id/extract *ROOT*)))))
+    (contains? roles (id/extract *ROOT*)))))
 
 (defn entity-allows?
   ([entity rules] (entity-allows? entity rules *roles*))
@@ -153,8 +152,8 @@
      (if (or (nil? *rules*) (superuser? roles)) true
          (letfn [(ok? [rule]
                    (boolean
-                     (not-empty
-                       (set/intersection roles (get-in *rules* [:relation relation direction rule])))))]
+                    (not-empty
+                     (set/intersection roles (get-in *rules* [:relation relation direction rule])))))]
            (some ok? rules)))
      (catch Throwable ex
        (log/error "[IAM] Couldn't evaluate relation-allows for roles %s" roles)
@@ -163,23 +162,23 @@
 (defn roles-allowed?
   [roles]
   (or
-    (superuser?)
-    (nil? *roles*)
-    (not-empty (set/intersection roles *roles*))))
+   (superuser?)
+   (nil? *roles*)
+   (not-empty (set/intersection roles *roles*))))
 
 (defn scope-allowed?
   ([permission]
    (scope-allowed? *roles* permission))
   ([roles scope]
    (or
-     (superuser?)
-     (nil? *scopes*)
-     (reduce-kv
-       (fn [_ _ scopes]
-         (if (contains? scopes scope) (reduced true)
-             false))
-       false
-       (select-keys *scopes* roles)))))
+    (superuser?)
+    (nil? *scopes*)
+    (reduce-kv
+     (fn [_ _ scopes]
+       (if (contains? scopes scope) (reduced true)
+           false))
+     false
+     (select-keys *scopes* roles)))))
 
 (comment
   (def roles #{#uuid "7fc035e2-812e-4861-a25c-eb172b39577f"
@@ -191,22 +190,22 @@
 (defn get-roles-scope-data
   []
   (dataset/search-entity
-    :iam/user-role
-    nil
-    {(id/key) nil
-     :name nil
-     :scopes [{:selections {(id/key) nil
-                            :name nil}}]}))
+   :iam/user-role
+   nil
+   {(id/key) nil
+    :name nil
+    :scopes [{:selections {(id/key) nil
+                           :name nil}}]}))
 
 (defn transform-scope-data
   [roles]
   (reduce
-    (fn [r role-data]
-      (let [role-id (id/extract role-data)
-            scopes (:scopes role-data)]
-        (assoc r role-id (set (remove nil? (map :name scopes))))))
-    {}
-    roles))
+   (fn [r role-data]
+     (let [role-id (id/extract role-data)
+           scopes (:scopes role-data)]
+       (assoc r role-id (set (remove nil? (map :name scopes))))))
+   {}
+   roles))
 
 (defn load-scopes
   []
@@ -230,11 +229,11 @@
           relations (core/focus-entity-relations model role-entity)
           relation-ids (set (map id/extract relations))
           all-ids (->
-                    relation-ids
+                   relation-ids
                      ;; Disj permissions and users
-                    (disj #uuid "16ca53f4-0fe3-4122-93dd-1e86fd1b58db"
-                          #uuid "1a2cc45d-1301-4fdd-bb02-650362165b37")
-                    (conj :iam/user-role))
+                   (disj #uuid "16ca53f4-0fe3-4122-93dd-1e86fd1b58db"
+                         #uuid "1a2cc45d-1301-4fdd-bb02-650362165b37")
+                   (conj :iam/user-role))
           delta-chan (async/chan (async/sliding-buffer 1))]
 
       ;; Store channel and subscribed elements for cleanup
@@ -246,16 +245,16 @@
         (async/sub core/*delta-publisher* element delta-chan))
       ;; Start idle service that will listen on delta changes
       (async/go-loop
-        [_ (async/<! delta-chan)]
-        (log/debugf "[IAM] Received something at delta channel")
+       [_ (async/<! delta-chan)]
+        (log/debug "[IAM] Received something at delta channel")
         ;; When first delta change is received start inner loop
         (loop [[idle-value] (async/alts!
-                              [;; That will check for new delta values
-                               delta-chan
+                             [;; That will check for new delta values
+                              delta-chan
                              ;; Or timeout
-                               (async/go
-                                 (async/<! (async/timeout 5000))
-                                 ::TIMEOUT)])]
+                              (async/go
+                                (async/<! (async/timeout 5000))
+                                ::TIMEOUT)])]
           (log/debugf "[IAM] Next idle value is: %s" idle-value)
           ;; IF timeout is received than reload rules
           (if (= ::TIMEOUT idle-value)
@@ -266,12 +265,12 @@
             ;; Otherwise some other delta has been received and
             ;; inner loop will be repeated
             (recur (async/alts!
-                     [;; That will check for new delta values
-                      delta-chan
+                    [;; That will check for new delta values
+                     delta-chan
                      ;; Or timeout
-                      (async/go
-                        (async/<! (async/timeout 5000))
-                        ::TIMEOUT)]))))
+                     (async/go
+                       (async/<! (async/timeout 5000))
+                       ::TIMEOUT)]))))
         ;; when reloading is complete, wait for new delta value
         ;; and repeat process
         (recur (async/<! delta-chan)))

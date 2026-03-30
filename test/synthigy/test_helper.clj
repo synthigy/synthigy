@@ -13,7 +13,7 @@
     (use-fixtures :each test-helper/reset-state-fixture)"
   (:require
     [buddy.hashers :as hashers]
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.tools.logging :as log]
     [patcho.lifecycle :as lifecycle]
@@ -233,7 +233,7 @@
   "Parse JSON response body to Clojure map."
   [response]
   (when-let [body (:body response)]
-    (json/read-str body :key-fn keyword)))
+    (json/read-str body)))
 
 (defn parse-location-params
   "Parse query parameters from Location header.

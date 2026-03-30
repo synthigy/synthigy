@@ -2,7 +2,7 @@
   (:require
     [buddy.hashers :as hashers]
     clojure.data
-    ;; NOTE: Using synthigy.json/->json instead of clojure.data.json for consistency
+    ;; JSON via synthigy.json (jsonista)
     [clojure.java.io :as io]
     clojure.set
     clojure.string

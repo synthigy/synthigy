@@ -16,7 +16,7 @@
   (:require
    [clojure.test :refer [deftest testing is use-fixtures]]
    [clojure.string :as str]
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [buddy.hashers :as hashers]
    [synthigy.oauth.handlers :as handlers]
    [synthigy.oauth.core :as core]
@@ -64,7 +64,7 @@
 
 (defn parse-json-body [response]
   (when-let [body (:body response)]
-    (json/read-str body :key-fn keyword)))
+    (json/read-str body)))
 
 ;; =============================================================================
 ;; Test Fixtures

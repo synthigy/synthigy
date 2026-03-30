@@ -19,7 +19,7 @@
   (:require
     [clj-http.client :as http]
     [clj-http.cookies :as cookies]
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.tools.logging :as log]
     [ring.util.codec :as codec]
@@ -104,7 +104,7 @@
   "Parse JSON response body to Clojure map."
   [response]
   (when-let [body (:body response)]
-    (json/read-str body :key-fn keyword)))
+    (json/read-str body)))
 
 (defn parse-location-params
   "Parse query parameters from Location header.

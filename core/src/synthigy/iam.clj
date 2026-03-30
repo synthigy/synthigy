@@ -6,8 +6,6 @@
     clojure.pprint
     clojure.set
     [clojure.tools.logging :as log]
-    [com.walmartlabs.lacinia.resolve :as resolve]
-    [com.walmartlabs.lacinia.selection :as selection]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
     synthigy.core
@@ -33,8 +31,7 @@
     [synthigy.iam.util
      :refer [import-role
              import-api
-             import-app]]
-    [synthigy.lacinia :as lacinia]))
+             import-app]]))
 
 ;; ============================================================================
 ;; IAM Entity Definitions
@@ -217,43 +214,7 @@
      :type nil
      :settings nil}))
 
-(defn wrap-protect
-  [protection resolver]
-  (if (not-empty protection)
-    (fn wrapped-protection
-      [ctx args value]
-      ; (log/infof "RESOLVING: %s" resolver)
-      ; (def protection protection)
-      ; (def resolver resolver)
-      ; (def value value)
-      ; (def ctx ctx)
-      ; (def args args)
-      (let [{:keys [scopes roles]}
-            (reduce
-              (fn [result definition]
-                (let [{:keys [scopes roles]} (selection/arguments definition)]
-                  (->
-                    result
-                    (update :scopes (fnil clojure.set/union #{}) (set scopes))
-                    (update :roles
-                            (fnil clojure.set/union #{})
-                            (map (fn [r] (if (= :euuid (id/provider-type))
-                                           (parse-uuid r)
-                                           r))
-                                 roles)))))
-              nil
-              protection)]
-        (if (and
-              (or (empty? scopes)
-                  (some access/scope-allowed? scopes))
-              (or (empty? roles)
-                  (access/roles-allowed? roles)))
-          (resolver ctx args value)
-          (resolve/resolve-as
-            nil
-            {:message "Access denied!"
-             :code :unauthorized}))))
-    resolver))
+;; wrap-protect moved to synthigy.lacinia (GraphQL concern, not IAM core)
 
 (defn ensure-public
   []
@@ -334,7 +295,6 @@
     ;; Bind IAM access control implementation to dataset protocol
     (alter-var-root #'dataset.access/*access-control*
                     (constantly (access/->IAMAccessControl)))
-    (lacinia/add-directive :protect wrap-protect)
     (dataset/reload)
     (log/info "IAM initialized")
     (catch Throwable e
@@ -345,10 +305,7 @@
   []
   (when context/*user-context-provider*
     (context/stop! context/*user-context-provider*)
-    (alter-var-root #'context/*user-context-provider* (constantly nil)))
-  (dosync
-    (ref-set lacinia/compiled nil)
-    (ref-set lacinia/state nil)))
+    (alter-var-root #'context/*user-context-provider* (constantly nil))))
 
 (defn setup-schema
   "Sets up the IAM database schema.
@@ -428,7 +385,6 @@
             (start)
             (log/info "[IAM] IAM started"))
    :stop (fn []
-           ;; Runtime: Clear lacinia state
            (log/info "[IAM] Stopping IAM...")
            (stop)
            (log/info "[IAM] IAM stopped"))})

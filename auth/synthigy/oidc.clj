@@ -2,7 +2,7 @@
   (:require
    [buddy.core.codecs]
    [buddy.sign.util :refer [to-timestamp]]
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [clojure.set :as set]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
@@ -293,7 +293,7 @@
       {:status 200
        :headers {"Content-Type" "application/json"
                  "Cache-Control" "max-age=3600"}
-       :body (json/write-str config :escape-slash false)})))
+       :body (json/write-str config)})))
 
 (defn openid-configuration-handler
   "OpenID Connect Discovery handler.
@@ -322,7 +322,7 @@
       {:status 200
        :headers {"Content-Type" "application/json"
                  "Cache-Control" "max-age=3600"}
-       :body (json/write-str config :escape-slash false)})))
+       :body (json/write-str config)})))
 
 (defn userinfo-handler
   "OpenID Connect UserInfo endpoint handler.

@@ -33,7 +33,7 @@
 
    See SDK.md for full specification."
   (:require
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [clojure.java.io :as io]
    [clojure.tools.logging :as log]
    [patcho.lifecycle :as lifecycle]
@@ -62,7 +62,8 @@
   (try
     (let [result (if (= op "query")
                    ;; Query operation — SQL template
-                   (template/execute-template template params)
+                   (template/execute-template template params
+                                              {:cached (get operation :cached true)})
                    ;; Dataset operations — resolve entity from deployed schema
                    (let [entity-id (sql-query/resolve-entity entity)]
                      (case op
@@ -123,7 +124,7 @@
                          body
                          (slurp (io/reader body)))]
           (when-not (empty? body-str)
-            (json/read-str body-str :key-fn keyword)))))
+            (json/read-str body-str)))))
     (catch Exception e
       (log/debugf e "Failed to parse JSON body")
       nil)))

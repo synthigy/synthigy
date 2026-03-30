@@ -1,6 +1,6 @@
 (ns synthigy.oauth.login
   (:require
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    clojure.java.io
    clojure.pprint
    [clojure.set :as set]

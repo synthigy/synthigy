@@ -163,10 +163,32 @@
        (synthigy-val-fn nil result)
        result))))
 
+(def keyword-mapper
+  "Mapper that keywordizes keys but does no value transformation."
+  (json/object-mapper {:decode-key-fn keyword}))
+
+(def string-key-mapper
+  "Mapper with no key or value transformations (string keys)."
+  (json/object-mapper {}))
+
 (defn ->json
   "Convert Clojure data to JSON string."
   [data]
   (json/write-value-as-string data write-mapper))
+
+(def write-str
+  "Convert Clojure data to JSON string. Alias for ->json."
+  ->json)
+
+(defn read-str
+  "Parse JSON string to Clojure data with keyword keys. No value transformations."
+  [s]
+  (json/read-value s keyword-mapper))
+
+(defn read-str-raw
+  "Parse JSON string to Clojure data with string keys. No value transformations."
+  [s]
+  (json/read-value s string-key-mapper))
 
 (defn ->timestamp [date] (when date (java.sql.Timestamp. (.getTime date))))
 

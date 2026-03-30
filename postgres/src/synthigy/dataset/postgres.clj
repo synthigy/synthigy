@@ -2,8 +2,7 @@
   (:require
     [buddy.hashers :as hashers]
     clojure.data
-    ;; NOTE: Using synthigy.json/->json instead of clojure.data.json
-    ;; because ->json handles PGobject (via jsonista) while data.json doesn't
+    ;; JSON via synthigy.json (jsonista)
     [clojure.java.io :as io]
     clojure.set
     [clojure.string :as str]

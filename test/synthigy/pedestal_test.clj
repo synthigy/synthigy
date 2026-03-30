@@ -8,7 +8,7 @@
   - SPA static file serving
   - Server lifecycle (start/stop)"
   (:require
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [clojure.test :refer [deftest testing is use-fixtures]]
    [clj-http.client :as http]
    [synthigy.server :as server]
@@ -49,7 +49,7 @@
 (defn parse-json
   "Parse JSON response body"
   [response]
-  (json/read-str (:body response) :key-fn keyword))
+  (json/read-str (:body response)))
 
 ;; =============================================================================
 ;; Server Lifecycle Tests

@@ -3,7 +3,7 @@
   (:require
    nano-id.core
    [clojure.string :as str]
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [ring.util.codec :as codec])
   (:import
    [java.lang String]
@@ -96,7 +96,7 @@
                           (some? state) (assoc :state state)
                           (some? scope) (assoc :scope (str/join " " scope)))}))
         body (try
-               (json/read-str body)
+               (json/read-str-raw body)
                (catch Throwable _
                  (println body)
                  {:error "unknown" :error_description "Returned body wasn't in json format"}))]
@@ -131,7 +131,7 @@
                           (some? state) (assoc :state state)
                           (some? scope) (assoc :scope (str/join " " scope)))}))
         body (try
-               (json/read-str body)
+               (json/read-str-raw body)
                (catch Throwable _
                  (println body)
                  {:error "unknown" :error_description "Returned body wasn't in json format"}))]
@@ -158,7 +158,7 @@
            :form-params (cond->
                          {:response_type "code"}
                           (some? state) (assoc :state state))}))
-        body (json/read-str body)]
+        body (json/read-str-raw body)]
     (case status
       200 body
       (let [{:strs [error error_description]} body]

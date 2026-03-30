@@ -23,7 +23,7 @@
   NOTE: These tests use REAL database entities (not mocks) for realistic testing."
   (:require
     [buddy.hashers :as hashers]
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.test :refer [deftest testing is use-fixtures]]
     [synthigy.dataset :as dataset]
@@ -82,7 +82,7 @@
 
 (defn parse-json-body [response]
   (when-let [body (:body response)]
-    (json/read-str body :key-fn keyword)))
+    (json/read-str body)))
 
 ;; =============================================================================
 ;; Test Fixtures

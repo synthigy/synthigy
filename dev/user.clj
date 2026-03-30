@@ -21,8 +21,8 @@
   - (lifecycle/print-system-report)                       - Show system status
   - (lifecycle/system-report)                             - Get status as data"
   (:require
-    [synthigy.data :as data]
-    [synthigy.iam :as iam]))
+   [synthigy.data :as data]
+   [synthigy.iam :as iam]))
 
 (comment
   ;; 1. Setup - ensure namespaces are loaded

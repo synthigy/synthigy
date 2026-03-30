@@ -13,7 +13,7 @@
 
    RFC 7662: https://tools.ietf.org/html/rfc7662"
   (:require
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [clojure.string :as str]
    [clojure.tools.logging :as log]
    [synthigy.iam.encryption :as encryption]

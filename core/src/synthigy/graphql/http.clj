@@ -9,7 +9,7 @@
    5. Execute (executor/execute-query + ResolverResult handling)
    6. Format response (JSON with proper status codes)"
   (:require
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     [clojure.string :as str]
     [com.walmartlabs.lacinia.constants :as constants]
     [com.walmartlabs.lacinia.executor :as executor]
@@ -37,7 +37,7 @@
   [s]
   (when-not (str/blank? s)
     (try
-      (json/read-str s :key-fn keyword)
+      (json/read-str s)
       (catch Exception _ nil))))
 
 (defn- validate-params

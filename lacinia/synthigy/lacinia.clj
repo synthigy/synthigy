@@ -12,6 +12,8 @@
     [com.walmartlabs.lacinia.selection :as selection]
     [patcho.lifecycle :as lifecycle]
     synthigy.dataset
+    [synthigy.dataset.id :as id]
+    [synthigy.iam.access :as access]
     [synthigy.transit
      :refer [<-transit ->transit]]))
 
@@ -331,6 +333,44 @@
   nil)
 
 ;;; ============================================================================
+;;; IAM Directive: :protect
+;;; ============================================================================
+
+(defn wrap-protect
+  "Field directive that enforces IAM scope/role checks on GraphQL fields.
+  Moved here from synthigy.iam to keep lacinia dependency out of core."
+  [protection resolver]
+  (if (not-empty protection)
+    (fn wrapped-protection
+      [ctx args value]
+      (let [{:keys [scopes roles]}
+            (reduce
+              (fn [result definition]
+                (let [{:keys [scopes roles]} (selection/arguments definition)]
+                  (->
+                    result
+                    (update :scopes (fnil clojure.set/union #{}) (set scopes))
+                    (update :roles
+                            (fnil clojure.set/union #{})
+                            (map (fn [role] (if (= :euuid (id/provider-type))
+                                              (parse-uuid role)
+                                              role))
+                                 roles)))))
+              nil
+              protection)]
+        (if (and
+              (or (empty? scopes)
+                  (some access/scope-allowed? scopes))
+              (or (empty? roles)
+                  (access/roles-allowed? roles)))
+          (resolver ctx args value)
+          (r/resolve-as
+            nil
+            {:message "Access denied!"
+             :code :unauthorized}))))
+    resolver))
+
+;;; ============================================================================
 ;;; Initialization
 ;;; ============================================================================
 
@@ -347,9 +387,10 @@
   (log/info "Initializing Lacinia GraphQL system...")
   (try
     (reload!)
-    ;; Register the :hook directive with wrap-hooks function from dataset
+    ;; Register directives
     (let [wrap-hooks (requiring-resolve 'synthigy.dataset/wrap-hooks)]
       (add-directive :hook wrap-hooks))
+    (add-directive :protect wrap-protect)
 
     ;; Load static GraphQL schema shards from resources
     (add-shard ::dataset-directives (slurp (io/resource "dataset_directives.graphql")))
@@ -375,7 +416,10 @@
             (start)
             (log/info "[GRAPHQL] GraphQL system started"))
    :stop (fn []
-           ;; Runtime: Stop model listener
+           ;; Runtime: Stop model listener, clear compiled schema
            (log/info "[GRAPHQL] Stopping GraphQL system...")
            (stop-model-listener!)
+           (dosync
+             (ref-set compiled nil)
+             (ref-set state nil))
            (log/info "[GRAPHQL] GraphQL system stopped"))})

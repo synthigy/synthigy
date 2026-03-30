@@ -43,7 +43,7 @@
 
   See individual handler functions for details."
   (:require
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.tools.logging :as log]
     [environ.core :refer [env]]

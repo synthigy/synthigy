@@ -28,7 +28,7 @@
     ;; Stop server
     (server/stop)"
   (:require
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     clojure.set
     [clojure.string :as str]
     [clojure.tools.logging :as log]
@@ -83,7 +83,7 @@
             :as request} (:request ctx)]
        (if (and body content-type (str/starts-with? content-type "application/json"))
          (try
-           (let [json-params (json/read-str (slurp body) :key-fn keyword)]
+           (let [json-params (json/read-str (slurp body))]
              (assoc ctx :request
                     (update request :params merge json-params)))
            (catch Exception e

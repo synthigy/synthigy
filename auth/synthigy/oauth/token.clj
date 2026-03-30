@@ -4,7 +4,7 @@
    [buddy.hashers :as hashers]
    [buddy.sign.util :refer [to-timestamp]]
    [camel-snake-kebab.core :as csk]
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    clojure.java.io
    clojure.pprint
    [clojure.string :as str]

@@ -11,7 +11,7 @@
   (:require
    [clojure.test :refer [deftest testing is use-fixtures]]
    [clojure.string :as str]
-   [clojure.data.json :as json]
+   [synthigy.json :as json]
    [buddy.hashers :as hashers]
    [patcho.lifecycle :as lifecycle]
    [synthigy.oauth.handlers :as handlers]
@@ -57,7 +57,7 @@
 
 (defn parse-json-body [response]
   (when-let [body (:body response)]
-    (json/read-str body :key-fn keyword)))
+    (json/read-str body)))
 
 (defn parse-location-params [location]
   (when location
@@ -911,7 +911,7 @@
               ;; Add padding if needed
               padded (str payload-b64 (apply str (repeat (mod (- 4 (mod (count payload-b64) 4)) 4) "=")))
               payload-json (String. (.decode (java.util.Base64/getUrlDecoder) padded))
-              payload (json/read-str payload-json :key-fn keyword)
+              payload (json/read-str payload-json)
               _ (println "  acr:" (:acr payload))
               _ (println "  amr:" (:amr payload))]
 

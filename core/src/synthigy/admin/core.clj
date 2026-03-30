@@ -9,7 +9,7 @@
   - Health checks
   - Graceful shutdown"
   (:require
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.tools.logging :as log]
     [patcho.lifecycle :as lifecycle]
@@ -70,7 +70,7 @@
   [request]
   (try
     (let [body (when-let [b (:body request)]
-                 (json/read-str (slurp b) :key-fn keyword))
+                 (json/read-str (slurp b)))
           master (:master body)]
       (if-not master
         (error-response "Missing 'master' field in request body")
@@ -89,7 +89,7 @@
   [request]
   (try
     (let [body (when-let [b (:body request)]
-                 (json/read-str (slurp b) :key-fn keyword))
+                 (json/read-str (slurp b)))
           share (:share body)]
       (if-not share
         (error-response "Missing 'share' field in request body")
@@ -112,7 +112,7 @@
       (throw (ex-info "IAM not started" {:type :service-not-started})))
 
     (let [body (when-let [b (:body request)]
-                 (json/read-str (slurp b) :key-fn keyword))
+                 (json/read-str (slurp b)))
           {:keys [username password]} body]
       (if (or (str/blank? username) (str/blank? password))
         (error-response "Missing 'username' or 'password' in request body")
@@ -231,7 +231,7 @@
   [request]
   (try
     (let [body (when-let [b (:body request)]
-                 (json/read-str (slurp b) :key-fn keyword))
+                 (json/read-str (slurp b)))
           {:keys [encryption superuser]} body
           master-key (get encryption :master_key)
           shares (get encryption :shares)

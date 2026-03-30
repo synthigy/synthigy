@@ -1,6 +1,6 @@
 (ns synthigy.oauth.authorization-code
   (:require
-    [clojure.data.json :as json]
+    [synthigy.json :as json]
     clojure.java.io
     clojure.pprint
     [clojure.tools.logging :as log]

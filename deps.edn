@@ -12,9 +12,7 @@
   com.cognitect/transit-clj {:mvn/version "1.0.333"}
   org.clojure/tools.logging {:mvn/version "1.3.0"}
 
-
-
-  ;; Auth/Crypto
+;; Auth/Crypto
   buddy/buddy-sign {:mvn/version "3.6.1-359"}
   buddy/buddy-core {:mvn/version "1.12.0-430"}
   buddy/buddy-hashers {:mvn/version "2.0.167"}
@@ -25,9 +23,10 @@
   dev.gersak/patcho {:local/root "patcho"}
   ; dev.gersak/patcho {:mvn/version "0.4.2"}
   camel-snake-kebab/camel-snake-kebab {:mvn/version "0.4.3"}
+  com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
+  babashka/fs {:mvn/version "0.5.22"}
 
-
-  ;; Configuration
+;; Configuration
   environ/environ {:mvn/version "1.2.0"}
 
   ;; Logging
@@ -49,14 +48,12 @@
   {:extra-paths ["postgres/src"]
    :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}
                 ;; Database (shared JDBC infrastructure - drivers are backend-specific)
-                com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
                 com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
 
   :sqlite
   {:extra-paths ["sqlite/src"]
    :extra-deps {org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
                 ;; Database (shared JDBC infrastructure - drivers are backend-specific)
-                com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
                 com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
 
   ;; Stub for compilation without a real database backend
@@ -76,24 +73,21 @@
                 io.pedestal/pedestal.jetty {:mvn/version "0.7.0"}
                 com.github.gersak/lacinia-pedestal {:mvn/version "1.3.1"}
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}
-                babashka/fs {:mvn/version "0.5.22"}}}
+                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}}}
 
   :httpkit
   {:extra-paths ["httpkit/src"]
    :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}
                 ring/ring-core {:mvn/version "1.12.2"}
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}
-                babashka/fs {:mvn/version "0.5.22"}}}
+                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}}}
 
   :undertow
   {:extra-paths ["undertow/src"]
    :extra-deps {luminus/ring-undertow-adapter {:mvn/version "1.3.1"}
                 ring/ring-core {:mvn/version "1.12.2"}
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}
-                babashka/fs {:mvn/version "0.5.22"}}}
+                org.clojars.pntblnk/clj-ldap {:mvn/version "0.0.17"}}}
 
   ;; =========================================================================
   ;; Development & Testing

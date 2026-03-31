@@ -56,6 +56,7 @@
     [synthigy.server.auth :as auth]
     [synthigy.server.data :as data]
     [synthigy.server.spa :as spa]
+    [synthigy.server.subscription :as subscription]
     [synthigy.ws :as ws])
   (:import
     [jakarta.websocket Session]))
@@ -168,7 +169,17 @@
     ;; Data API (direct dataset operations, service-to-service)
     ["/data" :post [coerce-body
                     (ring-handler->pedestal-interceptor data/handler ::data-api)]
-     :route-name ::data-api]})
+     :route-name ::data-api]
+
+    ;; Data Subscriptions
+    ["/data/subscription/set" :post [coerce-body
+                                     (ring-handler->pedestal-interceptor subscription/set-handler ::subscription-set)]
+     :route-name ::subscription-set]
+    ["/data/subscription/status" :get [(ring-handler->pedestal-interceptor subscription/status-handler ::subscription-status)]
+     :route-name ::subscription-status]
+    ["/data/subscription/remove" :post [coerce-body
+                                        (ring-handler->pedestal-interceptor subscription/remove-handler ::subscription-remove)]
+     :route-name ::subscription-remove]})
 
 (def oauth-routes
   "OAuth 2.0 and OpenID Connect endpoint routes.

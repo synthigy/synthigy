@@ -26,6 +26,7 @@
    (server/stop)
    ```"
   (:require
+    [clojure.core.async :as async]
     [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.tools.logging :as log]
@@ -33,6 +34,7 @@
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
     [ring.adapter.undertow :refer [run-undertow]]
+    ring.adapter.undertow.response
     [ring.middleware.keyword-params :refer [wrap-keyword-params]]
     [ring.middleware.params :refer [wrap-params]]
     [ring.util.response :as response]
@@ -51,6 +53,7 @@
     [synthigy.server.auth :as auth]
     [synthigy.server.data :as data]
     [synthigy.server.spa :as spa]
+    [synthigy.server.subscription :as subscription]
     [synthigy.ws :as ws]))
 
 ;;; ============================================================================
@@ -137,6 +140,72 @@
       (handler request))))
 
 ;;; ============================================================================
+;;; SSE Handler
+;;; ============================================================================
+
+(defrecord SSEBody [identity-key stream-chan])
+
+(extend-protocol ring.adapter.undertow.response/RespondBody
+  SSEBody
+  (respond [{:keys [identity-key stream-chan]} ^io.undertow.server.HttpServerExchange exchange]
+    (if (.isInIoThread exchange)
+      (.dispatch exchange ^Runnable
+        (^:once fn* [] (ring.adapter.undertow.response/respond
+                         (->SSEBody identity-key stream-chan) exchange)))
+      (do
+        (.startBlocking exchange)
+        (let [out (.getOutputStream exchange)]
+          (.flush out)
+          (loop []
+            (let [[val port] (async/<!! (async/go
+                                          (async/alts!
+                                            [stream-chan
+                                             (async/timeout 20000)])))]
+              (cond
+                (and (nil? val) (= port stream-chan))
+                (do (subscription/destroy-event-stream identity-key stream-chan)
+                    (try (.endExchange exchange) (catch Exception _)))
+
+                (not= port stream-chan)
+                (if (try
+                      (.write out (.getBytes ^String subscription/keepalive-msg "UTF-8"))
+                      (.flush out)
+                      true
+                      (catch Exception _
+                        (subscription/destroy-event-stream identity-key stream-chan)
+                        false))
+                  (recur)
+                  (try (.endExchange exchange) (catch Exception _)))
+
+                :else
+                (if (try
+                      (.write out (.getBytes ^String (subscription/format-sse val) "UTF-8"))
+                      (.flush out)
+                      true
+                      (catch Exception _
+                        (subscription/destroy-event-stream identity-key stream-chan)
+                        false))
+                  (recur)
+                  (try (.endExchange exchange) (catch Exception _)))))))))))
+
+(defn- make-sse-handler
+  "Creates a Ring handler for SSE event streaming."
+  []
+  (fn [request]
+    (let [iam (auth/authenticate-request request)]
+      (if-not iam
+        {:status 401
+         :headers {"Content-Type" "application/json"}
+         :body (json/write-str {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})}
+        (let [identity-key (subscription/request-identity iam)
+              stream-chan (subscription/create-event-stream identity-key)]
+          {:status 200
+           :headers {"Content-Type" "text/event-stream"
+                     "Cache-Control" "no-cache"
+                     "Connection" "keep-alive"}
+           :body (->SSEBody identity-key stream-chan)})))))
+
+;;; ============================================================================
 ;;; Default Routes
 ;;; ============================================================================
 
@@ -182,7 +251,13 @@
      ["/graphql-ws" :get websocket-handler]
 
      ;; Data API (direct dataset operations, service-to-service)
-     ["/data" :post data/handler]]))
+     ["/data" :post data/handler]
+
+     ;; Data Subscriptions
+     ["/data/subscription/set" :post subscription/set-handler]
+     ["/data/subscription/status" :get subscription/status-handler]
+     ["/data/subscription/remove" :post subscription/remove-handler]
+     ["/data/events" :get (make-sse-handler)]]))
 
 ;;; ============================================================================
 ;;; Middleware Stack

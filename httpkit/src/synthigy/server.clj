@@ -43,6 +43,7 @@
 
   See individual handler functions for details."
   (:require
+    [clojure.core.async :as async]
     [synthigy.json :as json]
     [clojure.string :as str]
     [clojure.tools.logging :as log]
@@ -68,6 +69,7 @@
     [synthigy.server.auth :as auth]
     [synthigy.server.data :as data]
     [synthigy.server.spa :as spa]
+    [synthigy.server.subscription :as subscription]
     [synthigy.ws :as ws]))
 
 ;;; ============================================================================
@@ -98,7 +100,7 @@
          ;; Context function that adds IAM data from pre-authenticated request
          context-fn (fn [request]
                       (auth/assoc-iam {} (::auth/iam request)))
-         base-handler (gql/graphql-handler
+         base-handler (gql/handler
                         schema-fn
                         {:cache cache
                          :tracing-header tracing-header
@@ -147,6 +149,60 @@
   (fn [request]
     (when-let [handler (match-route request routes)]
       (handler request))))
+
+;;; ============================================================================
+;;; SSE Handler
+;;; ============================================================================
+
+(defn- make-sse-handler
+  "Creates a Ring handler for SSE event streaming via http-kit.
+   Authenticates, creates an event stream, and streams events to the client."
+  []
+  (fn [request]
+    (let [iam (auth/authenticate-request request)]
+      (if-not iam
+        {:status 401
+         :headers {"Content-Type" "application/json"}
+         :body (json/write-str {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})}
+        (let [identity-key (subscription/request-identity iam)
+              stream-chan (subscription/create-event-stream identity-key)]
+          (httpkit/as-channel request
+            {:on-open
+             (fn [ch]
+               (log/debugf "[SSE] Client connected: %s" identity-key)
+               ;; Send SSE headers via initial response
+               (httpkit/send! ch
+                 {:status 200
+                  :headers {"Content-Type" "text/event-stream"
+                            "Cache-Control" "no-cache"
+                            "Connection" "keep-alive"}}
+                 false)
+               ;; Start sending events (non-blocking, runs on async thread pool)
+               (async/go-loop []
+                 (when (httpkit/open? ch)
+                   (let [[val port] (async/alts!
+                                      [stream-chan
+                                       (async/timeout 20000)])]
+                     (cond
+                       ;; Stream channel closed
+                       (and (nil? val) (= port stream-chan))
+                       (when (httpkit/open? ch)
+                         (httpkit/close ch))
+
+                       ;; Timeout - send keepalive
+                       (not= port stream-chan)
+                       (do (httpkit/send! ch subscription/keepalive-msg false)
+                           (recur))
+
+                       ;; Event received
+                       :else
+                       (do (httpkit/send! ch (subscription/format-sse val) false)
+                           (recur)))))))
+
+             :on-close
+             (fn [_ch _status]
+               (log/debugf "[SSE] Client disconnected: %s" identity-key)
+               (subscription/destroy-event-stream identity-key stream-chan))}))))))
 
 ;;; ============================================================================
 ;;; Default Routes
@@ -204,7 +260,13 @@
      ["/graphql" :post graphql-handler]
 
      ;; Data API (direct dataset operations, service-to-service)
-     ["/data" :post data/handler]]))
+     ["/data" :post data/handler]
+
+     ;; Data Subscriptions
+     ["/data/subscription/set" :post subscription/set-handler]
+     ["/data/subscription/status" :get subscription/status-handler]
+     ["/data/subscription/remove" :post subscription/remove-handler]
+     ["/data/events" :get (make-sse-handler)]]))
 
 ;;; ============================================================================
 ;;; Middleware Stack

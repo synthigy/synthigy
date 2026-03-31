@@ -29,7 +29,7 @@
    [next.jdbc :as jdbc]
    [nano-id.core :refer [nano-id]]
    [synthigy.dataset
-    :refer [deployed-relation deployed-entity]]
+    :refer [deployed-relation deployed-entity deployed-model]]
    [synthigy.dataset.access :as access]
    [synthigy.dataset.core :as core]
    [synthigy.dataset.encryption :refer [decrypt-data]]
@@ -70,12 +70,37 @@
 
 (defonce ^:private _deployed-schema (atom nil))
 (defonce ^:private _entity-index (atom nil))
+(defonce ^:private _relation-index (atom nil))
 (defonce ^:private _template-cache
   (atom (cache/ttl-cache-factory {} :ttl (* 30 60 1000))))
 
+(defn- normalize-entity-name
+  "Normalize entity name for index lookup: camelCase → snake_case, lowercase."
+  [name]
+  (-> name
+      (str/replace #"([a-z])([A-Z])" "$1_$2")
+      str/lower-case
+      (str/replace #"[\s]+" "_")))
+
+(defn- build-relation-index
+  "Build reverse index {relation-uuid -> {:entity entity-name :label to-label}}
+  from the deployed model. Returns nil if no model is available."
+  []
+  (when-let [model (deployed-model)]
+    (into {}
+          (for [entity (core/get-entities model)
+                :let [entity-name (:name entity)]
+                :when entity-name
+                relation (core/focus-entity-relations model entity)
+                :let [relation-id (id/extract relation)
+                      label (:to-label relation)]
+                :when (and relation-id label)]
+            [relation-id {:entity (normalize-entity-name entity-name)
+                          :label (normalize-entity-name label)}]))))
+
 (defn deploy-schema
   "Caches the runtime schema (from model->schema) for fast access.
-  Also rebuilds the entity name index.
+  Also rebuilds the entity name index and relation reverse index.
 
   This should be called when a new model is deployed to avoid
   regenerating the schema on every query."
@@ -86,11 +111,8 @@
           (into {}
                 (for [[id {:keys [name]}] schema
                       :when name]
-                  [(-> name
-                       (str/replace #"([a-z])([A-Z])" "$1_$2")
-                       str/lower-case
-                       (str/replace #"[\s]+" "_"))
-                   id]))))
+                  [(normalize-entity-name name) id])))
+  (reset! _relation-index (build-relation-index)))
 
 (defn deployed-schema
   "Returns the currently deployed runtime schema.
@@ -127,13 +149,36 @@
 
    Returns entity ID or throws if not found."
   [entity-name]
-  (let [normalized (-> entity-name
-                       (str/replace #"([a-z])([A-Z])" "$1_$2")
-                       str/lower-case
-                       (str/replace #"[\s]+" "_"))]
+  (let [normalized (normalize-entity-name entity-name)]
     (or (get @_entity-index normalized)
         (throw (ex-info (str "Unknown entity: " entity-name)
                         {:code "UNKNOWN_ENTITY" :entity entity-name})))))
+
+(defn relation-index
+  "Returns {relation-uuid -> {:entity name :label label}} reverse index.
+   Built automatically when schema is deployed."
+  []
+  @_relation-index)
+
+(defn resolve-relation
+  "Resolve entity name + relation label to relation UUID.
+
+   Returns relation UUID or throws if not found."
+  [entity-name label]
+  (let [entity-uuid (resolve-entity entity-name)
+        model (deployed-model)
+        entity (core/get-entity model entity-uuid)
+        relations (core/focus-entity-relations model entity)
+        normalized-label (normalize-entity-name label)]
+    (or (some (fn [rel]
+                (when (= normalized-label
+                         (normalize-entity-name (or (:to-label rel) "")))
+                  (id/extract rel)))
+              relations)
+        (throw (ex-info (str "Unknown relation: " entity-name "." label)
+                        {:code "UNKNOWN_RELATION"
+                         :entity entity-name
+                         :relation label})))))
 
 (defn deployed-schema-entity
   "Gets a specific entity from the deployed schema by UUID.

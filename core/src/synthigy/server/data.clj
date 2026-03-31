@@ -114,7 +114,7 @@
 ;;; Request Parsing
 ;;; ============================================================================
 
-(defn- parse-json-body
+(defn parse-json-body
   "Parse JSON request body. Returns parsed map or nil."
   [request]
   (try
@@ -129,12 +129,19 @@
       (log/debugf e "Failed to parse JSON body")
       nil)))
 
-(defn- json-response
+(defn json-response
   "Create a JSON Ring response."
   [status body]
   {:status status
    :headers {"Content-Type" "application/json"}
    :body (json/write-str body)})
+
+(defn parse-request-body
+  "Parse request body. Checks :params first (from wrap-params middleware),
+   then falls back to reading JSON from body."
+  [request]
+  (or (not-empty (dissoc (:params request) :datastar))
+      (parse-json-body request)))
 
 ;;; ============================================================================
 ;;; Acting-As Resolution
@@ -177,8 +184,7 @@
       (json-response 401 {:error {:message "Unauthorized"
                                   :code "UNAUTHORIZED"}})
       ;; Parse body
-      (let [body (or (not-empty (dissoc (:params request) :datastar))
-                     (parse-json-body request))]
+      (let [body (parse-request-body request)]
         (if-not body
           (json-response 400 {:error {:message "Invalid or missing JSON body"
                                       :code "INVALID_BODY"}})

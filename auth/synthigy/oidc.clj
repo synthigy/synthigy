@@ -119,7 +119,7 @@
     {:scope #{"openid"}
      :response_type #{"code"}
      :client_id "f019uj391r9231"
-     :redirect_uri "http://localhost:8080/synthigy"})
+     :redirect_uri "http://localhost:7887/synthigy"})
 
   (s/explain ::code-response (:response_type request))
   (s/conform ::flow (:response_type request))
@@ -128,7 +128,7 @@
    {:scope #{"openid"}
     :response_type #{"code"}
     :client_id "f019uj391r9231"
-    :redirect_uri "http://localhost:8080/synthigy"}))
+    :redirect_uri "http://localhost:7887/synthigy"}))
 
 (letfn [(config []
           {:issuer (domain+)

@@ -362,7 +362,7 @@
 ;;                                             (conj
 ;;                                              (remove empty? (str/split (env :synthigy-allowed-origins "") #"\s*,\s*"))
 ;;                                               ;; Below is compatibility
-;;                                              (env :synthigy-iam-root-url "http://localhost:8080"))})]
+;;                                              (env :synthigy-iam-root-url "http://localhost:7887"))})]
 ;;   (def routes
 ;;     #{["/oauth/login" :get [only-identity-provider redirect-to-login] :route-name ::short-login]
 ;;       ["/oauth/login/index.html" :post [only-identity-provider middleware/cookies login-interceptor login-page] :route-name ::handle-login]

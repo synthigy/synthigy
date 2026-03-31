@@ -2,7 +2,7 @@
   "Integration tests for OAuth 2.0 and OIDC endpoints.
 
    Tests the full OAuth authorization code flow.
-   The test fixture automatically starts/stops a server on localhost:8080."
+   The test fixture automatically starts/stops a server on localhost:7887."
   (:require
     [buddy.hashers :as hashers]
     [synthigy.json :as json]
@@ -21,7 +21,7 @@
 ;;; Configuration
 ;;; ============================================================================
 
-(def base-url "http://localhost:8080")
+(def base-url "http://localhost:7887")
 
 (def test-client
   {:id "oauth-test-client"
@@ -148,8 +148,8 @@
   (setup-oauth-test-data)
 
   ;; Start server for integration tests
-  (log/info "[OAuth Integration Test] Starting HTTP server on port 8080...")
-  (server/start {:port 8080
+  (log/info "[OAuth Integration Test] Starting HTTP server on port 7887...")
+  (server/start {:port 7887
                  :spa-root nil})
   (Thread/sleep 500)  ; Give server time to bind
 

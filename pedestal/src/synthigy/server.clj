@@ -16,7 +16,7 @@
   Usage:
     (require '[synthigy.server :as server])
 
-    ;; Start server with defaults (localhost:8080)
+    ;; Start server with defaults (localhost:7887)
     (server/start)
 
     ;; Start with custom config
@@ -427,7 +427,7 @@
   Args:
     opts - Optional configuration map:
            :host - Bind address (default: \"localhost\" or SYNTHIGY_HOST env var)
-           :port - Port number (default: 8080 or SYNTHIGY_PORT env var)
+           :port - Port number (default: 7887 or SYNTHIGY_PORT env var)
            :routes - Additional routes to merge (default: #{})
            :service-initializer - Function to transform service map (default: identity)
            :info - Server info map for /info endpoint (defaults to patcho version info)
@@ -456,7 +456,7 @@
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
   ([{:keys [host port routes service-initializer info spa-root]
      :or {host (or (env :synthigy-host) "localhost")
-          port (or (some-> (env :synthigy-port) Integer/parseInt) 8080)
+          port (or (some-> (env :synthigy-port) Integer/parseInt) 7887)
           routes #{}
           service-initializer identity
           spa-root (env :synthigy-serve)}}]
@@ -531,7 +531,7 @@
 
   HTTP server:
     SYNTHIGY_HOST - Bind address (default: 'localhost')
-    SYNTHIGY_PORT - Port number (default: 8080)
+    SYNTHIGY_PORT - Port number (default: 7887)
     SYNTHIGY_SERVE - SPA static files directory (optional)
 
   Application:

@@ -89,7 +89,7 @@
   []
   (let [origins-str (env :synthigy-allowed-origins "")
         origins (remove empty? (str/split origins-str #"\s*,\s*"))
-        iam-root (env :synthigy-iam-root-url "http://localhost:8080")]
+        iam-root (env :synthigy-iam-root-url "http://localhost:7887")]
     (set (conj origins iam-root))))
 
 (defn- wrap-identity-provider-cors
@@ -97,7 +97,7 @@
 
    Uses environment variables to configure allowed origins:
    - SYNTHIGY_ALLOWED_ORIGINS (comma-separated list)
-   - SYNTHIGY_IAM_ROOT_URL (fallback, defaults to http://localhost:8080)"
+   - SYNTHIGY_IAM_ROOT_URL (fallback, defaults to http://localhost:7887)"
   [handler]
   (ring/wrap-cors handler {:allowed-origins (allowed-origins)}))
 

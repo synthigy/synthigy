@@ -317,8 +317,6 @@
 (defn clients-match?
   "Validates client credentials against session client.
 
-  Supports both hashed secrets (bcrypt) and plaintext secrets (for backward compatibility).
-
   Args:
     session - Session ID to look up client
     params - Map with :client_id and :client_secret
@@ -341,13 +339,9 @@
       (nil? client_secret)
       false
 
-      ;; Validate secret - use hash check if secret is hashed
+      ;; Validate hashed secret
       :else
-      (if (re-matches #"^\$2[aby]\$.*|^bcrypt\+.*" known-secret)
-        ;; Hashed secret - use buddy hashers/check
-        (hashers/check client_secret known-secret)
-        ;; Plaintext secret - direct comparison (backward compatibility)
-        (= client_secret known-secret)))))
+      (hashers/check client_secret known-secret))))
 
 (def clients-doesnt-match? (complement clients-match?))
 

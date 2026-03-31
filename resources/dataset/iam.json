@@ -12,7 +12,7 @@
         "9ptmMENqHWqLFbyidsyF9Y": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "User Role",
-            "~:width": 138.71875,
+            "~:width": 138.3125,
             "~:original": null,
             "~:type": "STRONG",
             "~:xid": "9ptmMENqHWqLFbyidsyF9Y",
@@ -79,13 +79,13 @@
                 }
               }
             ],
-            "~:height": 138
+            "~:height": 137.59375
           }
         },
         "W2BXVawY82expJoFJAAANX": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "OAuth Scope",
-            "~:width": 138.71875,
+            "~:width": 138.3125,
             "~:original": null,
             "~:type": "WEAK",
             "~:xid": "W2BXVawY82expJoFJAAANX",
@@ -128,13 +128,13 @@
                 }
               }
             ],
-            "~:height": 106
+            "~:height": 105.59375
           }
         },
         "P5apo8kss7HEgtjdxXozwz": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "Person Info",
-            "~:width": 205.921875,
+            "~:width": 205.53125,
             "~:original": null,
             "~:type": "WEAK",
             "~:xid": "P5apo8kss7HEgtjdxXozwz",
@@ -372,13 +372,13 @@
                 }
               }
             ],
-            "~:height": 346
+            "~:height": 345.59375
           }
         },
         "5FdHiW1BHsJSPFNcT1Dsd5": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "Dataset Entity Attribute",
-            "~:width": 205.828125,
+            "~:width": 205.390625,
             "~:original": null,
             "~:type": "WEAK",
             "~:xid": "5FdHiW1BHsJSPFNcT1Dsd5",
@@ -574,13 +574,13 @@
                 }
               }
             ],
-            "~:height": 170
+            "~:height": 169.59375
           }
         },
         "KV4seQm27gTAUHCxWERS12": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "User Group",
-            "~:width": 138.71875,
+            "~:width": 138.3125,
             "~:original": null,
             "~:type": "STRONG",
             "~:xid": "KV4seQm27gTAUHCxWERS12",
@@ -680,13 +680,13 @@
                 }
               }
             ],
-            "~:height": 154
+            "~:height": 153.59375
           }
         },
         "46uqZWNio5gQF6ZNU1QQDp": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "Dataset Relation",
-            "~:width": 154.046875,
+            "~:width": 153.625,
             "~:original": null,
             "~:type": "WEAK",
             "~:xid": "46uqZWNio5gQF6ZNU1QQDp",
@@ -774,13 +774,13 @@
                 }
               }
             ],
-            "~:height": 122
+            "~:height": 121.59375
           }
         },
         "LrqagSaDABNV272TRWfx9G": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "Dataset Entity",
-            "~:width": 150.765625,
+            "~:width": 150.375,
             "~:original": null,
             "~:type": "STRONG",
             "~:xid": "LrqagSaDABNV272TRWfx9G",
@@ -823,13 +823,13 @@
                 }
               }
             ],
-            "~:height": 106
+            "~:height": 105.59375
           }
         },
         "WN5xU8Do5pcdhTkxXvEYwt": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "User",
-            "~:width": 127.859375,
+            "~:width": 127.453125,
             "~:original": null,
             "~:type": "STRONG",
             "~:xid": "WN5xU8Do5pcdhTkxXvEYwt",
@@ -966,13 +966,13 @@
                 }
               }
             ],
-            "~:height": 186
+            "~:height": 185.59375
           }
         },
         "3vhKU5p1QK9KPoyLoYkYW9": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "OAuth API",
-            "~:width": 150.765625,
+            "~:width": 150.375,
             "~:original": null,
             "~:type": "WEAK",
             "~:xid": "3vhKU5p1QK9KPoyLoYkYW9",
@@ -1051,13 +1051,13 @@
                 }
               }
             ],
-            "~:height": 154
+            "~:height": 153.59375
           }
         },
         "1ubBUFuDpcpqxY94TECvMw": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "OAuth Client",
-            "~:width": 138.71875,
+            "~:width": 138.3125,
             "~:original": null,
             "~:type": "STRONG",
             "~:xid": "1ubBUFuDpcpqxY94TECvMw",
@@ -1109,7 +1109,7 @@
                   "~:seq": 1,
                   "~:name": "Secret",
                   "~:constraint": "optional",
-                  "~:type": "string",
+                  "~:type": "hashed",
                   "~:configuration": null,
                   "~:active": true
                 }
@@ -1175,13 +1175,13 @@
                 }
               }
             ],
-            "~:height": 186
+            "~:height": 185.59375
           }
         },
         "7Skf8MvReE4XsEQXdtHXWn": {
           "~#synthigy.dataset.core.ERDEntity": {
             "~:name": "Project",
-            "~:width": 138.71875,
+            "~:width": 138.3125,
             "~:original": null,
             "~:type": "STRONG",
             "~:xid": "7Skf8MvReE4XsEQXdtHXWn",
@@ -1248,7 +1248,7 @@
                 }
               }
             ],
-            "~:height": 138
+            "~:height": 137.59375
           }
         }
       },
@@ -1501,7 +1501,7 @@
                 }
               }
             },
-            "~:from-label": null,
+            "~:from-label": "service user",
             "~:xid": "TYVoHhUnDf3KN2LmSp9yfP",
             "~:from": "WN5xU8Do5pcdhTkxXvEYwt",
             "~:active": null,
@@ -1786,3 +1786,4 @@
   "~:deployed": false,
   "~:xid": "Ws2yTEEMqmVVv9Mt8GYfKP"
 }
+

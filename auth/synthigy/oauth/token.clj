@@ -2,11 +2,11 @@
   (:require
    [buddy.core.codecs]
    [buddy.hashers :as hashers]
-   [buddy.sign.util :refer [to-timestamp]]
    [camel-snake-kebab.core :as csk]
    [synthigy.json :as json]
    clojure.java.io
    clojure.pprint
+   [clojure.set :as set]
    [clojure.string :as str]
    [clojure.tools.logging :as log]
    [nano-id.core :as nano-id]
@@ -23,8 +23,7 @@
             refresh-token-expiry
             process-scope
             defscope
-            sign-token]]
-   [timing.core :as timing]))
+            sign-token]]))
 
 (defonce ^:dynamic *tokens* (atom nil))
 
@@ -192,6 +191,57 @@
 (defmulti grant-token (fn [{:keys [grant_type]}] grant_type))
 
 (defmethod grant-token :default [_] unsupported)
+
+;; =============================================================================
+;; Client Credentials Token Generation
+;; =============================================================================
+
+(defn resolve-client-api-scopes
+  "Given a client ID and audience, resolve the API's scopes.
+   Returns nil if the client is not linked to an API with that audience.
+   Returns the set of scope names if found."
+  [client-id audience]
+  (let [{[api] :apis} (dataset/get-entity
+                       :iam/app
+                       {:id client-id}
+                       {:apis [{:selections
+                                {:audience [{:args {:_eq audience}}]
+                                 :scopes [{:selections {:name nil}}]}}]})]
+    (when api
+      (set (map :name (:scopes api))))))
+
+(defn generate-client-token
+  "Generate token for client_credentials grant.
+   Stateless — no session, no refresh token.
+   Scopes are filtered by: role_scopes ∩ api_scopes ∩ requested_scopes."
+  [client service-user {:keys [audience scope client_id]}]
+  (let [user-scopes (access/roles-scopes (:roles service-user))
+        api-scopes (when audience
+                     (resolve-client-api-scopes client_id audience))
+        ;; Triple intersection
+        granted-scopes (cond-> user-scopes
+                         api-scopes (set/intersection api-scopes)
+                         (seq scope) (set/intersection scope))
+        access-exp (-> (System/currentTimeMillis)
+                       (quot 1000)
+                       (+ (access-token-expiry client)))
+        access-token {:aud audience
+                      :exp access-exp
+                      :iss (core/domain+)
+                      :sub (:name service-user)
+                      :iat (quot (System/currentTimeMillis) 1000)
+                      :jti (gen-token)
+                      :client_id client_id
+                      :scope (str/join " " granted-scopes)}
+        signed (sign-token nil :access_token access-token)]
+    (iam/publish
+     :oauth.grant/tokens
+     {:tokens {:access_token signed}
+      :session nil})
+    {:access_token signed
+     :token_type "Bearer"
+     :scope (str/join " " granted-scopes)
+     :expires_in (access-token-expiry client)}))
 
 ; (defn- issued-at? [token] (:at (meta token)))
 
@@ -370,34 +420,46 @@
           client)))))
 
 (defmethod grant-token "client_credentials"
-  [{:keys [client_id client_secret scope]
+  [{:keys [client_id client_secret audience]
     :as request}]
   (log/debugf "[%s] Processing client credentials grant request" client_id)
   (if-let [client (validate-client-credentials request)]
-    (let [;; Process the requested scope
-          processed-scope (or scope "")
-
-          ;; Service user has the same name as the client id
-          ;; This is set as sub claim in the JWT for identity resolution
-          token-request (assoc request
-                          :scope processed-scope
-                          :sub (:id client))]
-
-      (try
-        (let [tokens (generate client nil token-request)
-              response (json/write-str tokens)]
-          (log/debugf "[%s] Client credentials tokens generated successfully" client_id)
-          {:status 200
-           :headers {"Content-Type" "application/json;charset=UTF-8"
-                     "Pragma" "no-cache"
-                     "Cache-Control" "no-store"}
-           :body response})
-        (catch Exception e
-          (log/errorf e "[%s] Error generating tokens for client credentials" client_id)
+    (let [service-user (iam/get-user-details (:id client))]
+      (cond
+        ;; Service user must exist
+        (nil? service-user)
+        (do
+          (log/warnf "[%s] Service user not found for client" client_id)
           (token-error
-           500
-           "server_error"
-           "An error occurred while generating tokens"))))
+           401
+           "invalid_client"
+           "Service user not configured for this client"))
+
+        ;; If audience specified, client must be linked to that API
+        (and audience (nil? (resolve-client-api-scopes client_id audience)))
+        (do
+          (log/warnf "[%s] Client not authorized for audience: %s" client_id audience)
+          (token-error
+           403
+           "invalid_target"
+           "Client is not authorized for the requested audience"))
+
+        :else
+        (try
+          (let [tokens (generate-client-token client service-user request)
+                response (json/write-str tokens)]
+            (log/debugf "[%s] Client credentials tokens generated successfully" client_id)
+            {:status 200
+             :headers {"Content-Type" "application/json;charset=UTF-8"
+                       "Pragma" "no-cache"
+                       "Cache-Control" "no-store"}
+             :body response})
+          (catch Exception e
+            (log/errorf e "[%s] Error generating tokens for client credentials" client_id)
+            (token-error
+             500
+             "server_error"
+             "An error occurred while generating tokens")))))
 
     ;; Client validation failed
     (do

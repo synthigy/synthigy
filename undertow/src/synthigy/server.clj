@@ -16,7 +16,7 @@
    ```clojure
    (require '[synthigy.server :as server])
 
-   ;; Start with defaults (localhost:8080)
+   ;; Start with defaults (localhost:7887)
    (server/start)
 
    ;; Custom port
@@ -290,7 +290,7 @@
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
   ([{:keys [host port spa-root info routes]
      :or {host (or (env :synthigy-host) "localhost")
-          port (or (some-> (env :synthigy-port) Integer/parseInt) 8080)
+          port (or (some-> (env :synthigy-port) Integer/parseInt) 7887)
           spa-root (env :synthigy-serve)}}]
 
    (stop)

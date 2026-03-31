@@ -4,20 +4,20 @@
   This namespace provides the public API for working with dataset models.
   It delegates to database-specific implementations via protocols."
   (:require
-    [clojure.core.async :as async]
-    [clojure.java.io :as io]
-    [clojure.tools.logging :as log]
-    [patcho.patch :as patch]
-    synthigy.dataset.access
-    [synthigy.dataset.core :as core]
-    [synthigy.dataset.id :as id :refer [defentity defrelation defdata]]
-    synthigy.dataset.operations
-    [synthigy.dataset.patch.model :as model]
-    synthigy.dataset.projection
-    [synthigy.db :as db :refer [*db*]]
-    [synthigy.env :as env]
-    [synthigy.transit :refer [<-transit]]
-    [version-clj.core :as version]))
+   [clojure.core.async :as async]
+   [clojure.java.io :as io]
+   [clojure.tools.logging :as log]
+   [patcho.patch :as patch]
+   synthigy.dataset.access
+   [synthigy.dataset.core :as core]
+   [synthigy.dataset.id :as id :refer [defentity defrelation defdata]]
+   synthigy.dataset.operations
+   [synthigy.dataset.patch.model :as model]
+   synthigy.dataset.projection
+   [synthigy.db :as db :refer [*db*]]
+   [synthigy.env :as env]
+   [synthigy.transit :refer [<-transit]]
+   [version-clj.core :as version]))
 
 ;; ============================================================================
 ;; Dataset Meta-Entity Definitions
@@ -161,80 +161,79 @@
   [dataset-id]
   (let [version (patch/read-version patch/*version-store* :synthigy.dataset/model)]
     (->
-      (db/get-entity
-        *db*
-        :dataset/dataset
-        {(id/key) dataset-id}
-        {:xid nil
-         :euuid nil
-         :name nil
-         :versions [{:selections
-                     {:xid nil
-                      :euuid nil
-                      :name nil
-                      :model nil
-                      :modified_on nil
-                      :dataset [{:selections {:xid nil
-                                              :euuid nil
-                                              :name nil}}]}
-                     :args {:deployed {:_boolean :TRUE}
-                            :_order_by {(cond
-                                          (version/newer-or-equal? version "1.0.1") :deployed_on
-                                          (version/older? version "1.0.1") :modified_on) :desc}
-                            :_limit 1}}]})
-      :versions
-      first)))
-
+     (db/get-entity
+      *db*
+      :dataset/dataset
+      {(id/key) dataset-id}
+      {:xid nil
+       :euuid nil
+       :name nil
+       :versions [{:selections
+                   {:xid nil
+                    :euuid nil
+                    :name nil
+                    :model nil
+                    :modified_on nil
+                    :dataset [{:selections {:xid nil
+                                            :euuid nil
+                                            :name nil}}]}
+                   :args {:deployed {:_boolean :TRUE}
+                          :_order_by {(cond
+                                        (version/newer-or-equal? version "1.0.1") :deployed_on
+                                        (version/older? version "1.0.1") :modified_on) :desc}
+                          :_limit 1}}]})
+     :versions
+     first)))
 
 (comment
   (def dataset-id (id/data :dataset/id))
   ((juxt :modified_on :deployed_on :xid) (latest-deployed-version (id/data :dataset/id)))
   (search-entity
-    :dataset/dataset
-    nil
-    {(id/key) nil
-     :name nil
-     :versions [{:selections
-                 {(id/key) nil
-                  :name nil
-                  :modified_on nil
-                  :model nil}
-                 :args {:_order_by {:deployed_on :desc}
-                        :_limit 2}}]})
+   :dataset/dataset
+   nil
+   {(id/key) nil
+    :name nil
+    :versions [{:selections
+                {(id/key) nil
+                 :name nil
+                 :modified_on nil
+                 :model nil}
+                :args {:_order_by {:deployed_on :desc}
+                       :_limit 2}}]})
   (def version
     (get-entity
-      :dataset/version
-      {:euuid #uuid "d908a70f-a1fb-46bd-ac76-801bebe6ceed"}
+     :dataset/version
+     {:euuid #uuid "d908a70f-a1fb-46bd-ac76-801bebe6ceed"}
       ; {:xid "vjhvyB3WqchFr4CCn8rgcX"}
       ; {:xid "CcJHRJ7PPHXcobdGTYna1m"}
-      {:euuid nil
-       :name nil
-       :xid nil
-       :modified_on nil
-       :deployed_on nil
-       :dataset [{:selections {:euuid nil
-                               :xid nil
-                               :name nil}}]
-       :model nil}))
+     {:euuid nil
+      :name nil
+      :xid nil
+      :modified_on nil
+      :deployed_on nil
+      :dataset [{:selections {:euuid nil
+                              :xid nil
+                              :name nil}}]
+      :model nil}))
 
   (:model version)
 
   (spit "resources/dataset/dataset.json"
         (synthigy.transit/->transit
-          (->
-            (latest-deployed-version (id/data :dataset/id))
-            (assoc-in [:dataset :euuid] (id/data :dataset/id :euuid))
-            (assoc-in [:dataset :xid] (id/data :dataset/id :xid))
-            (assoc :euuid (id/data :dataset.model/version-1.0.3 :euuid))
-            (assoc :xid (id/data :dataset.model/version-1.0.3 :xid)))))
+         (->
+          (latest-deployed-version (id/data :dataset/id))
+          (assoc-in [:dataset :euuid] (id/data :dataset/id :euuid))
+          (assoc-in [:dataset :xid] (id/data :dataset/id :xid))
+          (assoc :euuid (id/data :dataset.model/version-1.0.3 :euuid))
+          (assoc :xid (id/data :dataset.model/version-1.0.3 :xid)))))
   (spit "resources/dataset/iam.json"
         (synthigy.transit/->transit
-          (->
-            (latest-deployed-version (id/data :iam/id))
-            (assoc-in [:dataset :euuid] (id/data :iam/id :euuid))
-            (assoc-in [:dataset :xid] (id/data :iam/id :xid))
-            (assoc :euuid (id/data :iam.model/version-0.80.0 :euuid))
-            (assoc :xid (id/data :iam.model/version-0.80.0 :xid))))))
+         (->
+          (latest-deployed-version (id/data :iam/id))
+          (assoc-in [:dataset :euuid] (id/data :iam/id :euuid))
+          (assoc-in [:dataset :xid] (id/data :iam/id :xid))
+          (assoc :euuid (id/data :iam.model/version-0.80.0 :euuid))
+          (assoc :xid (id/data :iam.model/version-0.80.0 :xid))))))
 
 (defn adapt-model-to-provider
   "Transform model to match current ID provider format.
@@ -272,8 +271,8 @@
               :xid (-> data
                        (assoc (id/key) (or xid (id/uuid->nanoid euuid))))
               :euuid (->
-                       data
-                       (assoc (id/key) (or euuid (id/nanoid->uuid xid))))))]
+                      data
+                      (assoc (id/key) (or euuid (id/nanoid->uuid xid))))))]
     (as-> (-> (io/resource path)
               slurp
               <-transit
@@ -288,19 +287,20 @@
   []
   (<-resource "dataset/dataset.json"))
 
-
 (comment
   (<-resource "dataset/dataset.json")
   (def new-dataset-model
     (synthigy.dataset.patch.model/transform-model
-      (:model (<-transit (slurp (io/resource "dataset/dataset.json"))))
-      :euuid
-      :xid))
+     (:model (<-transit (slurp (io/resource "dataset/dataset.json"))))
+     :euuid
+     :xid))
   (def new-dataset-model2 new-dataset-model)
   (= new-dataset-model)
 
   (binding [id/*provider* (id/->NanoIDProvider)]
     (<-resource "dataset/dataset.json"))
+  (binding [id/*provider* (id/->NanoIDProvider)]
+    (spit "resources/dataset/iam.json" (synthigy.transit/->transit (<-resource "dataset/iam.json"))))
   (binding [id/*provider* (id/->NanoIDProvider)]
     (spit "resources/dataset/dataset.json" (synthigy.transit/->transit (<-resource "dataset/dataset.json")))
     (spit "resources/dataset/iam.json" (synthigy.transit/->transit (<-resource "dataset/iam.json")))))
@@ -434,9 +434,9 @@
   []
   (let [delta-client (async/chan 1000)
         delta-publisher (async/pub
-                          delta-client
-                          (fn [{:keys [element]}]
-                            element))]
+                         delta-client
+                         (fn [{:keys [element]}]
+                           element))]
     (alter-var-root #'core/*delta-client* (constantly delta-client))
     (alter-var-root #'core/*delta-publisher* (constantly delta-publisher))))
 
@@ -456,27 +456,27 @@
   [hooks resolver]
   (if (not-empty hooks)
     (let [hooks (keep
-                  (fn [definition]
-                    (let [{resolver :fn
-                           :as hook} ((requiring-resolve 'com.walmartlabs.lacinia.selection/arguments) definition)]
-                      (if-some [resolved (try
-                                           (resolve (symbol resolver))
-                                           (catch Throwable e
-                                             (log/errorf e "Couldn't resolve symbol %s" resolver)
-                                             nil))]
-                        (assoc hook :fn resolved)
-                        (assoc hook :fn (fn [ctx args v]
-                                          (log/errorf "Couldn't resolve '%s'" resolver)
-                                          [ctx args v])))))
-                  hooks)
+                 (fn [definition]
+                   (let [{resolver :fn
+                          :as hook} ((requiring-resolve 'com.walmartlabs.lacinia.selection/arguments) definition)]
+                     (if-some [resolved (try
+                                          (resolve (symbol resolver))
+                                          (catch Throwable e
+                                            (log/errorf e "Couldn't resolve symbol %s" resolver)
+                                            nil))]
+                       (assoc hook :fn resolved)
+                       (assoc hook :fn (fn [ctx args v]
+                                         (log/errorf "Couldn't resolve '%s'" resolver)
+                                         [ctx args v])))))
+                 hooks)
           ;;
           {:keys [pre post]}
           (group-by
-            #(cond
-               (neg? (:metric % 1)) :pre
-               (pos? (:metric % 1)) :post
-               :else :resolver)
-            hooks)
+           #(cond
+              (neg? (:metric % 1)) :pre
+              (pos? (:metric % 1)) :post
+              :else :resolver)
+           hooks)
           ;;
           steps
           (cond-> (or (some-> (not-empty (map :fn pre)) vec) [])
@@ -492,10 +492,10 @@
       (fn wrapped-hooks-resolver [ctx args value]
         (let [[_ _ v]
               (reduce
-                (fn [[ctx args value] f]
-                  (f ctx args value))
-                [ctx args value]
-                steps)]
+               (fn [[ctx args value] f]
+                 (f ctx args value))
+               [ctx args value]
+               steps)]
           v)))
     resolver))
 
@@ -521,16 +521,13 @@
 
    (init-delta-pipe)
 
-
-     ;; Reload model from database (after patches are applied)
+;; Reload model from database (after patches are applied)
    (core/reload *db*)
 
-
-     ;; Apply dataset feature patches (database transforms)
+;; Apply dataset feature patches (database transforms)
    (patch/level! :synthigy/dataset)
 
-
-     ;; Apply dataset model patches (meta-model deployment)
+;; Apply dataset model patches (meta-model deployment)
    (patch/level! :synthigy.dataset/model)
    nil))
 

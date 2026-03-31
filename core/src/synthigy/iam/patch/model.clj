@@ -64,3 +64,9 @@
                                "exports/role_iam_admin.json"
                                "exports/role_iam_user.json"]]
                    (import-role role))))
+
+;; Patch 0.80.1 - Client secret hashing (attribute type changed to Hash)
+(patch/upgrade :synthigy.iam/model
+               "0.80.1"
+               (log/info "[IAM Model] Deploying IAM dataset v0.80.1")
+               (dataset/deploy! (current-iam-model)))

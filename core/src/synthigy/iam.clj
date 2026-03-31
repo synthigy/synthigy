@@ -172,16 +172,16 @@
                    :or {id (gen/client-id)
                         type :public}}]
   (let [confidential? (#{:confidential "confidential"} type)
-        secret (or secret
-                   (when confidential?
-                     (gen/client-secret)))
+        raw-secret (or secret
+                       (when confidential?
+                         (gen/client-secret)))
         client (dataset/sync-entity
                  :iam/app
                  {:id id
                   :name name
                   :type type
                   :settings settings
-                  :secret secret
+                  :secret raw-secret
                   :active true})]
     ;; Auto-create linked service user for confidential clients
     (when confidential?
@@ -190,7 +190,8 @@
         {:name id
          :type :SERVICE
          :active true}))
-    client))
+    ;; Return raw secret — DB stores the hash (attribute type: Hash)
+    (assoc client :secret raw-secret)))
 
 (defn remove-client [client]
   (dataset/delete-entity :iam/app {(id/key) (id/extract client)}))

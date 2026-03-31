@@ -79,30 +79,36 @@
    maps to an active client. This is the server-side validation
    equivalent to session checking for stateless tokens.
 
+   Options:
+     :audience - Expected audience. If provided, token's aud claim must match.
+                 Nil means accept any audience (backward compatible).
+
    Args:
      token - Valid bearer token
 
    Returns:
      Map with :user, :roles, :groups, :claims or nil on failure"
-  [token]
+  [token & {:keys [audience]}]
   (try
     (when-let [claims (encryption/unsign-data token)]
-      (let [{:keys [sub client_id]
-             sub-uuid "sub:uuid"} claims
-            ;; Extract user identifier from claims
-            user-id (or (when sub-uuid
-                          (try
-                            (java.util.UUID/fromString sub-uuid)
-                            (catch Exception _ nil)))
-                        sub)]
-        ;; If client_id present, verify client is still active
-        (when (or (nil? client_id)
-                  (:active (oauth/get-client client_id)))
-          (when-let [user-ctx (and user-id (iam.context/get-user-context user-id))]
-            {:user (id/extract user-ctx)
-             :roles (:roles user-ctx)
-             :groups (:groups user-ctx)
-             :claims claims}))))
+      (let [{:keys [sub client_id aud]
+             sub-uuid "sub:uuid"} claims]
+        ;; Audience validation: if caller specifies expected audience, enforce it
+        (when (or (nil? audience)
+                  (= audience aud))
+          (let [user-id (or (when sub-uuid
+                              (try
+                                (java.util.UUID/fromString sub-uuid)
+                                (catch Exception _ nil)))
+                            sub)]
+            ;; If client_id present, verify client is still active
+            (when (or (nil? client_id)
+                      (:active (oauth/get-client client_id)))
+              (when-let [user-ctx (and user-id (iam.context/get-user-context user-id))]
+                {:user (id/extract user-ctx)
+                 :roles (:roles user-ctx)
+                 :groups (:groups user-ctx)
+                 :claims claims}))))))
     (catch Exception e
       (log/errorf e "Error extracting context from token")
       nil)))

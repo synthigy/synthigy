@@ -13,7 +13,7 @@
   ```clojure
   (require '[synthigy.server :as server])
 
-  ;; Start with defaults (localhost:8080)
+  ;; Start with defaults (localhost:7887)
   (server/start)
 
   ;; Custom port
@@ -363,7 +363,7 @@
   Args:
     opts - Configuration map:
            :host     - Bind address (default: localhost or SYNTHIGY_HOST)
-           :port     - Port number (default: 8080 or SYNTHIGY_PORT)
+           :port     - Port number (default: 7887 or SYNTHIGY_PORT)
            :spa-root - SPA static files directory (default: SYNTHIGY_SERVE)
            :info     - Server info for /info endpoint
            :routes   - Custom routes (replaces defaults)
@@ -373,7 +373,7 @@
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
   ([{:keys [host port spa-root info routes]
      :or {host (or (env :synthigy-host) "localhost")
-          port (or (some-> (env :synthigy-port) Integer/parseInt) 8080)
+          port (or (some-> (env :synthigy-port) Integer/parseInt) 7887)
           spa-root (env :synthigy-serve)}}]
 
    (stop)
@@ -399,7 +399,7 @@
 
   Configuration via environment variables:
     SYNTHIGY_HOST - Bind address (default: localhost)
-    SYNTHIGY_PORT - Port (default: 8080)
+    SYNTHIGY_PORT - Port (default: 7887)
     SYNTHIGY_SERVE - SPA static files directory"
   [& _]
   (try
@@ -434,5 +434,5 @@
 (comment
   (lifecycle/print-topology-layers)
   (lifecycle/system-report)
-  (start {:port 8080})
+  (start {:port 7887})
   (stop))

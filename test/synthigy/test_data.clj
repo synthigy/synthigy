@@ -438,6 +438,19 @@
 (defdata :test/oauth-creds-restricted
   :euuid #uuid "10000006-0000-0000-0000-000000000002" :xid "2ybRCEaGTauXvecdVWyEMP")
 
+;; Client Grant Test - Audience & Scope Filtering (client_grant_test.clj)
+(defdata :test/client-grant-api
+  :euuid #uuid "10000006-0000-0000-0000-000000000010" :xid "2ybRCEaGTauXvecdVWyEN1")
+
+(defdata :test/client-grant-role
+  :euuid #uuid "10000006-0000-0000-0000-000000000011" :xid "2ybRCEaGTauXvecdVWyEN2")
+
+(defdata :test/client-grant-client
+  :euuid #uuid "10000006-0000-0000-0000-000000000012" :xid "2ybRCEaGTauXvecdVWyEN3")
+
+(defdata :test/client-grant-service-user
+  :euuid #uuid "10000006-0000-0000-0000-000000000013" :xid "2ybRCEaGTauXvecdVWyEN4")
+
 ;; Authorization Code Flow Test (authorization_code_flow_test.clj)
 (defdata :test/oauth-authcode-client
   :euuid #uuid "10000007-0000-0000-0000-000000000001" :xid "2ybRCKQTk3XDX4ZTR4XdVz")

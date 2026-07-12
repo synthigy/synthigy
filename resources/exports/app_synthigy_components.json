@@ -1,0 +1,33 @@
+{
+  "description": "Public OAuth client for Synthigy distributable web components. Auth flow: redirect to login, redirect back to hosting page.",
+  "name": "Synthigy Components",
+  "settings": {
+    "logo-url": null,
+    "login-page": "",
+    "redirections": [
+      "http://localhost:8000",
+      "http://localhost:8080",
+      "http://localhost:3000"
+    ],
+    "token-expiry": {
+      "id": 600,
+      "access": 3600,
+      "refresh": 129600
+    },
+    "allowed-grants": [
+      "authorization_code",
+      "refresh_token"
+    ],
+    "logout-redirections": [
+      "http://localhost:8000",
+      "http://localhost:8080",
+      "http://localhost:3000"
+    ]
+  },
+  "type": "public",
+  "secret": null,
+  "xid": "HbLUvg2ZfN93o18U3pLvwd",
+  "active": true,
+  "id": "SYNTHIGYCOMPONENTSPUBLICCLIENTFOROAUTHFLOWPOPUPWIN",
+  "euuid": "b673949a-ef54-4565-92ee-1f0395b9cdcc"
+}

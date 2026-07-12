@@ -1,0 +1,169 @@
+{
+  "scopes": null,
+  "delete_entities": null,
+  "from_read_relations": [
+    {
+      "euuid": "466b811e-0ec5-4871-a24d-5b2990e6db3d",
+      "xid": "9hMX1U9GJWbrZLgarrfnaG"
+    },
+    {
+      "euuid": "1deeb442-5bd2-45e3-8ba0-5cbb1d8d5389",
+      "xid": "4hNy4RPb35p4bvatdLUPZA"
+    },
+    {
+      "euuid": "1c7b9658-aaae-409a-821a-f0bf31dd44d6",
+      "xid": "4Wzmf2NFacsaQo9vZi6MeD"
+    },
+    {
+      "euuid": "4f4cd8f9-e76a-45c0-8bcd-33b13a20e5fe",
+      "xid": "AnxP7t9R6WmFic7piVxmYH"
+    },
+    {
+      "euuid": "25c97af4-4ddb-48e1-9fe9-4778999de49c",
+      "xid": "5fdmrbTYYQUXahV7QT95wH"
+    },
+    {
+      "euuid": "9c8ebcd4-5b23-4619-8fe8-cd3f474e7f72",
+      "xid": "LLHBTRnWWb7DtGCmP8z4o3"
+    },
+    {
+      "euuid": "9aaef2f8-9db2-43c5-9821-3fad88ed5b33",
+      "xid": "L6reVgYPXaLm1yh7QqJb9L"
+    },
+    {
+      "euuid": "5658e47b-51a6-4795-a5b7-d546a8f01fe4",
+      "xid": "BfRjYxqSLbdbGXJNRAnyfH"
+    },
+    {
+      "euuid": "9fd134da-ac87-4f48-aa7a-d94ae6ba18be",
+      "xid": "LjdEukYQUMdPduAcspH1kH"
+    },
+    {
+      "euuid": "9c5c9386-0e04-4849-b414-f189a083e5e8",
+      "xid": "LJsnZCCdyroSMbNpANoPwu"
+    },
+    {
+      "euuid": "cf0ddc08-b399-4e40-a327-a912d12d26a7",
+      "xid": "SZwWXJ2zam1UfKgTeM3QfY"
+    },
+    {
+      "euuid": "7efa7244-ae20-4248-9792-7623d12cea9e",
+      "xid": "GgRvYSf6GQs5MvjNH9F2Gd"
+    },
+    {
+      "euuid": "ae3e0f7f-dd0a-468c-9885-caac4141a5c3",
+      "xid": "NWwVJG6ympZP99zoS2E7F8"
+    },
+    {
+      "euuid": "2c11b4c1-0033-4f4b-a113-bcf84d18d99a",
+      "xid": "6SdNuPzNU2mw77Gtmy6qX7"
+    }
+  ],
+  "to_read_relations": [
+    {
+      "euuid": "466b811e-0ec5-4871-a24d-5b2990e6db3d",
+      "xid": "9hMX1U9GJWbrZLgarrfnaG"
+    },
+    {
+      "euuid": "1deeb442-5bd2-45e3-8ba0-5cbb1d8d5389",
+      "xid": "4hNy4RPb35p4bvatdLUPZA"
+    },
+    {
+      "euuid": "1c7b9658-aaae-409a-821a-f0bf31dd44d6",
+      "xid": "4Wzmf2NFacsaQo9vZi6MeD"
+    },
+    {
+      "euuid": "4f4cd8f9-e76a-45c0-8bcd-33b13a20e5fe",
+      "xid": "AnxP7t9R6WmFic7piVxmYH"
+    },
+    {
+      "euuid": "25c97af4-4ddb-48e1-9fe9-4778999de49c",
+      "xid": "5fdmrbTYYQUXahV7QT95wH"
+    },
+    {
+      "euuid": "9c8ebcd4-5b23-4619-8fe8-cd3f474e7f72",
+      "xid": "LLHBTRnWWb7DtGCmP8z4o3"
+    },
+    {
+      "euuid": "9aaef2f8-9db2-43c5-9821-3fad88ed5b33",
+      "xid": "L6reVgYPXaLm1yh7QqJb9L"
+    },
+    {
+      "euuid": "5658e47b-51a6-4795-a5b7-d546a8f01fe4",
+      "xid": "BfRjYxqSLbdbGXJNRAnyfH"
+    },
+    {
+      "euuid": "9fd134da-ac87-4f48-aa7a-d94ae6ba18be",
+      "xid": "LjdEukYQUMdPduAcspH1kH"
+    },
+    {
+      "euuid": "d6f368d2-f8d4-4aff-a061-a40f6aa711e2",
+      "xid": "TYVoHhUnDf3KN2LmSp9yfP"
+    },
+    {
+      "euuid": "9c5c9386-0e04-4849-b414-f189a083e5e8",
+      "xid": "LJsnZCCdyroSMbNpANoPwu"
+    },
+    {
+      "euuid": "cf0ddc08-b399-4e40-a327-a912d12d26a7",
+      "xid": "SZwWXJ2zam1UfKgTeM3QfY"
+    },
+    {
+      "euuid": "7efa7244-ae20-4248-9792-7623d12cea9e",
+      "xid": "GgRvYSf6GQs5MvjNH9F2Gd"
+    },
+    {
+      "euuid": "ae3e0f7f-dd0a-468c-9885-caac4141a5c3",
+      "xid": "NWwVJG6ympZP99zoS2E7F8"
+    },
+    {
+      "euuid": "2c11b4c1-0033-4f4b-a113-bcf84d18d99a",
+      "xid": "6SdNuPzNU2mw77Gtmy6qX7"
+    }
+  ],
+  "name": "IAM User",
+  "owned_entities": null,
+  "from_write_relations": null,
+  "read_entities": [
+    {
+      "euuid": "6f525f5f-0504-498b-8b92-c353a0f9d141",
+      "xid": "EkJBUAxs1zQ5m2C1zXw4e4"
+    },
+    {
+      "euuid": "b2ccded3-9f8e-49aa-b610-8902ad7330e9",
+      "xid": "P5apo8kss7HEgtjdxXozwz"
+    },
+    {
+      "euuid": "edcab1db-ee6f-4744-bfea-447828893223",
+      "xid": "WN5xU8Do5pcdhTkxXvEYwt"
+    },
+    {
+      "euuid": "eb03406a-9b0c-4d61-8f96-34e8aa04f13c",
+      "xid": "W2BXVawY82expJoFJAAANX"
+    },
+    {
+      "euuid": "0757bd93-7abf-45b4-8437-2841283edcba",
+      "xid": "1ubBUFuDpcpqxY94TECvMw"
+    },
+    {
+      "euuid": "17b18b52-458e-4657-a827-eb1255de8f1e",
+      "xid": "3vhKU5p1QK9KPoyLoYkYW9"
+    },
+    {
+      "euuid": "95afb558-3d28-45e5-9fbf-a2625afc5675",
+      "xid": "KV4seQm27gTAUHCxWERS12"
+    },
+    {
+      "euuid": "4778f7b1-f946-4cb2-b356-b9cb336b4087",
+      "xid": "9ptmMENqHWqLFbyidsyF9Y"
+    }
+  ],
+  "to_write_relations": null,
+  "to_delete_relations": null,
+  "xid": "5GUzSCCLa1MrqwdtAVDebG",
+  "euuid": "228df5f6-86c7-4308-8a9e-4a578c5e4af7",
+  "avatar": null,
+  "write_entities": null,
+  "from_delete_relations": null
+}
+

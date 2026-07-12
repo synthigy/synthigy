@@ -1,0 +1,6 @@
+.cpcache
+.claude/
+.lsp/
+.clj-kondo/
+target/
+CLAUDE.md

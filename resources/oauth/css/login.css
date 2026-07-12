@@ -1,0 +1,136 @@
+/* Synthigy OAuth - Login */
+
+@import url("common.css");
+
+body {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+
+/* Main container */
+body > div:first-child {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 320px;
+}
+
+/* Logo row - full width, left aligned */
+body > div:first-child > div:first-child {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-bottom: 2rem;
+}
+
+body > div:first-child > div:first-child img {
+  height: 56px;
+}
+
+body > div:first-child > div:first-child .name {
+  margin-left: 0.75rem;
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: #333;
+}
+
+/* Form */
+form {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 0 40px;
+  gap: 0.75rem;
+}
+
+/* Input rows - underline spans full row */
+form .row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid #ddd;
+  transition: border-color 0.2s;
+}
+
+form .row:has(.error) {
+  border-bottom: none;
+}
+
+form .row.active {
+  border-bottom-color: #333;
+}
+
+form .row .ficon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  fill: #999;
+  transition: fill 0.2s;
+}
+
+form .row.active .ficon {
+  fill: #333;
+}
+
+form button {
+  margin-top: 20px;
+}
+
+/* Inputs */
+input {
+  flex: 1;
+  padding: 0.75rem 0;
+  font-size: 1rem;
+  font-weight: 500;
+  color: #333;
+  background: transparent;
+  border: none;
+}
+
+input:focus {
+  outline: none;
+}
+
+input::placeholder {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #bbb;
+}
+
+/* Error */
+span.error {
+  font-size: 0.8rem;
+  color: #d32f2f;
+}
+
+span.error:empty {
+  display: none;
+}
+
+/* Button */
+button {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 3rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: #666;
+  background: #e8e8e8;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+button:hover {
+  background: #ddd;
+}
+
+button h4 {
+  font-size: inherit;
+  font-weight: inherit;
+}

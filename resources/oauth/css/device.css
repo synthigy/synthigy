@@ -1,0 +1,115 @@
+/* Synthigy OAuth - Device Code Flow */
+
+@import url('common.css');
+
+body {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  background-color: #ededed;
+}
+
+.device-card {
+  padding: 2rem 1.75rem;
+  border-radius: 0.5rem;
+  max-width: 500px;
+}
+
+.device-card .inner {
+  padding: 2rem;
+  border-radius: 0.5rem;
+}
+
+.device-card .header {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 1rem 0;
+  user-select: none;
+}
+
+.device-card .logo {
+  width: 2.5rem;
+  height: 2.5rem;
+  margin-right: 1rem;
+}
+
+.device-card h1,
+.device-card button {
+  user-select: none;
+  color: #3a3c3f;
+}
+
+.device-card .description {
+  padding: 1rem 0;
+  text-align: center;
+  font-weight: 400;
+  font-size: 0.875rem;
+  color: #374151;
+  user-select: none;
+}
+
+/* Form */
+.device-form {
+  margin-block-end: 0;
+}
+
+.device-form .input-wrapper {
+  display: flex;
+  flex-grow: 1;
+  justify-content: center;
+  align-items: center;
+  padding-top: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.device-form .input-wrapper:focus-within {
+  border-bottom-color: #6b7280;
+}
+
+.device-form .input-wrapper input {
+  text-align: center;
+  font-size: 1rem;
+  padding: 0.5rem;
+  border: none;
+  background: transparent;
+}
+
+.device-form .input-wrapper input:focus {
+  outline: none;
+}
+
+/* Error message */
+.device-form .error {
+  display: flex;
+  align-items: center;
+  min-height: 4rem;
+  width: 100%;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #b91c1c;
+}
+
+/* Buttons */
+.device-form .actions {
+  display: flex;
+  flex-grow: 1;
+  justify-content: center;
+}
+
+.device-form .actions button {
+  margin: 1rem;
+  padding: 0.5rem;
+  min-width: 6rem;
+  min-height: 2rem;
+  font-weight: 600;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.device-form .actions button:hover {
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.3);
+}

@@ -1,0 +1,35 @@
+(ns synthigy.iam.util
+  (:require
+    [clojure.java.io :as io]
+    [synthigy.log :as log]
+    [synthigy.dataset :as dataset]
+    [synthigy.dataset.id :as id]
+    [synthigy.json :refer [<-json]]))
+
+(defn import-data
+  [path entity]
+  (let [{entity-name :name} (dataset/deployed-entity (id/entity entity))]
+    (when-some [data (<-json (slurp (io/resource path)) {:keyfn keyword})]
+      (log/info {:id ::importing-iam-data
+                 :data {:entity entity-name :name (:name data)}}
+                "Importing IAM data record")
+      (dataset/stack-entity entity data))))
+
+(defn import-role [path] (import-data path :iam/user-role))
+(defn import-api [path] (import-data path :iam/api))
+(defn import-app [path] (import-data path :iam/app))
+
+(comment
+  (dataset/stack-entity
+    :iam/app
+    (->
+      (<-json (slurp (io/resource "exports/app_synthigy_frontend.json")) {:keyfn keyword})
+      (update-in
+        [:settings :redirections] conj
+        "http://localhost:8000/synthigy/callback"
+        "http://localhost:8000/synthigy/silent-callback")
+      (update-in
+        [:settings :logout-redirections] conj
+        "http://localhost:8000/synthigy/"
+        "http://localhost:8000/synthigy")))
+  (import-role "roles/role_dataset_developer.json"))

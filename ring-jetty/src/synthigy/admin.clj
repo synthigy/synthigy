@@ -1,0 +1,134 @@
+(ns synthigy.admin
+  "ring-jetty (Jetty 12) admin service.
+
+  Provides localhost-only HTTP API for system administration.
+
+  Usage:
+    (start)       ; Start on random port
+    (start {:port 9000})
+    (stop)
+    (port)        ; Get current port
+
+  Environment Variables:
+    SYNTHIGY_ADMIN_PORT - Fixed port (default: random)"
+  (:require
+    [babashka.fs :as fs]
+    [environ.core :refer [env]]
+    [patcho.lifecycle :as lifecycle]
+    [ring.adapter.jetty :as jetty]
+    [synthigy.admin.core :as admin.core]
+    synthigy.db
+    [synthigy.env :as senv]
+    [synthigy.log :as log])
+  (:import
+    [java.net ServerSocket]))
+
+;;; ============================================================================
+;;; State
+;;; ============================================================================
+
+(defonce ^:private server (atom nil))
+(defonce ^:private port-atom (atom nil))
+
+;;; ============================================================================
+;;; Port File Management
+;;; ============================================================================
+
+(defn- write-port-file! [port]
+  (try
+    (fs/create-dirs (fs/parent senv/admin-port))
+    (spit senv/admin-port (str port))
+    (log/info {:id ::port-file-written :data {:action :written :subject :port-file :path senv/admin-port}}
+              "Port file written")
+    (catch Exception e
+      (log/error! {:id ::port-file-write-failed :data {:action :writing :subject :port-file}} e))))
+
+(defn- delete-port-file! []
+  (try
+    (when (fs/exists? senv/admin-port)
+      (fs/delete senv/admin-port)
+      (log/info {:id ::port-file-deleted :data {:action :deleted :subject :port-file}} "Port file deleted"))
+    (catch Exception e
+      (log/error! {:id ::port-file-delete-failed :data {:action :deleting :subject :port-file}} e))))
+
+(defn- find-free-port []
+  (with-open [socket (ServerSocket. 0)]
+    (.getLocalPort socket)))
+
+;;; ============================================================================
+;;; Lifecycle
+;;; ============================================================================
+
+(declare stop)
+
+(defn start
+  ([] (start {}))
+  ([{:keys [port]}]
+   (when @server
+     (log/warn {:id ::already-running :data {:action :starting :subject :admin-server}} "Already running, stopping first")
+     (stop))
+
+   (let [actual-port (or port
+                         (when-let [p (env :synthigy-admin-port)]
+                           (try (Integer/parseInt p) (catch Exception _ nil)))
+                         (find-free-port))]
+     (log/info {:id ::starting :data {:action :starting :subject :admin-server :host "127.0.0.1" :port actual-port}}
+               "Starting admin server")
+     (try
+       (reset! server (jetty/run-jetty admin.core/app
+                                       {:host "127.0.0.1"
+                                        :port actual-port
+                                        :join? false}))
+       (reset! port-atom actual-port)
+       (write-port-file! actual-port)
+       (log/info {:id ::ready
+                  :data {:url (format "http://127.0.0.1:%d/admin/info" actual-port)}}
+                 "Admin server ready")
+       (catch Exception e
+         (log/error! {:id ::start-failed} e)
+         (reset! server nil)
+         (reset! port-atom nil)
+         (throw e))))))
+
+(defn stop
+  []
+  (when-let [s @server]
+    (log/info {:id ::stopping :data {:action :stopping :subject :admin-server}} "Stopping...")
+    (.stop s)
+    (reset! server nil)
+    (reset! port-atom nil)
+    (delete-port-file!)
+    (log/info {:id ::stopped :data {:action :stopped :subject :admin}} "Stopped")))
+
+(defn port
+  []
+  @port-atom)
+
+;;; ============================================================================
+;;; Module Registration
+;;; ============================================================================
+
+(lifecycle/register-module!
+  :synthigy/admin
+  {:depends-on [:synthigy/iam :synthigy/log.config]
+   :doc "Admin UI + management routes"
+   :start (fn []
+            (log/info {:id ::lifecycle-starting :data {:action :starting}} "Starting admin service...")
+            (start)
+            (log/info {:id ::lifecycle-started :data {:action :started}} "Admin service started"))
+   :stop (fn []
+           (log/info {:id ::lifecycle-stopping :data {:action :stopping}} "Stopping admin service...")
+           (stop)
+           (log/info {:id ::lifecycle-stopped :data {:action :stopped}} "Admin service stopped"))})
+
+;;; ============================================================================
+;;; Main
+;;; ============================================================================
+
+(defn -main [& _]
+  (try
+    (start)
+    (log/info {:id ::server-running :data {:action :ready :subject :admin-server}} "Admin server running. Press Ctrl+C to stop.")
+    (catch Throwable ex
+      (log/error! {:id ::server-start-failed :data {:action :starting :subject :admin-server}} ex)
+      (System/exit 1))))

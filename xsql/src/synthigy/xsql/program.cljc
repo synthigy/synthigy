@@ -6,8 +6,8 @@
        @search top_movies            ; @<op> <name>   (name required)
        @description Top movies         ; optional; MULTILINE via indented
          since a given year.           ; continuation (ends at next flush-left line)
-       Movie                           ; root entity + rooted body
-         title
+       movie                           ; root entity + rooted body — snake_case,
+         title                         ; like every other XSQL identifier
          _args (release_year >= 2000)
 
    `@sql` is the exception: `@sql name` + optional @description, then a RAW SQL
@@ -360,6 +360,33 @@
             (update :from + (:body-offset cur))
             (update :to + (:body-offset cur))))
       {:from offset :to offset :options []})))
+
+(defn scope-at
+  "Persistent-panel counterpart to `complete` — see `complete.cljc/scope-at`
+   for the :args vs :scope distinction. Finds the operation containing
+   `:offset`, resolves scope in its isolated body, and threads back
+   `:op` (the declaration's own op string) plus `:body-offset`/`:body-end`
+   (the buffer span the body occupies — the caller needs this to bound
+   its own line edits to THIS declaration only; a same-named attribute
+   at the same indent could otherwise match in a different declaration
+   sharing the buffer)."
+  [{:keys [source offset schema] :or {offset 0}}]
+  (let [spans (op-spans (parse (or source "")) (or source ""))
+        cur   (or (some (fn [o] (when (and (>= offset (:decl-offset o))
+                                           (< offset (:end-offset o))) o))
+                        spans)
+                  (last spans))]
+    (if (and cur (not (:batch cur)) (not (:mutate cur)) (not (:sql? cur))
+             (:body-offset cur) (>= offset (:body-offset cur)))
+      (assoc (complete-impl/scope-at
+              {:source (:body cur)
+               :offset (- offset (:body-offset cur))
+               :schema schema
+               :root-entity nil})
+             :op (:op cur)
+             :body-offset (:body-offset cur)
+             :body-end (:end-offset cur))
+      {:mode :none})))
 
 (defn batch-member-ops
   "The compiled ops referenced by the `@batch` named `batch-name`, in member

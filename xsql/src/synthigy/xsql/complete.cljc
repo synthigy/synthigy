@@ -130,6 +130,13 @@
 (defn- line-start-indent [^String source pos]
   (current-line-indent-text source pos))
 
+(defn- line-start-offset
+  "Offset of the first character of the line containing `offset`."
+  [^String source offset]
+  (loop [s offset]
+    (if (and (pos? s) (not= "\n" (char-at source (dec s))))
+      (recur (dec s)) s)))
+
 (defn- current-word-range [^String source offset]
   (let [n (count source)
         start (loop [s offset]
@@ -695,6 +702,12 @@
    created_on desc` keeps working."
   #{"created_on" "modified_on" "created_by" "modified_by"})
 
+(def ^:dynamic *include-audit?*
+  "Bound true by the persistent scope PANEL (`scope-at`), which browses
+   the full runtime surface — audit columns included. The transient
+   autocomplete POPUP keeps its minimal what-you-modeled filter."
+  false)
+
 (def ^:private audit-relation-names
   "Same idea as audit-attr-names but for the FK relations the audit
    subsystem injects (`created_by` / `modified_by` → User). Hide them
@@ -703,19 +716,21 @@
   #{"created_by" "modified_by"})
 
 (defn- non-audit-attr-keys
-  "Sorted attribute keys for autocomplete, minus the audit-injected ones."
+  "Sorted attribute keys for autocomplete, minus the audit-injected ones
+   (unless *include-audit?* — the scope panel shows everything)."
   [entity-def]
   (->> (:attributes entity-def)
        keys
-       (remove audit-attr-names)
+       (remove (if *include-audit?* #{} audit-attr-names))
        sort))
 
 (defn- non-audit-relation-keys
-  "Sorted relation keys for autocomplete, minus the audit-injected ones."
+  "Sorted relation keys for autocomplete, minus the audit-injected ones
+   (unless *include-audit?* — the scope panel shows everything)."
   [entity-def]
   (->> (:relations entity-def)
        keys
-       (remove audit-relation-names)
+       (remove (if *include-audit?* #{} audit-relation-names))
        sort))
 
 (defn- numeric-attr-options
@@ -956,3 +971,166 @@
         options (op-complete-options op ctx options entity-def)
         {:keys [from to]} (current-word-range (or source "") offset)]
     {:from from :to to :options options}))
+
+;; ── Persistent scope panel (as opposed to token-position completion) ────
+;;
+;; `complete` resolves ONE token position — right for a popup, wrong for a
+;; panel that should stay stable while the cursor wanders around inside the
+;; same block. `scope-at` buckets the same `context-at` resolution into two
+;; kinds a persistent panel actually wants:
+;;   :args  — cursor is inside `(...)`, after a comparison operator, or a
+;;            keyword tail (is/not/like/in) — genuinely position-sensitive,
+;;            same options `complete` would offer here.
+;;   :scope — anywhere else in an entity/relation body — the FULL
+;;            attribute/relation set of whatever's in scope (the caller
+;;            renders a stable toggle-list from `:entity-def`, checked
+;;            against `:siblings`), not a position-narrowed list.
+;;   :root  — flush-left root-entity line — offer entity names.
+
+(def ^:private args-kinds
+  #{:value-suggestion :after-is :after-is-not :after-not :after-like
+    :after-in :arg-list-start :after-attr-in-pred :path-continuation
+    :agg-fn :order-dir})
+
+(defn scope-at
+  [{:keys [source offset schema root-entity]}]
+  (let [tree (parser/parse (or source ""))
+        root-entity (or (some-> (:root-entity tree) :text) root-entity)
+        [resolved ancestors] (innermost-with-ancestors tree offset)
+        ctx (context-at tree resolved ancestors source offset schema root-entity)
+        entity-stack (:entity-stack ctx)
+        current-entity (peek entity-stack)
+        ;; Indent for a NEW sibling at this scope. NOT derived from
+        ;; `(count entity-stack)` — context-at's indent-based fallback
+        ;; (the path that fires for a blank child line whose :block
+        ;; hasn't parsed into real AST content yet — the common case
+        ;; right after auto-descending into a relation) returns
+        ;; `:entity-stack [target]`, just the target ALONE, discarding
+        ;; the parent chain — so stack depth only reflects true nesting
+        ;; on the OTHER resolution path. The cursor's own physical line
+        ;; indent is reliable either way: read straight from the source,
+        ;; matching whatever's actually already indented there (by hand
+        ;; or by our own auto-descend).
+        indent (max 2 (current-line-indent-text source offset))
+        ;; Sitting on a relation's OWN header — before its :block has
+        ;; opened, or just parked on the declaration line — still means
+        ;; "I'm looking at this relation": resolve to ITS target instead
+        ;; of the parent's scope, so the panel offers its own
+        ;; attrs/relations without requiring the cursor to be a line
+        ;; deeper. Only overrides a plain "declare a sibling here"
+        ;; result (:block-start / :line-start-root); anything more
+        ;; specific (args, agg body, …) is left alone. This is additive
+        ;; to `scope-at` only — `context-at`/`entity-stack-from-ancestors`
+        ;; (shared with real autocomplete) are untouched.
+        ;; Only the relation's own HEADER LINE counts — a blank line
+        ;; inside its block also has the relation as an AST ancestor
+        ;; (blank lines stay in the block until non-blank content at
+        ;; lower indent appears), but scope there is decided by indent:
+        ;; dedenting a trailing blank line must move the panel OUT of
+        ;; the relation, not re-trigger this override.
+        header-rel (when (#{:block-start :line-start-root} (:kind ctx))
+                     (when-let [rel (enclosing-of-tag resolved ancestors :relation)]
+                       (when (= (line-start-offset source offset)
+                                (line-start-offset source (first (:span rel))))
+                         rel)))
+        header-target (when header-rel
+                        (let [rel-name (relation-name-of header-rel)
+                              rel-def (get-in current-entity [:relations rel-name])
+                              target (when rel-def (get-in schema [:entities (:target rel-def)]))]
+                          ;; Only a genuine override if context-at's OWN
+                          ;; resolution hasn't already descended into this
+                          ;; relation — its indent-heuristic can beat us to
+                          ;; it for a blank child line one level deeper.
+                          ;; Applying the override on top of that would
+                          ;; double-descend and compute one indent level
+                          ;; too many.
+                          (when (and target (not= target current-entity))
+                            target)))
+        ;; Same idea, one level up: sitting on the ROOT entity line once
+        ;; it's a complete, real schema entity means "I'm looking at
+        ;; this entity" — show its attrs/relations, not the entity
+        ;; picker. Only fires when `root-entity` resolves to a genuine
+        ;; schema match (mid-typing an unrecognized name still falls
+        ;; through to the entity list below, so it stays usable for
+        ;; picking/renaming the root).
+        root-target (when (and (= :root-entity-line (:kind ctx)) (seq root-entity))
+                      (get-in schema [:entities root-entity]))
+        ;; `ctx`'s own `:siblings` comes from `scope-parent-node`, which
+        ;; walks up to the nearest REAL `:block` ancestor. When the
+        ;; indent-heuristic fallback resolved us into a target whose OWN
+        ;; block hasn't parsed into real content yet (stack truncated to
+        ;; `[target]`, length 1, and that target isn't actually the root
+        ;; entity), the nearest real block is the PARENT's — so `:siblings`
+        ;; would silently attribute the parent's children to this scope.
+        ;; A same-named attribute one level up (e.g. both entities happen
+        ;; to have "name") would then show as already-used here when it
+        ;; isn't. Safer to report no siblings than wrong ones — an empty
+        ;; child scope is also exactly what our own auto-descend leaves
+        ;; behind, so this is the common case, not a rare corner.
+        indent-heuristic-only? (and (= 1 (count entity-stack))
+                                    (not= current-entity
+                                          (get-in schema [:entities root-entity])))
+        ;; When the cursor sits inside an enclosing relation's REAL parsed
+        ;; :block, that block's own statements are the authoritative
+        ;; sibling set — same source the header-target branch uses. The
+        ;; empty-siblings guard below exists for the indent-heuristic
+        ;; fallback (blank child line, no parsed block yet), but the
+        ;; indent path also wins for fully-parsed relation bodies —
+        ;; where wiping siblings made every present attribute show
+        ;; unchecked (and let duplicates in).
+        enclosing-rel-block (when-let [rel (enclosing-of-tag resolved ancestors :relation)]
+                              (when-let [block (ast/find-child rel :block)]
+                                (let [[from to] (:span block)
+                                      body-ind (block-body-indent block source)]
+                                  ;; Same cursor-column hint as
+                                  ;; entity-stack-from-ancestors: a blank
+                                  ;; line dedented BELOW the body indent
+                                  ;; is logically outside this block even
+                                  ;; though its span still contains it.
+                                  (when (and (>= offset from) (<= offset to)
+                                             (not (and body-ind
+                                                       (< (current-line-indent-text source offset)
+                                                          body-ind))))
+                                    block))))
+        safe-siblings (cond
+                        enclosing-rel-block (sibling-bare-names enclosing-rel-block offset)
+                        indent-heuristic-only? {:attrs #{} :rels #{}}
+                        :else (:siblings ctx))]
+    (cond
+      header-target
+      {:mode :scope
+       :entity-def header-target
+       :siblings (if-let [block (ast/find-child header-rel :block)]
+                   (sibling-bare-names block offset)
+                   {:attrs #{} :rels #{}})
+       :indent (+ 2 (current-line-indent-text source offset))}
+
+      root-target
+      {:mode :scope
+       :entity-def root-target
+       ;; The query node's own :children ARE the body statements (no
+       ;; wrapping :block — see parser.cljc's Query production), so it
+       ;; doubles as its own scope-parent for sibling lookup.
+       :siblings (sibling-bare-names tree offset)
+       :indent indent}
+
+      :else
+      (case (:kind ctx)
+        :root-entity-line
+        {:mode :root :entities (vec (sort (keys (:entities schema))))}
+
+        :count-block-body
+        {:mode :scope :entity-def current-entity :siblings safe-siblings
+         :relations-only? true :indent indent}
+
+        :agg-block-body
+        {:mode :scope :entity-def current-entity :siblings safe-siblings
+         :relations-only? true :indent indent}
+
+        :agg-attr-name
+        {:mode :scope :entity-def current-entity :numeric-only? true :indent indent}
+
+        (if (contains? args-kinds (:kind ctx))
+          {:mode :args :options (binding [*include-audit?* true]
+                                  (vec (options-for-context ctx schema root-entity)))}
+          {:mode :scope :entity-def current-entity :siblings safe-siblings :indent indent})))))

@@ -1,0 +1,45 @@
+# Synthigy CLI installer for Windows (PowerShell 5.1+ / pwsh):
+#   irm https://raw.githubusercontent.com/synthigy/synthigy/main/install.ps1 | iex
+# Pin a version:
+#   $env:SYNTHIGY_VERSION = "v0.1.0"; irm .../install.ps1 | iex
+# Installs to %LOCALAPPDATA%\synthigy (override: $env:SYNTHIGY_INSTALL_DIR).
+$ErrorActionPreference = "Stop"
+
+$repo = "synthigy/synthigy"
+$dir  = if ($env:SYNTHIGY_INSTALL_DIR) { $env:SYNTHIGY_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "synthigy" }
+$ver  = if ($env:SYNTHIGY_VERSION) { $env:SYNTHIGY_VERSION } else { "latest" }
+
+$arch = switch ($env:PROCESSOR_ARCHITECTURE) {
+  "AMD64" { "amd64" }
+  "ARM64" { "arm64" }
+  default { throw "unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
+}
+$asset = "synthigy-cli-windows-$arch.exe"
+
+if ($ver -eq "latest") {
+  # Newest release that actually carries this platform's binary — releases
+  # can be jars-only (CLI binaries are attached separately). Newest-first.
+  $releases = Invoke-RestMethod "https://api.github.com/repos/$repo/releases?per_page=30"
+  $hit = $releases | Where-Object { $_.assets.name -contains $asset } | Select-Object -First 1
+  if (-not $hit) { throw "no published release carries $asset yet" }
+  $url = ($hit.assets | Where-Object name -eq $asset).browser_download_url
+  $ver = $hit.tag_name
+} else {
+  $url = "https://github.com/$repo/releases/download/$ver/$asset"
+}
+
+Write-Host "Downloading $asset ($ver)..."
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$exe = Join-Path $dir "synthigy.exe"
+Invoke-WebRequest -Uri $url -OutFile $exe
+
+Write-Host "Installed: $exe"
+& $exe version
+
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$dir*") {
+  Write-Host "NOTE: $dir is not on your PATH. Add it with:"
+  Write-Host "  [Environment]::SetEnvironmentVariable('Path', `"$userPath;$dir`", 'User')"
+}
+Write-Host ""
+Write-Host "Start Synthigy:  synthigy up"

@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.postgres.patch
   "PostgreSQL-specific dataset feature patches.
 
@@ -18,24 +40,24 @@
     (require '[patcho.patch :as patch])
     (patch/level! :synthigy/dataset)"
   (:require
-    [clojure.string :as str]
-    [next.jdbc :as jdbc]
-    [patcho.patch :as patch]
-    [synthigy.dataset :as dataset]
-    [synthigy.dataset.core :as core]
-    [synthigy.dataset.id :as id]
-    [synthigy.substrate.postgres :as substrate]
-    [synthigy.dataset.sql.naming
-     :as naming
-     :refer [normalize-name
-             relation->table-name
-             entity->relation-field
-             entity->table-name]]
-    [synthigy.dataset.sql.query :as sql-query]
-    [synthigy.db :refer [*db*]]
-    [synthigy.db.postgres]  ; Load Postgres JDBCBackend implementation
-    [synthigy.db.sql :as sql :refer [execute-one!]]
-    [synthigy.log :as log]))
+   [clojure.string :as str]
+   [next.jdbc :as jdbc]
+   [patcho.patch :as patch]
+   [synthigy.dataset :as dataset]
+   [synthigy.dataset.core :as core]
+   [synthigy.dataset.id :as id]
+   [synthigy.plug.postgres :as plug]
+   [synthigy.dataset.sql.naming
+    :as naming
+    :refer [normalize-name
+            relation->table-name
+            entity->relation-field
+            entity->table-name]]
+   [synthigy.dataset.sql.query :as sql-query]
+   [synthigy.db :refer [*db*]]
+   [synthigy.db.postgres]  ; Load Postgres JDBCBackend implementation
+   [synthigy.db.sql :as sql :refer [execute-one!]]
+   [synthigy.log :as log]))
 
 ;;; ============================================================================
 ;;; ID Immutability Triggers
@@ -48,7 +70,7 @@
   Instead of throwing an exception, it silently keeps the old value."
   []
   (format
-    "CREATE OR REPLACE FUNCTION prevent_%s_update()
+   "CREATE OR REPLACE FUNCTION prevent_%s_update()
 RETURNS TRIGGER AS $$
 BEGIN
   IF OLD.%s IS NOT NULL AND NEW.%s IS DISTINCT FROM OLD.%s THEN
@@ -58,7 +80,7 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;"
-    (id/field) (id/field) (id/field) (id/field) (id/field) (id/field)))
+   (id/field) (id/field) (id/field) (id/field) (id/field) (id/field)))
 
 (defn postgres-id-trigger
   "Returns SQL to create a PostgreSQL trigger for ID immutability on a table.
@@ -70,11 +92,11 @@ $$ LANGUAGE plpgsql;"
     SQL string to create the trigger"
   [table-name]
   (format
-    "CREATE OR REPLACE TRIGGER prevent_%s_update_trigger
+   "CREATE OR REPLACE TRIGGER prevent_%s_update_trigger
   BEFORE UPDATE ON \"%s\"
   FOR EACH ROW
   EXECUTE FUNCTION prevent_%s_update();"
-    (id/field) table-name (id/field)))
+   (id/field) table-name (id/field)))
 
 (defn drop-postgres-id-trigger
   "Returns SQL to drop a PostgreSQL ID immutability trigger.
@@ -86,8 +108,8 @@ $$ LANGUAGE plpgsql;"
     SQL string to drop the trigger"
   [table-name]
   (format
-    "DROP TRIGGER IF EXISTS prevent_%s_update_trigger ON \"%s\";"
-    (id/field) table-name))
+   "DROP TRIGGER IF EXISTS prevent_%s_update_trigger ON \"%s\";"
+   (id/field) table-name))
 
 (defn drop-postgres-id-trigger-function
   "Returns SQL to drop the PostgreSQL trigger function for ID immutability."
@@ -110,17 +132,14 @@ $$ LANGUAGE plpgsql;"
     SQL string to create the trigger"
   [table-name]
   (format
-    "CREATE TRIGGER IF NOT EXISTS prevent_%s_update_trigger
+   "CREATE TRIGGER IF NOT EXISTS prevent_%s_update_trigger
   BEFORE UPDATE ON \"%s\"
   FOR EACH ROW
   WHEN NEW.%s != OLD.%s
 BEGIN
   SELECT RAISE(ABORT, 'Cannot modify %s value');
 END;"
-    (id/field) table-name (id/field) (id/field) (id/field)))
-
-;; Backwards-compatible alias
-(def sqlite-euuid-trigger sqlite-id-trigger)
+   (id/field) table-name (id/field) (id/field) (id/field)))
 
 (defn drop-sqlite-id-trigger
   "Returns SQL to drop a SQLite ID immutability trigger.
@@ -132,8 +151,8 @@ END;"
     SQL string to drop the trigger"
   [table-name]
   (format
-    "DROP TRIGGER IF EXISTS prevent_%s_update_trigger;"
-    (id/field)))
+   "DROP TRIGGER IF EXISTS prevent_%s_update_trigger;"
+   (id/field)))
 
 (defn get-entity-tables
   "Gets all entity table names from the deployed schema.
@@ -179,9 +198,6 @@ END;"
       :tables tables
       :type :postgres})))
 
-;; Backward compatibility alias
-(def create-euuid-immutability-triggers! create-id-immutability-triggers!)
-
 (defn remove-id-immutability-triggers!
   "Removes ID immutability triggers from all entity tables.
 
@@ -210,17 +226,15 @@ END;"
      :tables tables
      :type :postgres}))
 
-;; Backward compatibility alias
-(def remove-euuid-immutability-triggers! remove-id-immutability-triggers!)
-
 ;;; ============================================================================
 ;;; Patch Helper Functions
 ;;; ============================================================================
 
 (defn is-mandatory-attribute?
-  "Check if attribute has mandatory constraint in the dataset model"
+  "Check if attribute has mandatory constraint in the dataset model.
+   Includes `unique+mandatory` (natural key) via `core/mandatory-constraint?`."
   [attribute]
-  (= "mandatory" (:constraint attribute)))
+  (core/mandatory-constraint? (:constraint attribute)))
 
 (defn get-column-constraints
   "Get column constraints from database including NOT NULL"
@@ -270,20 +284,20 @@ END;"
   (let [statements (let [model (dataset/deployed-model)
                          relations (core/get-relations model)]
                      (reduce
-                       (fn [r {:keys [from to]
-                               :as relation}]
-                         (let [table (relation->table-name relation)
-                               from-field (entity->relation-field from)
-                               to-field (entity->relation-field to)
-                               indexes (set (map :index (get-relation-indexes relation)))]
-                           (cond-> r
-                             (not (indexes (str table \_ "fidx")))
-                             (conj (format "create index %s_fidx on \"%s\" (%s);" table table from-field))
+                      (fn [r {:keys [from to]
+                              :as relation}]
+                        (let [table (relation->table-name relation)
+                              from-field (entity->relation-field from)
+                              to-field (entity->relation-field to)
+                              indexes (set (map :index (get-relation-indexes relation)))]
+                          (cond-> r
+                            (not (indexes (str table \_ "fidx")))
+                            (conj (format "create index %s_fidx on \"%s\" (%s);" table table from-field))
                                ;;
-                             (not (indexes (str table \_ "tidx")))
-                             (conj (format "create index %s_tidx on \"%s\" (%s);" table table to-field)))))
-                       []
-                       relations))]
+                            (not (indexes (str table \_ "tidx")))
+                            (conj (format "create index %s_tidx on \"%s\" (%s);" table table to-field)))))
+                      []
+                      relations))]
     (with-open [con (jdbc/get-connection (:datasource *db*))]
       (doseq [statement statements]
         (try
@@ -298,41 +312,41 @@ END;"
   (let [model (dataset/deployed-model)
         entities (core/get-entities model)]
     (reduce
-      (fn [r entity]
-        (let [user-table-name "user"
-              entity-table (entity->table-name entity)
-              modified_by (str entity-table \_ "modified_by_fkey")
-              refered-attributes (filter
-                                   (comp
-                                     #{"user" "group" "role"}
-                                     :type)
-                                   (:attributes entity))
+     (fn [r entity]
+       (let [user-table-name "user"
+             entity-table (entity->table-name entity)
+             modified_by (str entity-table \_ "modified_by_fkey")
+             refered-attributes (filter
+                                 (comp
+                                  #{"user" "group" "role"}
+                                  :type)
+                                 (:attributes entity))
                 ;;
-              current-result
-              (conj r
-                    (format "alter table \"%s\" drop constraint \"%s\"" entity-table modified_by)
-                    (format
-                      "alter table \"%s\" add constraint \"%s\" foreign key (modified_by) references \"%s\"(_eid) on delete set null"
-                      entity-table modified_by user-table-name))]
-          (reduce
-            (fn [r {attribute-name :name
-                    attribute-type :type}]
-              (let [attribute-column (normalize-name attribute-name)
-                    constraint-name (str entity-table \_ attribute-column "_fkey")
-                    refered-table (case attribute-type
-                                    "user" "user"
-                                    "group" "user_group"
-                                    "role" "user_role")]
-                (conj
-                  r
-                  (format "alter table \"%s\" drop constraint %s" entity-table constraint-name)
-                  (format
-                    "alter table \"%s\" add constraint \"%s\" foreign key (%s) references \"%s\"(_eid) on delete set null"
-                    entity-table constraint-name attribute-column refered-table))))
-            current-result
-            refered-attributes)))
-      []
-      entities)))
+             current-result
+             (conj r
+                   (format "alter table \"%s\" drop constraint \"%s\"" entity-table modified_by)
+                   (format
+                    "alter table \"%s\" add constraint \"%s\" foreign key (modified_by) references \"%s\"(_eid) on delete set null"
+                    entity-table modified_by user-table-name))]
+         (reduce
+          (fn [r {attribute-name :name
+                  attribute-type :type}]
+            (let [attribute-column (normalize-name attribute-name)
+                  constraint-name (str entity-table \_ attribute-column "_fkey")
+                  refered-table (case attribute-type
+                                  "user" "user"
+                                  "group" "user_group"
+                                  "role" "user_role")]
+              (conj
+               r
+               (format "alter table \"%s\" drop constraint %s" entity-table constraint-name)
+               (format
+                "alter table \"%s\" add constraint \"%s\" foreign key (%s) references \"%s\"(_eid) on delete set null"
+                entity-table constraint-name attribute-column refered-table))))
+          current-result
+          refered-attributes)))
+     []
+     entities)))
 
 (defn fix-mandatory-constraints
   "Remove NOT NULL constraints from all mandatory fields in the dataset model.
@@ -342,30 +356,30 @@ END;"
   (let [model (dataset/deployed-model)
         entities (core/get-entities model)
         statements (reduce
-                     (fn [statements entity]
-                       (let [entity-table (entity->table-name entity)
+                    (fn [statements entity]
+                      (let [entity-table (entity->table-name entity)
 
                               ;; Get all mandatory attributes for this entity
-                             mandatory-attributes (filter is-mandatory-attribute? (:attributes entity))
+                            mandatory-attributes (filter is-mandatory-attribute? (:attributes entity))
 
                               ;; Generate ALTER TABLE statements for mandatory attributes
-                             attribute-statements
-                             (reduce
-                               (fn [attr-statements {:keys [name]}]
-                                 (let [column-name (normalize-name name)
-                                       column-info (get-column-constraints entity-table column-name)
-                                       has-not-null? (and column-info (= "NO" (:is_nullable column-info)))]
-                                   (if has-not-null?
-                                     (conj attr-statements
-                                           (format "ALTER TABLE \"%s\" ALTER COLUMN %s DROP NOT NULL"
-                                                   entity-table column-name))
-                                     attr-statements)))
-                               []
-                               mandatory-attributes)]
+                            attribute-statements
+                            (reduce
+                             (fn [attr-statements {:keys [name]}]
+                               (let [column-name (normalize-name name)
+                                     column-info (get-column-constraints entity-table column-name)
+                                     has-not-null? (and column-info (= "NO" (:is_nullable column-info)))]
+                                 (if has-not-null?
+                                   (conj attr-statements
+                                         (format "ALTER TABLE \"%s\" ALTER COLUMN %s DROP NOT NULL"
+                                                 entity-table column-name))
+                                   attr-statements)))
+                             []
+                             mandatory-attributes)]
 
-                         (concat statements attribute-statements)))
-                     []
-                     entities)]
+                        (concat statements attribute-statements)))
+                    []
+                    entities)]
       ;; Execute the statements
     (with-open [con (jdbc/get-connection (:datasource *db*))]
       (doseq [statement statements]
@@ -385,36 +399,36 @@ END;"
   (let [model (dataset/deployed-model)
         entities (core/get-entities model)
         statements (reduce
-                     (fn [statements entity]
-                       (let [entity-table (entity->table-name entity)
+                    (fn [statements entity]
+                      (let [entity-table (entity->table-name entity)
 
                               ;; Handle modified_by column (always references user)
-                             modified-by-type (get-column-type entity-table "modified_by")
-                             modified-by-statements
-                             (if (and modified-by-type (= "integer" (:data_type modified-by-type)))
-                               [(format "ALTER TABLE \"%s\" ALTER COLUMN modified_by TYPE bigint" entity-table)]
-                               [])
+                            modified-by-type (get-column-type entity-table "modified_by")
+                            modified-by-statements
+                            (if (and modified-by-type (= "integer" (:data_type modified-by-type)))
+                              [(format "ALTER TABLE \"%s\" ALTER COLUMN modified_by TYPE bigint" entity-table)]
+                              [])
 
                               ;; Handle entity attributes
-                             attribute-statements
-                             (reduce
-                               (fn [attr-statements {:keys [name type]}]
-                                 (if-not (contains? #{"user" "group" "role" "int"} type)
-                                   attr-statements
-                                   (let [column-name (normalize-name name)
-                                         current-type (get-column-type entity-table column-name)
-                                         needs-conversion? (and current-type (= "integer" (:data_type current-type)))]
-                                     (if needs-conversion?
-                                       (conj attr-statements
-                                             (format "ALTER TABLE \"%s\" ALTER COLUMN %s TYPE bigint"
-                                                     entity-table column-name))
-                                       attr-statements))))
-                               []
-                               (:attributes entity))]
+                            attribute-statements
+                            (reduce
+                             (fn [attr-statements {:keys [name type]}]
+                               (if-not (contains? #{"user" "group" "role" "int"} type)
+                                 attr-statements
+                                 (let [column-name (normalize-name name)
+                                       current-type (get-column-type entity-table column-name)
+                                       needs-conversion? (and current-type (= "integer" (:data_type current-type)))]
+                                   (if needs-conversion?
+                                     (conj attr-statements
+                                           (format "ALTER TABLE \"%s\" ALTER COLUMN %s TYPE bigint"
+                                                   entity-table column-name))
+                                     attr-statements))))
+                             []
+                             (:attributes entity))]
 
-                         (concat statements modified-by-statements attribute-statements)))
-                     []
-                     entities)]
+                        (concat statements modified-by-statements attribute-statements)))
+                    []
+                    entities)]
     (with-open [con (jdbc/get-connection (:datasource *db*))]
       (doseq [statement statements]
         (try
@@ -456,11 +470,11 @@ END;"
 
 ;; Installed model version from __deploy_history
 (patch/installed-version
-  :synthigy.dataset/model
-  (or (some-> (dataset/latest-deployed-version (id/data :dataset/id))
-              :name
-              str)
-      "0"))
+ :synthigy.dataset/model
+ (or (some-> (dataset/latest-deployed-version (id/data :dataset/id))
+             :name
+             str)
+     "0"))
 
 ;;; ============================================================================
 ;;; Dataset Model Patches
@@ -511,6 +525,16 @@ END;"
                           :data {:action :upgraded :subject :dataset-model :version "1.0.5"}}
                          "Meta-model v1.0.5 deployed; audit fields now resolvable in selections"))
 
+(patch/upgrade :synthigy.dataset/model
+               "1.0.6"
+               (log/info {:id ::model-v106-deploying
+                          :data {:action :deploying :subject :dataset-model :version "1.0.6"}}
+                         "Deploying meta-model v1.0.6 — RBAC opt-in on meta-entities")
+               (dataset/deploy! (dataset/current-dataset-version))
+               (log/info {:id ::model-v106-complete
+                          :data {:action :upgraded :subject :dataset-model :version "1.0.6"}}
+                         "Meta-model v1.0.6 deployed"))
+
 ;;; ============================================================================
 ;;; PostgreSQL Dataset Feature Patches
 ;;; ============================================================================
@@ -543,15 +567,15 @@ END;"
                ;; Guard: only run on PostgreSQL (skip for SQLite, etc.)
                (when (instance? synthigy.db.Postgres *db*)
                  (log/info {:id ::v101-installing-id-triggers :data {:action :installing :subject :id-triggers :version "1.0.1"}}
-                           "Installing EUUID immutability triggers")
+                           "Installing ID immutability triggers")
                  (log/info {:id ::v101-rationale}
                            "Enables order-independent mapping for CockroachDB/SQLite compatibility")
                  (try
-                   (let [result (create-euuid-immutability-triggers!)]
+                   (let [result (create-id-immutability-triggers!)]
                      (log/info {:id ::v101-triggers-created
                                 :data {:count (:created result)
                                        :type (name (:type result))}}
-                               "Created EUUID immutability triggers")
+                               "Created ID immutability triggers")
                      (log/info {:id ::v101-protected-tables
                                 :data {:tables (:tables result)}}
                                "Protected tables"))
@@ -580,7 +604,7 @@ END;"
                          schema (sql-query/model->schema model)
                          relations (mapcat (fn [[_eid ent]] (vals (:relations ent))) schema)
                          unique-tables (set (keep :table relations))]
-                     (substrate/reconcile-relations! *db* (:datasource *db*) relations)
+                     (plug/reconcile-relations! *db* (:datasource *db*) relations)
                      (log/info {:id ::v120-installed
                                 :data {:action :installed :subject :dataset-features :version "1.2.0"
                                        :relation-count (count unique-tables)}}
@@ -611,7 +635,7 @@ END;"
                          schema (sql-query/model->schema model)
                          relations (mapcat (fn [[_eid ent]] (vals (:relations ent))) schema)
                          unique-tables (set (keep :table relations))]
-                     (substrate/reconcile-relations! *db* (:datasource *db*) relations)
+                     (plug/reconcile-relations! *db* (:datasource *db*) relations)
                      (log/info {:id ::v130-installed
                                 :data {:action :upgraded :subject :dataset-features :version "1.3.0"
                                        :relation-count (count unique-tables)}}
@@ -621,3 +645,61 @@ END;"
                                   :data {:action :upgrading :subject :dataset-features :version "1.3.0"}} e)
                      (throw e)))))
 
+;; Patch 1.4.0 - Enum columns to TEXT (PostgreSQL only)
+;; Enum values are model metadata, not database types. Native enum types made
+;; every value change a type-rotation DDL dance, behaved differently on each
+;; backend (SQLite already stores TEXT), and could destroy row data on value
+;; removal. Convert every enum-typed column to TEXT and drop all enum types —
+;; including orphaned `x__` rotation leftovers. Catalog-driven and idempotent:
+;; a second run finds no enum columns/types and no-ops.
+(patch/upgrade :synthigy/dataset
+               "1.4.0"
+               (when (instance? synthigy.db.Postgres *db*)
+                 (log/info {:id ::v140-enum-to-text
+                            :data {:action :upgrading :subject :dataset-features :version "1.4.0"}}
+                           "Migrating enum columns to TEXT")
+                 (try
+                   (let [enum-columns (sql/execute!
+                                       ["select c.table_name, c.column_name
+                                         from information_schema.columns c
+                                         join pg_type t on t.typname = c.udt_name
+                                         join pg_namespace n on n.oid = t.typnamespace
+                                         where t.typtype = 'e' and n.nspname = 'public'
+                                           and c.table_schema = 'public'"])
+                         enum-types (sql/execute!
+                                     ["select t.typname
+                                       from pg_type t
+                                       join pg_namespace n on n.oid = t.typnamespace
+                                       where t.typtype = 'e' and n.nspname = 'public'"])]
+                     ;; sql/execute! builds UNQUALIFIED maps with identity labels
+                     ;; (see synthigy.db.postgres/defaults :raw) - keys are plain
+                     ;; :table_name / :column_name / :typname.
+                     (doseq [{table :table_name
+                              column :column_name} enum-columns]
+                       (execute-one!
+                        [(format "alter table \"%s\" alter column \"%s\" type text using \"%s\"::text"
+                                 table column column)]))
+                     (doseq [{type-name :typname} enum-types]
+                       (execute-one!
+                        [(format "drop type if exists \"%s\" cascade" type-name)]))
+                     (log/info {:id ::v140-complete
+                                :data {:action :upgraded :subject :dataset-features :version "1.4.0"
+                                       :columns (count enum-columns)
+                                       :types (count enum-types)}}
+                               "Enum columns migrated to TEXT, enum types dropped"))
+                   (catch Throwable e
+                     (log/error! {:id ::v140-failed
+                                  :data {:action :upgrading :subject :dataset-features :version "1.4.0"}} e)
+                     (throw e)))))
+
+
+;; Patch 1.5.0 - Unique groups as indexes (no-op on PostgreSQL)
+;; SQLite cannot ALTER a table constraint, so 1.5.0 moves its unique groups to
+;; CREATE UNIQUE INDEX and rebuilds tables carrying the old inline form.
+;; Postgres has real constraint DDL and keeps using it; the marker keeps the
+;; feature version aligned across backends.
+(patch/upgrade :synthigy/dataset
+               "1.5.0"
+               (log/info {:id ::v150-unique-index
+                          :data {:action :upgraded :subject :dataset-features :version "1.5.0"}}
+                         "Unique-groups-as-indexes: no-op on PostgreSQL (constraint DDL is supported)"))

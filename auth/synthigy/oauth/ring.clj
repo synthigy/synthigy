@@ -1,14 +1,28 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth.ring
-  "Ring utilities for OAuth/OIDC
-
-  This namespace provides utilities to replace Pedestal interceptor dependencies
-  with lightweight Ring patterns. These utilities enable OAuth/OIDC handlers to
-  work with any Ring-based framework (Compojure, Reitit, Luminus, Kit).
-
-  Key features:
-  - Middleware composition helpers
-  - State passing through request map (replaces Pedestal context)
-  - Zero Pedestal dependencies"
+  "Ring utilities replacing Pedestal interceptor dependencies, so OAuth/OIDC
+   handlers work with any Ring framework. See docs/core/synthigy/oauth/ring.md."
   (:require
    [clojure.walk :as walk]))
 
@@ -17,21 +31,8 @@
 ;; =============================================================================
 
 (defn compose-middleware
-  "Compose middleware left-to-right, similar to Pedestal's (conj interceptors).
-
-   Takes middleware functions and a final handler as arguments.
-   The last argument is treated as the handler, all others are middleware.
-
-   Example:
-     (compose-middleware wrap-params wrap-cookies wrap-auth my-handler)
-
-   Is equivalent to:
-     (-> my-handler wrap-params wrap-cookies wrap-auth)
-
-   This makes middleware composition more explicit and easier to test.
-
-   If called with no arguments, returns identity function.
-   If called with one argument, returns that argument unchanged."
+  "Compose middleware left-to-right (last argument is the handler), mirroring
+   Pedestal's (conj interceptors)."
   [& args]
   (if (empty? args)
     identity
@@ -46,38 +47,15 @@
 ;; =============================================================================
 
 (defn pass-state
-  "Pass custom state through request map.
-
-   Replaces Pedestal's pattern of adding custom keys to context:
-     (assoc ctx ::session session-id)
-
-   With Ring pattern:
-     (pass-state request ::session session-id)
-
-   Returns modified request map."
+  "Pass custom state through the request map (replaces Pedestal's ctx keys)."
   [request k v]
   (assoc request k v))
 
 (defn get-state
-  "Get custom state from request map.
-
-   Replaces Pedestal's pattern:
-     (::session ctx)
-
-   With Ring pattern:
-     (get-state request ::session)
-
-   Returns state value or nil."
   [request k]
   (get request k))
 
 (defn update-state
-  "Update custom state in request map with function.
-
-   Example:
-     (update-state request ::counter inc)
-
-   Returns modified request map."
   [request k f & args]
   (apply update request k f args))
 
@@ -86,16 +64,10 @@
 ;; =============================================================================
 
 (defn keywordize-params
-  "Recursively keywordize all parameter keys in a map.
-
-   Replaces Pedestal's keywordize-params interceptor."
   [params]
   (walk/keywordize-keys params))
 
 (defn stringify-params
-  "Recursively stringify all parameter keys in a map.
-
-   Useful for outgoing requests where string keys are required."
   [params]
   (walk/stringify-keys params))
 
@@ -104,12 +76,6 @@
 ;; =============================================================================
 
 (defn set-cookie
-  "Add or update a cookie in the response.
-
-   Example:
-     (set-cookie response \"session\" \"abc123\" {:http-only true})
-
-   Returns modified response map."
   ([response cookie-name value]
    (set-cookie response cookie-name value {}))
   ([response cookie-name value opts]
@@ -117,25 +83,12 @@
              (merge {:value value} opts))))
 
 (defn delete-cookie
-  "Delete a cookie by setting max-age to 0.
-
-   Example:
-     (delete-cookie response \"session\")
-
-   Returns modified response map."
+  "Delete a cookie by setting max-age to 0."
   [response cookie-name]
   (assoc-in response [:cookies cookie-name]
             {:value "" :max-age 0 :path "/"}))
 
 (defn merge-cookies
-  "Merge multiple cookie operations into response.
-
-   Example:
-     (merge-cookies response
-       {\"session\" {:value \"abc\" :http-only true}
-        \"prefs\" {:value \"xyz\" :max-age 3600}})
-
-   Returns modified response map."
   [response cookies]
   (update response :cookies merge cookies))
 
@@ -144,19 +97,8 @@
 ;; =============================================================================
 
 (defn short-circuit?
-  "Check if middleware should short-circuit (not call downstream handler).
-
-   In Ring, we short-circuit by returning a response directly instead of
-   calling (handler request).
-
-   This is conceptually equivalent to Pedestal's chain/terminate.
-
-   Example:
-     (if (authenticated? request)
-       (handler request)          ; Continue chain
-       {:status 401 :body \"Unauthorized\"})  ; Short-circuit
-
-   This function is provided for documentation purposes and clarity."
+  "Documents that returning a response map instead of calling (handler request)
+   IS Ring's equivalent of Pedestal's chain/terminate."
   [response]
   (and (map? response)
        (contains? response :status)))
@@ -166,22 +108,8 @@
 ;; =============================================================================
 
 (defn wrap-cors
-  "Add CORS headers to responses.
-
-   Replaces Pedestal's allow-origin interceptor with Ring middleware.
-
-   Options:
-   - :allowed-origins - Set of allowed origin strings or :all for any origin
-   - :allowed-methods - Set of allowed HTTP methods (default: #{:get :post :put :delete :options})
-   - :allowed-headers - Set of allowed headers (default: #{\"*\"})
-   - :max-age - Preflight cache duration in seconds (default: 3600)
-   - :allow-credentials - Allow credentials (default: true)
-
-   Example:
-     (wrap-cors handler {:allowed-origins #{\"http://localhost:3000\"
-                                            \"https://example.com\"}})
-
-     (wrap-cors handler {:allowed-origins :all})"
+  "Add CORS headers to responses; :allowed-origins may be :all, a set, or a
+   coll."
   [handler {:keys [allowed-origins
                    allowed-methods
                    allowed-headers

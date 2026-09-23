@@ -1,4 +1,28 @@
-/* Synthigy OAuth - Common Styles */
+/*
+ *   Synthigy — model-driven IAM and data platform
+ *   Copyright (C) 2026 Robert Geršak
+ *
+ *   This program is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU Affero General Public License as
+ *   published by the Free Software Foundation, either version 3 of the
+ *   License, or (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU Affero General Public License for more details.
+ *
+ *   You should have received a copy of the GNU Affero General Public
+ *   License along with this program.  If not, see
+ *   <https://www.gnu.org/licenses/>.
+ *
+ *   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+ *   in a proprietary product, or offering it as a service without
+ *   releasing your source under section 13 — a commercial license is
+ *   available: r.gersak@gmail.com  See COMMERCIAL.md.
+ */
+
+/* Synthigy OAuth — shared dark theme foundation (login / device / error) */
 
 * {
   box-sizing: border-box;
@@ -6,59 +30,71 @@
   padding: 0;
 }
 
+:root {
+  --logo-primary: #ffffff;
+  --logo-secondary: #5b5b5b;
+  /* Neutral monochrome grays — equal R=G=B, no blue/cool tint */
+  --sy-text: #e8e8e8;
+  --sy-text-m: #8b8b8b;
+  --sy-canvas-bg: #0f0f10;
+  --sy-vignette: radial-gradient(120% 90% at 50% 40%, rgba(255,255,255,0.035), rgba(255,255,255,0) 60%);
+  --sy-star-rgb: 255, 255, 255;               /* read by starfield.js */
+  --sy-field-border: rgba(255, 255, 255, 0.10);
+  --sy-field-border-active: rgba(255, 255, 255, 0.3);
+  --sy-icon: #707070;
+  --sy-icon-active: #a3a3a3;
+  --sy-placeholder: #707070;
+  --sy-glass: rgba(255, 255, 255, 0.06);
+  --sy-glass-border: rgba(255, 255, 255, 0.12);
+  --sy-glass-hover: rgba(255, 255, 255, 0.13);
+  --sy-error: #ef4444;
+}
+
 html, body {
   height: 100%;
-  font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Shared centered container */
+body {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  color: var(--sy-text);
+  background: var(--sy-vignette), var(--sy-canvas-bg);
+}
+
+/* Starfield canvas (painted by starfield.js), behind everything */
+#sy-starfield {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* Content sits above the starfield */
+.sy-login,
 .oauth-container {
-  position: absolute;
-  top: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.oauth-container {
   display: flex;
   flex-direction: column;
-  flex-grow: 1;
-  justify-content: center;
   align-items: center;
-  width: 100%;
-  height: 100%;
 }
 
-/* Shared card styling */
-.oauth-card {
-  padding: 2rem;
-  max-width: 440px;
-}
-
-.oauth-card .header {
+/* Brand lockup — figurative mark + wordmark on one row */
+.sy-lockup {
   display: flex;
-  justify-content: center;
+  flex-direction: row;
   align-items: center;
-  padding: 1rem 0;
-  user-select: none;
+  gap: 14px;
 }
 
-.oauth-card .logo {
-  width: 2.5rem;
-  height: 2.5rem;
-  margin-right: 1rem;
-  border-radius: 0.375rem;
-}
+.sy-login-mark svg { width: auto; height: 44px; display: block; }
+.sy-login-verbal svg { width: 132px; height: auto; display: block; }
 
-.oauth-card .logo img {
-  width: 100%;
-  height: 100%;
-}
-
-.oauth-card h1,
-.oauth-card h2,
-.oauth-card button {
-  user-select: none;
-  color: #4d4e4f;
-}
-
-/* User select none utility */
-.select-none {
-  user-select: none;
-}
+.select-none { user-select: none; }

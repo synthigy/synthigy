@@ -1,18 +1,30 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth.introspect
-  "RFC 7662 Token Introspection endpoint.
-
-   Token introspection allows resource servers to query the authorization
-   server about the state of an access token or refresh token.
-
-   The endpoint returns metadata about the token, including:
-   - Whether the token is active (valid and not expired)
-   - Token scope
-   - Client ID that requested the token
-   - Username of the resource owner
-   - Token expiration and issuance times
-
-   RFC 7662: https://tools.ietf.org/html/rfc7662"
+  "RFC 7662 Token Introspection endpoint. See
+   docs/core/synthigy/oauth/introspect.md."
   (:require
+   [buddy.hashers :as hashers]
    [synthigy.json :as json]
    [clojure.string :as str]
    [synthigy.log :as log]
@@ -24,38 +36,26 @@
 ;; Introspection Logic
 ;; =============================================================================
 
-(defn- inactive-response
-  "Returns the standard inactive token response per RFC 7662 Section 2.2."
+(defn inactive-response
   []
   {:active false})
 
-(defn- extract-token-claims
-  "Extract claims from a JWT token.
-   Returns nil if token is invalid or cannot be decoded."
+(defn extract-token-claims
+  "Decode a JWT token's claims, or nil if invalid."
   [token-string]
   (try
     (encryption/unsign-data token-string)
     (catch Exception _
       nil)))
 
-(defn- token-expired?
-  "Check if token is expired based on exp claim."
+(defn token-expired?
   [claims]
   (when-let [exp (:exp claims)]
     (< (* 1000 exp) (System/currentTimeMillis))))
 
 (defn introspect-token
-  "Introspect an access or refresh token.
-
-   Per RFC 7662, returns a map with at minimum {:active true/false}.
-   If active, includes token metadata like scope, client_id, exp, etc.
-
-   Args:
-     token - The token string to introspect
-     token-type-hint - Optional hint: \"access_token\" or \"refresh_token\"
-
-   Returns:
-     Map with :active and optional metadata claims"
+  "Introspect an access or refresh token; returns {:active false} or {:active
+   true ...metadata}."
   [token token-type-hint]
   (log/debug {:id ::introspect-start
               :data {:action :introspecting
@@ -64,7 +64,6 @@
              "Introspecting token")
 
   (cond
-    ;; No token provided
     (or (nil? token) (empty? token))
     (do
       (log/debug {:id ::introspect-empty-token
@@ -75,19 +74,12 @@
                  "Empty token")
       (inactive-response))
 
-    ;; Try to find token in our token store
     :else
-    (let [token-key (when token-type-hint (keyword token-type-hint))
-          tokens @token/*tokens*
-          ;; Try hint first, then both token types
-          [found-key session] (some
-                               (fn [tk]
-                                 (when-some [s (get-in tokens [tk token])]
-                                   [tk s]))
-                               (filter some? [token-key :access_token :refresh_token]))]
+    (let [[found-key session] (token/find-token
+                               (when token-type-hint (keyword token-type-hint))
+                               token)]
 
       (cond
-        ;; Token not found in store
         (nil? session)
         (do
           (log/info {:id ::introspect-not-in-store
@@ -98,13 +90,11 @@
                     "Token not found in store")
           (inactive-response))
 
-        ;; Token found - get claims and check expiration
         :else
         (let [claims (extract-token-claims token)
               expired? (token-expired? claims)]
 
           (cond
-            ;; No claims (invalid token format)
             (nil? claims)
             (do
               (log/info {:id ::introspect-no-claims
@@ -116,7 +106,6 @@
                         "Could not extract claims from token")
               (inactive-response))
 
-            ;; Token expired
             expired?
             (do
               (log/info {:id ::introspect-expired
@@ -129,9 +118,8 @@
                         "Token is expired")
               (inactive-response))
 
-            ;; Valid active token - return metadata
             :else
-            (let [{:keys [scope aud iss sub exp iat jti client_id sid]} claims
+            (let [{:keys [scope aud iss sub xid exp iat jti client_id sid]} claims
                   {:keys [name]} (core/get-session-resource-owner session)]
               (log/info {:id ::introspect-active
                          :data {:action :introspected
@@ -150,26 +138,32 @@
                :exp exp
                :iat iat
                :sub (or sub name)
+               :xid xid
                :iss (or iss (core/domain+))
                :aud (or aud client_id)
                :jti jti
                :sid sid})))))))
 
 ;; =============================================================================
+;; Client Authentication (RFC 7662 §2.1)
+;; =============================================================================
+
+;; client_id alone is NOT authentication — it's echoed on every authorization
+;; redirect, so it's public by design; a real client_secret match is required
+;; (public clients, which have no secret, are rejected outright).
+(defn authenticated-client
+  [client_id client_secret]
+  (when-let [{:keys [secret] :as client} (core/get-client client_id)]
+    (when (and secret client_secret (hashers/check client_secret secret))
+      client)))
+
+;; =============================================================================
 ;; Ring Handler
 ;; =============================================================================
 
 (defn introspect-handler
-  "OAuth 2.0 Token Introspection endpoint handler (RFC 7662).
-
-   Accepts POST requests with form-encoded parameters:
-   - token (REQUIRED): The token to introspect
-   - token_type_hint (OPTIONAL): 'access_token' or 'refresh_token'
-
-   Client authentication is REQUIRED (Basic auth or form params).
-
-   Returns JSON response with at minimum {\"active\": true/false}.
-   If active, includes token metadata (scope, client_id, exp, etc.)."
+  "OAuth 2.0 Token Introspection endpoint handler (RFC 7662); client
+   authentication is required."
   [request]
   (let [{:keys [token token_type_hint client_id client_secret]} (:params request)]
 
@@ -181,8 +175,6 @@
                "Introspect request received")
 
     (cond
-      ;; RFC 7662 Section 2.1: Client authentication is REQUIRED
-      ;; Check that client credentials are provided
       (or (nil? client_id) (empty? client_id))
       (do
         (log/warn {:id ::introspect-missing-client
@@ -198,15 +190,16 @@
          :body (json/write-str {:error "invalid_client"
                                 :error_description "Client authentication required"})})
 
-      ;; Validate client credentials
-      (nil? (core/get-client client_id))
+      ;; Same 401 for unknown client and wrong secret — distinguishing them
+      ;; would let a caller enumerate valid client_ids.
+      (nil? (authenticated-client client_id client_secret))
       (do
-        (log/warn {:id ::introspect-unknown-client
+        (log/warn {:id ::introspect-client-auth-failed
                    :data {:action :rejected
                           :subject :access-token
-                          :reason :unknown-client
+                          :reason :client-auth-failed
                           :client client_id}}
-                  "Unknown client")
+                  "Client authentication failed")
         {:status 401
          :headers {"Content-Type" "application/json"
                    "WWW-Authenticate" "Basic realm=\"OAuth\""
@@ -215,7 +208,6 @@
          :body (json/write-str {:error "invalid_client"
                                 :error_description "Client authentication failed"})})
 
-      ;; Missing token parameter
       (or (nil? token) (empty? token))
       (do
         (log/warn {:id ::introspect-missing-token-param
@@ -231,7 +223,6 @@
          :body (json/write-str {:error "invalid_request"
                                 :error_description "Missing required parameter: token"})})
 
-      ;; Valid request - introspect the token
       :else
       (let [result (introspect-token token token_type_hint)]
         {:status 200

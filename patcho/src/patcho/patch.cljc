@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns patcho.patch
   "A simple version migration system for Clojure applications.
   
@@ -125,19 +147,29 @@
     ;; Switch to DB - state auto-migrates
     (set-store! *db*)
 
-    (level! :my/app)  ; Uses database store"
+    (level! :my/app)  ; Uses database store
+
+  Migration is BEST-EFFORT and runs AFTER the new store is installed. Doing it
+  the other way round wedges the system: if the old store is dead (its pool was
+  closed by a module `:stop`), the migration read throws and the new store never
+  gets installed — so every later `set-store!` retries the same dead read and
+  throws again, with no way back."
   [store]
-  #?(:clj
-     (alter-var-root #'*version-store*
-                     (fn [old-store]
-                       (when (and old-store store (not= old-store store))
-                         (migrate-store! old-store store nil))
-                       store))
-     :cljs
-     (let [old-store *version-store*]
-       (when (and old-store store (not= old-store store))
-         (migrate-store! old-store store nil))
-       (set! *version-store* store))))
+  (let [old-store *version-store*]
+    #?(:clj  (alter-var-root #'*version-store* (constantly store))
+       :cljs (set! *version-store* store))
+    (when (and old-store store (not= old-store store))
+      (try
+        (migrate-store! old-store store nil)
+        (catch #?(:clj Throwable :cljs :default) e
+          ;; Loud, not silent: a lost migration means recorded versions may be
+          ;; missing and `level!` could replay patches. Not fatal though — the
+          ;; new store is installed and authoritative.
+          (let [msg (str "[patcho] version store migration failed; new store is "
+                         "installed but prior state was NOT copied: " (ex-message e))]
+            #?(:clj  (binding [*out* *err*] (println msg))
+               :cljs (js/console.error msg))))))
+    store))
 
 
 (defmacro with-store

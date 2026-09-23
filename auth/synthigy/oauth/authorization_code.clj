@@ -1,12 +1,38 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth.authorization-code
   (:require
    [synthigy.json :as json]
    clojure.java.io
    clojure.pprint
+   [next.jdbc :as jdbc]
    [synthigy.log :as log]
    [nano-id.core :as nano-id]
+   [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
-   [synthigy.iam :refer [publish validate-password]]
+   [synthigy.dataset.sql.schema :as schema]
+   [synthigy.db :as db]
+   [synthigy.iam :as iam :refer [publish validate-password]]
    [synthigy.oauth.core :as core
     :refer [get-client]]
    [synthigy.oauth.token :as token
@@ -15,65 +41,81 @@
             client-id-missmatch
             owner-not-authorized]]))
 
-(defonce ^:dynamic *authorization-codes* (atom nil))
-
 (def grant "authorization_code")
-
-(defn delete [code]
-  (swap! *authorization-codes* dissoc code))
 
 (let [alphabet "ACDEFGHJKLMNOPQRSTUVWXYZ"]
   (def gen-authorization-code (nano-id/custom alphabet 30)))
 
-(defn bind-authorization-code
-  [session]
-  (let [code (gen-authorization-code)]
-    (swap! *authorization-codes* assoc code {:session session
-                                             :at (System/currentTimeMillis)})
-    (swap! core/*sessions* update session
-           (fn [current]
-             (->
-              current
-              (assoc :code code)
-              (dissoc :authorization-code-used?))))
-    (publish :oauth.grant/code {:session session
-                                :code code})
-    code))
+(defn minutes [x] (* 1000 60 x))
 
-(defn set-session-authorized-at
-  [session timestamp]
-  (swap! core/*sessions* assoc-in [session :authorized-at] timestamp))
+(defn create-code!
+  "Insert a pending code row at /oauth/authorize time."
+  [code {:keys [client agent ip request issued?]}]
+  (dataset/stack-entity
+   (id/entity :oauth/authorization-code)
+   {:code code
+    :issued (boolean issued?)
+    :expires_at (java.util.Date. (+ (System/currentTimeMillis) (minutes 8)))
+    :data {"client" client
+           "agent" agent
+           "ip" ip
+           "request" request}})
+  nil)
 
-(defn get-session-authorized-at
-  [session]
-  (get-in @core/*sessions* [session :authorized-at]))
-
-(defn get-session-code
-  ([session]
-   (get-in @core/*sessions* [session :code])))
-
-(defn get-code-request
+(defn get-code
+  "Decoded code entry in the legacy atom shape, or nil."
   [code]
-  (get-in @*authorization-codes* [code :request]))
+  (when code
+    (when-let [row (dataset/get-entity
+                    (id/entity :oauth/authorization-code)
+                    {:code code}
+                    {:code nil :data nil :issued nil :claimed nil :expires_at nil
+                     :session [{:selections {:id nil} :args {:_join :left}}]})]
+      (let [{:strs [client agent ip request]} (:data row)]
+        (cond-> {:client client
+                 :user/agent agent
+                 :user/ip ip
+                 :issued? (boolean (:issued row))
+                 :claimed? (boolean (:claimed row))}
+          request (assoc :request (core/decode-stored-request request))
+          (:expires_at row) (assoc :expires-at (.getTime ^java.util.Date (:expires_at row)))
+          (get-in row [:session :id]) (assoc :session (get-in row [:session :id])))))))
 
-(defn get-code-session
-  [code]
-  (get-in @*authorization-codes* [code :session]))
+(defn delete [code]
+  (when code
+    (dataset/delete-entity (id/entity :oauth/authorization-code) {:code code})
+    nil))
+
+(defn get-code-request [code] (:request (get-code code)))
+
+(defn get-code-session [code] (:session (get-code code)))
 
 (defn get-code-client
   [code]
   (get-client (:client_id (get-code-request code))))
 
+(defn code-was-issued? [code] (true? (:issued? (get-code code))))
+
 (defn revoke-authorization-code
   ([code]
    (when code
      (let [session (get-code-session code)]
-       (swap! *authorization-codes* dissoc code)
-       (swap! core/*sessions* update session dissoc :code)
+       (delete code)
+       (core/update-session-context! session dissoc "code")
        (publish :oauth.revoke/code {:code code
                                     :session session})))))
 
-(defn code-was-issued? [code] (true? (get-in @*authorization-codes* [code :issued?])))
+(defn claim-code!
+  "Atomically flip claimed false→true; true iff this caller won the claim."
+  [code]
+  (let [{:keys [table]} (schema/deployed-schema-entity
+                         (id/entity :oauth/authorization-code))]
+    (pos? (:next.jdbc/update-count
+           (jdbc/execute-one!
+            (:datasource db/*db*)
+            [(str "UPDATE " table
+                  " SET claimed = TRUE WHERE code = ? AND claimed IS NOT TRUE")
+             code])))))
 
 (defn validate-client [request]
   (let [{:keys [client_id redirect_uri]} request
@@ -108,8 +150,8 @@
         {:type "missing_redirect"
          :request request}))
       ;;
-      (and (not (core/localhost-redirect? redirect_uri))
-           (not-any? #(= base-redirect-uri %) redirections))
+      (and (not-any? #(= base-redirect-uri %) redirections)
+           (not (core/loopback-redirect-matches? redirect_uri redirections)))
       (throw
        (ex-info
         "Client provided uri doesn't match available redirect URI(s)"
@@ -124,53 +166,39 @@
          :request request}))
       ;;
       :else
-      (do
-        (swap! core/*clients* assoc client-id client)
-        client))))
+      client)))
 
 (defmethod grant-token "authorization_code"
   [request]
   (let [{:keys [code redirect_uri client_id client_secret]} request
-        ;; Atomically CLAIM the code in ONE swap: mark it :claimed? and capture
-        ;; its prior value. Concurrent redemptions of the same code can't both
-        ;; win — only the caller whose `prior` shows it present-and-unclaimed
-        ;; proceeds; the rest see :claimed? (or the code already gone once the
-        ;; winner revokes it) and are rejected. We MARK rather than remove so the
-        ;; code stays readable during token generation — the openid scope reads
-        ;; the nonce via get-code-request (see oidc.clj). The winner removes it at
-        ;; the very end via revoke-authorization-code. Closes the TOCTOU
-        ;; double-mint race (old path read here and deleted only at the end).
-        [prior _] (swap-vals! *authorization-codes*
-                              (fn [m] (cond-> m
-                                        (contains? m code) (assoc-in [code :claimed?] true))))
-        already-claimed? (get-in prior [code :claimed?])
         {{request-redirect-uri :redirect_uri
           :as original-request} :request
-         client-id :client
-         :keys [session expires-at]} (get prior code)
+         client-key :client
+         :keys [session expires-at]
+         :as entry} (get-code code)
+        ;; CAS: only the claim winner proceeds; row stays readable until revoked
+        ;; at the end
+        already-claimed? (when entry
+                           (or (:claimed? entry)
+                               (not (claim-code! code))))
         {id :id
          :as client
          _secret :secret
          _type :type
          {:strs [allowed-grants]} :settings
-         session-client :id} (get @core/*clients* client-id)
+         session-client :id} (iam/get-client-by-key client-key)
         grants (set allowed-grants)
         {:keys [active]} (core/get-session-resource-owner session)]
     (log/debug {:id ::token-grant-request
                 :data {:client-id client_id}}
                "Processing authorization-code token grant")
     (if-not session
-      ;; If session isn't available, that is if somebody
-      ;; is trying to hack in
       (token-error
        "invalid_request"
        "Trying to abuse token endpoint for code that"
        "doesn't exsist or has expired. Further actions"
        "will be logged and processed")
-      ;; If there is some session than check other requirements
       (cond
-        ;; Lost the claim race, or a reuse arrived while the winner was still
-        ;; mid-exchange — another redemption already claimed this code.
         already-claimed?
         (token-error
          "invalid_request"
@@ -190,25 +218,21 @@
          "invalid_request"
          "This authorization code has expired. Restart"
          "authentication process.")
-        ;; If redirect uri doesn't match
         (not= request-redirect-uri redirect_uri)
         (token-error
          "invalid_request"
          "Redirect URI that you provided doesn't"
          "match URI that was issued to provided authorization code")
-        ;; If client ids don't match
         (not= session-client client_id)
         (token-error
          "invalid_client"
          "Client ID that was provided doesn't"
          :w "match client ID that was used in authorization request")
-        ;; Public clients don't require a secret (RFC 6749 §2.1, OAuth 2.1 §2.1)
-        ;; They rely on PKCE (code_verifier) for proof instead
+        ;; Public clients need no secret (RFC 6749 §2.1) — PKCE is their proof
         (and (not= _type :public) (some? _secret) (empty? client_secret))
         (token-error
          "invalid_client"
          "Client secret wasn't provided")
-        ;; If client has secret and is not public, validate it
         (and (not= _type :public) (some? _secret) (not (validate-password client_secret _secret)))
         (token-error
          "invalid_client"
@@ -228,7 +252,6 @@
           (delete code)
           (core/kill-session session)
           owner-not-authorized)
-        ;; Issue that token
         :else
         (let [tokens (token/generate client session original-request)
               response (json/write-str tokens)
@@ -242,8 +265,6 @@
                             :client client_id
                             :flow "authorization_code"}}
                     "Authorization code exchanged for access token")
-          ;; Code is still present (we only marked it :claimed?), so the normal
-          ;; revoke removes it AND does the session cleanup + publish.
           (revoke-authorization-code code)
           {:status 200
            :headers {"Content-Type" "application/json;charset=UTF-8"
@@ -251,17 +272,13 @@
                      "Cache-Control" "no-store"}
            :body response})))))
 
-(defn minutes [x] (* 1000 60 x))
-
 (defn mark-code-issued [session code]
-  (swap! *authorization-codes* update code
-         (fn [data]
-           (assoc data
-                  :issued? true
-                  :session session
-                  :expires-at (->
-                               (System/currentTimeMillis)
-                               (+ (minutes 5))))))
+  (dataset/stack-entity
+   (id/entity :oauth/authorization-code)
+   {:code code
+    :issued true
+    :session {:id session}
+    :expires_at (java.util.Date. (+ (System/currentTimeMillis) (minutes 5)))})
   (let [resource-owner (core/get-session-resource-owner session)
         {client-id :id} (core/get-session-client session)]
     (log/info {:id ::code-issued
@@ -276,18 +293,11 @@
               "Authorization code issued and bound to session")))
 
 (defn clean-codes
-  ([] (clean-codes (minutes 8)))
-  ([timeout]
-   (let [now (System/currentTimeMillis)]
-     (swap! *authorization-codes*
-            (fn [codes]
-              (reduce-kv
-               (fn [result code {:keys [created-on]
-                                 :as data}]
-                 (if (or (nil? created-on) (> (- now created-on) timeout)) result
-                     (assoc result code data)))
-               nil
-               codes))))))
+  "Janitor: delete rows past expires_at (set at create, tightened at issue)."
+  []
+  (dataset/purge-entity (id/entity :oauth/authorization-code)
+                        {:_where {:expires_at {:_le (java.util.Date.)}}}
+                        {:code nil}))
 
 (comment
   (clean-codes))

@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.db.sqlite
   "SQLite connection management and lifecycle"
   (:require
@@ -10,6 +32,7 @@
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
     [synthigy.db :as db]
+    [synthigy.db.dialect :as dialect]
     [synthigy.db.sql :as sql]
     synthigy.env
     [synthigy.log :as log])
@@ -29,16 +52,20 @@
 
   Args:
     path - File path to SQLite database
-    max-connections - Maximum connection pool size (default: 1 for SQLite)
+    max-connections - Maximum connection pool size (default: 8, SQLITE_POOL_SIZE)
 
   Returns:
     SQLite record with :path and :datasource (HikariDataSource)"
   [{:keys [path max-connections]
-    :or {max-connections 1}  ; SQLite works best with single connection
+    :or {max-connections 8}
     :as config}]
   (log/info {:id ::connecting :data {:path path}} "Connecting to SQLite database")
+  ;; SQLite cannot create a database whose parent directory doesn't exist —
+  ;; the zero-config default (~/.synthigy/db/synthigy.db) needs db/ created
+  ;; on first boot.
+  (io/make-parents (str path))
   (let [;; Add JDBC parameters to improve statement handling and concurrency
-        jdbc-url (str "jdbc:sqlite:" path "?journal_mode=WAL&busy_timeout=30000")
+        jdbc-url (str "jdbc:sqlite:" path "?journal_mode=WAL&busy_timeout=30000&transaction_mode=IMMEDIATE")
         datasource (doto
                      (HikariDataSource.)
                      (.setDriverClassName "org.sqlite.JDBC")
@@ -72,14 +99,41 @@
   "Builds SQLite connection config from environment variables.
 
   Environment variables:
-    SQLITE_PATH - Path to SQLite database file (default: synthigy.db)
+    SQLITE_PATH      - Path to SQLite database file (default: synthigy.db)
+    SQLITE_POOL_SIZE - Connection pool size (default: 8)
 
   Returns:
-    Config map with :path key"
+    Config map with :path and :max-connections keys"
   []
   (let [path (env :sqlite-path (str synthigy.env/home "/db/synthigy.db"))]
     (log/info {:id ::path-from-env :data {:path path}} "Database path from env")
-    {:path path}))
+    {:path path
+     :max-connections (Integer/parseInt (env :sqlite-pool-size "8"))}))
+
+(defn freelist-count
+  [db]
+  (with-open [c (jdbc/get-connection (:datasource db))]
+    (long (first (vals (jdbc/execute-one! c ["PRAGMA freelist_count"]))))))
+
+(defn ensure-incremental-vacuum!
+  "Put the file in auto_vacuum=INCREMENTAL once; an existing file needs one full VACUUM for the mode to take."
+  [db]
+  (with-open [c (jdbc/get-connection (:datasource db))]
+    (let [mode (long (first (vals (jdbc/execute-one! c ["PRAGMA auto_vacuum"]))))]
+      (when (not= 2 mode)
+        (log/info {:id ::enabling-incremental-vacuum
+                   :data {:action :migrating :subject :db-backend :auto-vacuum mode}}
+                  "Switching SQLite file to incremental auto_vacuum")
+        (jdbc/execute! c ["PRAGMA auto_vacuum = INCREMENTAL"])
+        (jdbc/execute! c ["VACUUM"])))))
+
+(defn incremental-vacuum!
+  "Return up to `pages` free pages to the OS; cheap when the freelist is empty."
+  [db pages]
+  ;; executeUpdate, never execute!/execute — the pragma frees one page per step and only executeUpdate steps it to the end
+  (with-open [^java.sql.Connection c (jdbc/get-connection (:datasource db))
+              st (.createStatement c)]
+    (.executeUpdate st (str "PRAGMA incremental_vacuum(" (long pages) ")"))))
 
 (defn start
   "Initializes SQLite database connection.
@@ -99,7 +153,7 @@
    (when-not (instance? SQLite db/*db*)
      (log/info {:id ::backend-starting :data {:action :starting :subject :db-backend}} "Starting SQLite backend...")
      (when-let [db (connect config)]
-
+       (ensure-incremental-vacuum! db)
        (alter-var-root #'db/*db* (constantly db))
        (log/info {:id ::backend-started :data {:action :started :subject :db-backend}} "SQLite backend started")
        nil))))
@@ -299,6 +353,14 @@
    :stop (fn []
            ;; Runtime: Close connections
            (log/info {:id ::lifecycle-stopping :data {:action :stopping}} "Stopping SQLite connection...")
+           ;; Release the patcho stores BEFORE closing the pool — see the same
+           ;; comment in synthigy.db.postgres. They hold THIS datasource, and
+           ;; `setup!` reads the lifecycle store before the next `:start` runs,
+           ;; so a stale one wedges restart beyond recovery. nil (not a fresh
+           ;; AtomStore) so `setup-complete?` isn't reported false and setup
+           ;; doesn't re-run.
+           (patch/set-store! nil)
+           (lifecycle/set-store! nil)
            (stop)
            (log/info {:id ::lifecycle-stopped :data {:action :stopped}} "SQLite connection stopped"))})
 
@@ -326,15 +388,9 @@
 (def ^:private defaults
   "SQLite-specific next.jdbc options for each return type.
 
-  :graphql - String keys, lowercase column names
   :edn - Keyword keys, kebab-case column names
   :raw - String keys, original column names"
-  {:graphql
-   {:builder-fn (sqlite-result-builder :graphql)
-    :label-fn str/lower-case
-    :qualifier-fn name}
-
-   :edn
+  {:edn
    {:builder-fn (sqlite-result-builder :edn)
     :label-fn (fn [w]
                 (let [special (re-find #"^_+" w)]
@@ -430,3 +486,28 @@
   (translate-db-exception [_ e]
     (when (instance? SQLiteException e)
       (translate-sqlite-exception e))))
+
+;;; ============================================================================
+;;; Dialect Protocol Implementation
+;;; ============================================================================
+
+(extend-type SQLite
+  db/Dialect
+
+  (json-param [_ s] s)
+  (json-column [_ v] v)
+
+  (table-exists? [_ table]
+    (boolean (sql/execute-one! ["SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?" table])))
+
+  ;; never pass untrusted `table` here — PRAGMA takes no bind params
+  (column-exists? [_ table column]
+    (boolean (some #(= column (:name %))
+                   (sql/execute! [(format "PRAGMA table_info(%s)" table)]))))
+
+  (ddl [_] {:serial-pk "INTEGER PRIMARY KEY AUTOINCREMENT" :json "TEXT" :now "CURRENT_TIMESTAMP"})
+  (json-text [_ expr] expr)
+  (json-get-text [_ expr k] (str "json_extract(" expr ", '$.\"" k "\"')"))
+  (json-remove [_ expr k] (str "json_remove(" expr ", '$.\"" k "\"')"))
+  (cast-placeholder [_ _type] "?")
+  (template-sql [_ raw-sql] (-> raw-sql dialect/strip-casts dialect/ilike->like)))

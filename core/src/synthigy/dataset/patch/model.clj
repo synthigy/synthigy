@@ -1,36 +1,39 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.patch.model
-  "Model transformation utilities for EUUID to XID migration.
-
-  This namespace provides functions to:
-  1. Transform ERDModel entities/relations from euuid to xid format
-  2. Patch-ready functions for upgrading/downgrading stored models
-  3. XID migration utilities for data tables
-
-  Usage:
-    (require '[synthigy.dataset.patch.model :as model])
-
-    ;; Transform a model in memory
-    (model/transform-model my-model :to-xid)
-
-    ;; In patch upgrade (MODIFIES DATABASE)
-    (model/upgrade-models-to-xid!)
-    (model/downgrade-models-to-euuid!)"
+  "EUUID<->XID model transformation and DB-modifying patch helpers for
+   upgrading/downgrading stored models."
   (:require
     [synthigy.log :as log]
     [synthigy.dataset.core :as core]
     [synthigy.dataset.id :as id]
+    [synthigy.dataset.sql.naming :as naming]
     [synthigy.db.sql :as sql]
     [synthigy.transit :refer [<-transit ->transit]]))
 
-
-;;; ============================================================================
-;;; Deploy drift-stamp (for codegen)
-;;; ============================================================================
-
-(defn- ->iso
-  "Best-effort ISO-8601 string for a `deployed_on` value across backends
-   (PG `Timestamp`/`Date` → instant; SQLite string/epoch → plain str).
-   Isolated so a coercion hiccup never nulls the surrounding version info."
+(defn ->iso
+  "Best-effort ISO-8601 string for a deployed_on value across backends. Isolated
+   so a coercion hiccup never nulls the surrounding version info."
   [v]
   (try
     (if (instance? java.util.Date v)
@@ -38,48 +41,43 @@
       (str v))
     (catch Throwable _ (str v))))
 
-(defn latest-deployed-version-info
-  "Lightweight drift-stamp for codegen: a map
-   `{:version <name> :version-id <id> :deployed-at <iso-string>}` describing the
-   most recently deployed dataset version, or `nil` when none is deployed (or a
-   legacy meta-model predates `deployed_on`). Reads `dataset_version` directly —
-   cheap, no model rebuild — so it's safe to call from the public discovery doc
-   and from `/schema` on every request."
+(def versions-relation-table
+  (memoize
+    (fn [id-key]
+      (naming/relation->table-name-for-id
+        {:euuid (id/relation-id-for-key :dataset/dataset->versions :euuid)
+         :xid   (id/relation-id-for-key :dataset/dataset->versions :xid)
+         :from  {:name "Dataset"}
+         :to    {:name "Dataset Version"}}
+        id-key))))
+
+(defn deployed-versions
+  "Drift stamp — {dataset-id {:version :deployed-at}} for every dataset's latest
+   deployed version. Cheap: reads the meta tables directly, no model rebuild."
   []
   (try
-    (let [id-col (clojure.core/name (id/key))]            ; active id seam: "xid" (or "euuid")
-      (when-let [row (first (sql/execute!
-                              [(str "SELECT " id-col ", name, deployed_on
-                                     FROM dataset_version
-                                     WHERE deployed = true
-                                     ORDER BY deployed_on DESC NULLS LAST
-                                     LIMIT 1")]))]
-        {:version     (:name row)
-         :version-id  (str (get row (keyword id-col)))
-         :deployed-at (some-> (:deployed_on row) ->iso)}))
+    (let [id-col (clojure.core/name (id/key))
+          rows   (sql/execute!
+                   [(str "SELECT d." id-col " AS dataset, v.name AS version, v.deployed_on
+                          FROM dataset_version v
+                          JOIN \"" (versions-relation-table (id/key)) "\" j
+                            ON j.dataset_version_id = v._eid
+                          JOIN dataset d ON d._eid = j.dataset_id
+                          WHERE v.deployed = true")])]
+      (reduce-kv
+        (fn [r dataset versions]
+          (let [latest (last (sort-by (comp ->iso :deployed_on) versions))]
+            (assoc r (str dataset)
+                   {:version     (:version latest)
+                    :deployed-at (some-> (:deployed_on latest) ->iso)})))
+        {}
+        (group-by :dataset rows)))
     (catch Throwable _ nil)))
 
 
-;;; ============================================================================
-;;; Full Model Transformation
-;;; ============================================================================
-
 (defn transform-model
-  "Transform all entities, clones, and relations in a model.
-
-  Args:
-    model     - ERDModel to transform
-    direction - :to-xid or :to-euuid
-
-  Returns:
-    Transformed model with:
-    - All entities/clones/relations having both euuid and xid
-    - Map keys updated to target ID format
-    - from/to references updated
-    - unique constraints updated
-
-  Note: Uses deterministic id/uuid->nanoid for consistency across all models.
-        Same euuid always resolves to same xid."
+  "Converts all entities/clones/relations/attributes/enum-values/RLS-conditions in a
+   model between id formats, via deterministic id/uuid->nanoid."
   ([model ->to]
    (transform-model model (id/key) ->to))
   ([original-model ->from ->to]
@@ -92,22 +90,18 @@
                   :euuid (comp id/nanoid->uuid :xid))
                 data))
              (->new-bare-id
-               ;; Translate a raw id (no surrounding record) between the
-               ;; two formats. Pass-through when the id is already in the
-               ;; target form or nil.
+               ;; translates a raw id (no surrounding record); pass-through if
+               ;; already target form or nil
                [id]
                (cond
                  (nil? id) id
                  (= ->to :xid) (if (uuid? id) (id/uuid->nanoid id) id)
                  (= ->to :euuid) (if (string? id) (id/nanoid->uuid id) id)))
              (transform-rls-condition
-               ;; RLS guard conditions reference attributes / relations /
-               ;; entities by bare id under `:attribute` and step keys
-               ;; `:relation-id` / `:entity-id` (format-DECOUPLED names). None
-               ;; carry the surrounding record, so `->new-id` doesn't apply —
-               ;; translate field-by-field. This is also the forward-migration
-               ;; seam for legacy `:relation-euuid` / `:entity-euuid` step keys:
-               ;; read either, write only the decoupled name.
+               ;; bare ids, no surrounding record — translate field-by-field;
+               ;; also the
+               ;; forward-migration seam for legacy
+               ;; :relation-euuid/:entity-euuid step keys
                [condition]
                (cond-> condition
                  (contains? condition :attribute)
@@ -148,7 +142,6 @@
                        :original (id/extract entity))))))]
 
        (as-> [nil original-model] data
-         ;; Migrate entities
          (reduce
            (fn [[mapping model] entity]
              (letfn [(find-attribute
@@ -198,7 +191,6 @@
                     (update :entities dissoc old-id))])))
            data
            (core/get-entities (second data)))
-         ;; Migrate clones
          (reduce-kv
            (fn [[mapping model] old-id {original-entity-id :entity
                                         :as old-value}]
@@ -210,7 +202,6 @@
                 (assoc-in model [:clones clone-new-id] (assoc old-value :entity new-original-entity-id))]))
            (assoc-in data [1 :clones] nil)
            (get-in data [1 :clones]))
-         ;;
          (reduce-kv
            (fn [[mapping model] old-relation-id {:keys [from to]
                                                  :as old-relation}]
@@ -240,69 +231,49 @@
            (:relations original-model))
          (second data))))))
 
-;;; ============================================================================
-;;; Patch Functions (MODIFY DATABASE)
-;;; ============================================================================
-;;
-;; These functions are designed to be called from patcho upgrade/downgrade blocks.
-;; They transform ALL deployed models in the database.
-;;
-;; WARNING: These functions MODIFY the database!
-;; Only call them from patch definitions.
-
+;; WARNING: functions below MODIFY THE DATABASE — call only from patcho patch
+;; definitions
 
 (comment
-  (def version-euuid #uuid "d908a70f-a1fb-46bd-ac76-801bebe6ceed")
-  (def version-euuid #uuid "8996515d-3447-4ac1-8f36-2c874967913b")
+  (def version-id #uuid "d908a70f-a1fb-46bd-ac76-801bebe6ceed")
+  (def version-id #uuid "8996515d-3447-4ac1-8f36-2c874967913b")
   (def direction :xid)
   (def version-record
     (sql/execute-one!
       ["SELECT euuid, name, model
                            FROM dataset_version
                            WHERE euuid = ?"
-       version-euuid]))
+       version-id]))
   (def model
     (when-let [m (:model version-record)]
       (<-transit m))))
 
 (defn transform-stored-model!
-  "Transform a single stored model and save it back to the database.
-
-  Args:
-    version-euuid - UUID of the dataset_version record
-    direction     - :to-xid or :to-euuid
-
-  Returns:
-    Map with :success, :version-name, :entities-count
-
-  WARNING: This MODIFIES the database!"
-  [version-euuid direction]
+  "Transforms a single stored model and saves it back to the database. MODIFIES
+   THE DATABASE."
+  [version-id direction]
   (log/info {:id ::transforming-model
-             :data {:version-euuid version-euuid :direction direction}}
+             :data {:version-id version-id :direction direction}}
             "Transforming model")
-  (let [;; Load the version record
-        version-record (sql/execute-one!
+  (let [version-record (sql/execute-one!
                          ["SELECT euuid, name, model
                            FROM dataset_version
                            WHERE euuid = ?"
-                          version-euuid])
+                          version-id])
         model (when (:model version-record)
                 (<-transit (:model version-record)))]
     (if-not model
       (do
         (log/warn {:id ::model-not-found
-                   :data {:version-euuid version-euuid}}
+                   :data {:version-id version-id}}
                   "No model found for version")
         {:success false
          :error "No model found"})
-      (let [;; Transform the model
-            transformed (transform-model model direction)
-            ;; Serialize back to Transit
+      (let [transformed (transform-model model direction)
             transit-data (->transit transformed)]
-        ;; Update the database
         (sql/execute!
           ["UPDATE dataset_version SET model = ? WHERE euuid = ?"
-           transit-data version-euuid])
+           transit-data version-id])
         (log/info {:id ::model-transformed
                    :data {:version-name (:name version-record)
                           :entity-count (count (:entities transformed))
@@ -314,20 +285,8 @@
          :direction direction}))))
 
 (defn transform-stored-models!
-  "Transform ALL deployed models in the database.
-
-  Args:
-    direction - :to-xid or :to-euuid
-
-  Returns:
-    Map with :total, :success-count, :failures
-
-  Note: Processes models in deployment order (oldest first) to preserve
-        rebuild logic consistency. The deterministic id/uuid->nanoid ensures
-        that same euuid always resolves to same xid across all models.
-
-  WARNING: This MODIFIES the database!
-  Should be called from patcho patch definitions."
+  "Transforms ALL deployed models, oldest-first to preserve rebuild-logic
+   consistency. MODIFIES THE DATABASE."
   [direction]
   (log/info {:id ::transforming-all-models
              :data {:direction direction}}

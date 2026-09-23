@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.sqlite
   (:require
    [buddy.hashers :as hashers]
@@ -12,7 +34,6 @@
    [patcho.lifecycle :as lifecycle]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.core :as core]
-   [synthigy.dataset.encryption :refer [encrypt-data decrypt-data]]
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.sql.naming
@@ -25,6 +46,7 @@
             SQLNameResolution]]
    [synthigy.dataset.sql.protocol :as proto]
    [synthigy.dataset.sql.query :as query]
+   [synthigy.dataset.sql.rls :as rls]
     ;; IMPORTANT: Load SQLite-specific query namespace to ensure ModelQueryProtocol
     ;; is extended for synthigy.db.SQLite. Without this, requiring synthigy.dataset.sqlite
     ;; directly (e.g., from tests) would register the SQLite lifecycle module but lack
@@ -38,13 +60,14 @@
             delete-entity]]
    [synthigy.db.sql :refer [execute! execute-one!]]
    [synthigy.db.sqlite :as sqlite]
-   [synthigy.json :refer [json->data <-json ->json]]
+   [synthigy.json :refer [<-json ->json]]
    [synthigy.log :as log]
    ;; loaded for its lifecycle registration — :synthigy/dataset depends on
    ;; :synthigy/log.config so the data plane always carries DB-backed log routing
    [synthigy.log.config]
    [synthigy.transit
-    :refer [<-transit ->transit]])
+    :refer [<-transit ->transit]]
+   [synthigy.timestamp :as ts])
   (:import
    [synthigy.db SQLite]))
 
@@ -127,15 +150,26 @@
                 {:type ::unregistered-reference-type
                  :phase :ddl-generation
                  :reference-type t})))
-      ;; Standard types
-      (case t
+      (if (core/reference-type-names t)
+        ;; never fall through to the case — an unregistered reference type
+        ;; emits a bare `user` column type, which SQLite accepts silently
+        (throw (ex-info
+                (format "Reference type '%s' is not registered; register IAM reference types before mounting a model that uses them" t)
+                {:type ::unregistered-reference-type
+                 :phase :ddl-generation
+                 :reference-type t}))
+        ;; Standard types
+        (case t
         "currency" "TEXT"
         ("avatar" "string" "hashed") "TEXT"
         "timestamp" "TEXT"
         ("json" "encrypted" "timeperiod") "TEXT"
         "transit" "TEXT"
         "int" "INTEGER"
-        t))
+        ;; enum - TEXT everywhere since dataset 1.4.0; value list enforced at
+        ;; the write path, not by the database
+        "enum" "TEXT"
+        t)))
     (catch Throwable e
       (throw (ex-info
               (format "Failed to generate DDL for type '%s'" t)
@@ -146,19 +180,14 @@
 
 (defn attribute->ddl
   "Function converts attribute to DDL syntax (SQLite - enums stored as TEXT)"
-  [entity {n :name
-           t :type}]
-  (case t
-    "enum"
-    ;; SQLite doesn't have ENUM types - just use TEXT
-    (str (column-name n) " TEXT")
-    ;;
-    (clojure.string/join
-     " "
-     (remove
-      empty?
-      [(column-name n)
-       (type->ddl t)]))))
+  [_entity {n :name
+            t :type}]
+  (clojure.string/join
+   " "
+   (remove
+    empty?
+    [(column-name n)
+     (type->ddl t)])))
 
 (defn normalized-enum-value [value]
   (clojure.string/replace value #"-|\s" "_"))
@@ -174,28 +203,11 @@
           as' (keep #(attribute->ddl entity %) as)
           pk ["_eid INTEGER PRIMARY KEY"
               (str (id/field) " TEXT NOT NULL UNIQUE")]
-          cs' (keep-indexed
-               (fn [idx ids]
-                 (when (not-empty ids)
-                   (format
-                    "constraint \"%s\" unique(%s)"
-                    (str table "_eucg_" idx)
-                    (clojure.string/join
-                     ","
-                     (map
-                      (fn [id]
-                        (log/info {:id ::constraint-generated :data {:entity n :attribute-id id}}
-                                  "Generating constraint")
-                        (->
-                         (core/get-attribute entity id)
-                         :name
-                         column-name))
-                      ids)))))
-               ;; active-aware + index-stable: a composite unique key whose
-               ;; attribute is inactive nils out (skipped by not-empty) — never
-               ;; emit a constraint over a deactivated/removed column.
-               (core/unique-constraints-indexed entity))
-          rows (concat pk as' cs')]
+          ;; Unique groups are NOT inlined here — they ship as separate unique
+          ;; INDEXES (`generate-entity-index-ddl`). An inline constraint can
+          ;; never be dropped or changed on SQLite. See
+          ;; docs/core/synthigy/dataset/sqlite.md.
+          rows (concat pk as')]
       (format
        "create table \"%s\" (\n  %s\n)"
        table
@@ -212,10 +224,38 @@
                :has-constraints (some? cs)}
               e)))))
 
+(defn unique-index-name
+  [table idx]
+  (str table "_eucg_" idx))
+
+(defn unique-index-ddl
+  "CREATE UNIQUE INDEX for one unique group, or nil for an empty/dead group."
+  [entity table idx ids]
+  (when (not-empty ids)
+    (format
+     "create unique index if not exists \"%s\" on \"%s\"(%s)"
+     (unique-index-name table idx)
+     table
+     (clojure.string/join
+      ","
+      (map #(-> (core/get-attribute entity %) :name column-name) ids)))))
+
+(defn generate-entity-index-ddl
+  "Unique-group indexes for a NEW entity table. SQLite cannot alter a table
+   constraint, so groups live as indexes from the start."
+  [entity]
+  (let [table (entity->table-name entity)]
+    (vec
+     (keep-indexed
+      ;; active-aware + index-stable: a group whose attribute is inactive nils
+      ;; out at its position — never index a deactivated/removed column.
+      (fn [idx ids] (unique-index-ddl entity table idx ids))
+      (core/unique-constraints-indexed entity)))))
+
 (defn generate-relation-ddl
   "Returns relation table DDL for given model and target relation.
    Includes from_xid / to_xid TEXT columns for the relation-audit
-   substrate (denormalized at link time via link-relations subselects).
+   plug (denormalized at link time via link-relations subselects).
    On SQLite the app-path is authoritative for populating these — no
    BEFORE INSERT trigger fallback because SQLite can't modify NEW."
   [_ {f :from
@@ -317,13 +357,18 @@
 
 ;;
 (defn attribute-delta->ddl
-  [entity
-   {:keys [name type]
-    {:keys [values]} :configuration
-    :as attribute}]
+  "DDL for one changed attribute. `conn` is the deploy's OWN transaction — the
+   enum-removal guard runs a COUNT here, and on SQLite the pool is size 1, so
+   asking `*db*` for a second connection while the deploy transaction holds the
+   only one deadlocks until the pool times out."
+  ([entity attribute] (attribute-delta->ddl entity attribute nil))
+  ([entity
+    {:keys [name type]
+     {:keys [values]} :configuration
+     :as attribute}
+    conn]
   ;; Don't look at primary key since that is EYWA problem
-  (let [new-table (entity->table-name entity)
-        oentity (core/suppress entity)
+  (let [oentity (core/suppress entity)
         old-table (entity->table-name oentity)
         diff (core/diff attribute)]
     (if (core/new-attribute? attribute)
@@ -331,25 +376,13 @@
       (do
         (log/debug {:id ::attribute-added :data {:attribute name :table old-table}}
                    "Adding attribute to table")
-        (case type
-          "enum"
-          ;; SQLite: Enum is just TEXT (no custom types)
-          [(str "alter table \"" old-table "\" add column " (column-name name) " TEXT")]
-          ;; Add new scalar column to table
-          [(str "alter table \"" old-table "\" add column " (column-name name) " " (type->ddl type))]
-          ;; TODO - remove mandatory
-          #_[(cond-> (str "alter table \"" old-table "\" add column " (column-name name) " " (type->ddl type))
-               (= "mandatory" constraint) (str " not null"))]))
+        [(str "alter table \"" old-table "\" add column " (column-name name) " " (type->ddl type))])
       ;;
-      (when (or
-             (:name (core/diff entity)) ;; If entity name has changed check if there are some enums
-             (not-empty (dissoc diff :pk))) ;; If any other change happend follow steps
+      (when (not-empty (dissoc diff :pk))
         (let [{dn :name
                dt :type
                dconfig :configuration} diff
-              column (column-name (or dn name))
-              old-enum-name (normalize-name (str old-table \space (or dn name)))
-              new-enum-name (normalize-name (str new-table \space name))]
+              column (column-name (or dn name))]
           (when dt (check-type-conversion! entity attribute dt type))
           (cond-> []
             ;; Change attribute name
@@ -367,40 +400,23 @@
             ;; SQLite: Enum is TEXT, no custom types needed
             ;; (no-op - enum type changes don't need DDL)
             ;; Type has changed
+            ;; Reference conversions rejected upstream (check-type-conversion!).
+            ;; Scalar changes need no DDL — SQLite uses dynamic typing;
+            ;; string→json works because decoder is tolerant of plain strings.
             dt
             (as-> statements
-                  (log/debug {:id ::column-type-changed
-                              :data {:table old-table
-                                     :column column
-                                     :from-type dt
-                                     :to-type type}}
-                             "Changing table column type")
-              ;; SQLite: Dynamic typing! Most type changes don't need DDL.
-              ;; Only foreign key constraints (reference types) need updates.
-              (if (core/reference-type? type)
-                (let [attribute-name (normalize-name (or dn name))
-                      constraint-name (str old-table \_ attribute-name "_fkey")
-                      refered-table (reference-table type)]
-                  (conj
-                   (vec statements)
-                   (format "alter table \"%s\" drop constraint %s" old-table constraint-name)
-                   (format
-                    "alter table \"%s\" add constraint \"%s\" foreign key (%s) references \"%s\"(_eid) on delete set null"
-                    old-table constraint-name attribute-name refered-table)))
-                ;; For all other type changes, no DDL needed - SQLite uses dynamic typing!
-                ;; string→json works because decoder is tolerant of plain strings
-                (do
-                  (log/debug {:id ::column-type-change-no-ddl
-                              :data {:from-type dt :to-type type}}
-                             "No DDL needed for type change (dynamic typing)")
-                  statements)))
-            ;; SQLite: Enum type changes don't need special handling (just TEXT)
-            (= dt "enum")
-            identity
-            ;; SQLite: Enum name changes don't need special handling (no type system)
-            (and (= type "enum") (not= old-enum-name new-enum-name))
-            identity
-            ;; If type is enum and enum values have changed, update the data
+                  (do
+                    (log/debug {:id ::column-type-change-no-ddl
+                                :data {:table old-table :column column
+                                       :from-type dt :to-type type}}
+                               "No DDL needed for type change (dynamic typing)")
+                    statements))
+            ;; Enum value changes are pure data operations (dataset 1.4.0,
+            ;; identical semantics on every backend):
+            ;;   add    - no statement at all
+            ;;   rename - UPDATE rewriting old label to new
+            ;;   remove - allowed only when no rows reference the label;
+            ;;            otherwise the deploy fails - deactivate instead.
             (and (= type "enum") (nil? dt))
             (as-> statements
                   (let [id-key (id/key)
@@ -417,30 +433,53 @@
                                  (zipmap
                                   (map id-key values)
                                   (map :name values)))
-                        column (column-name name)]
+                        column (column-name name)
+                        removed (reduce-kv
+                                 (fn [r k v] (if (contains? nv k) r (conj r v)))
+                                 []
+                                 ov)
+                        renames (reduce-kv
+                                 (fn [r id old-name]
+                                   (let [new-name (get nv id)]
+                                     (if (and new-name old-name (not= old-name new-name))
+                                       (conj r [old-name new-name])
+                                       r)))
+                                 []
+                                 ov)]
                     (log/trace {:id ::enum-diffed
                                 :data {:diff-config dconfig
                                        :old-enums ov
                                        :new-enums nv}}
                                "Diffing enum values")
-                    ;; SQLite: Enum is just TEXT, only need UPDATE if values changed
-                    (if (empty? ov)
-                      statements
-                      (conj
-                       statements
-                       (str
-                        "update " old-table " set " column " ="
-                        "\n  case " column "\n    "
-                        (clojure.string/join
-                         "\n    "
-                         (reduce-kv
-                          (fn [r id old-name]
-                            (if-let [new-name (get nv id)]
-                              (conj r (str "when '" old-name "' then '" new-name "'"))
-                              (conj r (str "when '" old-name "' then '" old-name "'"))))
-                          (list (str "else " column))
-                          ov))
-                        "\n  end")))))))))))
+                    ;; SQLite cannot RAISE outside triggers, so the removal
+                    ;; guard runs here at generation time instead of as a SQL
+                    ;; statement. SQLite's single-writer lock makes
+                    ;; check-then-deploy effectively race-free.
+                    (when (seq removed)
+                      (let [in-clause (clojure.string/join
+                                       ", "
+                                       (map #(str \' (normalized-enum-value %) \') removed))
+                            q [(format "select count(*) as cnt from \"%s\" where %s in (%s)"
+                                       old-table column in-clause)]
+                            [{cnt :cnt}] (if conn (execute! conn q) (execute! q))]
+                        (when (pos? (or cnt 0))
+                          (throw (ex-info
+                                  (format "Cannot remove enum value(s) %s from attribute '%s' - %d row(s) still reference them; deactivate the value instead"
+                                          (clojure.string/join ", " removed) name cnt)
+                                  {:type ::enum-value-removal-forbidden
+                                   :entity-name name
+                                   :table-name old-table
+                                   :column column
+                                   :removed removed
+                                   :rows cnt})))))
+                    (cond-> statements
+                      (seq renames)
+                      (into
+                       (map (fn [[old-name new-name]]
+                              (format "update \"%s\" set %s = '%s' where %s = '%s'"
+                                      old-table column (normalized-enum-value new-name)
+                                      column (normalized-enum-value old-name)))
+                            renames))))))))))))
 
 (defn orphaned-attribute->drop-ddl
   "Generates DROP COLUMN DDL for an orphaned attribute.
@@ -462,20 +501,27 @@
 ;; 2. Rename table if needed
 ;; 3. Change constraints
 (defn entity-delta->ddl
-  [{:keys [attributes]
-    :as entity}]
+  ([entity] (entity-delta->ddl entity nil))
+  ([{:keys [attributes]
+     :as entity}
+    conn]
   (assert (core/diff? entity) "This entity is already synced with DB")
   (let [diff (core/diff entity)
         old-entity (core/suppress entity)
         old-table (entity->table-name old-entity)
         old-constraints (get-in old-entity [:configuration :constraints :unique])
-        ;; Index-stable, active-aware unique groups (same source of truth as
-        ;; Postgres + the schema). A composite unique key whose attribute was
-        ;; deactivated nils out at its position → the diff emits its DROP.
+        ;; DESIRED groups only — index-stable, active-aware. Reconcile is
+        ;; declarative (drop-then-create), so it never has to know what the
+        ;; database currently holds. Mirrors postgres.clj.
         new-unique (core/unique-constraints-indexed entity)
-        old-unique (core/unique-constraints-indexed old-entity)
+        raw-groups (max (count (get-in entity [:configuration :constraints :unique]))
+                        (count old-constraints))
+        group-members (into #{}
+                            (comp cat cat)
+                            [(get-in entity [:configuration :constraints :unique])
+                             old-constraints])
         table (entity->table-name entity)
-        attributes' (keep #(attribute-delta->ddl entity %) attributes)]
+        attributes' (keep #(attribute-delta->ddl entity % conn) attributes)]
     #_(do
         (def attributes' attributes')
         (def diff diff)
@@ -492,58 +538,25 @@
         ;; SQLite: Just rename the table - constraints, indexes, and triggers move automatically
         ;; No need for RENAME CONSTRAINT (doesn't exist in SQLite) or ALTER SEQUENCE (no sequences)
        [(format "alter table \"%s\" rename to \"%s\"" old-table table)])
-      ;; Reconcile unique constraints when the constraints config changes; pure
-      ;; attribute-deactivation is handled by the column drop. When the config
-      ;; changes we rebuild from ACTIVE-aware groups so a combo that lost an
-      ;; attribute is dropped (all-or-nothing), never referencing a dead column.
-      (-> diff :configuration :constraints)
+      ;; Reconcile unique groups whenever the constraints config changed OR an
+      ;; attribute participating in one did — deactivating an attribute leaves
+      ;; the config untouched and KEEPS the column, so nothing else would drop
+      ;; the dependent index. SQLite has no constraint DDL: groups are INDEXES,
+      ;; which is the only form that can be dropped and recreated. See
+      ;; docs/core/synthigy/dataset/sqlite.md.
+      (or (-> diff :configuration :constraints)
+          (some #(group-members (id/extract %)) (:attributes diff)))
       (into
-        ;; concatenate constraints
-       (let [ncs new-unique
-             ocs old-unique
-             groups (max (count ocs) (count ncs))]
-          ;; by reducing
-         (when (pos? groups)
-           (reduce
-            (fn [statements idx]
-              (let [o (try (nth ocs idx) (catch Throwable _ nil))
-                    n (try (nth ncs idx) (catch Throwable _ nil))
-                    constraint (str "_eucg_" idx)
-                    new-constraint (format
-                                    "alter table \"%s\" add constraint %s unique(%s)"
-                                    table (str table constraint)
-                                    (clojure.string/join
-                                     ","
-                                     (map
-                                      (fn [id]
-                                        (->
-                                         (core/get-attribute entity id)
-                                         :name
-                                         column-name))
-                                      n)))
-                    drop-constraint (format
-                                     "alter table \"%s\" drop constraint %s"
-                                     table
-                                     (str table constraint))]
-                (cond->
-                 statements
-                    ;; Add new constraint (only when there's a real new group —
-                    ;; an index where both old and new are empty/nil must emit
-                    ;; nothing, else we'd generate an invalid `unique()`).
-                  (and (empty? o) (seq n))
-                  (conj new-constraint)
-                    ;; Delete old constraint group
-                  (and (seq o) (empty? n))
-                  (conj drop-constraint)
-                    ;; When constraint has changed
-                  (and
-                   (every? not-empty [o n])
-                   (not= (set o) (set n)))
-                  (conj
-                   drop-constraint
-                   new-constraint))))
-            []
-            (range groups))))))))
+       (reduce
+        (fn [statements idx]
+          (let [statements (conj statements
+                                 (format "drop index if exists \"%s\""
+                                         (unique-index-name table idx)))]
+            (cond-> statements
+              (seq (get new-unique idx))
+              (conj (unique-index-ddl entity table idx (get new-unique idx))))))
+        []
+        (range raw-groups)))))))
 
 (defn transform-relation
   [tx {:keys [from to]
@@ -732,6 +745,8 @@
                        "Adding entity to DB")
             (try
               (execute-one! tx [table-sql])
+              (doseq [index-sql (generate-entity-index-ddl entity)]
+                (execute-one! tx [index-sql]))
               (catch Throwable e
                 (throw (ex-info
                         (format "Failed to create table for entity '%s'" n)
@@ -764,7 +779,7 @@
       (when (not-empty ce) (log/info {:id ::checking-changed-entities} "Checking changed entities"))
       (doseq [{n :name
                :as entity} ce
-              :let [sql (entity-delta->ddl entity)]]
+              :let [sql (entity-delta->ddl entity tx)]]
         (log/debug {:id ::entity-changing :data {:entity n}} "Changing entity")
         (doseq [statement sql]
           (def statement statement)
@@ -1081,6 +1096,23 @@
     (set (map id/extract (last-deployed-version-per-dataset)))
     (catch Throwable _ #{})))
 
+(defn latest-version-models
+  "Models of the latest deployed version of every dataset, plus `include-version`
+   when given."
+  ([] (latest-version-models nil))
+  ([include-version]
+   (let [;; the meta-model is not queryable during the first deploy — it creates it
+         prior (try
+                 (let [latest (deployed-version-per-dataset-ids)
+                       superseded (some-> include-version :dataset id/extract)]
+                   (->> (deployed-versions)
+                        (filter #(contains? latest (id/extract %)))
+                        (remove #(= superseded (some-> % :dataset id/extract)))
+                        (mapv (comp dataset/adapt-model-to-provider :model))))
+                 (catch Throwable _ []))]
+     (cond-> prior
+       include-version (conj (:model include-version))))))
+
 (defn gen-activation-filter
   "Returns a filter function for activate-model.
    Bootstrap behavior: if no versions deployed, everything is active.
@@ -1122,7 +1154,9 @@
               (core/join-models global (core/add-claims model version-id))))
           initial-model
           all-versions)]
-     (core/activate-model final-model (gen-activation-filter)))))
+     (-> final-model
+         (core/reconcile-rls-guards (latest-version-models))
+         (core/activate-model (gen-activation-filter))))))
 
 (defn last-deployed-model
   "Returns the global model with ALL entities from ALL deployed versions.
@@ -1158,6 +1192,15 @@
 
 (extend-protocol core/DatasetProtocol
   synthigy.db.SQLite
+  (core/preview-model [_ version]
+    (let [version (-> version decode-version-model (update :model core/normalize-legacy-types))
+          global (or (try
+                       (last-deployed-model)
+                       (catch Throwable _ nil))
+                     (core/map->ERDModel {:entities {} :relations {}}))]
+      (core/fold-version global (:model version) (id/extract version)
+                         (latest-version-models version)
+                         (gen-activation-filter (id/extract version)))))
   (core/deploy!
     [this version]
     (let [version (-> version decode-version-model (update :model core/normalize-legacy-types))
@@ -1176,6 +1219,10 @@
 
             ;; 1. Check for entity name conflicts (throws on conflict)
               _ (check-entity-name-conflicts! global model)
+
+            ;; 2. Refuse before any DDL runs if the resulting model would drop a
+            ;;    guard — the dropped op fail-closes with no other signal
+              _ (rls/assert-guards-compile! (core/preview-model this version) model)
 
             ;; 3. Call mount to transform database with updated global model
               dataset' (core/mount this (assoc version :model model))
@@ -1201,12 +1248,12 @@
             ;; existing entity adds the columns + triggers; transform-audit
             ;; is idempotent on SQLite (PRAGMA probe).
             ;;
-            ;; Substrate trigger reconcile (entity + relation delta queues)
+            ;; Plug trigger reconcile (entity + relation delta queues)
             ;; is owned by :synthigy/subscriptions.sqlite via
             ;; add-model-watch! on *deployed-model*. When that module is
             ;; started, save-model! above fires the watch synchronously and
-            ;; the substrate is installed/refreshed. Bare-server config
-            ;; doesn't start that module — substrate stays uninstalled.
+            ;; the plug is installed/refreshed. Bare-server config
+            ;; doesn't start that module — plug stays uninstalled.
             (let [all-entities (vec (core/get-entities updated-model))]
               (enhance/transform-audit *db* (:datasource *db*) all-entities)))
 
@@ -1435,9 +1482,10 @@
            ;; Use id/extract to get the version ID in the current provider format (xid or euuid)
            ;; This ensures claims match deployed-version-per-dataset-ids which also uses id/extract
            version-id (id/extract version)
-           model' (core/join-models global (core/add-claims model version-id))
-           ;; Pass version-id to filter so it's included even if not yet visible in DB query
-           model'' (core/activate-model model' (gen-activation-filter version-id))
+           ;; Pass version-id to the filter so it's included even if not yet visible in DB query
+           model'' (core/fold-version global model version-id
+                                      (latest-version-models version)
+                                      (gen-activation-filter version-id))
            schema (query/model->schema model'')]
        (query/deploy-schema schema)
        (dataset/save-model! model'')
@@ -1548,6 +1596,7 @@
 (lifecycle/register-module!
  :synthigy/dataset
  {:depends-on [:synthigy/log :synthigy/database :synthigy.dataset/encryption :synthigy/log.config]
+  :headline true
   :doc "ERD model — schema deploy, /data query engine"
   :setup (fn []
            ;; One-time: Create database file, deploy dataset meta-model
@@ -1610,12 +1659,12 @@
            ;; Runtime: Initialize delta channels, apply patches, load model
            (log/info {:id ::lifecycle-starting :data {:action :starting}} "Starting dataset system")
            (dataset/start)
-           ;; Substrate delta-queue triggers + drainer are owned by
-           ;; :synthigy/subscriptions.sqlite. Bare-server doesn't start
-           ;; that module → no substrate → no audit-substrate trigger tax
-           ;; on writes. Full-server / test fixtures must explicitly
-           ;; start :synthigy/subscriptions.sqlite for SSE + audit to capture.
-           ;; Audit persistence is owned by the observability substrate
+           ;; Plug delta-queue triggers + drainer are owned by
+           ;; :synthigy/plug. Both server profiles now start it
+           ;; (bare-server included), so writes carry the plug trigger
+           ;; tax. To skip it — a trigger-free fast write path — start
+           ;; :synthigy/dataset alone (no server profile).
+           ;; Audit persistence is owned by the observability plug
            ;; (`:synthigy/observability`, DuckDB or ClickHouse), started
            ;; separately by the operator/test fixture — not auto-bound
            ;; here. Without it, deltas still dispatch live to subscribers;
@@ -1670,240 +1719,7 @@
              field))
          relations)))))
 
-;;; Database Healthcheck
-;;; Verifies that the deployed dataset schema matches the actual PostgreSQL database state
-
-(defn get-pg-tables
-  "Returns a set of all table names in the public schema (excluding system tables)"
-  []
-  (let [system-tables #{"__deks" "__version_history"}]
-    (set (remove system-tables
-                 (map :table_name
-                      (execute! ["SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_type = 'BASE TABLE'
-                AND table_name NOT LIKE '__deploy%'"]))))))
-
-(defn get-pg-columns
-  "Returns a set of column names for a given table"
-  [table-name]
-  (set (map (comp keyword :column_name)
-            (execute! ["SELECT column_name FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = ?"
-                       table-name]))))
-
-(defn get-pg-enum-types
-  "Returns a set of all enum type names in the database"
-  []
-  (set (map :typname
-            (execute! ["SELECT typname FROM pg_type
-            WHERE typtype = 'e'"]))))
-
-(defn healthcheck-database
-  "Checks if deployed dataset schema matches actual PostgreSQL database state.
-
-   Returns a structured map with namespaced keywords:
-   - :healthy? - true if everything matches
-   - :expected/* - expected counts from schema
-   - :actual/* - actual counts from database
-   - :missing/* - {:count N :items [...]} missing items (in schema but not in DB)
-   - :extra/* - {:count N :items [...]} extra items (in DB but not in schema)"
-  []
-  (let [schema (query/deployed-schema)
-
-        ;; Get all actual tables from PostgreSQL
-        pg-tables (get-pg-tables)
-
-        ;; Get all actual enum types from PostgreSQL
-        pg-enums (get-pg-enum-types)
-
-        ;; Get all expected entity tables from schema
-        expected-entity-tables (set (keep (fn [[_ entity-data]]
-                                            (:table entity-data))
-                                          schema))
-
-        ;; Get all expected relation tables from schema
-        expected-relation-tables (set (mapcat
-                                       (fn [[_ entity-data]]
-                                         (map :table (vals (:relations entity-data))))
-                                       schema))
-
-        ;; Get all expected enum types from schema
-        expected-enums (set (mapcat
-                             (fn [[_ entity-data]]
-                               (keep (fn [field]
-                                       (:enum/name field))
-                                     (vals (:fields entity-data))))
-                             schema))
-
-        expected-tables (clojure.set/union expected-entity-tables expected-relation-tables)
-
-        ;; Find missing tables
-        missing-tables (clojure.set/difference expected-tables pg-tables)
-
-        ;; Find extra tables (could be inactive/historical)
-        extra-tables (clojure.set/difference pg-tables expected-tables)
-
-        ;; Find missing enum types
-        missing-enums (clojure.set/difference expected-enums pg-enums)
-
-        ;; Check columns for each entity table
-        missing-columns
-        (for [[entity-uuid entity-data] schema
-              :let [table-name (:table entity-data)
-                    expected-cols (set (concat
-                                        [:_eid (id/key) :modified_by :modified_on]
-                                        (map :key (vals (:fields entity-data)))))
-                    actual-cols (when (pg-tables table-name)
-                                  (get-pg-columns table-name))
-                    missing (when actual-cols
-                              (clojure.set/difference expected-cols actual-cols))]
-              :when (and missing (not-empty missing))]
-          {:entity (:name entity-data)
-           :entity-uuid entity-uuid
-           :table table-name
-           :missing-columns missing})
-
-        ;; Check relation tables
-        missing-relations (filter #(not (pg-tables %)) expected-relation-tables)]
-
-    {:healthy? (and (empty? missing-tables)
-                    (empty? missing-columns)
-                    (empty? missing-relations)
-                    (empty? missing-enums))
-
-     ;; Expected counts from schema
-     :expected/tables (count expected-tables)
-     :expected/entities (count expected-entity-tables)
-     :expected/relations (count expected-relation-tables)
-     :expected/enums (count expected-enums)
-
-     ;; Actual counts from database
-     :actual/tables (count pg-tables)
-     :actual/enums (count pg-enums)
-
-     ;; Missing items (expected but not found in DB)
-     :missing/tables {:count (count missing-tables)
-                      :items missing-tables}
-     :missing/columns {:count (count missing-columns)
-                       :items missing-columns}
-     :missing/relations {:count (count missing-relations)
-                         :items missing-relations}
-     :missing/enums {:count (count missing-enums)
-                     :items missing-enums}
-
-     ;; Extra items (in DB but not expected)
-     :extra/tables {:count (count extra-tables)
-                    :items extra-tables}}))
-
-(defn healthcheck-report
-  "Generates a healthcheck report with human-readable message.
-   Returns a map with:
-   - :healthy? - boolean
-   - :message - human-readable report string
-   - :data - full healthcheck data"
-  ([] (healthcheck-report (healthcheck-database)))
-  ([health]
-   (let [lines (atom [])
-         println! (fn [& args]
-                    (swap! lines conj (apply str args)))
-
-         missing-count (+ (get-in health [:missing/tables :count])
-                          (get-in health [:missing/columns :count])
-                          (get-in health [:missing/relations :count])
-                          (get-in health [:missing/enums :count]))]
-
-     ;; Build report message
-     (println! "=== Database Health Check ===")
-     (println! "")
-     (if (:healthy? health)
-       (println! "✅ Database is HEALTHY - schema matches deployed model")
-       (println! "❌ Database has ISSUES - schema does not match deployed model"))
-
-     ;; Expected vs Actual Summary
-     (println! "")
-     (println! "Expected (from schema):")
-     (println! (format "  Tables:    %d (%d entities + %d relations)"
-                       (:expected/tables health)
-                       (:expected/entities health)
-                       (:expected/relations health)))
-     (println! (format "  Enums:     %d" (:expected/enums health)))
-
-     (println! "")
-     (println! "Actual (in database):")
-     (println! (format "  Tables:    %d" (:actual/tables health)))
-     (println! (format "  Enums:     %d" (:actual/enums health)))
-
-     ;; Missing items
-     (when (pos? missing-count)
-       (println! "")
-       (println! (format "⚠️  Missing %d item(s):" missing-count)))
-
-     (when (pos? (get-in health [:missing/tables :count]))
-       (println! "")
-       (println! (format "  Tables (%d):" (get-in health [:missing/tables :count])))
-       (doseq [table (get-in health [:missing/tables :items])]
-         (println! (format "    - %s" table))))
-
-     (when (pos? (get-in health [:missing/relations :count]))
-       (println! "")
-       (println! (format "  Relations (%d):" (get-in health [:missing/relations :count])))
-       (doseq [table (get-in health [:missing/relations :items])]
-         (println! (format "    - %s" table))))
-
-     (when (pos? (get-in health [:missing/columns :count]))
-       (println! "")
-       (println! (format "  Columns (%d):" (get-in health [:missing/columns :count])))
-       (doseq [{:keys [entity table missing-columns]} (get-in health [:missing/columns :items])]
-         (println! (format "    Entity '%s' (table: %s)" entity table))
-         (doseq [col missing-columns]
-           (println! (format "      • %s" col)))))
-
-     (when (pos? (get-in health [:missing/enums :count]))
-       (println! "")
-       (println! (format "  Enums (%d):" (get-in health [:missing/enums :count])))
-       (doseq [enum-type (get-in health [:missing/enums :items])]
-         (println! (format "    - %s" enum-type))))
-
-     ;; Extra items (informational)
-     (when (pos? (get-in health [:extra/tables :count]))
-       (println! "")
-       (println! (format "ℹ️  Extra tables in DB (%d) - could be inactive/historical:"
-                         (get-in health [:extra/tables :count])))
-       (doseq [table (take 20 (get-in health [:extra/tables :items]))]
-         (println! (format "    - %s" table)))
-       (when (> (get-in health [:extra/tables :count]) 20)
-         (println! (format "    ... and %d more" (- (get-in health [:extra/tables :count]) 20)))))
-
-     (println! "")
-     (println! "=========================")
-
-     ;; Return structured response
-     {:healthy? (:healthy? health)
-      :message (clojure.string/join "\n" @lines)
-      :data health})))
-
-(defn healthcheck-print
-  "Convenience function that prints the healthcheck report to stdout"
-  []
-  (let [{:keys [message]} (healthcheck-report)]
-    (println message)))
-
 (comment
-  ;; Get structured report (for APIs, programmatic use)
-  (def report (healthcheck-report))
-  (:healthy? report) ;; => true/false
-  (println (:message report)) ;; => "=== Database Health Check ===\n..."
-  (:data report) ;; => {:expected/tables 216 ...}
-
-  ;; Print report to stdout
-  (healthcheck-print)
-
-  ;; Get raw health data directly
-  (def health (healthcheck-database))
-  (:healthy? health)
-  (get-in health [:missing/relations :count])
-
   ;; Previous comment block
   (def deployed (deployed-versions))
   (def without-dataset
@@ -1940,15 +1756,8 @@
       ("string" "int" "float" "timeperiod" "currency" "uuid" "avatar")
       value
 
-      ;; timestamp - SQLite stores as TEXT (ISO-8601 string)
       "timestamp"
-      (when value
-        (cond
-          (string? value) value  ; Assume already formatted
-          (instance? java.time.Instant value) (str value)
-          (instance? java.util.Date value) (str (.toInstant ^java.util.Date value))
-          (instance? java.time.LocalDateTime value) (str value)
-          :else (str value)))
+      (when (some? value) (ts/->sortable-text value))
 
       ;; boolean - SQLite uses INTEGER (0/1)
       "boolean"
@@ -1959,10 +1768,14 @@
       (when value
         (->json value))
 
-      ;; encrypted - Store as TEXT (JSON string with encrypted payload)
+      ;; encrypted - NOT a TypeCodec type, see postgres.clj's identical case
+      ;; for why (needs the active DEK, sealed at the storage boundary).
       "encrypted"
-      (when value
-        (->json (encrypt-data value)))
+      (throw (ex-info
+              (str "\"encrypted\" cannot be encoded via TypeCodec — it seals "
+                   "at the storage boundary (synthigy.dataset.encryption/"
+                   "seal-cell), never here.")
+              {:code :encrypted-not-a-codec-type}))
 
       ;; hashed - bcrypt hash string
       "hashed"
@@ -1980,8 +1793,11 @@
   (decode [_db type value]
     (case type
       ;; Scalars - pass through
-      ("string" "int" "float" "timestamp" "timeperiod" "currency" "uuid" "avatar")
+      ("string" "int" "float" "timeperiod" "currency" "uuid" "avatar")
       value
+
+      "timestamp"
+      (when (some? value) (ts/->date value))
 
       ;; boolean - Convert INTEGER to boolean
       "boolean"
@@ -2008,15 +1824,13 @@
                               value))
           :else value))
 
-      ;; encrypted - Parse and decrypt. Envelope keys must be keywords
-      ;; because decrypt-data destructures with :keys [data dek iv].
+      ;; encrypted - NOT a TypeCodec type; see the encode case above.
       "encrypted"
-      (when value
-        (let [encrypted-data (cond
-                               (or (map? value) (vector? value)) value
-                               (string? value) (<-json value)
-                               :else value)]
-          (decrypt-data encrypted-data)))
+      (throw (ex-info
+              (str "\"encrypted\" cannot be decoded via TypeCodec — it unseals "
+                   "at the storage boundary (synthigy.dataset.encryption/"
+                   "unseal-cell), never here.")
+              {:code :encrypted-not-a-codec-type}))
 
       ;; hashed - not decoded, only verified
       "hashed"
@@ -2161,96 +1975,3 @@
   (drop-types-like! [_db pattern]
     ;; SQLite doesn't have custom types - return 0
     0))
-
-;;; ============================================================================
-;;; Default audit-fields impl — timestamp-only AuditEnhancement (SQLite)
-;;;
-;;; Mirror of the Postgres timestamp-only default. SQLite has no PL/pgSQL,
-;;; so the triggers use UPDATE-after-UPDATE statements instead of BEFORE
-;;; triggers; same effect for the consumer.
-;;; ============================================================================
-
-(defn- audit-table-columns
-  "Return existing column names on `table`. Used to make ALTER ADD
-   COLUMN idempotent — SQLite has no `IF NOT EXISTS` for columns.
-
-   Result-set key shape varies — pgjdbc-style qualified
-   `:pragma_table_info/name` from raw next.jdbc, vs unqualified
-   `:name` when SQLite's builder-fn is `as-unqualified-modified-maps`.
-   We accept either."
-  [tx table]
-  (let [rows (jdbc/execute! tx [(format "PRAGMA table_info(\"%s\")" table)])]
-    (into #{}
-          (keep #(or (:pragma_table_info/name %) (:name %)))
-          rows)))
-
-(defn- install-modified-on-trigger! [tx entity]
-  (let [table        (entity->table-name entity)
-        trigger-name (str "update_" (normalize-name (:name entity)) "_modified_on")
-        cols         (audit-table-columns tx table)]
-    (when-not (contains? cols "modified_on")
-      (execute! tx [(format "ALTER TABLE \"%s\" ADD COLUMN modified_on TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP" table)]))
-    (execute! tx [(format "DROP TRIGGER IF EXISTS %s" trigger-name)])
-    (execute! tx [(format "CREATE TRIGGER %s
-                           AFTER UPDATE ON \"%s\"
-                           FOR EACH ROW
-                           BEGIN
-                             UPDATE \"%s\" SET modified_on = strftime('%%Y-%%m-%%d %%H:%%M:%%f', 'now') WHERE _eid = NEW._eid;
-                           END"
-                          trigger-name table table)])))
-
-(defn- install-created-on-trigger! [tx entity]
-  ;; Trigger name aligns with the principal-aware variant for clean swap.
-  (let [table        (entity->table-name entity)
-        trigger-name (str "preserve_" (normalize-name (:name entity)) "_created_audit")
-        cols         (audit-table-columns tx table)]
-    (when-not (contains? cols "created_on")
-      (execute! tx [(format "ALTER TABLE \"%s\" ADD COLUMN created_on TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP" table)]))
-    (execute! tx [(format "DROP TRIGGER IF EXISTS %s" trigger-name)])
-    (execute! tx [(format "CREATE TRIGGER %s
-                           AFTER UPDATE ON \"%s\"
-                           FOR EACH ROW
-                           WHEN (NEW.created_on != OLD.created_on)
-                           BEGIN
-                             UPDATE \"%s\" SET created_on = OLD.created_on WHERE _eid = NEW._eid;
-                           END"
-                          trigger-name table table)])))
-
-(defn transform-audit-timestamp-only
-  "Per-entity DDL for SQLite audit timestamps + AFTER UPDATE triggers."
-  [_db tx entities]
-  (let [audited (filter (fn [e] (or (core/audit-modified? e) (core/audit-created? e))) entities)]
-    (when (seq audited)
-      (log/info {:id ::transform-audit-starting
-                 :data {:action :starting :subject :audit-fields :mode :timestamp-only
-                        :entities (mapv :name audited)}}
-                "Installing SQLite timestamp audit columns + triggers")
-      (doseq [entity audited]
-        (when (core/audit-modified? entity) (install-modified-on-trigger! tx entity))
-        (when (core/audit-created? entity)  (install-created-on-trigger! tx entity))
-        (log/debug {:id ::table-audited
-                    :data {:table (entity->table-name entity)
-                           :modified (core/audit-modified? entity)
-                           :created (core/audit-created? entity)
-                           :mode :timestamp-only}}
-                   "Audited table (SQLite)")))))
-
-(defn augment-schema-timestamp-only
-  [_db entity]
-  (let [modified? (core/audit-modified? entity)
-        created?  (core/audit-created? entity)]
-    (cond-> {:fields {}}
-      modified? (assoc-in [:fields :modified_on] {:key :modified_on :type "timestamp"})
-      created?  (assoc-in [:fields :created_on]  {:key :created_on  :type "timestamp"}))))
-
-(defn install-default-audit-enhancement!
-  "Bind `AuditEnhancement` for SQLite to the timestamp-only impl. Called
-   at ns load and by `synthigy.iam.audit/uninstall-principal-aware!`."
-  []
-  (extend-protocol enhance/AuditEnhancement
-    synthigy.db.SQLite
-    (transform-audit [db tx entities] (transform-audit-timestamp-only db tx entities))
-    (augment-schema  [db entity]      (augment-schema-timestamp-only db entity))
-    (audit           [_ _ data _]     data)))
-
-(install-default-audit-enhancement!)

@@ -1,5 +1,27 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.observability
-  "ClickHouse implementation of Synthigy's observability substrate — durable
+  "ClickHouse implementation of Synthigy's observability plug — durable
   append-only storage for diagnostic logs (`synthigy.log.store/LogStore`)
   AND state-change audit events (`synthigy.audit/AuditProvider`), backed
   by a ClickHouse cluster over pure HTTP (Java 11+ `java.net.http`).
@@ -35,13 +57,13 @@
 
   ## Config (env)
 
-      SYNTHIGY_OBSERVABILITY_CH_URL       http://ch:8123  (required)
-      SYNTHIGY_OBSERVABILITY_CH_DB        Database name   (default: synthigy)
-      SYNTHIGY_OBSERVABILITY_CH_USER      Basic-auth user (optional)
-      SYNTHIGY_OBSERVABILITY_CH_PASSWORD  Basic-auth pwd  (optional)
-      SYNTHIGY_OBSERVABILITY_BUFFER_SIZE  Log queue cap   (default 8192)
-      SYNTHIGY_OBSERVABILITY_BATCH_ROWS   Max INSERT batch (default 500)
-      SYNTHIGY_OBSERVABILITY_BATCH_MS     Max flush delay (default 1000 ms)
+      CLICKHOUSE_URL          http://ch:8123  (required)
+      CLICKHOUSE_DB           Database name   (default: synthigy)
+      CLICKHOUSE_USER         Basic-auth user (optional)
+      CLICKHOUSE_PASSWORD     Basic-auth pwd  (optional)
+      CLICKHOUSE_BUFFER_SIZE  Log queue cap   (default 8192)
+      CLICKHOUSE_BATCH_ROWS   Max INSERT batch (default 500)
+      CLICKHOUSE_BATCH_MS     Max flush delay (default 1000 ms)
 
   ## Why one record for two protocols
 
@@ -66,7 +88,8 @@
     [synthigy.dataset :as dataset]
     [synthigy.json :as json]
     [synthigy.log :as log]
-    [synthigy.log.store :as store])
+    [synthigy.log.store :as store]
+    [synthigy.traffic :as traffic])
   (:import
     [java.net URI URLEncoder]
     [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -98,22 +121,22 @@
       fallback))
 
 (defn- env-config
-  "Read SYNTHIGY_OBSERVABILITY_CH_* + size/batch overrides on top of
-   defaults. Throws on missing :url so the module refuses to start without
-   a configured CH endpoint."
+  "Read CLICKHOUSE_* config + size/batch overrides on top of defaults.
+   Throws on missing :url so the module refuses to start without a
+   configured CH endpoint."
   []
-  (let [url      (env :synthigy-observability-ch-url)
+  (let [url      (env :clickhouse-url)
         _        (when (str/blank? url)
-                   (throw (ex-info ":synthigy/observability requires SYNTHIGY_OBSERVABILITY_CH_URL"
+                   (throw (ex-info ":synthigy/observability requires CLICKHOUSE_URL"
                                    {:cause :missing-config})))
         base     default-config]
     {:url              (str/replace url #"/+$" "")
-     :database         (or (env :synthigy-observability-ch-db) (:database base))
-     :user             (env :synthigy-observability-ch-user)
-     :password         (env :synthigy-observability-ch-password)
-     :buffer-size      (parse-int-or (env :synthigy-observability-buffer-size) (:buffer-size base))
-     :batch-rows       (parse-int-or (env :synthigy-observability-batch-rows)  (:batch-rows base))
-     :batch-ms         (parse-int-or (env :synthigy-observability-batch-ms)    (:batch-ms base))
+     :database         (or (env :clickhouse-db) (:database base))
+     :user             (env :clickhouse-user)
+     :password         (env :clickhouse-password)
+     :buffer-size      (parse-int-or (env :clickhouse-buffer-size) (:buffer-size base))
+     :batch-rows       (parse-int-or (env :clickhouse-batch-rows)  (:batch-rows base))
+     :batch-ms         (parse-int-or (env :clickhouse-batch-ms)    (:batch-ms base))
      :retry-attempts   (:retry-attempts     base)
      :retry-min-ms     (:retry-min-ms       base)
      :retry-max-ms     (:retry-max-ms       base)
@@ -156,7 +179,7 @@
 (defn- post!
   "POST `body` as CH query body with URL-encoded query string. Returns
    response body String on 2xx, throws ex-info on >=400."
-  [^HttpClient client config ^String query ^String body content-type]
+  [^HttpClient client config ^String query ^String body content-type settings]
   (let [{:keys [url database user password request-timeout-ms]} config
         ;; insert_deduplicate=0 — CH 24.8+ defaults to ON, which dedupes
         ;; identical blocks within a deduplication window. Two batches with
@@ -168,7 +191,8 @@
               (str url "/?database=" (url-encode database)
                    "&query=" (url-encode query)
                    "&output_format_json_quote_64bit_integers=0"
-                   "&insert_deduplicate=0"))
+                   "&insert_deduplicate=0"
+                   (apply str (for [[k v] settings] (str "&" k "=" v)))))
         builder (-> (HttpRequest/newBuilder)
                     (.uri uri)
                     (.header "Content-Type" content-type)
@@ -281,7 +305,7 @@
         SETTINGS index_granularity = 8192"))
 
 (defn- audit-entity-ddl [database]
-  ;; `txid` is String, not UInt64 — substrates produce different shapes
+  ;; `txid` is String, not UInt64 — plugs produce different shapes
   ;; (SQLite synthesizes UUIDv7 strings, PG/CRDB use BIGINT, etc.) and a
   ;; numeric column can't hold them all. UUIDv7 is binary-sortable as a
   ;; String, preserving chronology for ORDER BY txid queries.
@@ -302,6 +326,37 @@
         ) ENGINE = MergeTree
         PARTITION BY toYYYYMM(ts)
         ORDER BY (entity_xid, record_xid, ts)
+        SETTINGS index_granularity = 8192"))
+
+(defn- hist-col-name [b] (str "hist_" (if (= b :inf) "inf" b)))
+
+(def ^:private hist-cols
+  (mapv hist-col-name (conj (vec traffic/hist-bounds) :inf)))
+
+(defn- traffic-minutes-ddl
+  "Delta rows, one per node per minute; providers APPEND, reads SUM.
+   SummingMergeTree collapses same-key rows by summing every non-key
+   numeric column — the exact semantics `flush-deltas!` relies on for
+   same-minute re-flushes to be correct. `date` MATERIALIZED off `minute`
+   drives the TTL and partition; `node`+`minute` is the ORDER BY key (kept,
+   never summed)."
+  [database]
+  (str "CREATE TABLE IF NOT EXISTS " database ".traffic_minutes (
+          node            LowCardinality(String),
+          minute          Int64,
+          ok              Int64,
+          err             Int64,
+          " (str/join ",\n          " (map #(str % " Int64") hist-cols)) ",
+          ops             Int64,
+          sse             Int64,
+          subscriptions   Int64,
+          deltas_dropped  Int64,
+          date            Date MATERIALIZED toDate(toDateTime(minute * 60))
+        )
+        ENGINE = SummingMergeTree
+        PARTITION BY date
+        ORDER BY (node, minute)
+        TTL date + INTERVAL 90 DAY
         SETTINGS index_granularity = 8192"))
 
 (defn- audit-relation-ddl [database]
@@ -339,6 +394,7 @@
     (exec-ddl! client config (logs-ddl db))
     (exec-ddl! client config (audit-entity-ddl db))
     (exec-ddl! client config (audit-relation-ddl db))
+    (exec-ddl! client config (traffic-minutes-ddl db))
     (doseq [ddl (migrations-ddl db)]
       (try (exec-ddl! client config ddl) (catch Throwable _)))))
 
@@ -346,7 +402,8 @@
   (let [db (:database config)]
     (exec-ddl! client config (str "DROP TABLE IF EXISTS " db ".logs"))
     (exec-ddl! client config (str "DROP TABLE IF EXISTS " db ".audit_entity"))
-    (exec-ddl! client config (str "DROP TABLE IF EXISTS " db ".audit_relation"))))
+    (exec-ddl! client config (str "DROP TABLE IF EXISTS " db ".audit_relation"))
+    (exec-ddl! client config (str "DROP TABLE IF EXISTS " db ".traffic_minutes"))))
 
 ;;; ============================================================================
 ;;; Log signal → row coercion
@@ -429,8 +486,9 @@
      :host        host
      ;; Native CH Array(String) — JSONEachRow encodes a vector as a JSON array,
      ;; and `:has` queries with has(topics, ?). Sorted for stable round-trips.
+     ;; (subs (str kw) 1), not `name` — keeps child-topic namespaces
      :topics      (->> (:topics signal)
-                       (map (fn [t] (if (keyword? t) (name t) (str t))))
+                       (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t))))
                        sort vec)
      :data        (json/->json (or data {}))
      :ctx         (json/->json residual-ctx)
@@ -453,7 +511,9 @@
 
 (defn- envelope->entity-rows
   [envelopes]
-  (for [env envelopes
+  ;; Redact classified attribute VALUES before they reach the persistent
+  ;; store — keys survive, so /history still shows the attribute changed.
+  (for [env (map audit/redact-envelope envelopes)
         :let [data       (-> env :delta :data)
               record-xid (str-or-empty (:record-xid data))]
         :when (not (str/blank? record-xid))
@@ -520,24 +580,49 @@
 ;;; Batch INSERT helpers
 ;;; ============================================================================
 
+;; never on audit — the drainer acks queue rows on POST return, and
+;; wait_for_async_insert=0 returns before CH has durably flushed
+(def async-insert-settings {"async_insert" 1 "wait_for_async_insert" 0})
+
 (defn- insert-logs! [^HttpClient client config signals]
   (when (seq signals)
     (let [rows (mapv signal->log-row signals)
           body (rows->ndjson rows)
           q    (str "INSERT INTO " (:database config) ".logs FORMAT JSONEachRow")]
-      (post! client config q body "application/x-ndjson; charset=utf-8"))))
+      (post! client config q body "application/x-ndjson; charset=utf-8" async-insert-settings))))
 
 (defn- insert-entity-rows! [^HttpClient client config rows]
   (when (seq rows)
     (let [body (rows->ndjson rows)
           q    (str "INSERT INTO " (:database config) ".audit_entity FORMAT JSONEachRow")]
-      (post! client config q body "application/x-ndjson; charset=utf-8"))))
+      (post! client config q body "application/x-ndjson; charset=utf-8" nil))))
 
 (defn- insert-relation-rows! [^HttpClient client config rows]
   (when (seq rows)
     (let [body (rows->ndjson rows)
           q    (str "INSERT INTO " (:database config) ".audit_relation FORMAT JSONEachRow")]
-      (post! client config q body "application/x-ndjson; charset=utf-8"))))
+      (post! client config q body "application/x-ndjson; charset=utf-8" nil))))
+
+(defn- traffic-row->ch-row
+  "Delta row → flat keyword map for JSONEachRow — same shape jsonista
+   already serializes for log rows."
+  [row]
+  (into {:node (:node row) :minute (long (:minute row))
+         :ok (long (:ok row 0)) :err (long (:err row 0))}
+        (concat
+         (map (fn [b] [(keyword (hist-col-name b)) (long (get-in row [:hist b] 0))])
+              traffic/hist-bounds)
+         [[:hist_inf (long (get-in row [:hist :inf] 0))]
+          [:ops (long (:ops row 0))]
+          [:sse (long (:sse row 0))]
+          [:subscriptions (long (:subscriptions row 0))]
+          [:deltas_dropped (long (:deltas-dropped row 0))]])))
+
+(defn- insert-traffic-rows! [^HttpClient client config rows]
+  (when (seq rows)
+    (let [body (rows->ndjson (mapv traffic-row->ch-row rows))
+          q    (str "INSERT INTO " (:database config) ".traffic_minutes FORMAT JSONEachRow")]
+      (post! client config q body "application/x-ndjson; charset=utf-8" async-insert-settings))))
 
 ;;; ============================================================================
 ;;; Log writer thread — async batched HTTP POST with retry
@@ -659,7 +744,8 @@
         nm (str "p" n)
         rendered (cond
                    (boolean? v) (str v)
-                   (keyword? v) (clojure.core/name v)
+                   ;; keeps qualified-keyword namespaces (:traffic/sse)
+                   (keyword? v) (subs (str v) 1)
                    :else        (str v))]
     (swap! state assoc-in [:params nm] {:type ch-type :value rendered})
     (str "{" nm ":" (clojure.core/name ch-type) "}")))
@@ -771,20 +857,27 @@
    `params` is `{name {:type Kw :value String}}`."
   [filter-map database]
   (let [state   (new-params)
-        {:keys [where since until limit order-by group-by count?]
+        {:keys [where since until limit order-by group-by count? bucket-ms]
          :or   {limit 100}} filter-map
+        b       (when bucket-ms (long bucket-ms))
         clauses (->> [(compile-where where state)
                       (compile-time-bound :since since state)
                       (compile-time-bound :until until state)]
                      (remove str/blank?) (remove nil?))
         where-sql (when (seq clauses) (str " WHERE " (str/join " AND " clauses)))
+        ;; :bucket-ms → time-histogram: bucket start = the ms epoch floored
+        ;; to the bucket width. Aggregated in CH, so cheap at any volume.
         select-cols (cond
+                      b        (str "intDiv(toUnixTimestamp64Milli(inst), " b ") * " b " AS bucket, count() AS count")
                       count?   "count() AS count"
                       group-by (str (column-name group-by) ", count() AS count")
                       :else    "*")
-        group-sql (when group-by (str " GROUP BY " (column-name group-by)))
-        order-sql (when-not count? (str " ORDER BY " (compile-order-by order-by group-by)))
-        limit-sql (when-not count? (str " LIMIT " limit))
+        group-sql (cond b        " GROUP BY bucket"
+                        group-by (str " GROUP BY " (column-name group-by)))
+        order-sql (cond b               " ORDER BY bucket"
+                        (or count?)     nil
+                        :else           (str " ORDER BY " (compile-order-by order-by group-by)))
+        limit-sql (when-not (or count? b) (str " LIMIT " limit))
         sql (str "SELECT " select-cols " FROM " database ".logs"
                  (or where-sql "") (or group-sql "") (or order-sql "") (or limit-sql "")
                  " FORMAT JSONEachRow")]
@@ -842,6 +935,48 @@
   (let [rows (execute-log-query client config compiled)
         col  (keyword (kebab->snake group-key))]
     (mapv (fn [r] {group-key (get r col) :count (parse-count (:count r))}) rows)))
+
+(defn- execute-log-histogram
+  [client config compiled]
+  (let [rows (execute-log-query client config compiled)]
+    (mapv (fn [r] [(parse-count (:bucket r)) (parse-count (:count r))]) rows)))
+
+;;; ============================================================================
+;;; Traffic query — GROUP BY forces the sum even over unmerged
+;;; SummingMergeTree parts, so results are always correct regardless of
+;;; background merge state.
+;;; ============================================================================
+
+(defn- traffic-select-cols []
+  (str/join ", "
+            (concat ["node" "minute" "sum(ok) AS ok" "sum(err) AS err"]
+                    (map (fn [c] (str "sum(" c ") AS " c)) hist-cols)
+                    ["sum(ops) AS ops" "sum(sse) AS sse"
+                     "sum(subscriptions) AS subscriptions"
+                     "sum(deltas_dropped) AS deltas_dropped"])))
+
+(defn- query-traffic-window [client config from to]
+  (let [state   (new-params)
+        from-ph (bind! state (long from) :Int64)
+        to-ph   (bind! state (long to) :Int64)
+        sql (str "SELECT " (traffic-select-cols)
+                 " FROM " (:database config) ".traffic_minutes"
+                 " WHERE minute >= " from-ph " AND minute <= " to-ph
+                 " GROUP BY node, minute"
+                 " FORMAT JSONEachRow")
+        body (post-with-params! client config sql (:params @state))]
+    (mapv (fn [r]
+            {:node (:node r)
+             :minute (:minute r)
+             :ok (:ok r)
+             :err (:err r)
+             :hist (into {} (map (fn [b] [b (get r (keyword (hist-col-name b)) 0)]))
+                        (conj (vec traffic/hist-bounds) :inf))
+             :ops (:ops r)
+             :sse (:sse r)
+             :subscriptions (:subscriptions r)
+             :deltas-dropped (:deltas_dropped r)})
+          (parse-rows body))))
 
 ;;; ============================================================================
 ;;; Audit reader queries
@@ -1025,13 +1160,14 @@
                  since      (assoc :since since))]
       (store/search this opts)))
 
-  (search [_ {:keys [count? group-by] :as opts}]
+  (search [_ {:keys [count? group-by bucket-ms] :as opts}]
     (let [compiled (compile-log-sql opts (:database config))
           client (transport-client tp)]
       (cond
-        count?   (execute-log-count client config compiled)
-        group-by (execute-log-group client config group-by compiled)
-        :else    (execute-log-query client config compiled))))
+        bucket-ms (execute-log-histogram client config compiled)
+        count?    (execute-log-count client config compiled)
+        group-by  (execute-log-group client config group-by compiled)
+        :else     (execute-log-query client config compiled))))
 
   (tail [this {:keys [cursor ns-pattern level limit]}]
     (let [opts (cond-> {:order-by [:inst :asc] :limit (or limit 100)}
@@ -1064,9 +1200,32 @@
     ;; Durable backend — no transient state to hand off.
     nil)
 
+  ;; -------------------------------------------------------------------------
+  ;; Traffic side — flush-deltas! called by the synthigy.traffic flusher
+  ;; thread; query-window serves traffic-stats reads. GROUP BY at read time
+  ;; makes results correct regardless of SummingMergeTree merge state.
+  ;; -------------------------------------------------------------------------
+  traffic/TrafficStore
+
+  (flush-deltas! [_ rows]
+    (when (seq rows)
+      (insert-traffic-rows! (transport-client tp) config rows))
+    nil)
+
+  (query-window [_ {:keys [from to]}]
+    (try
+      (query-traffic-window (transport-client tp) config from to)
+      (catch Throwable _ [])))
+
+  (traffic-health [_]
+    {:up? true
+     :backend :clickhouse
+     :rows (try (row-count (transport-client tp) config "traffic_minutes")
+                (catch Throwable _ nil))})
+
   audit/AuditProvider
 
-  ;; Per-entity/relation audit opt-in is frozen at enqueue (substrate trigger
+  ;; Per-entity/relation audit opt-in is frozen at enqueue (plug trigger
   ;; `audit` flag) and applied by the drainer — the provider no longer
   ;; re-evaluates the mutable policy at drain time (which raced the write and
   ;; dropped committed records). Only the system gate remains. Mirrors DuckDB.
@@ -1165,7 +1324,7 @@
     (log/info {:id ::starting
                :data {:action :starting :subject :observability
                       :backend :clickhouse :url (:url cfg) :database (:database cfg)}}
-              "Starting observability substrate (ClickHouse)")
+              "Starting observability plug (ClickHouse)")
     ;; Swap FIRST so every new signal lands durably immediately; the old ring
     ;; is then frozen and we drain its final contents afterward. Drained boot
     ;; signals carry their original :inst, so they still sort correctly even
@@ -1181,7 +1340,7 @@
     (reset! state {:record rec :transport tp :client client :config cfg})
     (log/info {:id ::started
                :data {:action :started :subject :observability :backend :clickhouse}}
-              "Observability substrate started (ClickHouse)")))
+              "Observability plug started (ClickHouse)")))
 
 (defn stop
   "Reverse start: drain writer, rebind `*log-store*` to a fresh
@@ -1190,7 +1349,7 @@
   []
   (log/info {:id ::stopping
              :data {:action :stopping :subject :observability :backend :clickhouse}}
-            "Stopping observability substrate (ClickHouse)")
+            "Stopping observability plug (ClickHouse)")
   (dataset/remove-model-watch! model-watch-key)
   (audit/recompile-policy! nil)
   (when-let [{:keys [transport]} @state]
@@ -1200,10 +1359,10 @@
   (reset! state nil)
   (log/info {:id ::stopped
              :data {:action :stopped :subject :observability :backend :clickhouse}}
-            "Observability substrate stopped (ClickHouse)"))
+            "Observability plug stopped (ClickHouse)"))
 
 (defn cleanup
-  "Drop the substrate's tables. Reverses setup. Leaves the CH database in
+  "Drop the plug's tables. Reverses setup. Leaves the CH database in
    place; operator drops the database separately if they want a true wipe."
   []
   (let [cfg    (env-config)
@@ -1222,9 +1381,33 @@
 
 (lifecycle/register-module!
   :synthigy/observability
-  {:depends-on [:synthigy/log :synthigy/substrate]
+  {:depends-on [:synthigy/log :synthigy/plug]
    :doc "Log/audit analytics sink (ClickHouse)"
    :setup   setup
    :start   start
    :stop    stop
    :cleanup cleanup})
+
+;; Intentional overwrite of the in-memory dev registration in
+;; synthigy.traffic — this backend's record now implements TrafficStore
+;; too, so :synthigy/traffic re-points at IT. Safe: only one observability
+;; backend alias is ever on one classpath (shadowed-ns pattern), so load
+;; order is deterministic.
+(defn- traffic-start! []
+  (let [{:keys [record]} @state]
+    (when-not record
+      (throw (ex-info ":synthigy/traffic (clickhouse) requires :synthigy/observability to be started first"
+                      {:cause :observability-not-started})))
+    (alter-var-root #'traffic/*traffic-store* (constantly record))
+    (traffic/start-flusher!)))
+
+(defn- traffic-stop! []
+  (traffic/stop-flusher!)
+  (alter-var-root #'traffic/*traffic-store* (constantly (traffic/create-in-memory-store))))
+
+(lifecycle/register-module!
+  :synthigy/traffic
+  {:depends-on [:synthigy/observability]
+   :doc "Traffic metrics provider (ClickHouse)"
+   :start traffic-start!
+   :stop  traffic-stop!})

@@ -1,0 +1,43 @@
+{
+  "description": "Public OAuth client for Synthigy's own first-party tooling — the modeler, data console and log cockpit, served both from synthigy.com and from a local dev origin. Supersedes the former \"Synthigy\" and \"Synthigy Components\" clients, which were merged into this one: they pointed at the same API audience and differed only by origin, so two client registrations bought nothing but a second thing to keep in sync. Auth flow: redirect (or popup) to login, redirect back to the hosting page.",
+  "name": "Synthigy Tools",
+  "settings": {
+    "logo-url": null,
+    "login-page": null,
+    "allow-signup": false,
+    "redirections": [
+      "http://localhost:8000",
+      "http://localhost:8080",
+      "http://localhost:3000",
+      "https://synthigy.com/synthigy/callback",
+      "https://synthigy.com/synthigy/silent-callback"
+    ],
+    "token-expiry": {
+      "id": 600,
+      "access": 3600,
+      "refresh": 129600
+    },
+    "allowed-grants": [
+      "urn:ietf:params:oauth:grant-type:device_code",
+      "authorization_code",
+      "refresh_token"
+    ],
+    "logout-redirections": [
+      "http://localhost:8000",
+      "http://localhost:8080",
+      "http://localhost:3000",
+      "https://synthigy.com/synthigy",
+      "https://synthigy.com/synthigy/"
+    ]
+  },
+  "apis": [
+    {
+      "xid": "RtCFQ86BSUfiC5YTTBt2eQ"
+    }
+  ],
+  "type": "public",
+  "secret": null,
+  "xid": "PXjYPBMEcJuYrPwc5EmYiw",
+  "active": true,
+  "id": "ZMETOIKCJISOUMBAXRLOXOLKNSTVSMSGUZLMZOAFPIBJGCSF"
+}

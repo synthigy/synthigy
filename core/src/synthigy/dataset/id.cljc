@@ -1,98 +1,66 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.id
-  "Pluggable ID provider pattern for entity/relation identifiers.
-
-  Provides abstraction over ID generation and field access,
-  enabling future migration from UUID to NanoID.
-
-  Usage:
-    (require '[synthigy.dataset.id :as id])
-
-    ;; Generate new ID
-    (id/generate)  ;; => #uuid \"7c99...\" or \"V1StG...\"
-
-    ;; Get field keyword/string
-    (id/key)    ;; => :euuid or :xid
-    (id/field)  ;; => \"euuid\" or \"xid\"
-
-    ;; Extract ID from record
-    (id/extract entity)  ;; => #uuid \"...\"
-
-    ;; Deterministic UUID<->Base58 conversion
-    (id/uuid->nanoid #uuid \"edcab1db-ee6f-4744-bfea-447828893223\")
-    ;; => consistent 22-char Base58 string
-    (id/nanoid->uuid \"WN5xU8Do5pcdhTkxXvEYwt\")
-    ;; => #uuid \"edcab1db-ee6f-4744-bfea-447828893223\"
-    "
+  "Pluggable ID provider for entity/relation identifiers — UUIDProvider (:euuid)
+   or NanoIDProvider (:xid)."
   (:refer-clojure :exclude [key])
   (:require [clojure.string :as str]
-            [nano-id.core :as nano-id])
+            [nano-id.core :as nano-id]
+            #?@(:cljs [[goog.crypt :as gcrypt]]))
   #?(:clj (:import [java.util UUID]
                    [java.nio ByteBuffer]
-                   [java.math BigInteger])))
-
-;; =============================================================================
-;; Protocol
-;; =============================================================================
+                   [java.math BigInteger])
+     :cljs (:import [goog.crypt Md5])))
 
 (defprotocol IDProvider
-  "Protocol for entity/relation ID generation and access."
+  "Entity/relation ID generation and access."
 
   (generate* [this]
-    "Generate a new unique ID. Returns UUID or string.")
+    "Generates a new unique ID.")
 
   (key* [this]
-    "Returns the keyword for ID field. E.g., :euuid or :xid")
+    "Returns the ID field keyword, e.g. :euuid or :xid.")
 
   (extract* [this record]
-    "Extract ID from record. May handle transition logic.")
+    "Extracts the ID from a record.")
 
   (derive* [this parent name-str]
-    "Deterministically derive an ID from a parent ID + name string.
-     Returns a map carrying both forms — {:euuid <UUID> :xid <string>}
-     — so callers can attach dual identity regardless of active provider.
-
-     Used by ModelEnhancement implementers (in synthigy.dataset.runtime)
-     for synthetic attrs/relations that need stable identity across
-     deploys and provider switches. Same `(parent, name)` always
-     produces the same output, forever.
-
-     Server-side (CLJ) only — frontend never derives."))
-
-
-;; =============================================================================
-;; Base58 NanoID Generation
-;; =============================================================================
-;; Proper nanoid generation using Base58 alphabet (no ambiguous characters).
-;; Base58 excludes: 0, O, I, l (and +, /, =, _, - from base64url).
+    "Deterministically derives {:euuid <UUID> :xid <string>} from a parent id + name — same input, forever the same output."))
 
 (def base58-alphabet
   "Base58 alphabet: digits 1-9, uppercase A-Z (no I, O), lowercase a-z (no l)."
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 
 (def generate-xid
-  "Generate a 22-character nanoid using Base58 alphabet.
-   This is the canonical XID generator for new records.
-   Works in both CLJ and CLJS."
+  "The canonical XID generator for new records: 22-char Base58 nanoid."
   (nano-id/custom base58-alphabet 22))
 
-
-;; =============================================================================
-;; Deterministic UUID<->Base58 Conversion
-;; =============================================================================
-;; Bidirectional conversion between UUID and 22-char Base58 string.
-;; UUID (128 bits) → BigInteger → base58 digits → 22 chars (zero-padded).
-;; Same algorithm as Bitcoin addresses (Base58). Fully lossless roundtrip.
-;; 58^22 > 2^128, so every UUID fits in exactly 22 Base58 characters.
-
-(def ^:private xid-length 22)
+(def xid-length 22)
 
 #?(:clj (def ^:private ^BigInteger fifty-eight (BigInteger/valueOf 58)))
 
 (defn uuid->nanoid
-  "Deterministic conversion from UUID to 22-char Base58 string.
-   Every UUID maps to exactly one nanoid and vice versa.
-   Returns nil for nil input. Output uses Base58 alphabet only.
-   Works in both CLJ and CLJS."
+  "Deterministic, lossless UUID -> 22-char Base58 string. Nil in, nil out."
   [uuid]
   (when uuid
     #?(:clj
@@ -130,9 +98,7 @@
                     s))))))))
 
 (defn nanoid->uuid
-  "Deterministic conversion from 22-char Base58 string back to UUID.
-   Returns nil for nil input, wrong length, or invalid Base58 characters.
-   Works in both CLJ and CLJS."
+  "Inverse of uuid->nanoid. Nil for nil input, wrong length, or invalid Base58."
   [nanoid]
   (when (and nanoid (= xid-length (count nanoid)))
     #?(:clj
@@ -180,45 +146,39 @@
          (catch :default _ nil)))))
 
 
-;; =============================================================================
-;; Deterministic Derivation (private)
-;; =============================================================================
-;;
-;; Both built-in providers share the same hashing pipeline because both
-;; encode the same 128 bits — UUID and 22-char Base58 are exact inverses
-;; via uuid->nanoid / nanoid->uuid. The hash function is MD5 (UUID v3,
-;; via java.util.UUID/nameUUIDFromBytes). MD5 is locked forever:
-;; changing it shifts every derived id ever produced.
+;; MD5 (UUID v3) is locked forever — changing it shifts every derived id ever
+;; produced
+(defn canonical-anchor-string
+  "Coerces parent-id (UUID, xid string, or {:euuid :xid} map) to a stable hash
+   anchor."
+  [parent]
+  (cond
+    (string? parent) parent
+    (uuid? parent)   (uuid->nanoid parent)
+    (map? parent)    (or (:xid parent)
+                         (some-> (:euuid parent) uuid->nanoid)
+                         (throw (ex-info "Map carries no :euuid or :xid"
+                                         {:parent parent})))
+    :else (throw (ex-info "Cannot derive from non-id value"
+                          {:parent parent}))))
 
-#?(:clj
-   (defn- canonical-anchor-string
-     "Coerce parent-id (UUID, xid string, or {:euuid …, :xid …} map)
-      into a stable string anchor that we hash on. Anchoring on the
-      xid form when available — every record has one, it never collides,
-      and it sidesteps UUID-roundtrip gotchas (natively-generated xids
-      can encode > 128 bits and don't round-trip cleanly to a UUID)."
-     [parent]
-     (cond
-       (string? parent) parent
-       (uuid? parent)   (uuid->nanoid parent)
-       (map? parent)    (or (:xid parent)
-                            (some-> ^UUID (:euuid parent) uuid->nanoid)
-                            (throw (ex-info "Map carries no :euuid or :xid"
-                                            {:parent parent})))
-       :else (throw (ex-info "Cannot derive from non-id value"
-                             {:parent parent})))))
-
-#?(:clj
-   (defn- canonical-derive-uuid
-     "Hash (anchor-string, name) into a deterministic UUID v3."
-     [parent name-str]
-     (let [anchor (canonical-anchor-string parent)
-           bytes  (.getBytes (str anchor \: name-str) "UTF-8")]
-       (UUID/nameUUIDFromBytes bytes))))
-
-;; =============================================================================
-;; UUID Implementation (Current/Legacy)
-;; =============================================================================
+(defn canonical-derive-uuid
+  "Hashes (anchor-string, name) into a deterministic UUID v3, identical in CLJ
+   and CLJS."
+  [parent name-str]
+  (let [anchor (canonical-anchor-string parent)]
+    #?(:clj
+       (UUID/nameUUIDFromBytes (.getBytes (str anchor \: name-str) "UTF-8"))
+       :cljs
+       (let [md (Md5.)
+             _ (.update md (gcrypt/stringToUtf8ByteArray (str anchor ":" name-str)))
+             bs (.digest md)
+             _ (aset bs 6 (bit-or (bit-and (aget bs 6) 0x0f) 0x30))
+             _ (aset bs 8 (bit-or (bit-and (aget bs 8) 0x3f) 0x80))
+             hex (gcrypt/byteArrayToHex bs)]
+         (uuid (str (subs hex 0 8) "-" (subs hex 8 12) "-"
+                    (subs hex 12 16) "-" (subs hex 16 20) "-"
+                    (subs hex 20 32)))))))
 
 (defrecord UUIDProvider []
   IDProvider
@@ -228,91 +188,59 @@
   (key* [_] :euuid)
   (extract* [_ record] (:euuid record))
   (derive* [_ parent name-str]
-    #?(:clj  (let [u (canonical-derive-uuid parent name-str)]
-               {:euuid u :xid (uuid->nanoid u)})
-       :cljs (throw (js/Error. "id/derive* not supported in CLJS")))))
-
-;; =============================================================================
-;; NanoID Implementation (Future)
-;; =============================================================================
+    (let [u (canonical-derive-uuid parent name-str)]
+      {:euuid u :xid (uuid->nanoid u)})))
 
 (defrecord NanoIDProvider []
   IDProvider
   (generate* [_] (generate-xid))
   (key* [_] :xid)
   (extract* [_ record]
-    ;; Transition: check new key first, fall back to legacy
     (or (:xid record) (:euuid record)))
   (derive* [_ parent name-str]
-    #?(:clj  (let [u (canonical-derive-uuid parent name-str)]
-               {:euuid u :xid (uuid->nanoid u)})
-       :cljs (throw (js/Error. "id/derive* not supported in CLJS")))))
-
-;; ->NanoIDProvider constructor is automatically generated by defrecord.
-;; Creates 22-char Base58 nanoids. Base58 excludes ambiguous characters
-;; (0, O, I, l) and non-URL-safe characters (+, /, _, -).
-
-
-;; =============================================================================
-;; Global Provider Management
-;; =============================================================================
+    (let [u (canonical-derive-uuid parent name-str)]
+      {:euuid u :xid (uuid->nanoid u)})))
 
 (def ^{:dynamic true
-       :doc "The current ID provider.
-             Override with with-provider for testing."}
+       :doc "The active ID provider. Override with with-provider for testing."}
   *provider*
   (->NanoIDProvider))
 
 (defn set-provider!
-  "Set the global ID provider."
+  "Sets the global ID provider."
   [provider]
   #?(:clj (alter-var-root #'*provider* (constantly provider))
      :cljs (set! *provider* provider)))
 
 (defmacro with-provider
-  "Temporarily override ID provider for scope of body."
+  "Temporarily overrides the ID provider for the scope of body."
   [provider & body]
   `(binding [*provider* ~provider]
      ~@body))
 
-
-
-;; =============================================================================
-;; High-Level API
-;; =============================================================================
-
 (defn generate
-  "Generate a new ID using current provider."
+  "Generates a new ID using the current provider."
   []
   (generate* *provider*))
 
 (defn key
-  "Get the ID field keyword from current provider.
-   E.g., :euuid or :xid"
+  "Gets the ID field keyword (:euuid or :xid) from the current provider."
   []
   (key* *provider*))
 
 (defn field
-  "Get the ID column/field name string from current provider.
-   E.g., \"euuid\" or \"xid\""
+  "Gets the ID field name string from the current provider."
   []
   (name (key* *provider*)))
 
 (defn extract
-  "Extract ID from record using current provider.
-   Handles transition logic (checks both old and new keys)."
+  "Extracts the ID from a record using the current provider."
   [record]
   (extract* *provider* record))
 
 (defn coerce-arg
-  "Coerce a query-argument value to the active provider's runtime id type so the
-   DB binds the right column type. In :euuid mode a uuid-shaped string becomes a
-   java.util.UUID (PostgreSQL refuses an implicit `uuid = varchar` comparison);
-   non-strings and non-uuid strings pass through. In :xid mode (string ids) it is
-   a no-op. Tolerant — never throws.
-
-   CLJ coerces; CLJS passes through — the frontend never binds ids to a SQL
-   backend."
+  "Coerces a query-arg value to the active provider's runtime id type — PostgreSQL refuses
+   an implicit uuid = varchar comparison. Tolerant, never throws. CLJS passes through."
   [v]
   (if (and (= :euuid (key)) (string? v))
     #?(:clj  (try (java.util.UUID/fromString v) (catch Exception _ v))
@@ -320,12 +248,8 @@
     v))
 
 (defn coerce-stored-id
-  "Coerce an id persisted as TEXT (e.g. the audit/relation substrate stores ids
-   as TEXT regardless of provider) back into the active provider's runtime type:
-   :xid → string passthrough, :euuid → java.util.UUID. Strict — assumes a real id
-   string; returns nil for nil.
-
-   CLJ coerces; CLJS passes through."
+  "Coerces an id persisted as TEXT (audit/relation plug) back to the active
+   provider's runtime type. Strict — assumes a real id string; nil for nil."
   [s]
   (when s
     (case (key)
@@ -334,44 +258,25 @@
                 :cljs s))))
 
 (defn current-provider
-  "Return the active ID provider record. Useful as input to protocol
-   methods that take a provider (e.g. ModelEnhancement implementers)."
+  "Returns the active ID provider record."
   []
   *provider*)
 
 (defn derive-id
-  "Deterministically derive a stable id from a parent id + name string.
-   Returns {:euuid <UUID> :xid <string>} so the result is dual-id
-   regardless of active provider.
-
-   Server-side (CLJ) only."
+  "Deterministically derives {:euuid :xid} from a parent id + name string."
   [parent name-str]
   (derive* *provider* parent name-str))
 
 (defn new-model-node-id
-  "Mint a fresh MODEL-NODE identity: euuid-first, dual-representation —
-   `{:euuid <random UUID> :xid (uuid->nanoid euuid)}`. Both forms are always
-   present and the xid is uuid-ENCODED (reversible), so the model stays
-   PORTABLE across systems and `transform-model` can convert it losslessly.
-
-   Use for the portable schema artifact — entities / attributes / relations /
-   enum values. Records use `generate` (format-native) instead.
-
-   Mirrors `derive*`'s euuid-anchored shape, but with a random (non-derived)
-   uuid for interactively-created nodes. Works in CLJ and CLJS."
+  "Mints a fresh, euuid-first dual-id for a portable schema artifact (entity/attribute/relation).
+   Random, not derived — records use generate instead."
   []
   (let [u #?(:clj (java.util.UUID/randomUUID) :cljs (random-uuid))]
     {:euuid u :xid (uuid->nanoid u)}))
 
-;; =============================================================================
-;; Dual ID Conversion
-;; =============================================================================
-
 (defn ensure-dual-ids
-  "Ensure a record has both :euuid and :xid.
-   If :euuid is present but :xid is missing, derives :xid from :euuid.
-   If :xid is present but :euuid is missing, derives :euuid from :xid.
-   Returns record unchanged if both are present or both are nil."
+  "Fills in the missing half of :euuid/:xid on a record; unchanged if both or
+   neither present."
   [record]
   (let [euuid (:euuid record)
         xid (:xid record)]
@@ -384,63 +289,40 @@
 
       :else record)))
 
-;; =============================================================================
-;; Entity & Data ID Resolution (Compile-time registration via multimethods)
-;; =============================================================================
-
 (defn provider-type
-  "Returns :euuid or :xid based on current provider."
+  "Returns :euuid or :xid based on the current provider."
   []
   (if (instance? UUIDProvider *provider*) :euuid :xid))
 
-
 (defmulti -entity-
-  "Internal: Resolve entity schema ID. Dispatches on [entity-key provider-type].
-   Use `entity` function instead of calling this directly."
+  "Resolves entity schema ID, dispatching on [entity-key provider-type]. Use
+   entity instead."
   (fn [entity-key provider-type]
     [entity-key provider-type]))
 
 (defmulti -relation-
-  "Internal: Resolve relation schema ID. Dispatches on [relation-key provider-type].
-   Use `relation` function instead of calling this directly."
+  "Resolves relation schema ID, dispatching on [relation-key provider-type]. Use
+   relation instead."
   (fn [relation-key provider-type]
     [relation-key provider-type]))
 
 (defmulti -data-
-  "Internal: Resolve data ID. Dispatches on [data-key provider-type].
-   Use `data` function instead of calling this directly."
+  "Resolves data ID, dispatching on [data-key provider-type]. Use data instead."
   (fn [data-key provider-type]
     [data-key provider-type]))
 
-;; -----------------------------------------------------------------------------
-;; Memoized Lookups
-;; -----------------------------------------------------------------------------
-
-(def ^:private memo-entity
-  "Memoized entity lookup. Cache key: [entity-key provider-type]"
+(def memo-entity
   (memoize (fn [entity-key pt] (-entity- entity-key pt))))
 
-(def ^:private memo-relation
-  "Memoized relation lookup. Cache key: [relation-key provider-type]"
+(def memo-relation
   (memoize (fn [relation-key pt] (-relation- relation-key pt))))
 
-(def ^:private memo-data
-  "Memoized data lookup. Cache key: [data-key provider-type]"
+(def memo-data
   (memoize (fn [data-key pt] (-data- data-key pt))))
 
-;; -----------------------------------------------------------------------------
-;; Public API
-;; -----------------------------------------------------------------------------
-
 (defn entity
-  "Resolve entity schema ID based on current provider.
-
-   Returns the appropriate UUID or XID for the entity.
-   Pass-through for raw UUIDs/strings.
-   Memoized for performance.
-
-   Example:
-     (entity :iam/user)  ;; => #uuid \"...\" or \"IAM_USER\""
+  "Resolves an entity schema ID for the current provider; pass-through for raw
+   UUIDs/strings."
   ([entity-key] (entity entity-key (provider-type)))
   ([entity-key provider]
    (if (keyword? entity-key)
@@ -448,14 +330,8 @@
      entity-key)))
 
 (defn relation
-  "Resolve relation schema ID based on current provider.
-
-   Returns the appropriate UUID or XID for the relation.
-   Pass-through for raw UUIDs/strings.
-   Memoized for performance.
-
-   Example:
-     (relation :iam/user->roles)  ;; => #uuid \"...\" or \"USR_ROLES\""
+  "Resolves a relation schema ID for the current provider; pass-through for raw
+   UUIDs/strings."
   ([relation-key] (relation relation-key (provider-type)))
   ([relation-key provider]
    (if (keyword? relation-key)
@@ -463,33 +339,16 @@
      relation-key)))
 
 (defn data
-  "Resolve well-known data ID based on current provider.
-
-   Used for system entities like ROOT, SYNTHIGY, PUBLIC.
-   Pass-through for raw UUIDs/strings.
-   Memoized for performance.
-
-   Example:
-     (data :data/root-role)  ;; => #uuid \"...\" or \"SYS_SUPERUSER\""
+  "Resolves a well-known data ID (ROOT, SYNTHIGY, PUBLIC, ...) for the current
+   provider."
   ([data-key] (data data-key (provider-type)))
   ([data-key provider]
    (if (keyword? data-key)
      (memo-data data-key provider)
      data-key)))
 
-;; -----------------------------------------------------------------------------
-;; Introspection
-;; -----------------------------------------------------------------------------
-
 (defn registered-entities
-  "Returns information about all registered entity keys.
-
-  With no args, returns set of entity keys (backward compatible).
-  With :full, returns map of entity-key -> {:key :iam/user :euuid UUID :xid String :ns Symbol}
-
-  Example:
-    (registered-entities)       ;; => #{:iam/user :iam/app ...}
-    (registered-entities :full) ;; => {:iam/user {:key :iam/user :euuid #uuid\"...\" :xid \"IAM_USER\" :ns synthigy.iam}}"
+  "Returns a map of entity-key -> {:euuid UUID :xid String :_ns namespace}."
   ([]
    (reduce-kv
      (fn [result [entity-key _key] method]
@@ -501,12 +360,7 @@
      (methods -entity-))))
 
 (defn registered-relations
-  "Returns information about all registered relation keys.
-
-  Returns map of relation-key -> {:euuid UUID :xid String :_ns namespace}
-
-  Example:
-    (registered-relations) ;; => {:iam/user->roles {:euuid #uuid\"...\" :xid \"USR_ROLES\" ...}}"
+  "Returns a map of relation-key -> {:euuid UUID :xid String :_ns namespace}."
   ([]
    (reduce-kv
      (fn [result [relation-key _key] method]
@@ -517,12 +371,8 @@
      nil
      (methods -relation-))))
 
-
 (defn registered-data
-  "Returns information about all registered data keys.
-
-  With no args, returns set of data keys (backward compatible).
-  With :full, returns map of data-key -> {:key :data/root :euuid UUID :xid String :ns Symbol}"
+  "Returns a map of data-key -> {:euuid UUID :xid String :_ns namespace}."
   ([]
    (reduce-kv
      (fn [result [data-key _key] method]
@@ -534,62 +384,27 @@
      (methods -data-))))
 
 (defn entity-id-for-key
-  "Get a registered entity's ID in a specific format.
-
-   Args:
-     entity-key - Keyword like :iam/user
-     id-key     - :euuid or :xid
-
-   Examples:
-     (entity-id-for-key :iam/user :euuid) ;; => #uuid \"edcab1db-...\"
-     (entity-id-for-key :iam/user :xid)   ;; => \"IAM_USER\""
+  "Gets a registered entity's ID in a specific format (:euuid or :xid),
+   regardless of active provider."
   [entity-key id-key]
   (-entity- entity-key id-key))
 
 (defn relation-id-for-key
-  "Get a registered relation's ID in a specific format.
-
-   Args:
-     relation-key - Keyword like :iam/user->roles
-     id-key       - :euuid or :xid
-
-   Examples:
-     (relation-id-for-key :iam/user->roles :euuid) ;; => #uuid \"...\"
-     (relation-id-for-key :iam/user->roles :xid)   ;; => \"USR_ROLES\""
+  "Gets a registered relation's ID in a specific format (:euuid or :xid),
+   regardless of active provider."
   [relation-key id-key]
   (-relation- relation-key id-key))
 
 (defn data-id-for-key
-  "Get a registered data ID in a specific format.
-
-   Args:
-     data-key - Keyword like :data/root-role
-     id-key   - :euuid or :xid
-
-   Examples:
-     (data-id-for-key :data/root-role :euuid) ;; => #uuid \"601ee98d-...\"
-     (data-id-for-key :data/root-role :xid)   ;; => \"SYS_SUPERUSER\""
+  "Gets a registered data ID in a specific format (:euuid or :xid), regardless
+   of active provider."
   [data-key id-key]
   (-data- data-key id-key))
 
-
-;; =============================================================================
-;; Registration Macros
-;; =============================================================================
-
 #?(:clj
    (defmacro defentity
-     "Define a relation with compile-time values for multiple provider types.
-   Registers multimethod dispatch entries for each provided key-value pair.
-   
-   Example:
-     (defrelation :iam/user->roles
-       :euuid #uuid \"abc123...\"
-       :xid \"USR_ROLES\"
-       :custom-key \"custom-value\")
-   
-   Usage:
-     (relation :iam/user->roles)  ;; => value based on current provider"
+     "Registers an entity's per-provider id values as -entity- multimethod
+      dispatch entries."
      [relation-key & {:as opts}]
      `(do
         ~@(for [[k v] opts]
@@ -598,17 +413,8 @@
 
 #?(:clj
    (defmacro defrelation
-     "Define a relation with compile-time values for multiple provider types.
-   Registers multimethod dispatch entries for each provided key-value pair.
-   
-   Example:
-     (defrelation :iam/user->roles
-       :euuid #uuid \"abc123...\"
-       :xid \"USR_ROLES\"
-       :custom-key \"custom-value\")
-   
-   Usage:
-     (relation :iam/user->roles)  ;; => value based on current provider"
+     "Registers a relation's per-provider id values as -relation- multimethod
+      dispatch entries."
      [relation-key & {:as opts}]
      `(do
         ~@(for [[k v] opts]
@@ -617,17 +423,8 @@
 
 #?(:clj
    (defmacro defdata
-     "Define a relation with compile-time values for multiple provider types.
-   Registers multimethod dispatch entries for each provided key-value pair.
-   
-   Example:
-     (defrelation :iam/user->roles
-       :euuid #uuid \"abc123...\"
-       :xid \"USR_ROLES\"
-       :custom-key \"custom-value\")
-   
-   Usage:
-     (relation :iam/user->roles)  ;; => value based on current provider"
+     "Registers a data id's per-provider values as -data- multimethod dispatch
+      entries."
      [relation-key & {:as opts}]
      `(do
         ~@(for [[k v] opts]

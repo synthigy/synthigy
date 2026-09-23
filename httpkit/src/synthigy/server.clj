@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.server
   "http-kit HTTP server implementation for Synthigy.
 
@@ -10,8 +32,6 @@
   - CORS configuration
   - SPA serving
 
-  GraphQL and Frontend are optional services managed by admin.
-  See synthigy.admin.core for service orchestration.
 
   ## Quick Start
 
@@ -35,25 +55,24 @@
    [environ.core :refer [env]]
    [nano-id.core :refer [nano-id]]
    [org.httpkit.server :as httpkit]
+   [starfederation.datastar.clojure.adapter.http-kit :as d*hk]
    [patcho.lifecycle :as lifecycle]
    [patcho.patch :as patch]
    [synthigy.log :as log]
+   [synthigy.traffic :as traffic]
    [ring.middleware.keyword-params :refer [wrap-keyword-params]]
    [ring.middleware.params :refer [wrap-params]]
    [ring.util.response :as response]
    [synthigy.json :as json]
-   synthigy.admin
    synthigy.core
    [synthigy.iam.access :as access]
    synthigy.oauth
    synthigy.oauth.persistence
-   [synthigy.server.auth :as auth]
+   [synthigy.oauth.authentication :as auth]
    [synthigy.server.data :as data]
    [synthigy.server.profile :as profile]
    [synthigy.server.routes :as routes]
-   [synthigy.server.spa :as spa]
-   [synthigy.server.subscription :as subscription]
-   [synthigy.server.subscriptions.notifier :as notifier]))
+   [synthigy.server.subscription :as subscription]))
 
 ;;; ============================================================================
 ;;; Simple Router (No External Dependencies)
@@ -85,8 +104,11 @@
     Ring handler that dispatches to matching route or returns nil"
   [routes]
   (fn [request]
-    (when-let [handler (match-route request routes)]
-      (handler request))))
+    (if-let [handler (match-route request routes)]
+      (handler request)
+      ;; opt-in modules (console, …) register URI prefixes at lifecycle
+      ;; start; consulted per request so no server restart is needed
+      (routes/extension-handler request))))
 
 ;;; ============================================================================
 ;;; SSE Handler
@@ -101,7 +123,7 @@
    - `:synthigy.server/sse-client-connected`  — `:debug`, on open
    - `:synthigy.server/sse-event-sent`        — `:debug`, one per real
        send (skips keepalives), carries `:event-type` + `:event-bytes`
-   - `:synthigy.server/sse-connection-stats`  — `:info`,  on close,
+   - `:synthigy.server/sse-connection-stats`  — `:debug`, on close,
        carries `:duration-ms` + `:events-sent` + `:bytes-sent`
 
    Per-event debug rows are silent at the default `:info` level — bump
@@ -143,7 +165,8 @@
                                                                      "Connection" "keep-alive"}
                                                               origin
                                                               (merge {"Access-Control-Allow-Origin" origin
-                                                                      "Access-Control-Allow-Credentials" "true"}))}
+                                                                      "Access-Control-Allow-Credentials" "true"
+                                                                      "Vary" "Origin"}))}
                                                   false))
                                  (async/go-loop []
                                    (when (httpkit/open? ch)
@@ -177,7 +200,7 @@
                                  (let [total-events (.get events-sent)
                                        total-bytes  (.get bytes-sent)
                                        duration-ms  (- (System/currentTimeMillis) started-ms)]
-                                   (log/info {:id ::sse-connection-stats
+                                   (log/debug {:id ::sse-connection-stats
                                               :data {:identity-key identity-key
                                                      :duration-ms  duration-ms
                                                      :events-sent  total-events
@@ -186,111 +209,31 @@
                                  (subscription/destroy-event-stream identity-key stream-chan))}))))))
 
 ;;; ============================================================================
-;;; /subscribe — best-effort live notifications via SSE
-;;;
-;;; Declared interest is passed as either:
-;;;   - query params: entity_xid=ex_user&record_xids=rcx_a,rcx_b
-;;;   - JSON body on initial GET (rare for SSE, but supported)
-;;;
-;;; The handler authenticates, parses interest, registers the connection
-;;; with notifier/register!, then keeps the channel open. The drainer
-;;; calls notifier/dispatch! per envelope; the notifier walks
-;;; connections, matches, and emits via the per-connection `emit` fn.
-;;;
-;;; Request parsing (parse-declared-interest, parse-replay-cursor) lives in
-;;; synthigy.server.subscriptions.notifier — shared with ring-jetty/undertow.
-;;; ============================================================================
-
-(defn- make-subscribe-handler
-  "Ring handler for `/subscribe`. Establishes an SSE connection, registers
-   declared interest with the notifier, holds the channel open with a
-   keep-alive comment every 20s. Best-effort; reconnection is the client's
-   job."
-  []
-  (fn [request]
-    (let [;; EventSource cannot set headers — accept token via query param too.
-          request (if (get-in request [:headers "authorization"])
-                    request
-                    (if-let [token (get-in request [:query-params "access_token"])]
-                      (assoc-in request [:headers "authorization"] (str "Bearer " token))
-                      request))
-          iam-active? (lifecycle/started? :synthigy/iam)
-          iam (when iam-active? (auth/authenticate-request request))]
-      (if (and iam-active? (not iam))
-        {:status 401
-         :headers {"Content-Type" "application/json"}
-         :body (json/->json {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})}
-        (let [conn-id (nano-id 16)
-              interest (notifier/parse-declared-interest request)]
-          (httpkit/as-channel
-           request
-           {:on-open
-            (fn [ch]
-              (let [origin (get-in request [:headers "origin"])
-                    emit   (fn [sse-str]
-                             (when (httpkit/open? ch)
-                               (httpkit/send! ch sse-str false)))]
-                (httpkit/send! ch
-                               {:status 200
-                                :headers (cond-> {"Content-Type" "text/event-stream"
-                                                  "Cache-Control" "no-cache"
-                                                  "Connection" "keep-alive"
-                                                  "X-Synthigy-Conn-Id" conn-id}
-                                           origin
-                                           (merge {"Access-Control-Allow-Origin" origin
-                                                   "Access-Control-Allow-Credentials" "true"}))}
-                               false)
-                 ;; Backfill before going live: if a cursor was supplied
-                 ;; (?from=<seq>, or the browser's Last-Event-ID on reconnect),
-                 ;; replay the matching missed events in seq order first. No
-                 ;; cursor → live-only. Filtering reuses the live matcher, so
-                 ;; the client sees exactly what it would have seen live.
-                (when-let [cursor (notifier/parse-replay-cursor request)]
-                  (notifier/replay-and-emit! interest cursor emit {}))
-                (notifier/register! conn-id interest emit)
-                (log/info {:id ::subscribe-connected
-                           :data {:action :started :subject :subscribe
-                                  :conn-id conn-id
-                                  :interest interest}}
-                          "Subscribe SSE client connected")
-                 ;; Keep-alive comment every 20s to defeat proxy buffering.
-                (async/go-loop []
-                  (async/<! (async/timeout 20000))
-                  (when (httpkit/open? ch)
-                    (httpkit/send! ch ": keepalive\n\n" false)
-                    (recur)))))
-            :on-close
-            (fn [_ch _status]
-              (notifier/unregister! conn-id)
-              (log/info {:id ::subscribe-disconnected
-                         :data {:action :stopped :subject :subscribe :conn-id conn-id}}
-                        "Subscribe SSE client disconnected"))}))))))
-
-;;; ============================================================================
 ;;; Default Routes — table + module gating live in synthigy.server.routes,
 ;;; shared with ring-jetty/undertow. This backend only supplies its own
-;;; SSE transport (:sse-handler, :subscribe-handler).
+;;; SSE transport (:sse-handler).
 ;;; ============================================================================
 
 (defn default-routes
   "Route table for the full server (`:synthigy/server`). See
    `synthigy.server.routes/full-routes` for the shared route definitions."
   [opts]
-  (routes/full-routes (assoc opts
-                             :sse-handler (make-sse-handler)
-                             :subscribe-handler (make-subscribe-handler))))
+  (routes/full-routes (assoc opts :sse-handler (make-sse-handler))))
 
 (defn bare-routes
   "Route table for `:synthigy/bare-server`. See
    `synthigy.server.routes/bare-routes` for the shared route definitions."
   [opts]
-  (routes/bare-routes (assoc opts
-                             :sse-handler (make-sse-handler)
-                             :subscribe-handler (make-subscribe-handler))))
+  (routes/bare-routes (assoc opts :sse-handler (make-sse-handler))))
 
 ;;; ============================================================================
 ;;; Middleware Stack
 ;;; ============================================================================
+
+(defn vary-origin
+  "A response that echoes the request Origin is per-origin — say so, or a cache serves one origin's CORS header to the next."
+  [headers]
+  (assoc headers "Vary" (if-let [v (get headers "Vary")] (str v ", Origin") "Origin")))
 
 (defn wrap-cors
   "Simple CORS middleware allowing all origins.
@@ -301,11 +244,13 @@
     (let [response (handler request)
           origin (get-in request [:headers "origin"])]
       (if response
-        (update response :headers merge
-                {"Access-Control-Allow-Origin" (or origin "*")
-                 "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-                 "Access-Control-Allow-Headers" "Content-Type, Authorization"
-                 "Access-Control-Allow-Credentials" "true"})
+        (update response :headers
+                #(vary-origin
+                  (merge %
+                         {"Access-Control-Allow-Origin" (or origin "*")
+                          "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
+                          "Access-Control-Allow-Headers" "Content-Type, Authorization"
+                          "Access-Control-Allow-Credentials" "true"})))
         response))))
 
 (defn wrap-options
@@ -314,10 +259,11 @@
   (fn [request]
     (if (= :options (:request-method request))
       {:status 204
-       :headers {"Access-Control-Allow-Origin" (get-in request [:headers "origin"] "*")
-                 "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-                 "Access-Control-Allow-Headers" "Content-Type, Authorization"
-                 "Access-Control-Allow-Credentials" "true"}}
+       :headers (vary-origin
+                 {"Access-Control-Allow-Origin" (get-in request [:headers "origin"] "*")
+                  "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
+                  "Access-Control-Allow-Headers" "Content-Type, Authorization"
+                  "Access-Control-Allow-Credentials" "true"})}
       (handler request))))
 
 ;;; ============================================================================
@@ -367,7 +313,10 @@
   auth failures fall back to empty ctx so the request still gets logged."
   [request]
   (try
-    (when-let [{:keys [principal]} (auth/authenticate-request request)]
+    ;; BOTH faces here, never the authorizing default — this only decorates
+    ;; logs, and an identity-token request must stay attributable.
+    (when-let [{:keys [principal]} (auth/authenticate-request
+                                    request auth/first-party-audiences)]
       (cond-> {}
         (:xid    principal) (assoc :user-xid (:xid    principal))
         (:tenant principal) (assoc :tenant   (:tenant principal))))
@@ -403,13 +352,20 @@
           auth-ctx  (auth-ctx-from-request request)
           full-ctx  (assoc auth-ctx :request-id req-id)
           response  (log/with-ctx full-ctx
-                      (let [resp (handler request)]
-                        (log/info
+                      (let [resp (handler request)
+                            duration (- (System/currentTimeMillis) started)]
+                        ;; MEASUREMENT is the in-process counter ring —
+                        ;; nanoseconds, no storage. The signal itself is
+                        ;; DEBUG: it exists for request-id e2e correlation
+                        ;; under per-request/ns elevation, not for counting
+                        ;; (Robert, 2026-07-22 — no info-level traffic).
+                        (traffic/record! (:status resp) duration)
+                        (log/debug
                          {:id :synthigy.server/request-completed
                           :data {:method      (some-> (:request-method request) name)
                                  :uri         (:uri request)
                                  :status      (:status resp)
-                                 :duration-ms (- (System/currentTimeMillis) started)}}
+                                 :duration-ms duration}}
                          "request completed")
                         resp))]
       (assoc-in response [:headers "X-Request-Id"] req-id))))
@@ -420,25 +376,25 @@
   Args:
     opts - Configuration:
            :routes   - Custom routes (default: default-routes)
-           :spa-root - Filesystem path for SPA (optional)
            :info     - Server info map
 
   Returns:
     Ring handler"
-  [{:keys [routes spa-root info]
+  [{:keys [routes info]
     :or {info {}}}]
   (let [routes (or routes (default-routes {:info info}))
-        router (make-router routes)]
+        router (routes/wrap-not-found (make-router routes))]
     (wrap-request-id
-     (spa/wrap-spa
+     ;; INSIDE wrap-request-id, never outside — the error signal must be
+     ;; emitted while log/with-ctx still carries the request-id.
+     (routes/wrap-errors
       (-> router
           wrap-static-resources
           wrap-cors
           wrap-options
           wrap-keyword-params
           wrap-params
-          data/wrap-preserve-body)
-      {:root spa-root}))))
+          data/wrap-preserve-body)))))
 
 ;;; ============================================================================
 ;;; Server Lifecycle
@@ -458,6 +414,9 @@
   (when-let [stop-fn @server]
     (log/info {:id ::http-stopping :data {:action :stopping :subject :http-server}} "Stopping HTTP server")
     (stop-fn :timeout 100)
+    ;; drop the transport with the server that supplied it, so a module
+    ;; asking `sse-available?` against a stopped server gets the truth
+    (routes/unregister-sse-transport!)
     (reset! server nil))
   nil)
 
@@ -466,35 +425,31 @@
 
   Args:
     opts - Configuration map:
-           :host     - Bind address (default: localhost or SYNTHIGY_HOST)
-           :port     - Port number (default: 7887 or SYNTHIGY_PORT)
-           :spa-root - SPA static files directory (default: SYNTHIGY_SERVE)
+           :host     - Bind address (default: localhost or SYNTHIGY_SERVER_HOST)
+           :port     - Port number (default: 7887 or SYNTHIGY_SERVER_PORT)
            :info     - Server info for /info endpoint
            :routes   - Custom routes (replaces defaults)
 
   Returns:
     nil"
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
-  ([{:keys [host port spa-root info routes]
-     :or {host (or (env :synthigy-host) "localhost")
-          port (or (some-> (env :synthigy-port) Integer/parseInt) 7887)
-          spa-root (env :synthigy-serve)}}]
+  ([{:keys [host port info routes]
+     :or {host (or (env :synthigy-server-host) "localhost")
+          port (or (some-> (env :synthigy-server-port) Integer/parseInt) 7887)}}]
 
    (stop)
    (log/info {:id ::http-starting :data {:action :starting :subject :http-server :host host :port port}}
              "Starting HTTP server")
 
-   (let [handler (make-handler {:routes routes
-                                :spa-root spa-root
-                                :info info})
+   (let [handler (make-handler {:routes routes :info info})
          stop-fn (httpkit/run-server handler {:ip host
                                               :port port})]
+     ;; Opt-in modules register their prefix after boot, so they can't be
+     ;; handed :sse-handler as an argument — they look the adapter up.
+     (routes/register-sse-transport! d*hk/->sse-response)
      (reset! server stop-fn)
      (log/info {:id ::http-started :data {:action :started :subject :http-server :host host :port port}}
                "HTTP server started")
-     (when spa-root
-       (log/info {:id ::spa-enabled :data {:action :enabled :subject :spa :root spa-root}}
-                 "SPA static files enabled"))
      nil)))
 
 ;;; ============================================================================
@@ -505,9 +460,8 @@
   "Main entry point for http-kit server.
 
   Configuration via environment variables:
-    SYNTHIGY_HOST - Bind address (default: localhost)
-    SYNTHIGY_PORT - Port (default: 7887)
-    SYNTHIGY_SERVE - SPA static files directory"
+    SYNTHIGY_SERVER_HOST - Bind address (default: localhost)
+    SYNTHIGY_SERVER_PORT - Port (default: 7887)"
   [& _]
   (try
     (start)
@@ -523,17 +477,18 @@
 
 (lifecycle/register-module!
  :synthigy/server
- ;; Hard deps: the substrates that the full server's always-on routes
- ;; (/data, /history, /subscribe, /oauth/*) need. NOTE —
- ;; :synthigy/subscriptions transitively pulls :synthigy/iam, and
- ;; :synthigy/oauth.persistence transitively pulls :synthigy.iam/encryption
- ;; + :synthigy.iam/connector + :synthigy/oauth — so starting
- ;; :synthigy/server boots a full IAM + OAuth surface. For a true data-only
- ;; server without IAM, start :synthigy/bare-server instead (separate
- ;; registration below).
- {:depends-on profile/full-deps
+ ;; Hard deps: the plugs that the full server's always-on routes
+ ;; (/data, /history, /data/events, /oauth/*) need. NOTE — the IAM/OAuth
+ ;; surface comes from :synthigy/oauth.persistence (→ :synthigy/oauth +
+ ;; :synthigy.iam/encryption); :synthigy/subscriptions pulls NO IAM. So it
+ ;; is oauth.persistence, not subscriptions, that makes :synthigy/server a
+ ;; full IAM + OAuth surface. For a data-only server without IAM (but WITH
+ ;; live subscriptions), start :synthigy/bare-server instead (below).
+ {:headline true
+  :depends-on profile/full-deps
   :doc profile/full-doc
   :start (fn []
+           (profile/guard-mode! :synthigy/server :synthigy/bare-server)
            (log/info {:id ::lifecycle-starting :data {:action :starting}} "HTTP server lifecycle starting")
            (stop)
            (start)
@@ -544,16 +499,17 @@
           (log/info {:id ::lifecycle-stopped :data {:action :stopped}} "HTTP server lifecycle stopped"))})
 
 ;;; ============================================================================
-;;; Bare server — data-only, no IAM, no audit, no subscriptions
+;;; Bare server — data-only + live subscriptions, no IAM, no audit
 ;;; ============================================================================
 
 (lifecycle/register-module!
  :synthigy/bare-server
- ;; Minimum viable Synthigy server: just the dataset module. No IAM, no
- ;; OAuth, no audit substrate, no subscriptions, no SSE. Routes registered
- ;; are /data, /schema, /lint, /.well-known/synthigy, /info. The modeler
- ;; probes the discovery doc, sees auth.required=false, and runs without
- ;; a login flow.
+ ;; Data-only Synthigy server: dataset + the live delta plane (plug +
+ ;; subscriptions). No IAM, no OAuth, no audit module. Routes registered are
+ ;; /data, /schema, /lint, /.well-known/synthigy, /info, plus the gated
+ ;; /data/subscription/* + /data/events (allow-all access, no audit replay).
+ ;; The modeler probes the discovery doc, sees auth.required=false, and runs
+ ;; without a login flow.
  ;;
  ;; Operator picks one or the other — :synthigy/server and
  ;; :synthigy/bare-server are mutually exclusive (same http-kit instance,
@@ -562,6 +518,7 @@
  {:depends-on profile/bare-deps
   :doc profile/bare-doc
   :start (fn []
+           (profile/guard-mode! :synthigy/bare-server :synthigy/server)
            (log/info {:id ::bare-starting :data {:action :starting :subject :bare-server}}
                      "Bare HTTP server lifecycle starting")
            (stop)

@@ -1,79 +1,65 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.log.topics
-  "Topic classification for log signals — the single source of truth for
-   *what a log is ABOUT*, an axis orthogonal to level (*how severe it is*).
-
-   ## Why topics
-
-   Namespace describes where code LIVES; level describes SEVERITY. Neither
-   describes a signal's SUBJECT or its AUDIENCE. `synthigy.server` holds both
-   module lifecycle (a System concern) and `request-completed` (Traffic) — the
-   namespace can't separate them. And one event often has several audiences: a
-   dataset deploy is both a System event (a module did something) and a Dataset
-   event (the schema changed). ns+level forces it into one lens; a topic SET
-   lets it live in all the right ones.
-
-   ## The model
-
-   Every signal classifies to a set drawn from `all-topics`. Lenses subscribe
-   to a topic (`:system`, `:dataset`, …) instead of guessing from ns+level:
-
-       System   = topics ∋ :system
-       Dataset  = topics ∋ :dataset
-       Auth     = topics ∋ :auth
-       Requests = topics ∋ :traffic
-
-   `classify` derives the set from any explicit `:topics` on the signal PLUS
-   rules over `:id` / `:data {:action :subject}` / `:ns` / `:level`. So the
-   ~446 existing callsites get sensible topics with zero churn; you only add an
-   explicit `:topics` where derivation is ambiguous.
-
-   ## Design notes
-
-   - An exact `:id` mapping (`id->topics`) is AUTHORITATIVE: it covers the
-     per-request firehose (`request-completed`, `op-completed`, SSE/subscribe)
-     whose meaning the namespace actively misrepresents. When an id matches
-     here, ns/action/subject rules are skipped so a traffic signal can never
-     leak into `:system` via its `synthigy.server` namespace.
-   - `:diagnostic` is LEVEL-derived: every `:debug`/`:trace` signal also gets
-     `:diagnostic`, so 'show me all internal traces' is one subscription while
-     the signal keeps its subject topic too.
-   - ERROR/FATAL safety net: a non-traffic error always gets `:system`, so no
-     failure is invisible to operators regardless of subsystem or whether the
-     callsite remembered `:data {:action …}`. (HTTP 5xx envelopes stay in
-     `:traffic` — the Requests lens owns them with their request context; true
-     backend crashes like `uncaught-exception` carry no `:traffic` and surface
-     in System.)
-
-   This namespace is intentionally NOT wired into the pipeline or the wire
-   schema yet — it's the taxonomy made concrete and testable first."
+  "Topic classification for log signals — what a signal is ABOUT, an axis
+   orthogonal to level (how severe it is). Lenses subscribe to a topic
+   (`:system`, `:dataset`, `:auth`, `:traffic`, …) drawn from the closed
+   `all-topics` vocabulary instead of guessing from ns+level; `classify`
+   derives it from explicit `:topics` plus rules over `:id`/`:data`/`:ns`/`:level`,
+   with `:system` as the operator catch-all."
   (:require
    [clojure.string :as str]))
 
+(def parent-topics
+  "The closed set of top-level topics. Lenses subscribe at this level."
+  #{:system :dataset :auth :traffic :audit :diagnostic})
+
+(def child-topics
+  "The closed set of two-level topics (`parent/child`); a child never appears
+   without its parent. Locked 2026-07-22 (traffic family only)."
+  #{:traffic/request :traffic/op :traffic/sse
+    :traffic/subscription :traffic/delta})
+
 (def all-topics
   "The closed vocabulary of topics a signal may be tagged with."
-  #{:system :dataset :auth :traffic :audit :diagnostic})
+  (into parent-topics child-topics))
 
 ;;; ============================================================================
 ;;; Rule tables — the taxonomy, as data
 ;;; ============================================================================
 
 (def ^:private id->topics
-  "Exact `:id` → topics. AUTHORITATIVE — when an id matches here, no other
-   rule runs. Reserved for signals the namespace misclassifies: the
+  "Exact `:id` → topics, authoritative over all other rules; covers the
    per-request/op firehose."
-  {:synthigy.server/request-completed #{:traffic}
-   ;; A per-/data-op completion is TRAFFIC, not dataset. The Dataset lens is
-   ;; for dataset MODEL operations (deploys/schema/migrations); per-request
-   ;; reads/writes belong to the Requests/Traffic lens. Keeping op-completed
-   ;; out of :dataset keeps that topic focused on schema, not query volume.
-   :synthigy.server.data/op-completed #{:traffic}
-   :synthigy.admin/admin-request      #{:traffic}})
+  {:synthigy.server/request-completed #{:traffic/request}
+   :synthigy.server.data/op-completed #{:traffic/op}})
 
-(def ^:private traffic-id-name-prefixes
-  "An `:id` whose NAME starts with one of these is authoritative traffic,
-   regardless of namespace or action (e.g. `subscribe-connected` carries
-   `:action :started` but is connection traffic, not a lifecycle event)."
-  ["sse-" "subscribe-"])
+(def ^:private traffic-id-prefix->topic
+  "Id-NAME prefix → authoritative traffic child topic, regardless of
+   namespace or action."
+  {"sse-"          :traffic/sse
+   "subscription-" :traffic/subscription
+   "delta-"        :traffic/delta})
 
 (def ^:private lifecycle-actions
   "`:data :action` verbs that mark a module-lifecycle event → `:system`."
@@ -82,8 +68,7 @@
     :initialized :ready :not-initialized})
 
 (def ^:private deploy-actions
-  "`:data :action` verbs that mark a deploy/schema/patch event →
-   `:system` + `:dataset` (operators AND data folks both care)."
+  "`:data :action` verbs marking a deploy/schema/patch event → `:system` + `:dataset`."
   #{:deploying :deployed :deploy-failed
     :recalling :recalled :recall-failed
     :destroying :destroyed :destroy-failed
@@ -91,9 +76,8 @@
     :upgrading :upgraded :patching :patched})
 
 (def ^:private subject->topics
-  "`:data :subject` noun → topics. Splits the security surface: identity
-   FLOWS (tokens, sessions, codes) are `:auth`; security INFRASTRUCTURE
-   (encryption, keypair, persistence substrate) is `:system`."
+  "`:data :subject` noun → topics; splits identity FLOWS (`:auth`) from
+   security INFRASTRUCTURE (`:system`)."
   {;; system infrastructure
    :http-server       #{:system}
    :admin-server      #{:system}
@@ -137,40 +121,51 @@
    :iam-defaults      #{:auth}
    ;; audit / observability
    :iam-audit         #{:audit}
-   :observability     #{:audit :system}   ; substrate status is also a System concern
-   :subscribe         #{:traffic}})
+   :observability     #{:audit :system}
+   ;; delivery flow
+   :delta             #{:traffic/delta}})
 
 (def ^:private ns-prefix->topics
-  "Fallback base topic by `:ns` prefix. ORDERED — first (most specific) match
-   wins. Note `synthigy.server` defaults to `:system`: traffic ids in that ns
-   are already short-circuited by `id->topics` / `traffic-id-name-prefixes`,
-   so what's left (boot/lifecycle) is genuinely system."
-  [["synthigy.oauth"          #{:auth}]
-   ["synthigy.oidc"           #{:auth}]
-   ["synthigy.iam.audit"      #{:audit}]
-   ["synthigy.iam.encryption" #{:system}]
-   ["synthigy.iam"            #{:auth}]
-   ["synthigy.dataset"        #{:dataset}]
-   ["synthigy.observability"  #{:audit}]
-   ["synthigy.substrate"      #{:audit}]
-   ["synthigy.database"       #{:system}]
-   ["synthigy.admin"          #{:system}]
-   ["synthigy.log"            #{:system}]
-   ["synthigy.server"         #{:system}]])
+  "Fallback base topic by `:ns` prefix, ORDERED — first (most specific) match wins."
+  [["synthigy.oauth"              #{:auth}]
+   ["synthigy.oidc"               #{:auth}]
+   ["synthigy.iam.audit"          #{:audit}]
+   ["synthigy.iam.encryption"     #{:system}]
+   ["synthigy.iam"                #{:auth}]
+   ["synthigy.dataset.encryption" #{:system}]
+   ["synthigy.dataset"            #{:dataset}]
+   ["synthigy.observability"      #{:audit}]
+   ["synthigy.plug"          #{:audit}]
+   ["synthigy.subscriptions"      #{:system}]
+   ["synthigy.database"           #{:system}]
+   ["synthigy.admin"              #{:system}]
+   ["synthigy.log"                #{:system}]
+   ["synthigy.server"             #{:system}]])
 
 ;;; ============================================================================
 ;;; Classification
 ;;; ============================================================================
 
-(defn- id-name [id]
+(defn id-name [id]
   (when (keyword? id) (name id)))
 
-(defn- authoritative-traffic? [id]
-  (or (contains? id->topics id)
+(defn authoritative-traffic
+  "Topic set (possibly a child like `:traffic/sse`) when `id` is authoritative
+   traffic; nil otherwise."
+  [id]
+  (or (id->topics id)
       (when-let [n (id-name id)]
-        (some #(str/starts-with? n %) traffic-id-name-prefixes))))
+        (some (fn [[prefix child]]
+                (when (str/starts-with? n prefix) #{child}))
+              traffic-id-prefix->topic))))
 
-(defn- ns-base-topics [ns-str]
+(defn add-parents
+  "Materialize every child topic's parent into the set (`:traffic/sse` ⇒ also
+   `:traffic`), so parent-level subscriptions (`:has :traffic`) always match."
+  [topics]
+  (into topics (keep #(some-> (namespace %) keyword)) topics))
+
+(defn ns-base-topics [ns-str]
   (let [s (str ns-str)]
     (or (some (fn [[prefix topics]]
                 (when (str/starts-with? s prefix) topics))
@@ -178,28 +173,30 @@
         #{})))
 
 (defn classify
-  "Return the set of topics for a Telemere `signal` map. Pure. Reads
-   `:topics` (explicit override/augment), `:id`, `:level`, and
-   `:data {:action :subject}`. Always returns a non-empty subset of
-   `all-topics` (`#{:diagnostic}` when nothing else matches)."
+  "Return the topic set for a Telemere `signal`; pure, with `:system` as
+   catch-all."
   [{:keys [id ns level data] :as signal}]
   (let [explicit (set (:topics signal))
         action   (:action data)
         subject  (:subject data)
         diag?    (contains? #{:debug :trace} level)
-        err?     (contains? #{:error :fatal} level)]
-    (if (authoritative-traffic? id)
-      (cond-> (into explicit (or (id->topics id) #{:traffic}))
-        diag? (conj :diagnostic))
+        degraded? (contains? #{:warn :error :fatal} level)]
+    (if-let [traffic-t (authoritative-traffic id)]
+      (add-parents
+        (cond-> (into explicit traffic-t)
+          diag? (conj :diagnostic)))
       (let [t (cond-> explicit
                 (contains? lifecycle-actions action) (conj :system)
                 (contains? deploy-actions action)    (into #{:system :dataset})
+                (= :denied action)                   (conj :auth)
                 (contains? subject->topics subject)  (into (subject->topics subject))
                 true                                 (into (ns-base-topics ns)))
+            t (add-parents t)
             t (cond-> t
-                (and err? (not (contains? t :traffic))) (conj :system)
+                (and degraded? (not (contains? t :traffic))) (conj :system)
+                (not (some t [:dataset :auth :traffic])) (conj :system)
                 diag?                                   (conj :diagnostic))]
-        (if (empty? t) #{:diagnostic} t)))))
+        t))))
 
 (defn has-topic?
   "True when `signal` classifies to `topic`."

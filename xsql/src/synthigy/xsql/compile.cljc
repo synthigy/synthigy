@@ -1,62 +1,67 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.xsql.compile
-  "AST → wire JSON.
-
-   Produces `{:selections {…} :args {…}?}` matching the XSQL.md
-   §Wire-compilation table. Wire output is byte-identical to the
-   existing JS `compile()` (after JSON ↔ EDN round-trip) and is
-   what `/data` consumes today.
-
-   No schema knowledge here — that lives in the linter.
-
-   ## Named parameters
-
-   The 3-arity `compile` accepts a `params` map. Any `?name:type[]`
-   reference in the AST is resolved to its literal value at compile
-   time and type-checked against the declared `:type`. The wire output
-   never carries the `?name` syntax — only literal values that
-   downstream sql.query binds via JDBC. Missing required params and
-   type mismatches throw with a clear message."
+  "AST → wire JSON for the XSQL query DSL."
   (:refer-clojure :exclude [compile])
   (:require [clojure.string :as str]
             [synthigy.xsql.ast :as ast]
             [synthigy.xsql.parser :as parser]
             [synthigy.xsql.sql-params :as sql-params]))
 
-(declare compile-statement-into compile-scalar compile-relation
+(declare compile-ast
+         compile-statement-into compile-scalar compile-relation
          compile-count-block compile-agg-block compile-args-of-parens
          compile-arg-list compile-arg-stmt compile-or-expr compile-and-expr
          compile-primary-expr compile-arg-predicate compile-pred-op
          compile-value compile-list-literal compile-meta-key
          compile-scalar-or compile-scalar-and compile-scalar-prim
+         throw-optional-in-or
          merge-filters-into deep-merge-args)
 
-(def ^:private meta-keys #{:_limit :_offset :_order_by :_distinct :_join})
+(def ^:private meta-keys #{:_limit :_offset :_order_by :_distinct :_join :_on})
 
-(defn- text-of [leaf] (:text leaf))
+(defn text-of [leaf] (:text leaf))
 
 ;; ── Named parameters — resolution during compile ────────────────────────
-;;
-;; `compile` rebinds `*params*` to whatever map the caller passes (or `nil`
-;; when no params were supplied). `compile-value` / `compile-meta-key` look
-;; here when they encounter a :param-ref leaf in the AST. The wire never
-;; carries `?name` references — only literal values that downstream
-;; sql.query binds via JDBC.
 
 (def ^:dynamic *params* nil)
 
-(defn- param-type-kw
-  "Resolve a :param-ref node's raw type token to a canonical type keyword.
-   Defaults to :string (matches sql-params behaviour for untyped params)."
+(def ^:private absent
+  "Sentinel for a `?name?` optional param whose value wasn't supplied — drops the enclosing predicate; distinct from {} and nil."
+  ::absent)
+
+(defn absent? [v] (= absent v))
+
+(defn param-type-kw
   [param-ref-node]
   (let [raw (:param-type-raw param-ref-node)]
     (or (when raw
           (get sql-params/type-aliases (str/lower-case raw)))
         :string)))
 
-(defn- lookup-param
-  "Resolve a :param-ref leaf's value: the bound value if supplied, else the
-   inline `=default` if declared, else nil (syntax-only compile) or a
-   PARAM_MISSING throw (params bound but the name absent and no default)."
+(defn lookup-param
+  "Resolve a :param-ref leaf's value from bound params, inline default, or the
+   absent sentinel."
   [param-ref-node]
   (let [nm (:param-name param-ref-node)]
     (cond
@@ -65,20 +70,21 @@
       (:param-default param-ref-node)
       (sql-params/coerce-default (:param-default param-ref-node) (param-type-kw param-ref-node))
       (nil? *params*) nil
+      (:optional? param-ref-node) absent
       :else
       (throw (ex-info (str "Missing value for parameter ?" nm)
                       {:code "PARAM_MISSING"
                        :param nm
                        :span (:span param-ref-node)})))))
 
-(defn- resolve-param-ref
-  "Resolve a :param-ref leaf to its bound literal value. Type-checks
-   against the declared :type; throws on mismatch."
+(defn resolve-param-ref
+  "Resolve a :param-ref leaf to its bound literal value, type-checking against
+   the declared type."
   [param-ref-node]
   (let [type   (param-type-kw param-ref-node)
         array? (:array? param-ref-node)
         v      (lookup-param param-ref-node)
-        err    (when (some? *params*)
+        err    (when (and (some? *params*) (not (absent? v)))
                  (sql-params/validate-value type array? v))]
     (when err
       (throw (ex-info
@@ -93,29 +99,17 @@
     v))
 
 ;; ── Op-specific rewrites (multimethod) ───────────────────────────────────
-;;
-;; `compile-query` produces a generic wire shape; per-op rewrites layer
-;; on top via this multimethod. New ops with their own compile-time
-;; transforms register a `defmethod` here.
 
 (defmulti op-compile-rewrite
-  "Rewrite the compiled `{:selections … :args …?}` map for op-specific
-   semantics. Dispatches on the wire op string; `:default` is identity."
+  "Rewrite the compiled result map for op-specific semantics; dispatches on the
+   wire op string."
   (fn [op _result] (or op :default)))
 
 (defmethod op-compile-rewrite :default [_ result] result)
 
-(defn- root-scalar-args-entry?
-  "Detect the wire shape compile-scalar emits for `field = value` (and
-   other inline scalar predicates): a single-element vector containing
-   exactly one map whose only key is `:args` and whose `:args` value is
-   itself a map (i.e. an operator map like `{:_eq …}`).
-
-   Relations and `_count` / `_agg` blocks never produce this exact shape:
-   relations always include `:selections` (or are empty `{}` when bare),
-   and `_count` / `_agg` use plain map values, not single-args vectors.
-   `is_null` / `is_not_null` produce a string `:args`, not a map — those
-   stay field-level too."
+(defn root-scalar-args-entry?
+  "Detect the `[{:args {…}}]` wire shape compile-scalar emits for inline scalar
+   predicates."
   [v]
   (and (vector? v)
        (= 1 (count v))
@@ -124,13 +118,8 @@
               (= #{:args} (set (keys e)))
               (map? (:args e))))))
 
-(defn- get-arg-value
-  "Collapse a single-field predicate map to the bare value `get`
-   expects. `get` is primary-key-style (`{:name \"Engineering\"}`),
-   not predicate-style — the lifted scalar is `{:_eq …}` from compile,
-   so we strip that wrapper. Any non-`:_eq` operator passes through
-   unchanged (rare; would be a misuse, but better than silently
-   discarding it)."
+(defn get-arg-value
+  "Collapse a `{:_eq v}` predicate map to the bare value `get` expects."
   [pred]
   (if (and (map? pred)
            (= [:_eq] (vec (keys pred))))
@@ -139,13 +128,6 @@
 
 (defmethod op-compile-rewrite "get"
   [_ {:keys [selections args] :as result}]
-  ;; Lift every root-level scalar predicate (`[{:args {…}}]` shape) out
-  ;; of selections and into root args, collapsing `{:_eq v}` to bare
-  ;; `v` along the way. `get` is primary-key-style — args are flat
-  ;; key-value pairs, not predicate maps. The selection keeps the bare
-  ;; field as `nil`. Pre-existing args (legacy `_args (…)` form, even
-  ;; though lint rejects it) are also flattened so the whole `:args`
-  ;; map is uniformly bare for the backend.
   (let [[sels' lifted]
         (reduce-kv
          (fn [[s a] k v]
@@ -163,15 +145,13 @@
 
 ;; ── mergeFiltersInto ─────────────────────────────────────────────────────
 
-(defn- merge-filters-into
-  "Merge scalar-filter contributions into an existing args map as AND.
-   Meta-keys stay at the top level, not inside `_and`."
+(defn merge-filters-into
+  "Merge scalar-filter contributions into an existing args map as AND."
   [args filters]
   (if (empty? filters)
     args
     (let [base (or args {})]
       (cond
-        ;; Single filter, no existing preds → return filter directly.
         (and (= 1 (count filters))
              (empty? base))
         (first filters)
@@ -189,17 +169,10 @@
 ;; ── Top-level ───────────────────────────────────────────────────────────
 
 (defn compile-query
-  "Compile a :query AST node to `{:selections {…} :args {…}?}`.
-
-   `op` is the wire op string (\"search\" / \"get\" / …) — used to apply
-   op-specific rewrites. For `get`, every root-level scalar predicate is
-   lifted out of field-level args and into root args; the selection
-   keeps the bare field. See XSQL.md §`get` for rationale."
+  "Compile a :query AST node to `{:selections {…} :args {…}?}`."
   ([query-node] (compile-query query-node nil))
   ([query-node op]
    (let [entity (some-> (:root-entity query-node) :text)
-         ;; Root args in parens — `Movie (release_year >= 2000, _limit 10)`.
-         ;; Compiled like a relation's arg-list → seeds the root :args.
          root-parens-args (when-let [p (:root-parens query-node)]
                             (when-let [al (ast/find-child p :arg-list)]
                               (compile-arg-list al)))
@@ -207,28 +180,16 @@
          root-filters (atom [])]
      (doseq [c (:children query-node)]
        (case (:node c)
-         :root-args
-         ;; Root args may live inside a Parens (single-line form) or
-         ;; directly under :root-args as an :arg-list (block form).
-         (let [arg-list (or (some-> (ast/find-child c :parens)
-                                    (ast/find-child :arg-list))
-                            (ast/find-child c :arg-list))
-               args-map (if arg-list (compile-arg-list arg-list) {})]
-           (swap! out assoc :args args-map))
-
          :statement
          (let [{:keys [out' filters]}
                (compile-statement-into c (:selections @out) @root-filters)]
            (swap! out assoc :selections out')
            (reset! root-filters filters))
 
-         ;; Skip blank-line / error / etc.
          nil))
      (let [filters @root-filters]
        (when (seq filters)
          (swap! out update :args merge-filters-into filters)))
-     ;; Seed root :args from the root parens (merged with any block `_args`
-     ;; during the additive phase).
      (when (seq root-parens-args)
        (swap! out update :args #(deep-merge-args (or % {}) root-parens-args)))
      (let [result (op-compile-rewrite op @out)
@@ -239,7 +200,7 @@
 
 ;; ── Statement dispatch ──────────────────────────────────────────────────
 
-(defn- compile-statement-into
+(defn compile-statement-into
   "Compile one Statement, returning `{:out' :filters}`."
   [stmt-node parent filter-acc]
   (let [inner (first (:children stmt-node))]
@@ -256,13 +217,11 @@
       :agg-block
       {:out' (assoc parent :_agg (compile-agg-block inner)) :filters filter-acc}
 
-      ;; Unknown / error — leave parent alone.
       {:out' parent :filters filter-acc})))
 
 ;; ── Scalar ──────────────────────────────────────────────────────────────
 
-(defn- scalar-parts
-  "Extract {:field :pred :filter} from a :scalar AST node."
+(defn scalar-parts
   [scalar-node]
   (let [field-id (some (fn [c] (when (= :identifier (:node c)) c))
                        (:children scalar-node))
@@ -272,73 +231,72 @@
      :pred   pred
      :filter filter}))
 
-(defn- scalar-colon-error?
-  "True if the scalar carries an :error node whose token text is `:`.
-   Indicates the user tried to write a scalar alias (`display: name`)
-   or got the relation-alias order wrong (`name: -roles`). Either way,
-   the scalar shouldn't end up on the wire."
+(defn scalar-colon-error?
+  "True when the scalar carries a `:` error node (attempted scalar alias) and
+   must stay off the wire."
   [scalar-node]
   (boolean (some #(and (= :error (:node %)) (= ":" (:text %)))
                  (:children scalar-node))))
 
-(defn- compile-scalar
-  "Returns `{:out' :filters}` — out' is the new selections map and
-   filters is the (possibly extended) filter-accumulator."
+(defn compile-scalar
+  "Returns `{:out' :filters}` — updated selections plus the filter accumulator."
   [scalar-node parent filter-acc]
   (let [{:keys [field pred filter]} (scalar-parts scalar-node)]
     (if (or (nil? field) (scalar-colon-error? scalar-node))
-      ;; No field name, or alias-style mistake — drop the scalar so the
-      ;; wire stays clean. Lint surfaces the underlying error separately.
       {:out' parent :filters filter-acc}
       (let [key (keyword field)]
         (cond
-          ;; ScalarFilter → lift compound predicates into enclosing
-          ;; _where; selection stays bare since the filter is the
-          ;; parent's concern, not the column projection's.
           filter
           (let [or-expr (first (:children filter))
                 compiled (compile-scalar-or or-expr field)
-                filter-acc' (conj filter-acc compiled)]
+                filter-acc' (if (absent? compiled)
+                              filter-acc
+                              (conj filter-acc compiled))]
             {:out' (assoc parent key nil) :filters filter-acc'})
 
-          ;; Bare scalar with no inline predicate.
           (nil? pred)
           {:out' (assoc parent key nil) :filters filter-acc}
 
-          ;; Scalar with inline predicate. If the same field already carries
-          ;; an inline-predicate selection (the top-level "block form" — one
-          ;; predicate per line on the same field), AND-combine the args
-          ;; rather than clobbering the earlier predicate.
           :else
           (let [new-args (compile-pred-op pred)
                 existing (get parent key)
                 prev     (when (and (vector? existing) (map? (:args (first existing))))
-                           (:args (first existing)))
-                args     (if prev (deep-merge-args prev new-args) new-args)]
-            {:out' (assoc parent key [{:args args}])
-             :filters filter-acc}))))))
+                           (:args (first existing)))]
+            (if (absent? new-args)
+              {:out' (if prev parent (assoc parent key nil))
+               :filters filter-acc}
+              (let [args (if prev (deep-merge-args prev new-args) new-args)]
+                {:out' (assoc parent key [{:args args}])
+                 :filters filter-acc}))))))))
 
 ;; ── ScalarFilter compilation ────────────────────────────────────────────
 
-(defn- compile-scalar-or [or-node field]
+(defn compile-scalar-or [or-node field]
   (let [ands (ast/find-children or-node :scalar-and-expr)]
     (if (= 1 (count ands))
       (compile-scalar-and (first ands) field)
-      {:_or (mapv #(compile-scalar-and % field) ands)})))
+      (let [ms (mapv #(compile-scalar-and % field) ands)]
+        (if (some absent? ms)
+          (throw-optional-in-or or-node)
+          {:_or ms})))))
 
-(defn- compile-scalar-and [and-node field]
+(defn compile-scalar-and [and-node field]
   (let [prims (ast/find-children and-node :scalar-prim)]
     (if (= 1 (count prims))
       (compile-scalar-prim (first prims) field)
-      {:_and (mapv #(compile-scalar-prim % field) prims)})))
+      (let [ms (remove absent? (mapv #(compile-scalar-prim % field) prims))]
+        (case (count ms)
+          0 absent
+          1 (first ms)
+          {:_and (vec ms)})))))
 
-(defn- compile-scalar-prim [prim-node field]
+(defn compile-scalar-prim [prim-node field]
   (let [pred-op (ast/find-child prim-node :pred-op)]
     (cond
       pred-op
-      {(keyword field) (compile-pred-op pred-op)}
+      (let [m (compile-pred-op pred-op)]
+        (if (absent? m) absent {(keyword field) m}))
 
-      ;; Grouped: parenthesised ScalarOrExpr (no PredOp child)
       :else
       (let [nested (ast/find-child prim-node :scalar-or-expr)]
         (if nested
@@ -347,12 +305,10 @@
 
 ;; ── Relation ────────────────────────────────────────────────────────────
 
-(defn- compile-relation [rel-node parent]
+(defn compile-relation [rel-node parent]
   (let [join-marker (ast/find-child rel-node :join-marker)
         is-left? (= :arrow (-> join-marker :children first :node))
         alias-node (ast/find-child rel-node :alias)
-        ;; Field identifier: the :identifier that is NOT inside :alias
-        ;; or :join-marker. Walk children and find the first naked identifier.
         field-id (some (fn [c]
                          (when (= :identifier (:node c)) c))
                        (:children rel-node))
@@ -361,7 +317,6 @@
         block (ast/find-child rel-node :block)
         alias (when alias-node (-> alias-node :children first :text))
 
-        ;; Compile nested selections (and collect child filter contributions).
         [selections child-filters]
         (if block
           (loop [stmts (filter #(= :statement (:node %)) (:children block))
@@ -373,33 +328,21 @@
               [sel filters]))
           [nil []])
 
-        ;; Args from parens (relation-level filters).
         args-raw (when parens (compile-args-of-parens parens))
         meta     (into {} (filter (fn [[k _]] (meta-keys k)) (or args-raw {})))
         preds    (into {} (remove (fn [[k _]] (meta-keys k)) (or args-raw {})))
 
-        ;; AND-merge child scalar-filters into the relation's preds.
         preds (if (seq child-filters)
                 (merge-filters-into preds child-filters)
                 preds)
         preds (or preds {})
-        ;; Strip meta-keys from merged preds (they stayed at top by merge).
         meta  (merge meta (into {} (filter (fn [[k _]] (meta-keys k)) preds)))
         preds (into {} (remove (fn [[k _]] (meta-keys k)) preds))
 
-        ;; Args layout — predicates are flat at the args level
-        ;; (alongside meta-keys), matching the root-args shape. No more
-        ;; `:_where` wrapper. Distinguished by underscore prefix:
-        ;;   :_join     — "left" for `->rel`, absent for `-rel`
-        ;;   :_limit / :_offset / :_order_by / :_distinct — meta
-        ;;   :_or / :_and — explicit predicate combinators
-        ;;   anything else — field predicate (implicit AND between siblings)
-        has-preds? (seq preds)
-        has-meta?  (seq meta)
-        args (when (or has-preds? has-meta? is-left?)
-               (cond-> (merge meta preds)
-                 ;; Arrow implies LEFT, but an explicit `(_join …)` arg wins.
-                 (and is-left? (not (contains? meta :_join))) (assoc :_join "left")))
+        args (cond-> (merge meta preds)
+               ;; Sigil implies the join; an explicit `(_join …)` arg wins.
+               (not (contains? meta :_join))
+               (assoc :_join (if is-left? "left" "inner")))
 
         entry (cond-> {}
                 alias (assoc :alias alias)
@@ -407,31 +350,23 @@
                 selections (assoc :selections selections))
 
         wrapped (if (empty? entry) {} entry)
-        ;; Append to existing vector under this key — multiple aliased
-        ;; entries for the same relation conjoin instead of overwriting.
-        ;; Without this, `->aktivne:groups (...)` followed by
-        ;; `->neaktivne:groups (...)` would lose the first entry.
         existing (get parent (keyword field) [])]
-    (assoc parent (keyword field) (conj (vec existing) wrapped))))
+    (if (and (empty? preds)
+             (nil? selections)
+             (not is-left?)
+             parens
+             (some #(and (= :param-ref (:node %)) (:optional? %)
+                         (absent? (lookup-param %)))
+                   (tree-seq :children :children parens)))
+      ;; Every predicate evaporated via absent optional params — drop the JOIN
+      ;; too.
+      parent
+      (assoc parent (keyword field) (conj (vec existing) wrapped)))))
 
 ;; ── _count ──────────────────────────────────────────────────────────────
 
-(defn- compile-count-block
-  "Wire shape for `_count`:
-
-     [{:selections {<relation-name> [{:alias <a> :args <preds>} ...]}}]
-
-   Children are grouped by *relation name* (the target after `alias:`,
-   or the bare identifier when no alias). Each child becomes one entry
-   in the relation's vector. A bare relation with no alias and no args
-   collapses to `nil`, matching the backend's `(nil [nil])`
-   short-circuit in `synthigy.dataset.sql.query/selection->schema`.
-
-   Predicate args are emitted *flat* (same shape as `->rel` args); the
-   backend's count path lifts them into a SELECT-side `case when`
-   directly. No `:_where` envelope — that was a temporary indirection
-   wired around the old `_where → _maybe` rename, which Aggregate Hoist
-   makes obsolete."
+(defn compile-count-block
+  "Wire shape for `_count` — children grouped by relation name."
   [count-node]
   (let [grouped
         (reduce
@@ -456,27 +391,9 @@
 
 ;; ── _agg ────────────────────────────────────────────────────────────────
 
-(defn- compile-agg-block
-  "Wire shape for `_agg` (full `_count`-pattern parity):
-
-     [{:selections {<relation-name>
-                    [{:alias?     <a>
-                      :args?      <flat-preds>
-                      :selections {<attr> [{:selections {<fn> nil}} ...]}}
-                     ...]}}]
-
-   - **Envelope-per-child**: every entry sits in its own envelope under
-     the relation key, so the backend can group entries that target the
-     same relation and produce one JOIN with multiple aggregate columns
-     (Aggregate Hoist).
-   - **Alias / args at the relation level**: filter the source rows
-     once per entry; aggregates are computed over that filtered set.
-     Predicates land *flat* on `:args` (no `:_where`/`:_maybe` wrapper —
-     those are going away).
-   - **Per-attribute, each fn is its own entry**: required because the
-     backend's `_agg` schema-build extracts the fn via
-     `(ffirst (:selections data))` (`query.clj:1653`); packing multiple
-     fns under one map silently drops all but the first."
+(defn compile-agg-block
+  "Wire shape for `_agg` — envelope-per-child; each aggregate fn is its own
+   entry."
   [agg-node]
   (let [children (ast/find-children agg-node :agg-relation)
         grouped
@@ -517,62 +434,93 @@
 
 ;; ── Args inside Parens ──────────────────────────────────────────────────
 
-(defn- compile-args-of-parens [parens-node]
+(defn compile-args-of-parens [parens-node]
   (when parens-node
     (if-let [list (ast/find-child parens-node :arg-list)]
       (compile-arg-list list)
       {})))
 
-(defn- deep-merge-args
-  "Fold sibling arg-statements (comma- or newline-separated, implicitly AND'd)
-   into one args map. Predicates on the SAME field must AND-combine, not
-   clobber: two operator maps merge their keys (`{:_ge 2008}` + `{:_le 2014}`
-   → `{:_ge 2008 :_le 2014}`, the idiomatic /data where shape), and nested
-   paths merge recursively. Plain `merge` did last-write-wins, silently
-   dropping the first predicate (the implicit-AND clobber bug). Non-map
-   collisions (same op twice, vectors) keep the latter — degenerate input."
+(defn deep-merge-args
+  "AND-fold sibling arg maps — same-field operator maps merge keys; colliding
+   combinators restructure instead of clobbering."
   [a b]
-  (merge-with (fn [x y] (if (and (map? x) (map? y)) (deep-merge-args x y) y)) a b))
+  (reduce-kv
+    (fn [m k v]
+      (if-not (contains? m k)
+        (assoc m k v)
+        (let [x (get m k)]
+          (cond
+            (= k :_and)
+            (assoc m k (into (vec x) v))
 
-(defn- compile-arg-list [list-node]
+            (= k :_or)
+            (-> m
+                (dissoc :_or)
+                (update :_and (fnil into []) [{:_or x} {:_or v}]))
+
+            (and (map? x) (map? v))
+            (assoc m k (deep-merge-args x v))
+
+            :else (assoc m k v)))))
+    a b))
+
+(defn compile-arg-list [list-node]
   (reduce
     (fn [acc stmt]
       (let [inner (first (:children stmt))]
         (case (:node inner)
-          :or-expr   (deep-merge-args acc (compile-or-expr inner))
-          :meta-key  (deep-merge-args acc (compile-meta-key inner))
+          :or-expr   (let [m (compile-or-expr inner)]
+                       (if (absent? m) acc (deep-merge-args acc m)))
+          :meta-key  (let [m (into {} (remove (comp absent? val))
+                                   (compile-meta-key inner))]
+                       (deep-merge-args acc m))
           acc)))
     {}
     (ast/find-children list-node :arg-stmt)))
 
-(defn- compile-or-expr [or-node]
+(defn throw-optional-in-or
+  "Absent optional under `or` is an error — dropping a disjunct silently narrows
+   the result."
+  [node]
+  (throw (ex-info "optional `?name?` param under `or` — dropping a disjunct is ambiguous; restructure or supply the value"
+                  {:code "PARAM_OPTIONAL_IN_OR" :span (:span node)})))
+
+(defn compile-or-expr [or-node]
   (let [ands (ast/find-children or-node :and-expr)]
     (if (= 1 (count ands))
       (compile-and-expr (first ands))
-      {:_or (mapv compile-and-expr ands)})))
+      (let [ms (mapv compile-and-expr ands)]
+        (if (some absent? ms)
+          (throw-optional-in-or or-node)
+          {:_or ms})))))
 
-(defn- compile-and-expr [and-node]
+(defn compile-and-expr [and-node]
   (let [prims (ast/find-children and-node :primary-expr)]
     (if (= 1 (count prims))
       (compile-primary-expr (first prims))
-      {:_and (mapv compile-primary-expr prims)})))
+      (let [ms (remove absent? (mapv compile-primary-expr prims))]
+        (case (count ms)
+          0 absent
+          1 (first ms)
+          {:_and (vec ms)})))))
 
-(defn- compile-primary-expr [prim-node]
+(defn compile-primary-expr [prim-node]
   (let [inner (first (:children prim-node))]
     (case (:node inner)
       :arg-predicate (compile-arg-predicate inner)
       :grouped-expr  (compile-or-expr (ast/find-child inner :or-expr))
       {})))
 
-(defn- compile-arg-predicate [pred-node]
+(defn compile-arg-predicate [pred-node]
   (let [path (ast/find-child pred-node :path)
         pred-op (ast/find-child pred-node :pred-op)
         segs (mapv :text (filter #(= :identifier (:node %)) (:children path)))
         leaf (compile-pred-op pred-op)]
-    ;; Walk segments right-to-left, wrapping.
-    (reduce (fn [obj seg] {(keyword seg) obj})
-            leaf
-            (reverse segs))))
+    (if (absent? leaf)
+      absent
+      (reduce (fn [obj seg] {(keyword seg) obj})
+              leaf
+              (reverse segs)))))
 
 ;; ── PredOp ──────────────────────────────────────────────────────────────
 
@@ -584,15 +532,13 @@
    :gt  :_gt
    :ge  :_ge})
 
-(defn- compile-pred-op [pred-op-node]
+(defn compile-pred-op [pred-op-node]
   (let [children (:children pred-op-node)
         first-child (first children)
         first-text (:text first-child)
         second-text (some-> children second :text)]
     (cond
-      ;; "is null" / "is not null" — strict sequence match.
-      ;; Partial input (just `is`, or `is not` without `null`) falls
-      ;; through to {} so we don't fabricate a wire predicate.
+      ;; "is null" / "is not null" — partial input falls through to {}.
       (= "is" first-text)
       (let [texts (mapv :text children)]
         (cond
@@ -600,30 +546,31 @@
           (= ["is" "not" "null"] texts)  "is_not_null"
           :else                          {}))
 
-      ;; "not in (...)" — only emit _not_in when `in` was parsed
-      ;; alongside `not`. Bare `not` yields {}.
+      ;; "not in (...)" — bare `not` yields {}.
       (= "not" first-text)
       (if (= "in" second-text)
-        (let [list-node (ast/find-child pred-op-node :list-literal)]
-          {:_not_in (compile-list-literal list-node)})
+        (let [list-node (ast/find-child pred-op-node :list-literal)
+              vs (compile-list-literal list-node)]
+          (if (absent? vs) absent {:_not_in vs}))
         {})
 
       ;; "in (...)"
       (= "in" first-text)
-      (let [list-node (ast/find-child pred-op-node :list-literal)]
-        {:_in (compile-list-literal list-node)})
+      (let [list-node (ast/find-child pred-op-node :list-literal)
+            vs (compile-list-literal list-node)]
+        (if (absent? vs) absent {:_in vs}))
 
       ;; like / ilike (String | ParamRef)
       (or (= "like" first-text) (= "ilike" first-text))
       (let [operand (some #(when (#{:string :param-ref} (:node %)) %) children)
             value (if (= :param-ref (:node operand))
                     (resolve-param-ref operand)
-                    ;; Unquote: strip surrounding quotes; handle backslash escapes.
                     (-> operand :text (subs 1) (#(subs % 0 (dec (count %))))
                         (str/replace #"\\(.)" "$1")))]
-        (if (= "like" first-text)
-          {:_like value}
-          {:_ilike value}))
+        (cond
+          (absent? value)       absent
+          (= "like" first-text) {:_like value}
+          :else                 {:_ilike value}))
 
       ;; BinaryOp Value
       :else
@@ -631,15 +578,15 @@
             value (ast/find-child pred-op-node :value)]
         (if bin-op
           (let [tok (-> bin-op :children first :node)
-                wire-op (binop->wire tok :_eq)]
-            {wire-op (compile-value value)})
+                wire-op (binop->wire tok :_eq)
+                v (compile-value value)]
+            (if (absent? v) absent {wire-op v}))
           {})))))
 
-(defn- compile-value [value-node]
+(defn compile-value [value-node]
   (let [inner (first (:children value-node))]
     (case (:node inner)
       :string
-      ;; Strip quotes; handle escapes.
       (let [t (:text inner)
             stripped (subs t 1 (dec (count t)))]
         (str/replace stripped #"\\(.)" "$1"))
@@ -665,35 +612,37 @@
       :param-ref
       (resolve-param-ref inner)
 
-      ;; Fallback: unknown
       nil)))
 
-(defn- compile-list-literal [list-node]
-  ;; Most entries map 1:1 to a value. The exception is an array-typed
-  ;; named-parameter inside a list — `status in (?statuses:string[])` —
-  ;; which splices its array into the list position so a single param
-  ;; can bind a whole `_in` set. Without the splice the wire would
-  ;; carry `{:_in [["a" "b"]]}` (an array inside a list), which neither
-  ;; sql.query nor JDBC interprets correctly.
-  (reduce
-    (fn [acc v-node]
-      (let [inner (first (:children v-node))]
-        (if (and (= :param-ref (:node inner))
-                 (:array? inner))
-          (let [v (resolve-param-ref inner)]
-            (cond
-              (nil? v)          (conj acc nil)
-              (sequential? v)   (into acc v)
-              :else             (conj acc v)))
-          (conj acc (compile-value v-node)))))
-    []
-    (ast/find-children list-node :value)))
+(defn compile-list-literal [list-node]
+  ;; Array-typed params splice into the list position.
+  (let [{:keys [vals dropped?]}
+        (reduce
+          (fn [acc v-node]
+            (let [inner (first (:children v-node))]
+              (if (and (= :param-ref (:node inner))
+                       (:array? inner))
+                (let [v (resolve-param-ref inner)]
+                  (cond
+                    (absent? v)     (assoc acc :dropped? true)
+                    (nil? v)        (update acc :vals conj nil)
+                    (sequential? v) (update acc :vals into v)
+                    :else           (update acc :vals conj v)))
+                (let [v (compile-value v-node)]
+                  (if (absent? v)
+                    (assoc acc :dropped? true)
+                    (update acc :vals conj v))))))
+          {:vals [] :dropped? false}
+          (ast/find-children list-node :value))]
+    ;; A list emptied by absent optionals takes the whole predicate with it —
+    ;; never fabricate `_in []`.
+    (if (and dropped? (empty? vals)) absent vals)))
 
 ;; ── MetaKey ─────────────────────────────────────────────────────────────
 
-(defn- compile-meta-key [meta-node]
+(defn compile-meta-key [meta-node]
   (let [children (:children meta-node)
-        kw (-> children first :text)]
+        kw (parser/normalize-meta-kw (-> children first :text))]
     (case kw
       "_limit"
       (let [v-node (some #(when (#{:number :param-ref} (:node %)) %) children)
@@ -714,49 +663,96 @@
         {:_offset v})
 
       "_order_by"
-      (let [specs (ast/find-children meta-node :order-spec)]
-        {:_order_by
-         (mapv (fn [spec]
-                 (let [id (some #(when (= :identifier (:node %)) %)
-                                (:children spec))
-                       dir (last (filter #(and (= :identifier (:node %))
-                                               (#{"asc" "desc"} (:text %)))
-                                         (:children spec)))]
-                   [(:text id) (:text dir)]))
-               specs)})
+      (if-let [pref (some #(when (= :param-ref (:node %)) %)
+                          (:children meta-node))]
+        (let [v (lookup-param pref)]
+          (if (or (nil? v) (absent? v))
+            {}
+            (let [pairs (sql-params/normalize-order-specs
+                          v {:name (:param-name pref)
+                             :span (:span pref)
+                             :type-args (:param-type-args pref)})]
+              {:_order_by
+               (if (seq (:param-type-args pref))
+                 pairs
+                 (with-meta pairs
+                   {:xsql/scope-to-selection {:param (:param-name pref)
+                                              :span (:span pref)}}))})))
+        (let [specs (ast/find-children meta-node :order-spec)]
+          {:_order_by
+           (mapv (fn [spec]
+                   (let [id (some #(when (= :identifier (:node %)) %)
+                                  (:children spec))
+                         dir (last (filter #(and (= :identifier (:node %))
+                                                 (#{"asc" "desc"} (:text %)))
+                                           (:children spec)))]
+                     [(:text id) (:text dir)]))
+                 specs)}))
 
       "_distinct"
-      (let [ids (filter #(and (= :identifier (:node %))
-                              (not= "_distinct" (:text %)))
-                        children)]
+      (let [ids (filter #(= :identifier (:node %)) (rest children))]
         {:_distinct {:attributes (mapv :text ids)}})
 
       "_join"
-      (let [v (some #(when (and (= :identifier (:node %)) (not= "_join" (:text %))) %)
-                    children)]
+      (let [v (some #(when (= :identifier (:node %)) %) (rest children))]
         {:_join (:text v)})
 
+      "_on"
+      (let [v (some #(when (= :identifier (:node %)) %) (rest children))]
+        {:_on (:text v)})
+
       {})))
+
+;; ── Selection-scoped order params (post-pass) ───────────────────────────
+
+(defn selection-scalars [selections]
+  (set (keep (fn [[k v]] (when (nil? v) (name k))) selections)))
+
+(defn check-order-scope [{:keys [args] :as node} selections]
+  (when-let [info (some-> (:_order_by args) meta :xsql/scope-to-selection)]
+    (let [allowed (selection-scalars selections)]
+      (doseq [[col _] (:_order_by args)]
+        (when-not (allowed col)
+          (throw (ex-info
+                  (str "Parameter ?" (:param info) " orders by \"" col
+                       "\" which is not in the selection — select the column "
+                       "or widen with ?" (:param info) "(" col ", …)")
+                  {:code "PARAM_TYPE_MISMATCH"
+                   :param (:param info)
+                   :column col
+                   :allowed (vec (sort allowed))
+                   :span (:span info)}))))))
+  node)
+
+(defn enforce-order-scoping
+  "Apply selection-scoping to tagged order params across root and relation
+   configs."
+  [{:keys [selections] :as result}]
+  (check-order-scope result selections)
+  (letfn [(walk-sel [sel]
+            (doseq [[_ v] sel]
+              (when (vector? v)
+                (doseq [config v]
+                  (when (map? config)
+                    (check-order-scope config (:selections config))
+                    (walk-sel (:selections config)))))))]
+    (when (map? selections)
+      (walk-sel selections)))
+  result)
 
 ;; ── Public entry ────────────────────────────────────────────────────────
 
 (defn compile
-  "Compile an XSQL source string to wire JSON.
-   Returns `{:selections {…} :args {…}?}` matching XSQL.md § Wire.
-
-   `op` is the wire op string (\"search\" / \"get\" / …). Only `get`
-   currently triggers any op-specific behavior (root scalar lifting).
-
-   `params` is an optional `{name value}` map (keyword or string keys)
-   used to resolve `?name:type[]` placeholders in the source. When
-   omitted, placeholders compile to nil — useful for syntax-only paths
-   like the linter and editor tooling. When supplied, missing required
-   params or type mismatches throw an ex-info with a `:code` of
-   \"PARAM_MISSING\" or \"PARAM_TYPE_MISMATCH\"."
+  "Compile an XSQL source string to wire JSON."
   ([source]
    (compile source nil nil))
   ([source op]
    (compile source op nil))
   ([source op params]
-   (binding [*params* params]
-     (compile-query (parser/parse source) op))))
+   (compile-ast (parser/parse source) op params)))
+
+(defn compile-ast
+  "Compile a pre-parsed AST to wire JSON — the cache-friendly entry."
+  [ast op params]
+  (binding [*params* params]
+    (enforce-order-scoping (compile-query ast op))))

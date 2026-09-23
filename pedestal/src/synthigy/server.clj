@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.server
   "Pedestal HTTP server implementation for Synthigy.
 
@@ -8,8 +30,6 @@
   - Authentication interceptors
   - CORS configuration
 
-  GraphQL is an optional service managed by admin on its own port.
-  See synthigy.graphql.server for the standalone GraphQL server.
 
   Dependencies are optional - users must add Pedestal dependencies
   to their own project:
@@ -39,6 +59,8 @@
     [io.pedestal.http :as http]
     [io.pedestal.http.content-negotiation :as conneg]
     [io.pedestal.http.cors :as cors]
+    [io.pedestal.interceptor :as interceptor]
+    [io.pedestal.interceptor.chain :as chain]
     [io.pedestal.http.ring-middlewares :as middlewares]
     [io.pedestal.http.route :as route]
     [nano-id.core :refer [nano-id]]
@@ -46,23 +68,24 @@
     [patcho.patch :as patch]
     [ring.util.response :as response]
     [synthigy.log :as log]
-    synthigy.admin
+    [synthigy.traffic :as traffic]
     synthigy.core
     synthigy.oauth
     [synthigy.oauth.handlers :as oauth.handlers]
     synthigy.oauth.persistence
-    [synthigy.server.auth :as auth]
+    [synthigy.oauth.authentication :as auth]
     [synthigy.server.data :as data]
     [synthigy.server.history :as history]
-    [synthigy.server.login :as login-page]
-    [synthigy.server.spa :as spa]
+    [synthigy.oauth.page.custom :as login-page]
+    [synthigy.server.profile :as profile]
+    [synthigy.server.routes :as shared-routes]
     [synthigy.server.subscription :as subscription]))
 
 ;;; ============================================================================
 ;;; Authentication
 ;;; ============================================================================
 
-;; Authentication is provided by synthigy.server.auth
+;; Authentication is provided by synthigy.oauth.authentication
 ;; Use auth/authenticate-interceptor in route definitions
 
 (def coerce-body
@@ -80,14 +103,16 @@
             body :body
             :as request} (:request ctx)]
        (if (and body content-type (str/starts-with? content-type "application/json"))
-         (try
-           (let [json-params (json/read-str (slurp body))]
+         ;; never slurp without replacing — data/preserve-body is the ONE
+         ;; implementation every adapter shares; see its docstring
+         (let [request (data/preserve-body request)]
+           (try
              (assoc ctx :request
-                    (update request :params merge json-params)))
-           (catch Exception e
-             (log/warn {:id ::json-body-parse-failed :error e}
-                       "Failed to parse JSON body")
-             ctx))
+                    (update request :params merge (json/read-str (:raw-body request))))
+             (catch Exception e
+               (log/warn {:id ::json-body-parse-failed :error e}
+                         "Failed to parse JSON body")
+               (assoc ctx :request request))))
          ctx)))})
 
 (def json-response
@@ -161,13 +186,17 @@
                          (nano-id 10))
             started  (System/currentTimeMillis)
             response (log/with-ctx {:request-id req-id}
-                       (let [resp (handler request)]
-                         (log/info
+                       (let [resp (handler request)
+                             duration (- (System/currentTimeMillis) started)]
+                         ;; measurement = counters; the DEBUG signal exists
+                         ;; for request-id e2e correlation only.
+                         (traffic/record! (:status resp) duration)
+                         (log/debug
                            {:id :synthigy.server/request-completed
                             :data {:method      (some-> (:request-method request) clojure.core/name)
                                    :uri         (:uri request)
                                    :status      (:status resp)
-                                   :duration-ms (- (System/currentTimeMillis) started)}}
+                                   :duration-ms duration}}
                            "request completed")
                          resp))]
         (assoc ctx :response
@@ -196,7 +225,12 @@
                     (ring-handler->pedestal-interceptor #'data/handler ::data-api)]
      :route-name ::data-api]
 
-    ;; Audit substrate query surface (5 ops). Returns 404 when no audit
+    ;; Observability plane — log ops only, separate mount from /data
+    ["/logs" :post [coerce-body
+                    (ring-handler->pedestal-interceptor #'data/logs-handler ::logs-api)]
+     :route-name ::logs-api]
+
+    ;; Audit plug query surface (5 ops). Returns 404 when no audit
     ;; provider module is loaded — registration is static, but the handler
     ;; gates on `audit/*audit-provider*`.
     ["/history" :post [coerce-body
@@ -216,7 +250,15 @@
 
     ;; XSQL lint — schema-aware diagnostics for query DSL strings
     ["/lint" :post [(ring-handler->pedestal-interceptor #'data/lint-handler ::lint)]
-     :route-name ::lint]})
+     :route-name ::lint]
+
+    ;; IAM configuration transfer — ROOT-gated inside the handler
+    ["/iam/export" :get [(ring-handler->pedestal-interceptor #'data/iam-export-handler ::iam-export)]
+     :route-name ::iam-export]
+    ["/iam/import" :post [(ring-handler->pedestal-interceptor #'data/iam-import-handler ::iam-import)]
+     :route-name ::iam-import]
+    ["/iam/clients" :post [(ring-handler->pedestal-interceptor #'data/iam-add-client-handler ::iam-add-client)]
+     :route-name ::iam-add-client]})
 
 (def oauth-routes
   "OAuth 2.0 and OpenID Connect endpoint routes.
@@ -242,70 +284,108 @@
         so they don't need additional Pedestal interceptors for body parsing."
   #{;; OAuth 2.0 Core
     ["/oauth/authorize" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/authorize ::oauth-authorize)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/authorize ::oauth-authorize)]
      :route-name ::oauth-authorize]
 
     ["/oauth/token" :post
-     [(ring-handler->pedestal-interceptor oauth.handlers/token ::oauth-token)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/token ::oauth-token)]
      :route-name ::oauth-token]
 
+    ;; Terminal user-facing status page for interactive flows
+    ["/oauth/status" :get
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/oauth-status ::oauth-status)]
+     :route-name ::oauth-status]
+
+    ["/oauth/device/status" :get
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/oauth-status ::oauth-device-status)]
+     :route-name ::oauth-device-status]
+
     ["/oauth/login" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/login ::oauth-login)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/login ::oauth-login)]
      :route-name ::oauth-login-get]
 
     ["/oauth/login" :post
-     [(ring-handler->pedestal-interceptor oauth.handlers/login ::oauth-login)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/login ::oauth-login)]
      :route-name ::oauth-login-post]
 
     ["/oauth/logout" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/logout ::oauth-logout)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/logout ::oauth-logout)]
      :route-name ::oauth-logout-get]
 
     ["/oauth/logout" :post
-     [(ring-handler->pedestal-interceptor oauth.handlers/logout ::oauth-logout)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/logout ::oauth-logout)]
      :route-name ::oauth-logout-post]
 
     ["/oauth/revoke" :post
-     [(ring-handler->pedestal-interceptor oauth.handlers/revoke ::oauth-revoke)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/revoke ::oauth-revoke)]
      :route-name ::oauth-revoke]
 
     ["/oauth/introspect" :post
-     [(ring-handler->pedestal-interceptor oauth.handlers/introspect ::oauth-introspect)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/introspect ::oauth-introspect)]
      :route-name ::oauth-introspect]
 
     ;; Device Flow (RFC 8628)
     ["/oauth/device/auth" :post
-     [(ring-handler->pedestal-interceptor oauth.handlers/device-authorization ::oauth-device-auth)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/device-authorization ::oauth-device-auth)]
      :route-name ::oauth-device-auth]
 
     ["/oauth/device/activate" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/device-activation ::oauth-device-activate)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/device-activation ::oauth-device-activate)]
      :route-name ::oauth-device-activate-get]
 
     ["/oauth/device/activate" :post
-     [(ring-handler->pedestal-interceptor oauth.handlers/device-activation ::oauth-device-activate)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/device-activation ::oauth-device-activate)]
      :route-name ::oauth-device-activate-post]
 
     ;; Federated (social) login — Synthigy brokering to upstream IdPs
     ["/oauth/federated/start" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/federated-start ::oauth-federated-start)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/federated-start ::oauth-federated-start)]
      :route-name ::oauth-federated-start]
 
     ["/oauth/federated/callback" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/federated-callback ::oauth-federated-callback)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/federated-callback ::oauth-federated-callback)]
      :route-name ::oauth-federated-callback]
+    ["/oauth/federated/providers" :get
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/federated-providers ::oauth-federated-providers)]
+     :route-name ::oauth-federated-providers]
+    ["/oauth/federated/identities" :get
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/federated-identities ::oauth-federated-identities)]
+     :route-name ::oauth-federated-identities]
+    ["/oauth/federated/unlink" :post
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/federated-unlink ::oauth-federated-unlink)]
+     :route-name ::oauth-federated-unlink]
+    ["/oauth/federated/client/identities" :get
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/federated-client-identities ::oauth-federated-client-identities)]
+     :route-name ::oauth-federated-client-identities]
+    ["/oauth/federated/client/unlink" :post
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/federated-client-unlink ::oauth-federated-client-unlink)]
+     :route-name ::oauth-federated-client-unlink]
+
+    ;; Account onboarding/claim — federation is one claim method among several
+    ["/oauth/onboard" :post
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/onboard ::oauth-onboard)]
+     :route-name ::oauth-onboard]
+    ["/oauth/onboard/complete" :post
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/onboard-complete ::oauth-onboard-complete)]
+     :route-name ::oauth-onboard-complete]
+    ["/oauth/claim" :get
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/claim ::oauth-claim)]
+     :route-name ::oauth-claim]
+    ["/oauth/claim/password" :post
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/claim-password ::oauth-claim-password)]
+     :route-name ::oauth-claim-password]
 
     ;; OpenID Connect
     ["/oauth/userinfo" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/userinfo ::oidc-userinfo)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/userinfo ::oidc-userinfo)]
      :route-name ::oidc-userinfo]
 
     ["/oauth/jwks" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/jwks ::oidc-jwks)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/jwks ::oidc-jwks)]
      :route-name ::oidc-jwks]
 
     ["/.well-known/openid-configuration" :get
-     [(ring-handler->pedestal-interceptor oauth.handlers/openid-configuration ::oidc-discovery)]
+     [(ring-handler->pedestal-interceptor #'oauth.handlers/openid-configuration ::oidc-discovery)]
      :route-name ::oidc-discovery]})
 
 (def ^:private content-type-map
@@ -341,7 +421,7 @@
 
 (def static-routes
   "Routes for serving static OAuth resources (CSS, JS, images) plus the
-   optional custom login page mounted at /login/* via SYNTHIGY_LOGIN_PAGE_PATH.
+   optional custom login page mounted at /login/* via SYNTHIGY_IAM_LOGIN_PAGE_PATH.
    /login (no trailing slash) 302s to /login/; /login/ serves index.html;
    /login/* serves any file under the configured directory."
   #{["/oauth/css/*" :get [serve-resource] :route-name ::static-css]
@@ -394,13 +474,11 @@
 
   Args:
     opts - Optional configuration map:
-           :host - Bind address (default: \"localhost\" or SYNTHIGY_HOST env var)
-           :port - Port number (default: 7887 or SYNTHIGY_PORT env var)
+           :host - Bind address (default: \"localhost\" or SYNTHIGY_SERVER_HOST env var)
+           :port - Port number (default: 7887 or SYNTHIGY_SERVER_PORT env var)
            :routes - Additional routes to merge (default: #{})
            :service-initializer - Function to transform service map (default: identity)
            :info - Server info map for /info endpoint (defaults to patcho version info)
-           :spa-root - Filesystem path for SPA static files (default: SYNTHIGY_SERVE env var)
-                       Set to nil to disable SPA support
 
   Returns:
     nil
@@ -416,18 +494,14 @@
     ;; Custom port
     (start {:port 3000})
 
-    ;; Development mode with SPA
-    (start {:spa-root \"/var/www/my-app/dist\"})
-
-    ;; Production mode (no SPA, use nginx for static files)
-    (start {:spa-root nil})"
+    ;; Production mode (use nginx / a CDN for static files)
+    (start {})"
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
-  ([{:keys [host port routes service-initializer info spa-root]
-     :or {host (or (env :synthigy-host) "localhost")
-          port (or (some-> (env :synthigy-port) Integer/parseInt) 7887)
+  ([{:keys [host port routes service-initializer info]
+     :or {host (or (env :synthigy-server-host) "localhost")
+          port (or (some-> (env :synthigy-server-port) Integer/parseInt) 7887)
           routes #{}
-          service-initializer identity
-          spa-root (env :synthigy-serve)}}]
+          service-initializer identity}}]
 
    ;; Note: Core system should already be started by lifecycle dependencies
    ;; If using this function directly (not via lifecycle), ensure dependencies
@@ -447,16 +521,41 @@
                         routes))
          router (route/router all-routes :map-tree)
 
+         ;; Opt-in modules (console, …) cannot be in the static table: core
+         ;; can't require a namespace that may not be on the classpath, and
+         ;; requiring-resolve is banned. They claim a URI prefix from their
+         ;; lifecycle :start instead, so a request under one has to reach them
+         ;; — http-kit falls through to extension-handler on a route miss.
+         ;; Here it runs on :enter and TERMINATES, because this service map
+         ;; builds ::http/interceptors by hand (no default-interceptors, hence
+         ;; no not-found): a :leave hook that merely fills in a missing
+         ;; response empties every matched response instead.
+         extensions (interceptor/interceptor
+                      {:name ::prefix-extensions
+                       :enter
+                       (fn [ctx]
+                         (if-let [resp (shared-routes/extension-handler (:request ctx))]
+                           (-> ctx (assoc :response resp) chain/terminate)
+                           ctx))})
+
          ;; Build interceptor chain
-         interceptors (cond-> [;; CORS - allow all origins (configure per-route if needed)
-                               (cors/allow-origin {:allowed-origins (constantly true)})
-                               (middlewares/content-type {:mime-types {}})
-                               route/query-params
-                               (route/method-param)
-                               router]
-                        ;; Add SPA interceptor as LAST (only if spa-root provided)
-                        spa-root
-                        (conj (spa/make-spa-interceptor {:root spa-root})))
+         interceptors [;; first in the vector = last on :leave, i.e. after
+                       ;; allow-origin has merged its headers — never move it
+                       ;; below allow-origin. Why Vary at all: docs/core/synthigy/server.md
+                       (interceptor/interceptor
+                        {:name ::vary-origin
+                         :leave (fn [ctx]
+                                  (if (get-in ctx [:response :headers "Access-Control-Allow-Origin"])
+                                    (update-in ctx [:response :headers "Vary"]
+                                               #(if % (str % ", Origin") "Origin"))
+                                    ctx))})
+                       ;; CORS - allow all origins (configure per-route if needed)
+                       (cors/allow-origin {:allowed-origins (constantly true)})
+                       (middlewares/content-type {:mime-types {}})
+                       route/query-params
+                       (route/method-param)
+                       extensions
+                       router]
 
          ;; Create service map
          service-map
@@ -477,9 +576,6 @@
      (reset! server _server)
      (log/info {:id ::http-started :data {:action :started :subject :http-server :host host :port port}}
                "HTTP server started")
-     (when spa-root
-       (log/info {:id ::spa-enabled :data {:action :enabled :subject :spa :root spa-root}}
-                 "SPA static files enabled"))
      nil)))
 
 ;;; ============================================================================
@@ -498,10 +594,9 @@
     Run with: clj -M:postgres:pedestal or clj -M:sqlite:pedestal
 
   HTTP server:
-    SYNTHIGY_HOST - Bind address (default: 'localhost')
-    SYNTHIGY_PORT - Port number (default: 7887)
-    SYNTHIGY_SERVE - SPA static files directory (optional)
-    SYNTHIGY_LOGIN_PAGE_PATH - Custom login page directory served at /login/* (optional)
+    SYNTHIGY_SERVER_HOST - Bind address (default: 'localhost')
+    SYNTHIGY_SERVER_PORT - Port number (default: 7887)
+    SYNTHIGY_IAM_LOGIN_PAGE_PATH - Custom login page directory served at /login/* (optional)
 
   Application:
     SYNTHIGY_USER - Superuser username
@@ -513,7 +608,7 @@
     POSTGRES_DB - PostgreSQL database name
     POSTGRES_USER - PostgreSQL username
     POSTGRES_PASSWORD - PostgreSQL password
-    HIKARI_MAX_POOL_SIZE - Connection pool size (default: 20)
+    POSTGRES_POOL_SIZE - Connection pool size (default: 20)
 
   Database-specific (SQLite):
     SQLITE_PATH - SQLite database file path
@@ -535,12 +630,9 @@
 
 (lifecycle/register-module!
   :synthigy/server
-  {:doc "Full HTTP server — /data + IAM + OAuth + SSE + admin/SPA"
-   :depends-on [:synthigy/admin
-                :synthigy/oauth.persistence
-                :synthigy/audit
-                :synthigy/substrate
-                :synthigy/subscriptions]
+  {:headline true
+   :doc profile/full-doc
+   :depends-on profile/full-deps
    :start (fn []
             ;; Runtime: Start HTTP server (core system started by dependencies)
             (log/info {:id ::lifecycle-starting :data {:action :starting}} "HTTP server lifecycle starting")

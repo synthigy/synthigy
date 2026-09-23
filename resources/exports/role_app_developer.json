@@ -1,0 +1,31 @@
+{
+  "active" : true,
+  "browse_entities" : [ {
+    "xid" : "1ubBUFuDpcpqxY94TECvMw"
+  }, {
+    "xid" : "3vhKU5p1QK9KPoyLoYkYW9"
+  } ],
+  "create_entities" : [ {
+    "xid" : "1ubBUFuDpcpqxY94TECvMw"
+  }, {
+    "xid" : "3vhKU5p1QK9KPoyLoYkYW9"
+  } ],
+  "delete_entities" : [ {
+    "xid" : "1ubBUFuDpcpqxY94TECvMw"
+  }, {
+    "xid" : "3vhKU5p1QK9KPoyLoYkYW9"
+  } ],
+  "description" : "OAuth application surface: clients, APIs, scopes. Sessions read-only; tokens and keys are system-only.",
+  "name" : "App Developer",
+  "read_entities" : [ {
+    "xid" : "P2G9jsr3FReSGAs1AfeErp"
+  }, {
+    "xid" : "W2BXVawY82expJoFJAAANX"
+  } ],
+  "update_entities" : [ {
+    "xid" : "1ubBUFuDpcpqxY94TECvMw"
+  }, {
+    "xid" : "3vhKU5p1QK9KPoyLoYkYW9"
+  } ],
+  "xid" : "WpET587T1WTUG2di3J4BXQ"
+}

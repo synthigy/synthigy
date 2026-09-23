@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.postgres.xid
   "PostgreSQL XID migration utilities.
 
@@ -23,6 +45,7 @@
     [synthigy.db.sql :as sql]
     [synthigy.env :as env]
     [synthigy.log :as log]
+    [synthigy.supervisor :as supervisor]
     [synthigy.transit :refer [<-transit ->transit]]))
 
 
@@ -300,6 +323,7 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
    (log/info {:id ::xid-generation-starting
               :data {:table table-name :batch-size batch-size}}
              "Generating XIDs for table")
+   (supervisor/progress-update! {:detail table-name :done nil :total nil})
    (install-uuid->nanoid-fn!)
    ;; Bound the work to the `_eid` window that still needs a backfill. On a
    ;; fully-migrated table this returns nil and we skip entirely (cheap
@@ -334,6 +358,8 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
                (log/debug {:id ::xid-batch-updated
                            :data {:table table-name :batch (inc batches) :records updated}}
                           "Batch updated")
+               (supervisor/progress-update! {:done (min (- end lo) (- (inc hi) lo))
+                                  :total (- (inc hi) lo)})
                (recur end
                       (+ total updated)
                       (inc batches))))))))))
@@ -753,31 +779,37 @@ $$ LANGUAGE plpgsql;")
   ;; Step 1: Migrate meta-tables
   (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 1 :of 6 :name "migrate-meta-tables"}}
             "Migrating meta-tables")
+  (supervisor/progress-step! 1 6 "migrate-meta-tables")
   (let [meta-result (migrate-meta-tables!)]
 
     ;; Step 2: Transform stored models
     (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 2 :of 6 :name "transform-stored-models"}}
               "Transforming stored models")
+    (supervisor/progress-step! 2 6 "transform-stored-models")
     (let [model-result (model/transform-stored-models! :xid)]
 
       ;; Step 3: Migrate data tables
       (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 3 :of 6 :name "migrate-data-tables"}}
                 "Migrating data tables")
+      (supervisor/progress-step! 3 6 "migrate-data-tables")
       (let [data-result (migrate-all-tables!)]
 
         ;; Step 4: Rename relation tables (BEFORE provider switch!)
         (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 4 :of 6 :name "rename-relation-tables"}}
                   "Renaming relation tables")
+        (supervisor/progress-step! 4 6 "rename-relation-tables")
         (let [rename-result (rename-relation-tables!)]
 
           ;; Step 5: Add immutability triggers (constraints already added in step 3)
           (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 5 :of 6 :name "add-immutability-triggers"}}
                     "Adding immutability triggers")
+          (supervisor/progress-step! 5 6 "add-immutability-triggers")
           (create-xid-immutability-triggers!)
 
           ;; Step 6: Switch provider, save & reload
           (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 6 :of 6 :name "switch-provider"}}
                     "Switching to NanoID provider")
+          (supervisor/progress-step! 6 6 "switch-provider")
           (dataset/set-format! "xid")
           (id/set-provider! (id/->NanoIDProvider))
           (dataset/save-model! nil)
@@ -860,6 +892,8 @@ $$ LANGUAGE plpgsql;")
   1. Revert stored models to euuid format
   2. Revert relation table names (XID-based → EUUID-based)
   3. Drop xid columns from all tables
+  4. Clear the stored format stamp
+  5. Restore the euuid provider (full inverse of the import's step 6)
 
   Returns:
     Map with results"
@@ -868,17 +902,17 @@ $$ LANGUAGE plpgsql;")
             "RESETTING XID MIGRATION")
 
   ;; Step 1: Revert models to euuid format first (before dropping columns)
-  (log/info {:id ::reset-step :data {:step 1 :of 3 :name "revert-stored-models"}}
+  (log/info {:id ::reset-step :data {:step 1 :of 5 :name "revert-stored-models"}}
             "Reverting stored models to euuid format")
   (let [model-result (model/transform-stored-models! :euuid)]
 
     ;; Step 2: Revert relation table names (BEFORE dropping xid columns!)
-    (log/info {:id ::reset-step :data {:step 2 :of 3 :name "revert-relation-tables"}}
+    (log/info {:id ::reset-step :data {:step 2 :of 5 :name "revert-relation-tables"}}
               "Reverting relation table names")
     (let [revert-result (revert-relation-tables!)]
 
       ;; Step 3: Find all tables with xid column and drop it
-      (log/info {:id ::reset-step :data {:step 3 :of 3 :name "drop-xid-columns"}}
+      (log/info {:id ::reset-step :data {:step 3 :of 5 :name "drop-xid-columns"}}
                 "Dropping xid columns")
       (let [tables-with-xid (get-all-tables-with-xid)
             _ (log/info {:id ::reset-tables-found
@@ -890,6 +924,21 @@ $$ LANGUAGE plpgsql;")
                                    :result (drop-xid-column! table)})
                                 tables-with-xid))
             dropped-count (count (filter #(= :dropped (:result %)) drop-results))]
+
+        ;; Step 4: Clear the format stamp — a stale "xid" stamp would boot the
+        ;; reverted DB as migrated.
+        (log/info {:id ::reset-step :data {:step 4 :of 5 :name "clear-format-stamp"}}
+                  "Clearing stored format stamp")
+        (dataset/clear-format!)
+
+        ;; Step 5: Flip the provider back — the import gate reads the AMBIENT
+        ;; provider, so without this a same-process rerun skips as
+        ;; :already-synthigy.
+        (log/info {:id ::reset-step :data {:step 5 :of 5 :name "restore-euuid-provider"}}
+                  "Restoring euuid provider")
+        (id/set-provider! (id/->UUIDProvider))
+        (dataset/save-model! nil)
+        (dataset/reload)
 
         (log/info {:id ::reset-complete
                    :data {:models-reverted (:total model-result 0)
@@ -920,12 +969,8 @@ $$ LANGUAGE plpgsql;")
   (sql/execute-one! [(postgres.patch/postgres-id-trigger-function)]))
 
 (defn detect-format
-  "Detect ID format for Postgres based on existing tables.
-  Called when no format is stored in patcho.
-
-  Returns:
-    \"xid\"   - fresh install (no dataset_version) or migrated (has xid column)
-    \"euuid\" - legacy Postgres deployment (has dataset_version with euuid only)"
+  "Detect ID format for Postgres when no format stamp is stored: \"xid\" for a
+   fresh install, \"euuid\" for a legacy EYWA layout."
   []
   (cond
     ;; No dataset_version table → fresh install → xid. euuid is NOT a
@@ -941,19 +986,40 @@ $$ LANGUAGE plpgsql;")
                 "Fresh Postgres (no dataset_version), using xid")
       "xid")
 
-    ;; Has xid column → already migrated → xid
-    (column-exists? "dataset_version" "xid")
-    (do
-      (log/info {:id ::id-format-migrated :data {:action :migrated :subject :id-format :format "xid"}}
-                "Migrated Postgres (has xid column), using xid")
-      "xid")
-
-    ;; Has euuid only → legacy → euuid
+    ;; Has euuid only → legacy → euuid. A dataset_version WITH an xid column
+    ;; never reaches here — "migrated" is the stored format stamp, and the
+    ;; column-without-stamp case throws in detect-and-set-provider! as a
+    ;; partial migration.
     :else
     (do
       (log/info {:id ::id-format-legacy :data {:format "euuid"}}
                 "Legacy Postgres (euuid only), using euuid")
       "euuid")))
+
+(defn partial-migration?
+  "True when the xid import started populating (dataset_version carries xid
+   VALUES) but never stamped completion (import step 6) — the DB is
+   half-migrated. Column presence alone is NOT a signal: boot patches add xid
+   columns to every table on first contact with a legacy DB, values stay NULL
+   until the import runs."
+  []
+  (and (not= "xid" (dataset/current-format))
+       (table-exists? "dataset_version")
+       (column-exists? "dataset_version" "xid")
+       (pos? (:cnt (sql/execute-one!
+                    ["SELECT count(xid) AS cnt FROM dataset_version"])
+                   0))))
+
+(comment
+  ;; Simulate both import-crash windows on a healthy dev DB (restores itself):
+  (do (dataset/clear-format!)                     ; window A: no stamp at all
+      [(partial-migration?)                       ; => true
+       (try (detect-and-set-provider!) :no-throw
+            (catch clojure.lang.ExceptionInfo e (:state (ex-data e))))]) ; => :partial-migration
+  (do (dataset/set-format! "euuid")               ; window B: stale legacy stamp
+      (partial-migration?))                       ; => true
+  (do (dataset/set-format! "xid")                 ; restore
+      (partial-migration?)))                      ; => false
 
 (defn legacy-deployment?
   "Returns true if this is a legacy Postgres deployment.
@@ -964,14 +1030,18 @@ $$ LANGUAGE plpgsql;")
        (table-exists? "dataset_version")))
 
 (defn detect-and-set-provider!
-  "Detect ID format and set provider for Postgres.
-  Called from both setup and start.
-
-  If format is stored → use it.
-  If not stored → detect from existing tables, set provider, store format.
-
-  For XID mode, also ensures the trigger function exists."
+  "Resolve the ID format (stored stamp, else detection), set the provider, and
+   store the format. Throws on a half-migrated DB — never boot over one."
   []
+  (when (partial-migration?)
+    (throw (ex-info
+            (str "INTERRUPTED XID MIGRATION DETECTED — dataset_version has an xid "
+                 "column but the migration never stamped completion. Run "
+                 "(synthigy.dataset.postgres.xid/reset-xid-migration!) and then rerun "
+                 "(synthigy.dataset.postgres.xid/migrate->synthigy!). If this "
+                 "database is in fact fully migrated, stamp it with "
+                 "(synthigy.dataset/set-format! \"xid\") and restart.")
+            {:action :not-initialized :subject :id-format :state :partial-migration})))
   (if-let [stored (dataset/current-format)]
     ;; Format stored - use it
     (do
@@ -1063,7 +1133,7 @@ $$ LANGUAGE plpgsql;")
   []
   (= :euuid (id/key)))
 
-(defn import-eywa->synthigy!
+(defn migrate->synthigy!
   "One-time, idempotent forward migration of a LEGACY EYWA (euuid) Postgres
    database into the native Synthigy (xid) layout. No-op (returns
    `{:skipped :already-synthigy}`) on an already-native DB. After it runs the
@@ -1071,31 +1141,36 @@ $$ LANGUAGE plpgsql;")
 
    Requires the active provider to be euuid (boot detection sets this when it
    sees a legacy layout). Steps: (0) reconcile the legacy meta-columns the
-   migration reads (`deployed_on`, `active`) + audit columns/config, (1-6)
-   `migrate-to-xid!`, then verify every row carries an xid.
+   migration reads (`deployed_on`, `active`), (1-6) `migrate-to-xid!`, then
+   verify every row carries an xid.
 
    Postgres ONLY — SQLite/CRDB never carry a legacy euuid layout."
   []
   (if-not (legacy-eywa-layout?)
-    (do (log/info {:id ::eywa-import-skip :data {:action :migrating :subject :xid}}
-                  "Native Synthigy (xid) layout — no EYWA import needed")
+    (do (log/info {:id ::migrate-skip :data {:action :migrating :subject :xid}}
+                  "Native Synthigy (xid) layout — no migration needed")
         {:skipped :already-synthigy})
-    (do (log/warn {:id ::eywa-import-starting :data {:action :migrating :subject :xid}}
-                  "Legacy EYWA database detected — importing to Synthigy xid layout")
+    (do (log/warn {:id ::migrate-starting :data {:action :migrating :subject :xid}}
+                  "Legacy EYWA database detected — migrating to Synthigy xid layout")
         ;; transform-stored-models! reads dataset_version.deployed_on and the
         ;; model patches read `active` — add those columns BEFORE migrating.
         (reconcile-legacy-meta-columns!)
-        ;; Audit bring-up (#3), in two halves, BOTH before the schema-building
-        ;; reload inside migrate-to-xid!: (i) COLUMNS — real EYWA has
-        ;; modified-auditing but not created-auditing, and the modern audit
-        ;; schema queries created_by/created_on;
-        (reconcile-legacy-audit-columns!)
-        ;; (ii) MODEL CONFIG — legacy models declare no [:configuration :audit
-        ;; :actions], which is what augment-schema gates the audit fields on, so
-        ;; the columns above would otherwise be invisible to the rebuilt schema.
-        (normalize-stored-audit-config!)
         (let [result (migrate-to-xid!)]
           (verify-xid-migration)
-          (log/info {:id ::eywa-import-complete :data {:action :migrated :subject :xid}}
-                    "EYWA → Synthigy xid import complete and verified")
-          (assoc result :imported true)))))
+          (log/info {:id ::migrate-complete :data {:action :migrated :subject :xid}}
+                    "EYWA → Synthigy xid migration complete and verified")
+          (assoc result :migrated true)))))
+
+;; The operator console's migrate affordance — registered HERE so the verb
+;; exists exactly where the importer does (postgres classpath); a sqlite/bare
+;; boot answers method-not-found, which is honest.
+(supervisor/register-method! "migrate.xid"
+  (fn [_]
+    ;; never drop this guard — serve! runs every frame on its own thread, so a
+    ;; second click would otherwise migrate the same tables concurrently
+    (if-not (supervisor/progress-begin! :migration "starting")
+      (throw (ex-info "A migration is already running on this engine."
+                      {:code -32000 :running (supervisor/progress)}))
+      (try
+        (migrate->synthigy!)
+        (finally (supervisor/progress-finish!))))))

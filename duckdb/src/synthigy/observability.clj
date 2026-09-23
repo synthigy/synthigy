@@ -1,5 +1,27 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.observability
-  "DuckDB implementation of Synthigy's observability substrate — durable
+  "DuckDB implementation of Synthigy's observability plug — durable
   append-only storage for diagnostic logs (`synthigy.log.store/LogStore`)
   AND state-change audit events (`synthigy.audit/AuditProvider`), backed
   by a single embedded DuckDB database.
@@ -37,17 +59,24 @@
       audit_entity      (AuditProvider — attribute-grain state changes)
       audit_relation    (AuditProvider — relation edge changes)
 
-  File mode allows cross-table joins (`request_id` correlates a log row
-  to the audit events that ran inside the same request). `:memory:` mode
-  loses this because each connection gets its own in-process DB —
-  acceptable for dev, switch to file for cockpit correlation.
+  The default is a file under `~/.synthigy/db`. File mode survives
+  restarts, allows cross-table joins (`request_id` correlates a log row to
+  the audit events that ran inside the same request), and lets DuckDB spill
+  over `memory_limit` instead of failing the query. `:memory:` — opt-in via
+  `DUCKDB_PATH=:memory:` — loses all three: each connection gets its own
+  in-process DB, and with no temp directory a query that exceeds the cap
+  dies with an out-of-memory error.
 
   ## Config
 
-      SYNTHIGY_OBSERVABILITY_PATH         File path (default \":memory:\")
-      SYNTHIGY_OBSERVABILITY_BUFFER_SIZE  Log queue cap (default 8192)
-      SYNTHIGY_OBSERVABILITY_BATCH_ROWS   Max INSERT batch (default 500)
-      SYNTHIGY_OBSERVABILITY_BATCH_MS     Max flush delay ms (default 250)
+      DUCKDB_PATH               File path, or \":memory:\"
+                                (default ~/.synthigy/db/observability.duckdb)
+      DUCKDB_BUFFER_SIZE        Log queue cap (default 8192)
+      DUCKDB_BATCH_ROWS         Max INSERT batch (default 500)
+      DUCKDB_BATCH_MS           Max flush delay ms (default 250)
+      DUCKDB_MEMORY_LIMIT       DuckDB buffer cap, database-wide (default 256MB)
+      DUCKDB_LOG_MAX_ROWS       synthigy_logs row cap — NOT audit (default 1500000, ~200MB measured)
+      DUCKDB_LOG_RETENTION_DAYS synthigy_logs age cap — NOT audit (default 30, matches the ClickHouse TTL)
 
   ## Why one record for two protocols
 
@@ -62,14 +91,16 @@
    [patcho.patch :as patch]
    [synthigy.audit :as audit]
    [synthigy.dataset :as dataset]
+   synthigy.env
    [synthigy.json :as json]
    [synthigy.log :as log]
-   [synthigy.log.store :as store])
+   [synthigy.log.store :as store]
+   [synthigy.traffic :as traffic])
   (:import
    [java.io File]
-   [org.duckdb DuckDBConnection]
+   [org.duckdb DuckDBAppender DuckDBConnection]
    [java.sql Connection DriverManager PreparedStatement ResultSet Timestamp]
-   [java.time Instant]
+   [java.time Instant LocalDateTime ZoneOffset]
    [java.util ArrayList]
    [java.util.concurrent ArrayBlockingQueue TimeUnit]
    [java.util.concurrent.atomic AtomicBoolean AtomicLong]))
@@ -84,10 +115,16 @@
 ;;; ============================================================================
 
 (def ^:private default-config
-  {:path             ":memory:"
+  {:path             (str synthigy.env/home "/db/observability.duckdb")
    :buffer-size      8192
    :batch-rows       500
    :batch-ms         250
+   :memory-limit     "256MB"
+   ;; 1.5M rows measured at ~151 bytes/row with realistic varied content
+   ;; (mixed level/ns/msg/request/JSON, 2% carrying an error trace) -> ~227MB.
+   ;; Audit tables have no cap — see synthigy.audit for that boundary.
+   :log-max-rows       1500000
+   :log-retention-days 30
    :retry-attempts   3
    :retry-min-ms     100
    :retry-max-ms     5000
@@ -98,13 +135,16 @@
       fallback))
 
 (defn- env-config
-  "Read SYNTHIGY_OBSERVABILITY_* overrides on top of defaults."
+  "Read DUCKDB_* overrides on top of defaults."
   []
   (let [base default-config]
-    {:path             (or (env :synthigy-observability-path) (:path base))
-     :buffer-size      (parse-int-or (env :synthigy-observability-buffer-size) (:buffer-size base))
-     :batch-rows       (parse-int-or (env :synthigy-observability-batch-rows)  (:batch-rows base))
-     :batch-ms         (parse-int-or (env :synthigy-observability-batch-ms)    (:batch-ms base))
+    {:path             (or (env :duckdb-path) (:path base))
+     :buffer-size      (parse-int-or (env :duckdb-buffer-size) (:buffer-size base))
+     :batch-rows       (parse-int-or (env :duckdb-batch-rows)  (:batch-rows base))
+     :batch-ms         (parse-int-or (env :duckdb-batch-ms)    (:batch-ms base))
+     :memory-limit     (or (not-empty (env :duckdb-memory-limit)) (:memory-limit base))
+     :log-max-rows       (parse-int-or (env :duckdb-log-max-rows)       (:log-max-rows base))
+     :log-retention-days (parse-int-or (env :duckdb-log-retention-days) (:log-retention-days base))
      :retry-attempts   (:retry-attempts   base)
      :retry-min-ms     (:retry-min-ms     base)
      :retry-max-ms     (:retry-max-ms     base)
@@ -114,21 +154,51 @@
 ;;; Time helpers
 ;;; ============================================================================
 
-(defn- inst->sql-ts ^Timestamp [inst]
+(defn- ->instant ^Instant [inst]
   (cond
     (nil? inst)                       nil
-    (instance? Timestamp inst)        inst
-    (instance? Instant inst)          (Timestamp/from inst)
-    (instance? java.util.Date inst)   (Timestamp. (.getTime ^java.util.Date inst))
-    (string? inst)                    (try (Timestamp/from (Instant/parse inst))
-                                           (catch Throwable _ nil))
+    (instance? Instant inst)          inst
+    (instance? Timestamp inst)        (.toInstant ^Timestamp inst)
+    (instance? java.util.Date inst)   (.toInstant ^java.util.Date inst)
+    (string? inst)                    (try (Instant/parse inst) (catch Throwable _ nil))
     :else                             nil))
 
-(defn- ts->iso [^Timestamp ts]
-  (when ts (str (.toInstant ts))))
+(defn- inst->utc
+  "TIMESTAMP columns hold UTC wall clock; bind and append as LocalDateTime so no driver zone shift applies."
+  ^LocalDateTime [inst]
+  (some-> (->instant inst) (LocalDateTime/ofInstant ZoneOffset/UTC)))
+
+(defn- utc->iso [^LocalDateTime ts]
+  (when ts (str (.toInstant ts ZoneOffset/UTC))))
+
+(defn- read-utc ^LocalDateTime [^ResultSet rs ^String col]
+  (.getObject rs col LocalDateTime))
 
 ;;; ============================================================================
-;;; Connection + schema (logs + audit_entity + audit_relation)
+;;; Traffic schema helpers — shared column list against synthigy.traffic's
+;;; histogram bounds so DDL/insert/read never drift from the hot-path shape.
+;;; ============================================================================
+
+(defn- hist-col-name [b] (str "hist_" (if (= b :inf) "inf" b)))
+
+(def ^:private hist-cols
+  (mapv hist-col-name (conj (vec traffic/hist-bounds) :inf)))
+
+(def ^:private traffic-minutes-ddl
+  (str "CREATE TABLE IF NOT EXISTS traffic_minutes (
+      node            VARCHAR,
+      minute          BIGINT,
+      ok              BIGINT,
+      err             BIGINT,
+      " (str/join ",\n      " (map #(str % " BIGINT") hist-cols)) ",
+      ops             BIGINT,
+      sse             BIGINT,
+      subscriptions   BIGINT,
+      deltas_dropped  BIGINT
+    )"))
+
+;;; ============================================================================
+;;; Connection + schema (logs + audit_entity + audit_relation + traffic_minutes)
 ;;; ============================================================================
 
 (defn- jdbc-url [path]
@@ -180,10 +250,28 @@
       scope_xid     VARCHAR,
       txid          VARCHAR,
       seq           BIGINT
-    )"])
+    )"
+   traffic-minutes-ddl])
 
-(defn- open-connection ^Connection [path]
-  (DriverManager/getConnection (jdbc-url path)))
+(defn- ensure-parent-dir!
+  "Create the parent dir of `path` if file mode + parent missing. No-op for
+   :memory:."
+  [path]
+  (when (and (string? path) (not= path ":memory:") (not (str/blank? path)))
+    (when-let [parent (.getParentFile (File. ^String path))]
+      (when-not (.exists parent) (.mkdirs parent)))))
+
+(defn- open-connection
+  "Open the database and cap its buffer pool; the limit is database-wide, so duplicates inherit it."
+  ^Connection [{:keys [path memory-limit]}]
+  ;; DuckDB won't create a database under a missing directory — the
+  ;; zero-config default (~/.synthigy/db/observability.duckdb) needs db/ on
+  ;; first boot, and `start` can run without `setup` on an existing install.
+  (ensure-parent-dir! path)
+  (let [conn (DriverManager/getConnection (jdbc-url path))]
+    (with-open [stmt (.createStatement conn)]
+      (.execute stmt (str "SET memory_limit = '" memory-limit "'")))
+    conn))
 
 (def ^:private migrations-ddl
   "Idempotent column-adds for schema evolution. `CREATE TABLE IF NOT EXISTS`
@@ -218,7 +306,9 @@
    so membership is a portable bounded LIKE (`%|system|%`) with no array-type
    binding. Empty → empty string."
   [topics]
-  (let [names (->> topics (map (fn [t] (if (keyword? t) (name t) (str t)))) sort)]
+  ;; (subs (str kw) 1), not `name` — keeps child-topic namespaces
+  ;; (:traffic/sse → "traffic/sse"); "/" is safe inside the pipe scheme
+  (let [names (->> topics (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t)))) sort)]
     (if (seq names) (str "|" (str/join "|" names) "|") "")))
 
 (defn- delimited->topics
@@ -259,7 +349,7 @@
                        (string? host-raw) host-raw
                        (map? host-raw)    (:name host-raw)
                        :else              nil)]
-    {:inst        (inst->sql-ts inst)
+    {:inst        (inst->utc inst)
      :level       (some-> level name)
      :ns          (when ns (str ns))
      :id          (id->str id)
@@ -294,12 +384,14 @@
   "Flatten audit envelopes into rows for audit_entity. One row per changed
    attribute on insert/update; one sentinel row on delete."
   [envelopes]
-  (for [env envelopes
+  ;; Redact classified attribute VALUES before they reach the persistent
+  ;; store — keys survive, so /history still shows the attribute changed.
+  (for [env (map audit/redact-envelope envelopes)
         :let [data       (-> env :delta :data)
               record-xid (str-or-nil (:record-xid data))]
         :when record-xid
         :let [op         (-> env :delta :type name)
-              ts         (inst->sql-ts (:ts data))
+              ts         (inst->utc (:ts data))
               tenant     (str-or-nil (:tenant data))
               entity-xid (str-or-nil (:entity-xid data))
               actor      (str-or-nil (:actor data))
@@ -329,7 +421,7 @@
               from-xid (str-or-nil (:from-xid data))
               to-xid   (str-or-nil (:to-xid data))]
         :when (and from-xid to-xid)]
-    {:ts            (inst->sql-ts (:ts data))
+    {:ts            (inst->utc (:ts data))
      :tenant_xid    (str-or-nil (:tenant data))
      :relation_xid  (str-or-nil (:element env))
      :from_xid      from-xid
@@ -348,12 +440,6 @@
 (def ^:private insert-log-sql
   "INSERT INTO synthigy_logs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 
-(def ^:private insert-entity-sql
-  "INSERT INTO audit_entity VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-
-(def ^:private insert-relation-sql
-  "INSERT INTO audit_relation VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-
 (defn- bind-log-row! [^PreparedStatement ps row]
   (.setObject ps 1 (:inst row))
   (.setString ps 2 (:level row))
@@ -371,38 +457,6 @@
   (.setString ps 14 (:error_msg row))
   (.setString ps 15 (:error_trace row)))
 
-(defn- bind-entity-row! [^PreparedStatement ps row]
-  (.setObject ps 1 (:ts row))
-  (.setString ps 2 (:tenant_xid row))
-  (.setString ps 3 (:record_xid row))
-  (.setString ps 4 (:entity_xid row))
-  (.setString ps 5 (:attribute_xid row))
-  (.setString ps 6 (:value row))
-  (.setString ps 7 (:op row))
-  (.setString ps 8 (:actor_xid row))
-  (.setString ps 9 (:request_id row))
-  (.setString ps 10 (:scope_xid row))
-  ;; txid is opaque — SQLite synthesizes UUIDv7 strings, PG/CRDB use BIGINT,
-  ;; CH UInt64. Store as VARCHAR so any substrate's id shape fits without
-  ;; loss (UUIDv7 is binary-sortable as a string, preserving chronology).
-  (.setString ps 11 (when-let [v (:txid row)] (str v)))
-  ;; seq — the canonical delta cursor (drainer-assigned, monotonic). Nullable
-  ;; for envelopes that predate the sequencer.
-  (.setObject ps 12 (:seq row)))
-
-(defn- bind-relation-row! [^PreparedStatement ps row]
-  (.setObject ps 1 (:ts row))
-  (.setString ps 2 (:tenant_xid row))
-  (.setString ps 3 (:relation_xid row))
-  (.setString ps 4 (:from_xid row))
-  (.setString ps 5 (:to_xid row))
-  (.setString ps 6 (:op row))
-  (.setString ps 7 (:actor_xid row))
-  (.setString ps 8 (:request_id row))
-  (.setString ps 9 (:scope_xid row))
-  (.setString ps 10 (when-let [v (:txid row)] (str v)))
-  (.setObject ps 11 (:seq row)))
-
 (defn- insert-log-batch! [^Connection conn signals]
   (when (seq signals)
     (with-open [ps (.prepareStatement conn insert-log-sql)]
@@ -411,17 +465,133 @@
         (.addBatch ps))
       (.executeBatch ps))))
 
+(defn append-str [^DuckDBAppender a ^String v] (.append a v))
+
+(defn append-ts [^DuckDBAppender a ^LocalDateTime v]
+  (.appendLocalDateTime a v))
+
+(defn append-long [^DuckDBAppender a v]
+  (if (nil? v) (append-str a nil) (.append a (long v))))
+
+(defn with-audit-tx
+  "Run `f` on the drainer connection inside one explicit transaction; rollback and rethrow so a failed batch stays queued."
+  [^Connection conn f]
+  (.setAutoCommit conn false)
+  (try
+    (f)
+    (.commit conn)
+    (catch Throwable t
+      (try (.rollback conn) (catch Throwable _))
+      (throw t))
+    (finally
+      (.setAutoCommit conn true))))
+
+(defn delete-seq-range!
+  "Idempotency for a retried drainer batch: its seqs are contiguous and owned by it alone."
+  [^Connection conn table rows]
+  (when-let [seqs (seq (keep :seq rows))]
+    (with-open [ps (.prepareStatement conn (str "DELETE FROM " table " WHERE seq BETWEEN ? AND ?"))]
+      (.setLong ps 1 (long (apply min seqs)))
+      (.setLong ps 2 (long (apply max seqs)))
+      (.execute ps))))
+
 (defn- insert-entity-batch! [^Connection conn rows]
   (when (seq rows)
-    (with-open [ps (.prepareStatement conn insert-entity-sql)]
-      (doseq [r rows] (bind-entity-row! ps r) (.addBatch ps))
-      (.executeBatch ps))))
+    (with-audit-tx conn
+      (fn []
+        (delete-seq-range! conn "audit_entity" rows)
+        (with-open [a (.createAppender ^DuckDBConnection conn "main" "audit_entity")]
+          (doseq [r rows]
+            (.beginRow a)
+            (append-ts a (:ts r))
+            (append-str a (:tenant_xid r))
+            (append-str a (:record_xid r))
+            (append-str a (:entity_xid r))
+            (append-str a (:attribute_xid r))
+            (append-str a (:value r))
+            (append-str a (:op r))
+            (append-str a (:actor_xid r))
+            (append-str a (:request_id r))
+            (append-str a (:scope_xid r))
+            (append-str a (some-> (:txid r) str))
+            (append-long a (:seq r))
+            (.endRow a)))))))
 
 (defn- insert-relation-batch! [^Connection conn rows]
   (when (seq rows)
-    (with-open [ps (.prepareStatement conn insert-relation-sql)]
-      (doseq [r rows] (bind-relation-row! ps r) (.addBatch ps))
+    (with-audit-tx conn
+      (fn []
+        (delete-seq-range! conn "audit_relation" rows)
+        (with-open [a (.createAppender ^DuckDBConnection conn "main" "audit_relation")]
+          (doseq [r rows]
+            (.beginRow a)
+            (append-ts a (:ts r))
+            (append-str a (:tenant_xid r))
+            (append-str a (:relation_xid r))
+            (append-str a (:from_xid r))
+            (append-str a (:to_xid r))
+            (append-str a (:op r))
+            (append-str a (:actor_xid r))
+            (append-str a (:request_id r))
+            (append-str a (:scope_xid r))
+            (append-str a (some-> (:txid r) str))
+            (append-long a (:seq r))
+            (.endRow a)))))))
+
+;;; ============================================================================
+;;; Traffic delta rows — append-only; reads SUM. See synthigy.traffic for the
+;;; delta-flush semantics (deltas, never absolutes — flushing the same
+;;; minute twice must sum to the true total).
+;;; ============================================================================
+
+(def ^:private traffic-columns
+  (into ["node" "minute" "ok" "err"] (into hist-cols ["ops" "sse" "subscriptions" "deltas_dropped"])))
+
+(def ^:private insert-traffic-sql
+  (str "INSERT INTO traffic_minutes (" (str/join ", " traffic-columns) ") VALUES ("
+       (str/join "," (repeat (count traffic-columns) "?")) ")"))
+
+(defn- traffic-row-values [row]
+  (into [(:node row) (long (:minute row)) (long (:ok row 0)) (long (:err row 0))]
+        (concat (map (fn [b] (long (get-in row [:hist b] 0))) traffic/hist-bounds)
+                [(long (get-in row [:hist :inf] 0))]
+                [(long (:ops row 0)) (long (:sse row 0))
+                 (long (:subscriptions row 0)) (long (:deltas-dropped row 0))])))
+
+(defn- bind-traffic-row! [^PreparedStatement ps row]
+  (doseq [[i v] (map-indexed vector (traffic-row-values row))]
+    (if (string? v) (.setString ps (inc i) v) (.setLong ps (inc i) v))))
+
+(defn- insert-traffic-batch! [^Connection conn rows]
+  (when (seq rows)
+    (with-open [ps (.prepareStatement conn insert-traffic-sql)]
+      (doseq [r rows] (bind-traffic-row! ps r) (.addBatch ps))
       (.executeBatch ps))))
+
+(defn- read-traffic-row [^ResultSet rs]
+  {:node (.getString rs "node")
+   :minute (.getLong rs "minute")
+   :ok (.getLong rs "ok")
+   :err (.getLong rs "err")
+   :hist (into {} (map (fn [b] [b (.getLong rs ^String (hist-col-name b))]))
+              (conj (vec traffic/hist-bounds) :inf))
+   :ops (.getLong rs "ops")
+   :sse (.getLong rs "sse")
+   :subscriptions (.getLong rs "subscriptions")
+   :deltas-dropped (.getLong rs "deltas_dropped")})
+
+(defn- query-traffic-window [^Connection conn from to]
+  (with-open [ps (.prepareStatement
+                  conn "SELECT * FROM traffic_minutes WHERE minute >= ? AND minute <= ?")]
+    (.setLong ps 1 (long from))
+    (.setLong ps 2 (long to))
+    (with-open [rs (.executeQuery ps)]
+      (loop [acc (transient [])]
+        (if (.next rs) (recur (conj! acc (read-traffic-row rs))) (persistent! acc))))))
+
+(def ^:private traffic-retention-minutes (* 90 24 60))
+
+(defonce ^:private last-traffic-prune (atom 0))
 
 ;;; ============================================================================
 ;;; Log writer thread — async batched INSERT with retry
@@ -463,6 +633,35 @@
       (.drainTo queue batch (dec batch-rows)))
     batch))
 
+
+(def ^:private log-prune-check-ms (* 5 60000))
+
+(defonce ^:private last-log-prune (atom 0))
+
+(defn- prune-logs!
+  "DELETE from synthigy_logs past :log-retention-days or beyond :log-max-rows,
+   whichever bites first — audit tables are untouched, this is diagnostic
+   logs only. Both DELETEs are no-ops on an empty or under-cap table."
+  [^Connection conn {:keys [log-max-rows log-retention-days]}]
+  (let [cutoff (inst->utc (.minus (Instant/now) (long log-retention-days) java.time.temporal.ChronoUnit/DAYS))]
+    (with-open [ps (.prepareStatement conn "DELETE FROM synthigy_logs WHERE inst < ?")]
+      (.setObject ps 1 cutoff)
+      (.executeUpdate ps)))
+  (with-open [stmt (.createStatement conn)]
+    (.execute stmt (str "DELETE FROM synthigy_logs WHERE inst < "
+                        "(SELECT min(inst) FROM "
+                        "(SELECT inst FROM synthigy_logs ORDER BY inst DESC LIMIT " (long log-max-rows) "))"))))
+
+(defn- maybe-prune-logs!
+  "Runs prune-logs! at most once per log-prune-check-ms, on the log writer's
+   own connection between batches — cheap enough not to warrant a dedicated
+   scheduled task, same idiom as maybe-prune-traffic!."
+  [^Connection conn config]
+  (let [now-ms (System/currentTimeMillis)]
+    (when (> (- now-ms @last-log-prune) log-prune-check-ms)
+      (reset! last-log-prune now-ms)
+      (try (prune-logs! conn config) (catch Throwable _ nil)))))
+
 (defn- log-writer-loop!
   [{:keys [^ArrayBlockingQueue queue ^Connection conn ^AtomicLong written
            ^AtomicLong dropped ^AtomicLong batches ^AtomicBoolean running?
@@ -477,6 +676,7 @@
               (if ok?
                 (.addAndGet written (.size batch))
                 (.addAndGet dropped (.size batch))))))
+        (maybe-prune-logs! conn config)
         (catch InterruptedException _ (.set running? false))
         (catch Throwable t
           (binding [*out* *err*]
@@ -549,7 +749,9 @@
   "?")
 
 (defn- normalize-value [v]
-  (cond (keyword? v) (name v) :else v))
+  ;; (subs (str kw) 1), not `name` — identical for unqualified keywords,
+  ;; but keeps the namespace of qualified ones (:traffic/sse, :id keywords)
+  (cond (keyword? v) (subs (str v) 1) :else v))
 
 (defn- compile-comparison [field [op value] params]
   (let [sql-op (case op := "=" :!= "!=" :> ">" :< "<" :>= ">=" :<= "<=")
@@ -625,12 +827,8 @@
   (when value
     (when-let [inst (time-ref->instant value)]
       (let [op (if (= :since kind) ">" "<")
-            ;; Bind the cutoff as a java.sql.Timestamp so it travels the SAME
-            ;; setObject path as the stored `inst` column — both get identical
-            ;; driver-side timezone treatment, so the comparison is symmetric.
-            ;; (Casting an ISO-with-Z string literal did NOT match the stored
-            ;; value's tz shift, silently widening the window to all rows.)
-            ph (bind! params (inst->sql-ts inst))]
+            ;; bind as UTC LocalDateTime like the stored column — a cast string literal does not match
+            ph (bind! params (inst->utc inst))]
         (str "inst " op " " ph)))))
 
 (defn- compile-order-by [order-by group-by]
@@ -645,20 +843,26 @@
   "Compile a validated filter-map to `{:sql :params}` against synthigy_logs."
   [filter-map]
   (let [params  (new-params)
-        {:keys [where since until limit order-by group-by count?]
+        {:keys [where since until limit order-by group-by count? bucket-ms]
          :or   {limit 100}} filter-map
+        b       (when bucket-ms (long bucket-ms))
         clauses (->> [(compile-where where params)
                       (compile-time-bound :since since params)
                       (compile-time-bound :until until params)]
                      (remove str/blank?) (remove nil?))
         where-sql (when (seq clauses) (str " WHERE " (str/join " AND " clauses)))
+        ;; :bucket-ms → time-histogram via epoch_ms floored to the bucket.
         select-cols (cond
+                      b        (str "(epoch_ms(inst) // " b ") * " b " AS bucket, count(*) AS count")
                       count?   "count(*) AS count"
                       group-by (str (column-name group-by) ", count(*) AS count")
                       :else    "*")
-        group-sql (when group-by (str " GROUP BY " (column-name group-by)))
-        order-sql (when-not count? (str " ORDER BY " (compile-order-by order-by group-by)))
-        limit-sql (when-not count? (str " LIMIT " limit))
+        group-sql (cond b        " GROUP BY bucket"
+                        group-by (str " GROUP BY " (column-name group-by)))
+        order-sql (cond b      " ORDER BY bucket"
+                        count?  nil
+                        :else   (str " ORDER BY " (compile-order-by order-by group-by)))
+        limit-sql (when-not (or count? b) (str " LIMIT " limit))
         sql (str "SELECT " select-cols " FROM synthigy_logs"
                  (or where-sql "") (or group-sql "") (or order-sql "") (or limit-sql ""))]
     {:sql sql :params @params}))
@@ -669,7 +873,7 @@
 
 (defn- read-log-row [^ResultSet rs]
   {:v           1
-   :inst        (some-> (.getTimestamp rs "inst") .toInstant str)
+   :inst        (utc->iso (read-utc rs "inst"))
    :level       (.getString rs "level")
    :ns          (.getString rs "ns")
    :id          (.getString rs "id")
@@ -713,6 +917,15 @@
                                :count    (.getLong rs "count")}))
             (persistent! acc)))))))
 
+(defn- execute-log-histogram [^Connection conn {:keys [sql params]}]
+  (with-open [ps (.prepareStatement conn ^String sql)]
+    (bind-params! ps params)
+    (with-open [rs (.executeQuery ps)]
+      (loop [acc (transient [])]
+        (if (.next rs)
+          (recur (conj! acc [(.getLong rs "bucket") (.getLong rs "count")]))
+          (persistent! acc))))))
+
 ;;; ============================================================================
 ;;; Audit query helpers
 ;;; ============================================================================
@@ -720,7 +933,7 @@
 (defn- read-entity-event [^ResultSet rs]
   {:track          :entity
    :seq            (.getLong rs "seq")
-   :ts             (ts->iso (.getTimestamp rs "ts"))
+   :ts             (utc->iso (read-utc rs "ts"))
    :tenant-xid     (.getString rs "tenant_xid")
    :record-xid     (.getString rs "record_xid")
    :entity-xid     (.getString rs "entity_xid")
@@ -735,7 +948,7 @@
 (defn- read-relation-event [^ResultSet rs]
   {:track        :relation
    :seq          (.getLong rs "seq")
-   :ts           (ts->iso (.getTimestamp rs "ts"))
+   :ts           (utc->iso (read-utc rs "ts"))
    :tenant-xid   (.getString rs "tenant_xid")
    :relation-xid (.getString rs "relation_xid")
    :from-xid     (.getString rs "from_xid")
@@ -765,9 +978,9 @@
   [{:keys [record-xid between cursor seq tenant]}]
   (let [parts (cond-> []
                 record-xid (conj ["record_xid = ?" [record-xid]])
-                between    (into [["ts >= ?" [(inst->sql-ts (first between))]]
-                                  ["ts <= ?" [(inst->sql-ts (second between))]]])
-                cursor     (conj ["ts > ?" [(inst->sql-ts cursor)]])
+                between    (into [["ts >= ?" [(inst->utc (first between))]]
+                                  ["ts <= ?" [(inst->utc (second between))]]])
+                cursor     (conj ["ts > ?" [(inst->utc cursor)]])
                 seq        (conj ["seq > ?" [seq]])
                 tenant     (conj ["tenant_xid = ?" [tenant]]))]
     [(str/join " AND " (map first parts))
@@ -776,7 +989,7 @@
 (defn- query-get-at
   [^Connection conn record-xid at tenant include-deleted?]
   (let [tenant-clause (when tenant " AND tenant_xid = ?")
-        params (cond-> [record-xid (inst->sql-ts at)] tenant (conj tenant))
+        params (cond-> [record-xid (inst->utc at)] tenant (conj tenant))
         sql (str "SELECT attribute_xid, value, op FROM audit_entity"
                  " WHERE record_xid = ? AND ts <= ?" (or tenant-clause "")
                  " QUALIFY ROW_NUMBER() OVER"
@@ -877,6 +1090,21 @@
   (with-open [rc (.duplicate ^DuckDBConnection (transport-connection tp))]
     (f rc)))
 
+(defn- maybe-prune-traffic!
+  "DELETE aged-out rows at most once/day, piggybacked on the flush path —
+   cheap enough not to warrant a dedicated scheduled task."
+  [tp]
+  (let [now-m (quot (System/currentTimeMillis) 60000)]
+    (when (> (- now-m @last-traffic-prune) 1440)
+      (reset! last-traffic-prune now-m)
+      (try
+        (with-read-conn tp
+          (fn [conn]
+            (with-open [stmt (.createStatement conn)]
+              (.execute stmt (str "DELETE FROM traffic_minutes WHERE minute < "
+                                  (- now-m traffic-retention-minutes))))))
+        (catch Throwable _ nil)))))
+
 ;;; ============================================================================
 ;;; DuckDBObservability — one record, both protocols
 ;;; ============================================================================
@@ -897,14 +1125,15 @@
                  since      (assoc :since since))]
       (store/search this opts)))
 
-  (search [_ {:keys [count? group-by] :as opts}]
+  (search [_ {:keys [count? group-by bucket-ms] :as opts}]
     (let [compiled (compile-log-sql opts)]
       (with-read-conn tp
         (fn [conn]
           (cond
-            count?   (execute-log-count conn compiled)
-            group-by (execute-log-group conn group-by compiled)
-            :else    (execute-log-query conn compiled))))))
+            bucket-ms (execute-log-histogram conn compiled)
+            count?    (execute-log-count conn compiled)
+            group-by  (execute-log-group conn group-by compiled)
+            :else     (execute-log-query conn compiled))))))
 
   (tail [this {:keys [cursor ns-pattern level limit]}]
     (let [opts (cond-> {:order-by [:inst :asc] :limit (or limit 100)}
@@ -937,13 +1166,37 @@
     nil)
 
   ;; -------------------------------------------------------------------------
+  ;; Traffic side — flush-deltas! called by the synthigy.traffic flusher
+  ;; thread (own duplicate connection via with-read-conn — never the
+  ;; drainer's connection); query-window serves traffic-stats reads.
+  ;; -------------------------------------------------------------------------
+  traffic/TrafficStore
+
+  (flush-deltas! [_ rows]
+    (when (seq rows)
+      (with-read-conn tp (fn [conn] (insert-traffic-batch! conn rows))))
+    (maybe-prune-traffic! tp)
+    nil)
+
+  (query-window [_ {:keys [from to]}]
+    (try
+      (with-read-conn tp (fn [conn] (query-traffic-window conn from to)))
+      (catch Throwable _ [])))
+
+  (traffic-health [_]
+    {:up? true
+     :backend :duckdb
+     :rows (try (with-read-conn tp (fn [conn] (row-count conn "traffic_minutes")))
+                (catch Throwable _ nil))})
+
+  ;; -------------------------------------------------------------------------
   ;; Audit side — writers called by drainer (synchronous per batch);
   ;; readers serve the /history endpoint.
   ;; -------------------------------------------------------------------------
   audit/AuditProvider
 
   ;; The per-entity/relation audit-opt-in decision is frozen at enqueue time
-  ;; (the substrate trigger's `audit` flag) and applied by the drainer, so the
+  ;; (the plug trigger's `audit` flag) and applied by the drainer, so the
   ;; provider no longer re-evaluates the mutable policy here — that drain-time
   ;; re-check raced the write and silently dropped committed records. Only the
   ;; coarse system gate (`persistence-enabled?` — is IAM running for
@@ -1008,14 +1261,6 @@
 
 (def ^:private model-watch-key ::audit-policy-watch)
 
-(defn- ensure-parent-dir!
-  "Create the parent dir of `path` if file mode + parent missing. No-op for
-   :memory:."
-  [path]
-  (when (and (string? path) (not= path ":memory:") (not (str/blank? path)))
-    (when-let [parent (.getParentFile (File. ^String path))]
-      (when-not (.exists parent) (.mkdirs parent)))))
-
 ;;; ============================================================================
 ;;; Lifecycle — setup, start, stop, cleanup
 ;;; ============================================================================
@@ -1029,7 +1274,7 @@
   []
   (let [cfg (env-config)]
     (ensure-parent-dir! (:path cfg))
-    (with-open [conn (open-connection (:path cfg))]
+    (with-open [conn (open-connection cfg)]
       (apply-schema! conn))
     (log/info {:id ::setup-complete
                :data {:action :setup-complete :subject :observability
@@ -1065,7 +1310,7 @@
    DB) and the cost is negligible for file mode."
   []
   (let [cfg      (env-config)
-        conn     (open-connection (:path cfg))
+        conn     (open-connection cfg)
         _        (apply-schema! conn)
         tp       (make-transport conn cfg)
         rec      (->DuckDBObservability tp cfg)
@@ -1073,7 +1318,7 @@
     (log/info {:id ::starting
                :data {:action :starting :subject :observability
                       :backend :duckdb :path (:path cfg)}}
-              "Starting observability substrate")
+              "Starting observability plug")
     ;; Swap FIRST so every new signal lands in the durable store immediately;
     ;; the old ring is then frozen (the bridge no longer references it) and we
     ;; drain its final contents into the durable store afterward. Drained boot
@@ -1090,7 +1335,7 @@
     (reset! state {:record rec :transport tp :connection conn :config cfg})
     (log/info {:id ::started
                :data {:action :started :subject :observability :backend :duckdb}}
-              "Observability substrate started")))
+              "Observability plug started")))
 
 (defn stop
   "Reverse start: drain the writer, close the connection, rebind
@@ -1100,7 +1345,7 @@
   []
   (log/info {:id ::stopping
              :data {:action :stopping :subject :observability :backend :duckdb}}
-            "Stopping observability substrate")
+            "Stopping observability plug")
   (dataset/remove-model-watch! model-watch-key)
   (audit/recompile-policy! nil)
   (when-let [{:keys [transport]} @state]
@@ -1110,15 +1355,15 @@
   (reset! state nil)
   (log/info {:id ::stopped
              :data {:action :stopped :subject :observability :backend :duckdb}}
-            "Observability substrate stopped"))
+            "Observability plug stopped"))
 
 (defn cleanup
-  "Drop the substrate's tables. Reverses `setup`. For file mode this leaves
+  "Drop the plug's tables. Reverses `setup`. For file mode this leaves
    the .duckdb file in place (DuckDB has no DROP DATABASE for embedded files
    — operator removes the file separately if they want a true wipe)."
   []
   (let [cfg (env-config)]
-    (with-open [conn (open-connection (:path cfg))]
+    (with-open [conn (open-connection cfg)]
       (drop-schema! conn))
     (log/info {:id ::cleanup-complete
                :data {:action :cleanup-complete :subject :observability
@@ -1133,13 +1378,38 @@
 
 (lifecycle/register-module!
  :synthigy/observability
-  ;; Substrate sits parallel to :synthigy/server. Depends on the bits we
+  ;; Plug sits parallel to :synthigy/server. Depends on the bits we
   ;; actually use: :synthigy/log for the Telemere pipeline (we hang our
-  ;; bridge handler off it), :synthigy/substrate so the drainer is up
+  ;; bridge handler off it), :synthigy/plug so the drainer is up
   ;; before audit writes can land.
- {:depends-on [:synthigy/log :synthigy/substrate]
+ {:depends-on [:synthigy/log :synthigy/plug]
   :doc "Log/audit analytics sink (DuckDB)"
   :setup   setup
   :start   start
   :stop    stop
   :cleanup cleanup})
+
+;; Intentional overwrite of the in-memory dev registration in
+;; synthigy.traffic — this backend's record now implements TrafficStore too,
+;; so :synthigy/traffic re-points at IT instead. Safe because only one
+;; observability backend alias is ever on one classpath (shadowed-ns
+;; pattern), so load order is deterministic: this file loads, this
+;; registration wins, done.
+(defn- traffic-start! []
+  (let [{:keys [record]} @state]
+    (when-not record
+      (throw (ex-info ":synthigy/traffic (duckdb) requires :synthigy/observability to be started first"
+                      {:cause :observability-not-started})))
+    (alter-var-root #'traffic/*traffic-store* (constantly record))
+    (traffic/start-flusher!)))
+
+(defn- traffic-stop! []
+  (traffic/stop-flusher!)
+  (alter-var-root #'traffic/*traffic-store* (constantly (traffic/create-in-memory-store))))
+
+(lifecycle/register-module!
+ :synthigy/traffic
+ {:depends-on [:synthigy/observability]
+  :doc "Traffic metrics provider (DuckDB)"
+  :start traffic-start!
+  :stop  traffic-stop!})

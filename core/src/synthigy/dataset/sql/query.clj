@@ -1,25 +1,33 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.sql.query
-  "Database-agnostic SQL query utilities.
-
-  Provides shared utilities for all database implementations:
-  - Schema caching and management
-  - Runtime schema generation from ERD models
-  - Common type definitions
-  - Mutation helper functions
-  - Cursor navigation for nested schemas
-
-  This namespace contains ONLY code that is reused across multiple
-  database implementations (PostgreSQL, SQLite, MySQL, etc.).
-
-  Database-specific code belongs in respective namespaces:
-  - synthigy.dataset.postgres.query
-  - synthigy.dataset.sqlite.query (future)
-  - synthigy.dataset.mysql.query (future)"
+  "Database-agnostic SQL query core: schema caching, 
+  ERD schema generation, selection compilation, SQL emission, 
+  the pull, and the write path. Backend-specific code belongs 
+  in synthigy.dataset.postgres.query / .sqlite.query / .mysql.query."
   (:require
    [buddy.hashers :as hashers]
-   [camel-snake-kebab.core :as csk]
    [clojure.core.cache :as cache]
-   [clojure.pprint]
    [clojure.set]
    [clojure.string :as str]
    [synthigy.log :as log]
@@ -28,93 +36,45 @@
    [nano-id.core :refer [nano-id]]
    [synthigy.dataset
     :refer [deployed-relation deployed-entity deployed-model]]
-   [synthigy.dataset.access :as access]
+   [synthigy.dataset.access :as access :refer [*operation-rules*]]
    [synthigy.dataset.core :as core]
    [synthigy.dataset.enhance :as enhance]
+   [synthigy.dataset.encryption :as denc]
    [synthigy.dataset.id :as id]
+   [synthigy.dataset.key :as dk]
    [synthigy.dataset.rls :as rls-runtime]
    [synthigy.dataset.sql.naming :refer [normalize-name
+                                        normalized-enum-value
                                         entity->table-name
                                         relation->table-name
                                         entity->relation-field]]
    [synthigy.dataset.sql.protocol :as proto]
    [synthigy.dataset.sql.rls :as rls]
    [synthigy.dataset.sql.schema :as schema]
-   [synthigy.db :refer [*db*]]
+   [synthigy.db :as db :refer [*db*]]
    [synthigy.db.sql :as sql]
-   [synthigy.transit :refer [->transit]]))
+   synthigy.transit))
 
 ;;; ============================================================================
 ;;; Operation Context (Dynamic Vars)
 ;;; ============================================================================
 
-(def ^:dynamic *operation-rules*
-  "Dynamic var indicating current operation context.
-
-  Used to differentiate permission checks and schema building
-  based on whether we're doing a read, write, or delete operation.
-
-  Values: #{:read}, #{:write}, #{:delete}, #{:read :owns}, etc.
-
-  Copied from EYWA: neyho.eywa.dataset.postgres.query/*operation-rules*
-
-  Example:
-    (binding [*operation-rules* #{:delete}]
-      (selection->schema entity-id selection args))")
-
 ;;; ============================================================================
 ;;; Fetch concurrency (Dynamic Vars + macros)
 ;;; ============================================================================
-;;
-;; `pull-cursors` walks a schema and fires multiple sibling SQL queries — root,
-;; counts, numerics, related, children. How those siblings execute is
-;; controlled by `*fetch-mode*`:
-;;
-;;   :serial    Body wrapped in `delay`. Runs on the deref'ing thread using
-;;              the shared `con`. Safe inside a write transaction (visible
-;;              to the tx, snapshot consistent). No pool churn.
-;;
-;;   :parallel  Body wrapped in `future`. Each leaf SQL acquires a fresh
-;;              connection via `(jdbc/get-connection (:datasource *db*))`
-;;              and releases it on completion. Real DB-level parallelism.
-;;              NEVER use inside a write transaction — parallel readers on
-;;              fresh connections won't see uncommitted writes from the
-;;              outer tx.
-;;
-;; Cited rationale:
-;;   pgjdbc: "The driver makes no guarantees that methods on connections
-;;   are synchronized. It will be up to the caller to synchronize calls to
-;;   the driver."  https://jdbc.postgresql.org/documentation/thread/
-;;
-;;   SQLite (SERIALIZED mode, default): "SQLite uses mutexes to serialize
-;;   access to each object."  https://www.sqlite.org/threadsafe.html
-;;
-;; Default is `:serial` (safe). Backends opt into `:parallel` at their
-;; read-only protocol entry points (Postgres only; SQLite coerces to
-;; `:serial` to avoid pool=1 deadlocks).
+;; See docs/core/synthigy/dataset/sql/query.md "Operation context & fetch
+;; concurrency" — :parallel must never run inside a write transaction.
 
 (def ^:dynamic *fetch-mode*
-  "Sibling-fetch concurrency for `pull-cursors`. :serial or :parallel.
-   Bound by backend `ModelQueryProtocol` extensions at the entry point.
-   See header comment for semantics."
+  "Sibling-fetch concurrency for `pull-cursors`: :serial or :parallel, bound by backend protocol extensions."
   :serial)
 
 (def ^:dynamic ^java.sql.Connection *fetch-con*
-  "The connection a fetch task should use for SQL. In :serial mode this
-   equals the `con` passed into `pull-cursors`. In :parallel mode each
-   leaf fetch binds it to its own fresh pool connection.
-
-   Inside `pull-cursors` bodies, use *fetch-con* — never the lexical `con`
-   from the surrounding closure."
+  "Connection for the current fetch task — use instead of the lexical `con` inside pull-cursors bodies."
   nil)
 
 (defmacro fetch-on-conn
-  "Schedule a leaf SQL fetch. Returns a deref-able.
-
-     :serial   → wraps body in `delay`; uses *fetch-con*.
-     :parallel → wraps body in `future`; opens a fresh connection from
-                 `(:datasource *db*)`, binds *fetch-con*, runs body,
-                 releases connection on exit."
+  "Schedule a leaf SQL fetch; :parallel opens and releases its own connection."
   [& body]
   `(case *fetch-mode*
      :serial   (delay ~@body)
@@ -124,13 +84,8 @@
                      ~@body)))))
 
 (defmacro parallel-task
-  "Schedule a recursive pull task. Controls thread fanout only — does NOT
-   acquire a new connection itself. Use for `maybe-pull-children`-style
-   branching where the leaves further down will acquire their own
-   connections via `fetch-on-conn`.
-
-     :serial   → wraps body in `delay` (sequential).
-     :parallel → wraps body in `future` (concurrent fanout)."
+  "Schedule a recursive pull task; controls thread fanout only, acquires no
+   connection itself."
   [& body]
   `(case *fetch-mode*
      :serial   (delay  ~@body)
@@ -140,32 +95,22 @@
 ;;; Schema Caching (Database-Agnostic)
 ;;; ============================================================================
 
-;; The three deploy-coupled indexes live in ONE atom so a redeploy swaps
-;; them atomically — a reader can never observe a fresh :entity index against
-;; a stale :relation/:attribute-key one (the prior four separate reset!s left
-;; a torn-read window). Keys:
-;;   :entity        {normalized-entity-name -> entity-id}
-;;   :relation      {relation-uuid -> {:entity name :label label}}
-;;   :attribute-key {attr-xid-keyword -> field-keyword} — built at deploy time
-;;                  from the schema's :fields entries; used by subscription
-;;                  translate-delta to rewrite before/after maps from
-;;                  attribute-xid keys (substrate-captured) to user-facing
-;;                  attribute keys (what /data uses).
+;; Three deploy-coupled indexes (:entity :relation :attribute-key) share ONE
+;; atom so a redeploy swaps them atomically — avoids a torn read across a
+;; stale/fresh pair. See docs/core/synthigy/dataset/sql/query.md.
 (defonce ^:private _indexes (atom nil))
 (defonce ^:private _template-cache
   (atom (cache/ttl-cache-factory {} :ttl (* 30 60 1000))))
 
-(defn- normalize-entity-name
-  "Normalize entity name for index lookup: camelCase → snake_case, lowercase."
+(defn normalize-entity-name
+  "Normalize an entity/label reference for index lookup — delegates to
+   `naming/normalize-name`, the same fn DDL derives table/column names from."
   [name]
-  (-> name
-      (str/replace #"([a-z])([A-Z])" "$1_$2")
-      str/lower-case
-      (str/replace #"[\s]+" "_")))
+  (normalize-name name))
 
-(defn- build-relation-index
-  "Build reverse index {relation-uuid -> {:entity entity-name :label to-label}}
-  from the deployed model. Returns nil if no model is available."
+(defn build-relation-index
+  "Builds {relation-uuid -> {:entity entity-name :label to-label}} from the
+   deployed model, or nil if no model."
   []
   (when-let [model (deployed-model)]
     (into {}
@@ -179,35 +124,73 @@
             [relation-id {:entity (normalize-entity-name entity-name)
                           :label (normalize-entity-name label)}]))))
 
-(defn deploy-schema
-  "Caches the runtime schema (from model->schema) for fast access.
-  Also rebuilds the entity-name, relation reverse, and attribute-key
-  indices.
-
-  This should be called when a new model is deployed to avoid
-  regenerating the schema on every query."
+(defn build-skin-reverse
+  "Builds {skin -> canonical-key} from every field's :skins across the schema."
   [s]
-  (schema/set-deployed-schema! s)
-  (reset! _template-cache (cache/ttl-cache-factory {} :ttl (* 30 60 1000)))
-  ;; Build all three indexes, then publish them in a single reset! so readers
-  ;; see a consistent set (see _indexes). The attribute-key map flattens every
-  ;; entity's :fields into one {attr-xid-keyword -> field-key} map; the attr-xid
-  ;; is keyword-ified to line up with the substrate's before/after envelope
-  ;; shape (the trigger writes attr-xids as JSON string keys, but
-  ;; synthigy.json/<-json runs them through pkey-fn which keywordizes any string
-  ;; that has letters and isn't UUID-shaped, so envelopes arrive with
-  ;; :before { :<attr-xid> v, ... }).
-  (reset! _indexes
-          {:entity (into {}
-                         (for [[id {:keys [name]}] s
-                               :when name]
-                           [(normalize-entity-name name) id]))
-           :relation (build-relation-index)
-           :attribute-key (into {}
-                                (for [[_ {:keys [fields]}] s
-                                      [attr-id {field-key :key}] fields
-                                      :when (and attr-id field-key)]
-                                  [(keyword (str attr-id)) field-key]))}))
+  (let [by-skin (group-by first
+                          (for [[_ entity] s
+                                [_ {:keys [key skins]}] (:fields entity)
+                                :when (and key skins)
+                                [_ skin] skins]
+                            [skin key]))]
+    (doseq [[skin g] by-skin
+            :when (> (count (distinct (map second g))) 1)]
+      (log/warn {:id ::ambiguous-skin
+                 :data {:action :deploying :subject :dataset-schema
+                        :skin skin :keys (distinct (map second g))}}
+                "Skin resolves to multiple keys — dropped from inbound lookup"))
+    (into {} (for [[skin g] by-skin
+                   :when (= 1 (count (distinct (map second g))))]
+               [skin (second (first g))]))))
+
+
+(comment
+  (-> (deployed-schema) vals first :fields vals first :skins)
+  (time (:satisfaction (build-skin-reverse (deployed-schema))))
+  (map (comp :skins :fields) (vals (deployed-schema))))
+
+
+(defn build-inbound-cast
+  "Per-entity {received-key -> canonical-key} skins cast for inbound data."
+  [{:keys [fields relations recursions]}]
+  (let [pairs (for [{:keys [key skins]} (vals fields)
+                    :when key
+                    variant (cons key (vals skins))]
+                [variant key])
+        ambiguous (into #{}
+                        (keep (fn [[variant vs]]
+                                (when (> (count (distinct (map second vs))) 1)
+                                  variant)))
+                        (group-by first pairs))]
+    (into {}
+          (concat
+           (remove (comp ambiguous first) pairs)
+           (map (fn [k] [k k]) (concat (keys relations) recursions))
+           [[:xid :xid] [:euuid :euuid] [:_eid :_eid]]))))
+
+(defn deploy-schema
+  "Caches the runtime schema and rebuilds the entity/relation/attribute-key/
+   skin indexes; call on every model deploy."
+  [s]
+  (let [s (reduce-kv
+           (fn [m id e] (assoc m id (assoc e :inbound-cast (build-inbound-cast e))))
+           {} s)]
+    (schema/set-deployed-schema! s)
+    (reset! _template-cache (cache/ttl-cache-factory {} :ttl (* 30 60 1000)))
+    (dk/set-skin-index! (build-skin-reverse s))
+    ;; Single reset! publishes all three indexes atomically — avoids a torn
+    ;; read (see _indexes above).
+    (reset! _indexes
+            {:entity (into {}
+                           (for [[id {:keys [name]}] s
+                                 :when name]
+                             [(normalize-entity-name name) id]))
+             :relation (build-relation-index)
+             :attribute-key (into {}
+                                  (for [[_ {:keys [fields]}] s
+                                        [attr-id {field-key :key}] fields
+                                        :when (and attr-id field-key)]
+                                    [(keyword (str attr-id)) field-key]))})))
 
 (defn deployed-schema
   "Returns the currently deployed runtime schema, or nil."
@@ -235,7 +218,7 @@
   []
   (:entity @_indexes))
 
-(defn- levenshtein
+(defn levenshtein
   "Compute Levenshtein edit distance between two strings."
   [a b]
   (let [m (count a) n (count b)]
@@ -255,7 +238,7 @@
                               (+ cost (aget d i j))))))))
         (aget d m n)))))
 
-(defn- suggest-similar
+(defn suggest-similar
   "Pick the closest match from `candidates` for `target`, if any is within
    3 edits AND the candidate is at most 2x the target's length. Returns
    nil when no good match exists."
@@ -273,13 +256,8 @@
         best))))
 
 (defn resolve-entity
-  "Resolve user-provided entity reference to entity ID from deployed schema.
-
-   Accepts:
-     - Raw entity ID (UUID or XID string) — returned as-is if present in deployed schema
-     - Human-readable name: 'Dataset Version', 'dataset_version', 'DatasetVersion'
-
-   Returns entity ID or throws if not found."
+  "Resolves a user-provided entity reference (raw ID or human-readable name) to
+   its entity ID; throws if not found."
   [entity-ref]
   (cond
     ;; Already a schema ID (UUID in :euuid mode, XID string in :xid mode)
@@ -303,28 +281,22 @@
                     {:code "UNKNOWN_ENTITY" :entity entity-ref}))))
 
 (defn relation-index
-  "Returns {relation-uuid -> {:entity name :label label}} reverse index.
-   Built automatically when schema is deployed."
+  "Returns {relation-uuid -> {:entity name :label label}} reverse index."
   []
   (:relation @_indexes))
 
 (defn attribute-key-index
-  "Returns {attr-xid-keyword -> field-keyword} flat map across all
-   entities. Built automatically when schema is deployed. Used by the SSE
-   translate-delta to rewrite substrate-captured before/after maps
-   (attr-xid-keyed, post-pkey-fn keywordization) into user-facing
-   attribute-key shape."
+  "Returns {attr-xid-keyword -> field-keyword} flat map across all entities,
+   used by translate-delta."
   []
   (:attribute-key @_indexes))
 
 (defn resolve-relation
-  "Resolve entity name + relation label to relation UUID.
-
-   Returns relation UUID or throws if not found."
+  "Resolves entity name + relation label to relation UUID, or throws."
   [entity-name label]
-  (let [entity-uuid (resolve-entity entity-name)
+  (let [entity-id (resolve-entity entity-name)
         model (deployed-model)
-        entity (core/get-entity model entity-uuid)
+        entity (core/get-entity model entity-id)
         relations (core/focus-entity-relations model entity)
         normalized-label (normalize-entity-name label)]
     (or (some (fn [rel]
@@ -339,8 +311,8 @@
           (throw (ex-info (cond-> (str "Unknown relation: " entity-name "." label)
                             hint (str ". Did you mean \"" entity-name "." hint "\"?")
                             (seq available) (str
-                                              " Available on " entity-name ": "
-                                              (clojure.string/join ", " (sort available))))
+                                             " Available on " entity-name ": "
+                                             (clojure.string/join ", " (sort available))))
                           (cond-> {:code "UNKNOWN_RELATION"
                                    :entity entity-name
                                    :relation label
@@ -348,8 +320,7 @@
                             hint (assoc :hint hint))))))))
 
 (defn deployed-schema-entity
-  "Gets a specific entity from the deployed schema by UUID.
-  Delegates to synthigy.dataset.sql.schema/deployed-schema-entity."
+  "Gets a specific entity from the deployed schema by entity id"
   [entity-id]
   (schema/deployed-schema-entity entity-id))
 
@@ -358,11 +329,74 @@
 ;;; ============================================================================
 
 (defn tmp-key
-  "Generates a temporary key for entity tracking during mutations.
-
-  Uses nano-id for shorter, more readable identifiers."
+  "Generates a temporary key for entity tracking during mutations."
   []
   (nano-id 10))
+
+;;; ============================================================================
+;;; Delete — shared shape/identity guards (backends call these, then do SQL)
+;;; ============================================================================
+
+(def delete-batch-limit
+  "Max xids per multirow delete — above this, use purge."
+  1000)
+
+(defn delete-unique-args
+  "Filters args to entity-schema's unique-constraint keys (+ id key) and
+   builds the _eq predicate map for a single-row delete. Throws
+   UNIQUE_KEY_REQUIRED when no unique key survives or a surviving value is
+   nil — a delete predicate must uniquely name a row, never drop silently."
+  [entity-schema args]
+  (let [uniques (set (flatten ((comp :unique :constraints) entity-schema)))
+        unique-attribute-keys (as-> (:fields entity-schema) result
+                                (select-keys result uniques)
+                                (vals result)
+                                (conj (map :key result) (id/key)))
+        filtered-args (select-keys args unique-attribute-keys)]
+    (when (or (empty? filtered-args) (some nil? (vals filtered-args)))
+      (throw (ex-info
+              (str "Delete on " (:name entity-schema) " needs a non-nil unique key")
+              {:code "UNIQUE_KEY_REQUIRED"
+               :rule "delete_identity"
+               :entity-name (:name entity-schema)
+               :hint (str/join ", " (map name unique-attribute-keys))})))
+    {:filtered-args filtered-args
+     :predicate-args (reduce-kv (fn [acc k v] (assoc acc k {:_eq v})) nil filtered-args)}))
+
+(defn assert-single-match!
+  "Throws NON_UNIQUE_MATCH when a single-row delete's predicate matched more
+   than one row — partial composite-unique args, or any future drift in nil
+   predicate compilation, must never delete more than the one row named."
+  [entity-schema filtered-args eids]
+  (when (> (count eids) 1)
+    (throw (ex-info
+            (str "Delete predicate on " (:name entity-schema) " matched "
+                 (count eids) " rows, expected at most 1")
+            {:code "NON_UNIQUE_MATCH"
+             :rule "delete_identity"
+             :entity-name (:name entity-schema)
+             :args filtered-args
+             :matched (count eids)}))))
+
+(defn check-delete-batch!
+  "Validates + dedupes a vector-of-xids multirow delete. Throws
+   BAD_DATA_SHAPE on a non-string/blank element, DELETE_BATCH_LIMIT above
+   delete-batch-limit."
+  [xids]
+  (doseq [x xids]
+    (when-not (and (string? x) (not (str/blank? x)))
+      (throw (ex-info "Multirow delete takes a vector of non-blank xid strings"
+                      {:code "BAD_DATA_SHAPE"
+                       :rule "delete_data"
+                       :hint "natural keys -> single map; predicates -> purge"}))))
+  (let [deduped (vec (distinct xids))]
+    (when (> (count deduped) delete-batch-limit)
+      (throw (ex-info (str "Multirow delete takes at most " delete-batch-limit " xids")
+                      {:code "DELETE_BATCH_LIMIT"
+                       :rule "delete_data"
+                       :limit delete-batch-limit
+                       :hint "use purge with {:xid {:_in [...]}} for more"})))
+    deduped))
 
 ;;; ============================================================================
 ;;; Type Definitions
@@ -372,76 +406,12 @@
   "Scalar field types that can be selected"
   #{"boolean" "string" "int" "float" "timestamp" "enum"
     "json" "uuid" "encrypted" "hashed" "transit" "avatar"})
-    ;; NOTE: "transit" kept in scalar-types for backwards compatibility
-    ;; but no longer decoded/encoded — treated as plain string
-
-;;; ============================================================================
-;;; Helper Functions
-;;; ============================================================================
-
-(defn pprint
-  "Pretty-prints data to a string (for logging/debugging).
-
-  Args:
-    data - Any Clojure data structure
-
-  Returns:
-    Pretty-printed string representation"
-  [data]
-  (with-out-str (clojure.pprint/pprint data)))
-
-(defn j-and
-  "Joins SQL statements with ' and ' separator.
-
-  Args:
-    statements - Collection of SQL statement strings
-
-  Returns:
-    Joined SQL string
-
-  Example:
-    (j-and [\"age > 18\" \"active = true\"])
-    => \"age > 18 and active = true\""
-  [statements]
-  (clojure.string/join " and " statements))
-
-(defn freeze
-  "Encodes data to transit format (used for transit type fields).
-
-  If data is already a string, returns as-is (idempotent).
-  Otherwise encodes to transit string representation.
-
-  Args:
-    data - Clojure data structure or string
-
-  Returns:
-    Transit-encoded string"
-  [data]
-  (if (string? data) data (->transit data)))
+    ;; "transit" kept for back-compat only — no longer encoded/decoded, plain
+    ;; string
 
 (defn wrap-basic-fields
-  "Wraps database field names with optional table prefix and quoting.
-
-  Adds '_eid' to the field list and handles 'euuid' field name specially.
-  Uses double-quote SQL identifier quoting (standard SQL).
-
-  Args:
-    fields - Collection of field keywords
-    prefix - Optional table alias for prefixing (e.g., \"t1\")
-
-  Returns:
-    Sequence of formatted field strings
-
-  Examples:
-    (wrap-basic-fields [:name :age])
-    => (\"\\\"name\\\"\" \"\\\"age\\\"\" \"\\\"_eid\\\"\")
-
-    (wrap-basic-fields [:name] \"t1\")
-    => (\"t1.name\" \"t1._eid\")
-
-  Note:
-    Double-quote quoting is standard SQL but MySQL < 8.0 may need
-    ANSI_QUOTES mode or backtick quoting instead."
+  "Formats field names as SQL identifiers, optionally table-prefixed, always
+   appending `_eid`; double-quote quoting (see docs re: MySQL ANSI_QUOTES)."
   ([fields] (wrap-basic-fields fields nil))
   ([fields prefix]
    (if (not-empty prefix)
@@ -452,41 +422,13 @@
           (conj fields "_eid")))))
 
 (defn extend-fields
-  "Builds comma-separated SQL field list from field collection.
-
-  Wraps fields with quoting/prefixing via wrap-basic-fields and joins
-  with commas for use in SELECT clauses.
-
-  Args:
-    fields - Collection of field keywords
-    prefix - Optional table alias for prefixing
-
-  Returns:
-    Comma-separated SQL field list string
-
-  Example:
-    (extend-fields [:name :email] \"u\")
-    => \"u.name, u.email, u._eid\""
+  "Builds a comma-separated SQL field list via `wrap-basic-fields`."
   ([fields] (extend-fields fields nil))
   ([fields prefix]
    (clojure.string/join ", " (wrap-basic-fields fields prefix))))
 
 (defn schema-zipper
-  "Creates a zipper for navigating schema tree structure.
-
-  Enables tree traversal of nested schema relations using clojure.zip.
-  The root is wrapped in a synthetic ::ROOT map entry.
-
-  Args:
-    root - Root schema map with :relations
-
-  Returns:
-    Zipper over schema tree
-
-  Example:
-    (def z (schema-zipper {:relations {:posts {...}}}))
-    (-> z zip/down zip/node)
-    => [:posts {...}]"
+  "Zipper over a schema tree's :relations, rooted at a synthetic ::ROOT entry."
   [root]
   (letfn [(branch? [[_ {:keys [relations]}]]
             (not-empty relations))
@@ -505,44 +447,33 @@
 ;;; ============================================================================
 
 (defn throw-relation
-  "Throws access denied exception for relation access.
-
-  Args:
-    id - Relation UUID
-    [from-euuid _] - Direction vector [from-entity to-entity]
-
-  Throws:
-    ExceptionInfo with access denied message"
-  [id [from-euuid _]]
+  "Throws access-denied for relation access."
+  [id [from-id _]]
   (let [{{from :name} :from
          {to :name} :to
          :keys [from-label to-label]
          :as relation} (deployed-relation id)
-        [from from-label to to-label] (if (= from-euuid (id/extract (:from relation)))
+        [from from-label to to-label] (if (= from-id (id/extract (:from relation)))
                                         [from to-label to from-label]
                                         [to from-label from to-label])]
     (throw
      (ex-info
       (format
-       "You don't have sufficent privilages to access relation [%s]%s -> %s[%s]"
+       "You don't have sufficient privileges to access relation [%s]%s -> %s[%s]"
        from from-label to-label to)
       {:type ::enforce-search-access
+       :code "RELATION_FORBIDDEN"
+       :relation id
        :roles (access/role-ids)}))))
 
 (defn throw-entity
-  "Throws access denied exception for entity access.
-
-  Args:
-    id - Entity UUID
-
-  Throws:
-    ExceptionInfo with access denied message"
+  "Throws access-denied for entity access."
   [id]
   (let [{entity-name :name} (deployed-entity id)]
     (throw
      (ex-info
       (format
-       "You don't have sufficent privilages to access entity '%s'"
+       "You don't have sufficient privileges to access entity '%s'"
        entity-name)
       {:type ::enforce-search-access
        :code "ENTITY_FORBIDDEN"
@@ -551,17 +482,7 @@
        :roles (access/role-ids)}))))
 
 (defn entity-accessible?
-  "Checks if entity is accessible with given scopes.
-
-  Args:
-    entity-id - Entity UUID
-    scopes - Set of access scopes (e.g., #{:read}, #{:write :owns})
-
-  Returns:
-    true if accessible
-
-  Throws:
-    ExceptionInfo if not accessible"
+  "True if entity is accessible with given scopes; throws otherwise."
   [entity-id scopes]
   (when-not (access/entity-allows? entity-id scopes)
     (let [{entity-name :name} (deployed-entity entity-id)]
@@ -577,18 +498,8 @@
   true)
 
 (defn relation-accessible?
-  "Checks if relation is accessible with given scope and direction.
-
-  Args:
-    relation - Relation UUID
-    direction - Direction vector [from-entity to-entity]
-    scope - Access scope set (e.g., #{:read})
-
-  Returns:
-    true if accessible
-
-  Throws:
-    ExceptionInfo if not accessible"
+  "True if relation is accessible with given direction and scope; throws
+   otherwise."
   [relation direction scope]
   (let [allowed? (access/relation-allows? relation direction scope)]
     (when-not allowed?
@@ -606,32 +517,103 @@
       (throw-relation relation direction))
     true))
 
+(defn throw-attribute-write-denied
+  "Throws when the current role tries to WRITE a denied attribute (write side
+   fails closed, unlike read-side silent strip)."
+  [entity-id attribute-id]
+  (let [{entity-name :name} (deployed-entity entity-id)
+        attribute-name (some->> (:attributes (deployed-entity entity-id))
+                                (some #(when (= (id/extract %) attribute-id) %))
+                                :name)]
+    (throw
+     (ex-info
+      (format
+       "You don't have sufficient privileges to write attribute '%s' on entity '%s'"
+       attribute-name entity-name)
+      {:type ::attribute-write-denied
+       :code "ATTRIBUTE_FORBIDDEN"
+       :entity entity-id
+       :entity-name entity-name
+       :attribute attribute-id
+       :attribute-name attribute-name
+       :roles (access/role-ids)}))))
+
+(defn attribute-writable?
+  "Throws unless `attribute-id` on `entity-id` may be WRITTEN by the current
+   role."
+  [entity-id attribute-id]
+  (when-not (access/attribute-allows? entity-id attribute-id :write)
+    (log/info {:id   :synthigy.iam.access/access-denied
+               :data {:action    :denied
+                      :subject   :request
+                      :kind      :attribute
+                      :entity    entity-id
+                      :attribute attribute-id
+                      :roles     (vec (access/role-ids))}}
+              "RBAC denied attribute write")
+    (throw-attribute-write-denied entity-id attribute-id))
+  true)
+
+;;; ============================================================================
+;;; Link-only classification (shared: access gate + storage)
+;;; ============================================================================
+
+(defn reference-constraint-keys
+  "Constraint key vector identifying a write row keyed by `ks`, or nil."
+  [constraints ks]
+  (if (contains? ks (id/key))
+    [(id/key)]
+    (some #(when (every? ks %) %) constraints)))
+
+(defn link-only?
+  "True when a write row carries only identity/constraint keys — the caller is
+   linking an existing row, not writing one. ONE predicate for the access gate
+   and for storage's resolve-only path; if they disagree, the gate admits rows
+   storage then upserts."
+  [entity-schema constraints ks]
+  (let [declared (when entity-schema
+                   (->> (:fields entity-schema)
+                        (keep (fn [[k v]] (when-not (keyword? k) (:key v))))
+                        set))
+        recursions (:recursions entity-schema)
+        ckeys (reference-constraint-keys constraints ks)]
+    (boolean
+     (and (some? declared)
+          (not-empty ckeys)
+          (not-any? (fn [k]
+                      (and (or (contains? declared k)
+                               (contains? recursions k))
+                           (not-any? #(= % k) ckeys)))
+                    (conj ks (id/key)))))))
+
+(defn throw-reference-not-found
+  "Throws when a payload reference resolves to no row the caller can see."
+  [{:keys [entity/mapping constraint]} table row relation]
+  (let [entity-id (get mapping table)
+        {entity-name :name} (when entity-id (deployed-entity entity-id))
+        ident-keys (into #{(id/key)} (flatten (get constraint table)))
+        ident (into {} (filter (comp ident-keys key)) row)]
+    (throw
+     (ex-info
+      (format "Referenced '%s' not found: %s"
+              (or entity-name table)
+              (pr-str ident))
+      (cond-> {:type ::reference-not-found
+               :code "REF_NOT_FOUND"
+               :entity entity-id
+               :table table
+               :keys ident}
+        relation (assoc :relation relation))))))
+
 ;;; ============================================================================
 ;;; Type Encoding/Decoding (Database-Agnostic with Protocol)
 ;;; ============================================================================
 
 (defn entity-serde
-  "Builds encoder and decoder maps for entity fields (database-agnostic).
-
-  Uses TypeCodec protocol for database-specific type encoding/decoding.
-  This allows the same code to work with PostgreSQL (PGobject),
-  SQLite (TEXT/INTEGER), MySQL, etc.
-
-  Args:
-    entity-uuid - Entity UUID to build encoders/decoders for
-
-  Returns:
-    Map with :encoders and :decoders
-      :encoders - Map of field-key → encoder-fn (Clojure → Database)
-      :decoders - Map of field-key → decoder-fn (Database → Clojure)
-
-  Example:
-    (entity-serde user-uuid)
-    => {:encoders {:status (fn [v] (proto/encode *db* \"user_status\" v))}
-        :decoders {:status keyword
-                   :metadata json->data}}"
-  [entity-uuid]
-  (let [{:keys [fields]} (get (deployed-schema) entity-uuid)
+  "Builds {:encoders :decoders} maps for entity fields via the TypeCodec
+   protocol."
+  [entity-id]
+  (let [{:keys [fields field->attribute]} (get (deployed-schema) entity-id)
         field->type (reduce
                      (fn [result {f :key
                                   t :type
@@ -640,45 +622,34 @@
                      nil
                      (vals fields))
 
-        ;; Build encoders: Clojure values → Database representation
-        ;; Uses proto/encode for database-specific encoding
         encoders (reduce
                   (fn [result field]
                     (let [t (get field->type field)]
                       (case t
-                         ;; These types pass through unchanged (native DB support)
                         ("boolean" "string" "int" "float" "json"
                                    "timestamp" "timeperiod" "currency"
                                    "uuid" "avatar" "hashed" "transit" nil) result
-                         ;; Default: enum type - use protocol encoder
                         (assoc result field
                                (fn [v]
-                                  ;; Database-agnostic: delegates to TypeCodec protocol
-                                  ;; PostgreSQL: creates PGobject
-                                  ;; SQLite: converts to TEXT
                                  (proto/encode *db* t v))))))
                   nil
                   (keys field->type))
 
-        ;; Build decoders: Database representation → Clojure values
-        ;; All non-trivial types delegate to TypeCodec protocol for database-agnostic decoding
-        ;; NOTE: We capture `*db*` value here because decoders may be called in futures
-        ;; where the dynamic binding is not conveyed
+        ;; *db* captured as a value — decoders may run in futures where the
+        ;; dynamic binding isn't conveyed.
         db *db*
         decoders (reduce
                   (fn [r k]
                     (let [field-type (field->type k)
                           transform (case field-type
-                                       ;; Complex types - delegate to TypeCodec protocol
-                                      "uuid" (fn [data] (proto/decode db "uuid" data))
-                                      "encrypted" (fn [data] (proto/decode db "encrypted" data))
-                                      "json" (fn [data] (proto/decode db "json" data))
-                                      "boolean" (fn [data] (proto/decode db "boolean" data))
-                                       ;; enum - convert to keyword
-                                      "enum" (fn [data] (proto/decode db "enum" data))
-                                       ;; If not a scalar type, it's a custom enum - delegate to protocol
+                                      "uuid" (fn [data _] (proto/decode db "uuid" data))
+                                      "encrypted" (fn [data _] (denc/unseal-cell data))
+                                      "json" (fn [data _] (proto/decode db "json" data))
+                                      "boolean" (fn [data _] (proto/decode db "boolean" data))
+                                      "enum" (fn [data _] (proto/decode db "enum" data))
+                                      "timestamp" (fn [data _] (proto/decode db "timestamp" data))
                                       (if (and field-type (not (scalar-types field-type)))
-                                        (fn [data] (proto/decode db field-type data))
+                                        (fn [data _] (proto/decode db field-type data))
                                         nil))]
                       (if transform
                         (assoc r k transform)
@@ -693,17 +664,7 @@
 ;;; ============================================================================
 
 (defn flatten-selection
-  "Normalizes GraphQL selection format by removing entity namespace from keys.
-
-  Converts namespaced keys to simple keywords:
-    :User/name  → :name
-    :Post/title → :title
-
-  Example:
-    Input:  {:User/name [{:args nil :selections nil}]
-             :User/email [{:args {:_where {...}} :selections nil}]}
-    Output: {:name [{:args nil :selections nil}]
-             :email [{:args {:_where {...}} :selections nil}]}"
+  "Strips entity namespace from selection keys (:User/name -> :name)."
   [s]
   (reduce
    (fn [r [k v]]
@@ -712,22 +673,7 @@
    s))
 
 (defn distribute-fields
-  "Separates entity fields into scalars and references.
-
-  Args:
-    fields - Vector of field maps from entity schema
-             Each field has :key, :type, :euuid, :constraint
-
-  Returns:
-    Map with :field (scalars) and :reference (relation fields)
-
-  Example:
-    Input:  [{:key :email :type \"string\"}
-             {:key :owner :type \"user\"}
-             {:key :age :type \"int\"}]
-    Output: {:field [{:key :email :type \"string\"}
-                     {:key :age :type \"int\"}]
-             :reference [{:key :owner :type \"user\"}]}"
+  "Splits entity fields into {:field scalars :reference relation-typed fields}."
   [fields]
   (group-by
    (fn [{t :type}]
@@ -741,26 +687,8 @@
 ;;; ============================================================================
 
 (defn construct-response
-  "Constructs nested response structure from flat database records.
-
-  Takes flat database records with reference IDs and reconstructs the
-  nested object graph according to the schema structure.
-
-  Args:
-    schema - Query schema with entity/table, relations, fields, recursions
-    db - Database map with ::counts and ::numerics for aggregations
-    found-records - Flat records from database query
-
-  Returns:
-    Vector of nested response objects
-
-  Example:
-    Input schema:  {:entity/table \"users\"
-                    :relations {:roles {...}}
-                    :fields {:name nil :email nil}}
-    Input db:      {\"users\" {1 {:name \"Alice\" :roles [[\"roles\" 5]]}}
-                    \"roles\" {5 {:name \"Admin\"}}}
-    Output:        [{:name \"Alice\" :roles [{:name \"Admin\"}]}]"
+  "Rebuilds the nested object graph from flat DB records ([table id] references,
+   self references resolved in a second pass)."
   [{:keys [entity/table recursions]
     :as schema} {:keys [counts numerics]
                  :as db} found-records]
@@ -794,10 +722,8 @@
                                              (distinct v)))
                                ;;
                              (and (recursions k) (not= v id) (not= v [table id]))
-                             ;; Use the recursion's OWN schema (from :relations k)
-                             ;; so its :fields come from the caller's sub-selection
-                             ;; on this recursion — not from the parent's fields,
-                             ;; which would silently intersect and drop columns.
+                             ;; recursion's own schema (:relations k), not the
+                             ;; parent's fields
                              (let [child-schema (or (get-in schema [:relations k]) schema)]
                                (if (vector? v)
                                  (assoc data' k (pull-reference v child-schema cursor))
@@ -838,41 +764,15 @@
 ;;; ============================================================================
 
 (defn relations-cursor
-  "Converts cursor path to get-in path for navigating schema tree.
-
-  A cursor is a vector of relation keys forming a path through the schema tree.
-  This function converts it to the format needed for get-in on the schema.
-
-  Examples:
-    []                    → []
-    [:roles]              → [:relations :roles]
-    [:roles :permissions] → [:relations :roles :relations :permissions]
-
-  Args:
-    cursor - Vector of relation keywords
-
-  Returns:
-    Vector suitable for (get-in schema ...)"
+  "Converts a cursor path (vector of relation keys) to a get-in path on the
+   schema."
   [cursor]
   (if (empty? cursor)
     []
     (vec (mapcat (fn [k] [:relations k]) cursor))))
 
 (defn schema->cursors
-  "Generates all cursor paths present in the schema tree.
-
-  Recursively traverses the schema to find all relation paths.
-  Each cursor represents a unique path from root to a relation node.
-
-  Examples:
-    Schema: {:relations {:roles {:relations {:permissions {}}}}}
-    Returns: [[:roles] [:roles :permissions]]
-
-  Args:
-    schema - Query schema with nested :relations
-
-  Returns:
-    Vector of cursor paths (each cursor is a vector of keywords)"
+  "Generates all cursor paths present in the schema tree."
   ([schema]
    (schema->cursors
     (when-let [root-rels (keys (:relations schema))]
@@ -884,12 +784,10 @@
       (let [node (get-in schema (relations-cursor cursor))
             child-relations (:relations node)]
         (if (not-empty child-relations)
-          ;; Has children - expand cursor recursively
           (into
            (conj acc cursor)
            (mapcat #(schema->cursors [(conj cursor %)] schema)
                    (keys child-relations)))
-          ;; Leaf node - include if it has fields or is counted
           (if (or (:fields node) (:_count node))
             (conj acc cursor)
             acc))))
@@ -901,15 +799,8 @@
 ;;; ============================================================================
 
 (defn group-entity-rows
-  "Groups entity rows by their field keys for batch insertion.
-
-  Rows with the same set of fields can be inserted in a single INSERT statement.
-
-  Args:
-    tmp-rows - Map of {tmp-id entity-data}
-
-  Returns:
-    Map of {field-key-set [[data tmp-id] ...]}"
+  "Groups entity rows by their field-key set so same-shaped rows batch into one
+   INSERT."
   [tmp-rows]
   (reduce-kv
    (fn [result tmp-id data]
@@ -918,35 +809,13 @@
    tmp-rows))
 
 (defn enhance-write
-  "Orchestrates enhancement system for write operations.
-
-  Applies enhancements in two phases:
-  1. Infrastructure layer - audit fields (created_by, modified_on, etc.)
-  2. Domain layer - custom write enhancements (business logic)
-
-  This function is database-agnostic and delegates to the enhancement
-  protocol for database-specific behavior.
-
-  Args:
-    tx - Database transaction context
-    result - Analysis result map with :entity/mapping and entity data
-
-  Returns:
-    Enhanced result map with audit and custom enhancements applied
-
-  Example:
-    (enhance-write tx {:entity/mapping {\"users\" user-entity-uuid}
-                       :entity {\"users\" {\"tmp123\" {:name \"Alice\"}}}})
-    => {:entity {\"users\" {\"tmp123\" {:name \"Alice\"
-                                        :created_by user-id
-                                        :created_on timestamp}}}}"
+  "Applies audit enhancement (infrastructure), then custom write enhancements
+   (domain), to a write analysis result."
   [tx result]
   (let [final (reduce-kv
                (fn [final _ entity-id]
-                 (binding [*operation-rules* #{:write}]
-                   ;; FIRST: Apply audit enhancement (infrastructure layer)
+                 (binding [*operation-rules* #{:create :update}]
                    (let [audited (enhance/apply-audit *db* entity-id final tx)
-                         ;; THEN: Apply custom write enhancements (domain layer)
                          current (enhance/apply-write entity-id audited tx)]
                      current)))
                result
@@ -954,110 +823,87 @@
     final))
 
 (defn project-saved-entities
-  "Projects entity references after database save.
-
-  Converts temporary IDs to actual _eid values for relations and recursions.
-
-  Args:
-    analysis - Analysis map with :entity, :relations/one, :relations/many, :recursion
-
-  Returns:
-    Updated analysis with _eid values projected"
+  "Converts temporary IDs to actual _eid/xid values for relations and recursions
+   after database save. A tmp-id that never resolved is a DANGLING reference and
+   throws here — downstream `(filter second)` would drop it silently."
   [{:keys [entity :relations/one :relations/many recursion]
     :as analysis}]
-  (as-> analysis analysis
-    ;; Project to one relations
-    (reduce-kv
-     (fn [analysis
-          {from-table :from/table
-           to-table :to/table
-           :as table}
-          ks]
-       (assoc-in analysis [:relations/one table]
-                 (reduce
-                  (fn [result [from to]]
-                    (conj result
-                          [(get-in entity [from-table from :_eid])
-                           (get-in entity [to-table to :_eid])
-                           ;; carry the in-memory xids so link-relations can
-                           ;; denormalize from_xid/to_xid without a per-row
-                           ;; correlated subselect.
-                           (get-in entity [from-table from :xid])
-                           (get-in entity [to-table to :xid])]))
-                  []
-                  ks)))
-     analysis
-     one)
-    ;; Project to many relations
-    (reduce-kv
-     (fn [analysis
-          {from-table :from/table
-           to-table :to/table
-           :as table}
-          ks]
-       (assoc-in analysis [:relations/many table]
-                 (reduce
-                  (fn [result [from to]]
-                    (conj result
-                          [(get-in entity [from-table from :_eid])
-                           (get-in entity [to-table to :_eid])
-                           ;; carry the in-memory xids so link-relations can
-                           ;; denormalize from_xid/to_xid without a per-row
-                           ;; correlated subselect.
-                           (get-in entity [from-table from :xid])
-                           (get-in entity [to-table to :xid])]))
-                  []
-                  ks)))
-     analysis
-     many)
-    ;; Project to recursions
-    (reduce-kv
-     (fn [analysis table recursions]
-        ;; focus on recursions
-       (reduce-kv
-          ;; that are distributed as field parent children depth
-        (fn [analysis field bindings]
-            ;; Replace current temp ids with real :_eids
-          (assoc-in analysis [:recursion table field]
-                    (reduce-kv
-                     (fn [bindings parent children]
-                       (assoc bindings
-                              (get-in entity [table parent :_eid])
-                              (map #(get-in entity [table % :_eid]) children)))
-                     nil
-                     bindings)))
-        analysis
-        recursions))
-     analysis
-     recursion)))
+  (letfn [(eid [table tmp relation]
+            (when tmp
+              (or (get-in entity [table tmp :_eid])
+                  (throw-reference-not-found
+                   analysis table (get-in entity [table tmp]) relation))))
+          (xid [table tmp]
+            (when tmp (get-in entity [table tmp :xid])))]
+    (as-> analysis analysis
+      (reduce-kv
+       (fn [analysis
+            {from-table :from/table
+             to-table :to/table
+             relation :relation
+             :as table}
+            ks]
+         (assoc-in analysis [:relations/one table]
+                   (reduce
+                    (fn [result [from to]]
+                      (conj result
+                            [(eid from-table from relation)
+                             (eid to-table to relation)
+                             (xid from-table from)
+                             (xid to-table to)]))
+                    []
+                    ks)))
+       analysis
+       one)
+      (reduce-kv
+       (fn [analysis
+            {from-table :from/table
+             to-table :to/table
+             relation :relation
+             :as table}
+            ks]
+         (assoc-in analysis [:relations/many table]
+                   (reduce
+                    (fn [result [from to]]
+                      (conj result
+                            [(eid from-table from relation)
+                             (eid to-table to relation)
+                             (xid from-table from)
+                             (xid to-table to)]))
+                    []
+                    ks)))
+       analysis
+       many)
+      (reduce-kv
+       (fn [analysis table recursions]
+         (reduce-kv
+          (fn [analysis field bindings]
+            (assoc-in analysis [:recursion table field]
+                      (reduce-kv
+                       (fn [bindings parent children]
+                         (assoc bindings
+                                (eid table parent nil)
+                                (map #(eid table % nil) children)))
+                       nil
+                       bindings)))
+          analysis
+          recursions))
+       analysis
+       recursion))))
 
 ;;; ============================================================================
 ;;; Runtime Schema Generation (Database-Agnostic)
 ;;; ============================================================================
 
 (defn model->schema
-  "Converts ERDModel to runtime schema format for SQL query generation.
-
-  The schema is database-agnostic and works for PostgreSQL, SQLite, MySQL, etc.
-  Each database implementation interprets the schema according to its features.
-
-  Schema structure per entity:
-  {:table \"user\"
-   :name \"User\"
-   :fields {uuid {:key :email :euuid uuid :type \"string\" :constraint \"mandatory\"}
-            :modified_by {:key :modified_by :type \"user\" :reference/entity <user-uuid>}
-            :modified_on {:key :modified_on :type \"timestamp\"}}
-   :field->attribute {:field-name uuid}
-   :relations {:posts {:relation uuid :from uuid :to uuid :type :many ...}
-               :modified_by {:from uuid :to <user-uuid> :type :one ...}}
-   :recursions #{:parent}}"
+  "Converts ERDModel to the database-agnostic runtime schema used for SQL query
+   generation."
   ([] (model->schema (synthigy.dataset/deployed-model)))
   ([model]
    (reduce
     (fn [schema entity]
-      (let [euuid (id/extract entity)
+      (let [entity-id  (id/extract entity)
             table (entity->table-name entity)
-             ;; Build base fields from domain model attributes only
             base-fields (reduce
                          (fn [fields attr]
                            (let [attr-id (id/extract attr)
@@ -1068,34 +914,21 @@
                                  f {:key (keyword (normalize-name aname))
                                     (id/key) attr-id
                                     :type t
-                                    :constraint constraint}]
+                                    :constraint constraint
+                                    :skins (dk/label->skins aname)}]
                              (assoc fields attr-id
                                     (case t
                                       "enum"
-                                        ;; Store canonical enum name and values (database-agnostic)
-                                        ;; Values include :euuid for migration tracking (rename detection)
-                                        ;; Each DB implementation will map this appropriately:
-                                        ;;   PostgreSQL: CREATE TYPE "table_field" AS ENUM (...)
-                                        ;;   SQLite: CHECK (field IN (...))
-                                        ;;   MySQL: field ENUM('val1', 'val2')
                                       (assoc f
                                              :enum/name (normalize-name (str table \space aname))
                                              :enum/values (get-in config [:values]))
-                                        ;; Check if type is a reference (matches *reference-mapping*)
-                                        ;; If yes, add :reference/entity with the entity UUID
-                                      (if-some [ref-entity-uuid (core/reference-entity-uuid t)]
-                                        (assoc f :reference/entity ref-entity-uuid)
+                                      (if-some [ref-entity-id (core/reference-entity-id t)]
+                                        (assoc f :reference/entity ref-entity-id)
                                         f)))))
-                         {}  ; Start with empty map - audit comes from protocol
-                           ;; Only include active attributes (filter out deprecated/removed fields)
+                         {}
                          (filter :active (:attributes entity)))
 
-             ;; Get audit enhancement from protocol (infrastructure layer)
             audit-augmentation (enhance/augment-schema *db* entity)
-            ; _ (def entity entity)
-            ; _ (throw (Exception. "HEH"))
-
-             ;; Merge audit fields into base fields
             fields (core/deep-merge base-fields (:fields audit-augmentation))
 
             {relations :relations
@@ -1105,10 +938,8 @@
                (case t
                  "tree" :recursions
                  :relations))
-               ;; Only include active relations (filter out deprecated/removed)
              (filter :active (core/focus-entity-relations model entity)))
 
-             ;; Build relations from ERD model
             base-relations (reduce
                             (fn [relations
                                  {:keys [from to to-label cardinality]
@@ -1136,25 +967,18 @@
                             {}
                             relations)
 
-             ;; Merge audit relations from protocol (e.g., modified_by -> user)
             relations (core/deep-merge base-relations (:relations audit-augmentation))
             recursions (set (map (comp keyword normalize-name :to-label) recursions))
             mandatory-attributes (keep
                                   (fn [{:keys [constraint name]}]
-                                    (when (#{"mandatory" "unique+mandatory"} constraint)
+                                    (when (core/mandatory-constraint? constraint)
                                       (keyword (normalize-name name))))
                                   (:attributes entity))
-             ;; Compile RLS guards (if enabled for this entity)
             compiled-rls (rls/compile-entity-rls model entity)
-             ;; Build entity schema (audit fields and relations already merged above)
             entity-schema (cond->
                            {:table table
                             :name (:name entity)
                             :constraints (cond->
-                                          ;; :unique via the active-aware accessor —
-                                          ;; a composite unique key whose attribute was
-                                          ;; deactivated is dropped (all-or-nothing), so
-                                          ;; get/sync matching never keys on a dead combo.
                                           (assoc (get-in entity [:configuration :constraints])
                                                  :unique (core/get-entity-unique-constraints entity))
 
@@ -1168,16 +992,15 @@
                                                fields)
                             :recursions recursions
                             :relations relations}
-                             ;; Add :rls only if entity has RLS configured
                             compiled-rls
                             (assoc :rls compiled-rls))]
-        (assoc schema euuid entity-schema)))
+        (assoc schema entity-id  entity-schema)))
     {}
     (core/get-entities model))))
 
 (defn focus-order
-  "Function will remove nested :_order_by arguments
-  and keep only ones defined in schema root entity"
+  "Strips nested :_order_by args, keeping only the one on the schema root
+   entity."
   [{{order-by :_order_by} :args
     :as schema}]
   (if (some? order-by)
@@ -1190,9 +1013,8 @@
     schema))
 
 (defn schema->aggregate-cursors
-  "Given election schema produces cursors that point
-  to all connected entity tables. This is a way point to
-  pull linked data from db with single query"
+  "Produces cursors pointing to all connected entity tables for a single-query
+   pull."
   ([{:keys [relations]
      :as schema}]
    (schema->aggregate-cursors
@@ -1278,7 +1100,7 @@
                (mapv :tmp/id data')
                (:tmp/id data'))
        :root/table (:table (get (deployed-schema) entity))
-       :entity/euuid entity}
+       :entity/id entity}
       entity
       data'
       stack?)))
@@ -1288,10 +1110,28 @@
          type-mapping (memoize
                        (fn [{:keys [fields]}]
                          (reduce-kv
-                          (fn [result _ {:keys [type key]
-                                         ename :enum/name}]
-                            (assoc result key (or ename type)))
+                          ;; enum -> "enum", NEVER the PG type name: since
+                          ;; dataset 1.4.0 enums are TEXT and the type was
+                          ;; dropped, so a `?::<enum_type>` cast now fails.
+                          (fn [result _ {:keys [type key]}]
+                            (assoc result key type))
                           {(id/key) "uuid"}
+                          fields)))
+         ;; Enum enforcement lives HERE (dataset 1.4.0, enum = TEXT) — see docs.
+         enum-mapping (memoize
+                       (fn [{:keys [fields]}]
+                         (reduce-kv
+                          (fn [result _ {:keys [key] vs :enum/values}]
+                            (if (seq vs)
+                              (assoc result key
+                                     (into #{}
+                                           (comp
+                                            (remove #(false? (:active %)))
+                                            (keep :name)
+                                            (map normalized-enum-value))
+                                           vs))
+                              result))
+                          nil
                           fields)))
          reference-mapping (memoize
                             (fn [entity]
@@ -1316,16 +1156,12 @@
                                     (mapv (fn [e] (get-in fields [e :key])) constraints))
                                   unique)
                                  [(id/key)])))))
-         ;; Bundle every (entity, IAM-context)-stable derivation up so the
-         ;; per-row `transform-object` loop reads precomputed values instead
-         ;; of rederiving from schema on every row. Memoized per analyze-data
-         ;; call → cache lives for the batch + nested-relation walks, gets
-         ;; dropped when the call returns. IAM context is request-scoped, so
-         ;; relation-accessible? results are safe to bundle here.
+         ;; Per-call memoization of stable (entity, IAM-context) derivations
+         ;; so transform-object reads precomputed values per row — see docs.
          entity-profile
          (memoize
-          (fn [entity-euuid]
-            (let [{:keys [relations fields recursions] :as e} (find-entity entity-euuid)
+          (fn [entity-id]
+            (let [{:keys [relations fields recursions] :as e} (find-entity entity-id)
                   {refs true scalar-fields false}
                   (try
                     (group-by #(contains? % :reference/entity)
@@ -1336,28 +1172,36 @@
                         :data {:fields (vec (vals (dissoc fields :modified_by :modified_on)))}}
                        t)
                       (throw t)))
-                  cs (get-constraints entity-euuid)
+                  cs (get-constraints entity-id)
                   recursions-set (set recursions)
-                  ;; IAM-filtered relation keys: relation-accessible? throws on
-                  ;; deny, so this acts as an assertion. Once cached, per-row
-                  ;; cost is just the (contains? data k) check.
                   accessible-rel-keys
                   (into []
                         (keep (fn [k]
                                 (when-not (contains? recursions-set k)
                                   (let [{:keys [relation to from]} (get relations k)]
                                     (when (and relation
-                                               (relation-accessible? relation [from to] #{:write :owns}))
+                                               (access/relation-allows? relation [from to] #{:write :owns}))
                                       k)))))
-                        (keys relations))]
+                        (keys relations))
+                  scalar-field-keys (conj (mapv :key scalar-fields) (id/key))
+                  field->attribute (:field->attribute e)]
               {:entity            e
                :scalar-fields     scalar-fields
                :refs              refs
-               :scalar-field-keys (conj (mapv :key scalar-fields) (id/key))
+               :scalar-field-keys scalar-field-keys
                :constraints       cs
                :constraint-keys   (flatten cs)
                :recursions-set    recursions-set
-               :accessible-rel-keys accessible-rel-keys})))]
+               :accessible-rel-keys accessible-rel-keys
+               :accessible-rel-set (set accessible-rel-keys)
+               :entity-write?     (access/entity-allows? entity-id #{:create :update :owns})
+               :entity-read?      (access/entity-allows? entity-id #{:read :browse})
+               :denied-write-keys (into #{}
+                                        (filter (fn [k]
+                                                  (when-let [attr-id (get field->attribute k)]
+                                                    (not (access/attribute-allows? entity-id attr-id :write)))))
+                                        scalar-field-keys)
+               :inbound-cast      (:inbound-cast e)})))]
      (letfn [(get-indexes [data constraints]
                (remove
                 empty?
@@ -1370,29 +1214,39 @@
                  #(get-in current [:index table %])
                  indexes)
                 (tmp-key)))
-             (shallow-snake [data]
+             (shallow-snake [cast data]
                (reduce-kv
                 (fn [r k v]
                   (if-not k r
-                          (assoc r (csk/->snake_case_keyword k :separator #"[\s\-]") v)))
+                          (assoc r (or (get cast k) (dk/normalize-key k)) v)))
                 nil
                 data))
              (transform-object
-               ([entity-euuid data]
-                (transform-object nil entity-euuid data))
-               ([result entity-euuid {:keys [tmp/id]
+               ([entity-id data]
+                (transform-object nil entity-id data nil))
+               ([result entity-id data]
+                (transform-object result entity-id data nil))
+               ([result entity-id {:keys [tmp/id]
                                       :or {id (tmp-key)}
-                                      :as data}]
-                (entity-accessible? entity-euuid #{:write :owns})
-                (let [profile (entity-profile entity-euuid)
+                                      :as data}
+                 via-relation]
+                (let [profile (entity-profile entity-id)
                       {:keys [entity refs
                               scalar-field-keys
                               constraints constraint-keys
-                              accessible-rel-keys]} profile
-                      {:keys [relations recursions table]
+                              accessible-rel-keys accessible-rel-set
+                              entity-write? entity-read?
+                              denied-write-keys inbound-cast]} profile
+                      ;; the second half of this gate is below — never drop it
+                      _ (when-not (or entity-write? via-relation)
+                          (entity-accessible? entity-id #{:create :update :owns}))
+                      {:keys [relations recursions table field->attribute]
                        {mandatory-fields :mandatory} :constraints} entity
-                      data (shallow-snake (dissoc data :tmp/id))
+                      data (shallow-snake inbound-cast (dissoc data :tmp/id))
                       fields-data (select-keys data scalar-field-keys)
+                      _ (when-let [k (and (seq denied-write-keys)
+                                          (some denied-write-keys (keys fields-data)))]
+                          (attribute-writable? entity-id (get field->attribute k)))
                       _ (when (and (contains? data (id/key))
                                    (nil? (get data (id/key))))
                           (throw
@@ -1413,21 +1267,48 @@
                               {:data fields-data
                                :mandatory mandatory-fields}))))
                       type-mapping (type-mapping entity)
+                      enum-mapping (enum-mapping entity)
                       fields-data
                       (reduce
                        (fn [fd k]
                          (let [t (get type-mapping k)]
                            (update
                             fd k
-                            (case t
-                              ("boolean" "string" "int" "float" "timeperiod" "currency" "uuid" "transit" nil) identity
-                                ;; timestamp - encode via protocol (handles string → Instant conversion)
-                              "timestamp" (fn [v] (proto/encode *db* "timestamp" v))
-                              "hashed" (fn [v] (when v (hashers/derive v)))
+                            (if-let [allowed (get enum-mapping k)]
                               (fn [v]
                                 (when v
-                                  (proto/encode *db* t v)))))))
+                                  (let [label (normalized-enum-value (name v))]
+                                    (when-not (contains? allowed label)
+                                      (throw
+                                       (ex-info
+                                        (format "Value '%s' is not an active enum value for attribute '%s'. Allowed: %s"
+                                                label (name k) (str/join ", " (sort allowed)))
+                                        {:type ::invalid-enum-value
+                                         :attribute k
+                                         :value label
+                                         :allowed allowed})))
+                                    label)))
+                              (case t
+                                ;; "encrypted" is left as plaintext here on purpose — it is
+                                ;; sealed at the storage boundary (store-entity-records);
+                                ;; the backends refuse it as a TypeCodec type.
+                                ("boolean" "string" "int" "float" "timeperiod" "currency" "uuid" "transit" "encrypted" nil) identity
+                                "timestamp" (fn [v] (proto/encode *db* "timestamp" v))
+                                "hashed" (fn [v] (when v (hashers/derive v)))
+                                (fn [v]
+                                  (when v
+                                    (proto/encode *db* t v))))))))
                        fields-data
+                       (keys fields-data))
+                      ;; encrypted fields PRESENT in this payload — carried on `result`
+                      ;; as :encrypted so store-entity-records knows what to seal.
+                      encrypted-fields
+                      (reduce
+                       (fn [r k]
+                         (if (= "encrypted" (get type-mapping k))
+                           (conj (or r #{}) k)
+                           r))
+                       nil
                        (keys fields-data))
                       indexes (remove empty? (map #(select-keys fields-data %) constraints))
                       id (or
@@ -1442,13 +1323,24 @@
                        {:references-data nil
                         :resolved-references nil}
                        (select-keys data (map :key refs)))
+                      ;; accessible-rel-keys is memoized per entity, unaware of THIS
+                      ;; payload — a relation the role can't write and the payload
+                      ;; never mentions must stay silent (see valid-relation-keys),
+                      ;; but one the payload DOES reference must throw here, not
+                      ;; disappear as a no-op write the caller believes succeeded
+                      _ (doseq [k (keys data)]
+                          (when (and (contains? relations k)
+                                     (not (contains? recursions k))
+                                     (not (contains? accessible-rel-set k)))
+                            (let [{:keys [relation to from]} (get relations k)]
+                              (relation-accessible? relation [from to] #{:write :owns}))))
                       valid-relation-keys (filterv #(contains? data %) accessible-rel-keys)
                       relations-data (when (not-empty valid-relation-keys)
                                        (select-keys data valid-relation-keys))
                       recursions-data (select-keys data recursions)
                       [root parents-mapping]
                       (letfn [(normalize-value [v]
-                                (select-keys (shallow-snake v) constraint-keys))]
+                                (select-keys (shallow-snake inbound-cast v) constraint-keys))]
                         (reduce-kv
                          (fn [[r c] k v]
                            (if (nil? v)
@@ -1461,14 +1353,40 @@
                                        (not-empty references-data)
                                        (not-empty (apply dissoc fields-data [:_eid (id/key)])))
                                     fields-data
-                                    fields-data)]
+                                    fields-data)
+                      ;; references resolve INTO this row and recursion parents
+                      ;; UPDATE its FK — neither is a pointer, never drop these
+                      link-only-row? (and (not entity-write?)
+                                     (some? via-relation)
+                                     (empty? references-data)
+                                     (empty? parents-mapping)
+                                     (link-only? entity constraints (set (keys fields-data))))
+                      _ (when-not (or entity-write? link-only-row?)
+                          (entity-accessible? entity-id #{:create :update :owns}))
+                      _ (when (and link-only-row? (not entity-read?))
+                          (entity-accessible? entity-id #{:read :browse}))]
                   (as->
+                    ;; Take result and
                    (->
                     result
+                      ;; in case of stack merge all collected fields data, or in case of sync replace
+                      ;; last one wins
                     (update-in [:entity table id] (if stack? merge (fn [_ v] v)) fields-data)
-                    (assoc-in [:entity/mapping table] entity-euuid)
+                      ;; update entity table name to entity id
+                    (assoc-in [:entity/mapping table] entity-id)
+                      ;; encrypted fields on this table
+                    (cond-> encrypted-fields
+                      (update-in [:encrypted table] (fnil into #{}) encrypted-fields))
+                      ;; update indexes
                     (update-in [:index table] merge (zipmap indexes (repeat id)))
-                    (assoc-in [:constraint table] constraints))
+                      ;; set constraints for this table for further processing
+                    (assoc-in [:constraint table] constraints)
+                      ;; check if this is link operation
+                    (cond-> link-only-row? (update-in [:link-only table] (fnil conj #{}) id))
+                      ;; object the caller submitted itself, not one the walk
+                      ;; descended into — the only place this is knowable
+                    (cond-> (nil? via-relation)
+                      (update-in [:subject table] (fnil conj #{}) id)))
                    result
                     (reduce-kv
                      (fn [result k data]
@@ -1483,15 +1401,15 @@
                      parents-mapping)
                     (reduce-kv
                      (fn [result attribute data]
-                       (let [reference-entity-euuid (get
-                                                     (reference-mapping entity-euuid)
-                                                     attribute)
-                             reference-entity (find-entity reference-entity-euuid)
+                       (let [reference-entity-id (get
+                                                   (reference-mapping entity-id)
+                                                   attribute)
+                             reference-entity (find-entity reference-entity-id)
                              reference-data (some
-                                             (fn [ks]
-                                               (when (every? #(contains? data %) ks)
-                                                 (select-keys data ks)))
-                                             (get-constraints reference-entity-euuid))]
+                                              (fn [ks]
+                                                (when (every? #(contains? data %) ks)
+                                                  (select-keys data ks)))
+                                              (get-constraints reference-entity-id))]
                          (update-in
                           result
                           [:reference
@@ -1526,7 +1444,8 @@
                                      [:relations/many relation] (fnil conj #{})
                                      [id rid]))
                                    to
-                                   (assoc data :tmp/id rid))))
+                                   (assoc data :tmp/id rid)
+                                   relation)))
                               result
                               data))
                            :one
@@ -1544,7 +1463,8 @@
                                   [:relations/one relation] (fnil conj #{})
                                   [id rid]))
                                 to
-                                (assoc data :tmp/id rid)))))))
+                                (assoc data :tmp/id rid)
+                                relation))))))
                      result
                      relations-data)))))]
        (if (sequential? data)
@@ -1558,10 +1478,11 @@
   ([entity-id selection]
    (selection->schema entity-id selection nil))
   ([entity-id selection args]
-   (entity-accessible? entity-id #{:read :owns})
+   (entity-accessible? entity-id *operation-rules*)
    (let [{relations :relations
           recursions :recursions
           fields :fields
+          field->attribute :field->attribute
           _agg :_agg
           table :table
           rls :rls} (deployed-schema-entity entity-id)
@@ -1578,49 +1499,39 @@
                            (when (scalar-types t) k))
                          fields))
                        (id/key) :_eid)
-         ;; Pre-compute the relation-key set so the scalar walk below can
-         ;; tell a typo (`{movies: …}` when the entity has `movie`) from
-         ;; a legitimate relation key (which gets filtered into the
-         ;; `objects` branch at line 1615). Both `relations` keys and
-         ;; `refs` :key fields are valid here; `valid-relations` lower
-         ;; down (line 1537) widens the same set further with order-by /
-         ;; distinct-on relations, but those are args-side only.
          relation-key-set (cond-> (set (keys relations))
                             (not-empty refs) (clojure.set/union (set (map :key refs)))
                             (not-empty recursions) (clojure.set/union (set recursions)))
-         ;; Selection-level operators consumed by base-schema below
-         ;; (`:count` → :counted?; `:_count`/`:_agg` → aggregate folds).
-         ;; They appear as keys in the selection map but are NOT attributes,
-         ;; so the scalar walk passes them through as no-ops.
          selection-operator-keys #{:count :_count :_agg}
          scalars (reduce-kv
                   (fn [r k [{args :args}]]
                     (cond
-                      (valid-fields k)            (assoc r k args)
-                      ;; Alternate id key (`:euuid` in xid mode, `:xid` in euuid mode) —
-                      ;; wire-allowed but not a real column. The xid-structural
-                      ;; projection at line 1743 dual-projects both, so accepting it
-                      ;; here as a no-op preserves backwards-compat with selections
-                      ;; that include both id keys.
+                      (and (valid-fields k)
+                           (let [attr-id (get field->attribute k)]
+                             (or (nil? attr-id)
+                                 (access/attribute-allows? entity-id attr-id :read))))
+                      (assoc r k args)
+                      ;; attribute RBAC denial: silent strip, not an error (see
+                      ;; docs)
+                      (valid-fields k)            r
+                      ;; alternate id key, wire-allowed no-op (see docs)
                       (#{:xid :euuid} k)          r
                       (selection-operator-keys k) r
                       (relation-key-set k)        r       ; legit relation — handled by objects branch
                       :else
                       (throw (ex-info
-                               (str "Unknown attribute " (pr-str k)
-                                    " in selection on entity "
-                                    (:name (deployed-schema-entity entity-id)))
-                               (let [candidates (concat (map name valid-fields)
-                                                        (map name relation-key-set))]
-                                 (cond-> {:code "UNKNOWN_ATTRIBUTE"
-                                          :entity (:name (deployed-schema-entity entity-id))
-                                          :attribute (name k)
-                                          :rule "schema_attribute"
-                                          :path [:selections]}
-                                   ;; Skip Levenshtein on pathological-sized entities (>200 candidates).
-                                   ;; Wire still has entity + attribute so the client can act.
-                                   (<= (count candidates) 200)
-                                   (assoc :hint (suggest-similar (name k) candidates))))))))
+                              (str "Unknown attribute " (pr-str k)
+                                   " in selection on entity "
+                                   (:name (deployed-schema-entity entity-id)))
+                              (let [candidates (concat (map name valid-fields)
+                                                       (map name relation-key-set))]
+                                (cond-> {:code "UNKNOWN_ATTRIBUTE"
+                                         :entity (:name (deployed-schema-entity entity-id))
+                                         :attribute (name k)
+                                         :rule "schema_attribute"
+                                         :path [:selections]}
+                                  (<= (count candidates) 200)
+                                  (assoc :hint (suggest-similar (name k) candidates))))))))
                   {(id/key) nil}
                   selection)
          args (reduce-kv
@@ -1651,30 +1562,27 @@
                            ;;
                            (not-empty distinct-on-relations)
                            (clojure.set/union distinct-on-relations)
-                           ;; If there are some recursions add that relations as well
                            (not-empty recursions)
                            (clojure.set/union (set recursions)))
          type-mapping (zipmap (map :key fields) (map :type fields))
-         ;; Build decoders - delegate to TypeCodec protocol for database-agnostic decoding
-         ;; NOTE: We capture `*db*` value here because decoders may be called in futures
-         ;; where the dynamic binding is not conveyed
+         ;; *db* captured as a value — decoders may run in futures where the
+         ;; dynamic binding isn't conveyed.
          db *db*
          decoders (reduce
                    (fn [r k]
                      (if (valid-fields k)
                        (let [field-type (get type-mapping k)
+                             ;; every transform takes (data row); all but a few
+                             ;; ignore the row the apply sites always pass.
                              transform (case field-type
-                                          ;; Complex types - delegate to TypeCodec protocol
-                                         "encrypted" (fn [data] (proto/decode db "encrypted" data))
-                                         "json" (fn [data] (proto/decode db "json" data))
-                                         "boolean" (fn [data] (proto/decode db "boolean" data))
-                                          ;; enum - convert to keyword
-                                         "enum" (fn [data] (proto/decode db "enum" data))
-                                          ;; currency/period are scalar pass-throughs
-                                         ("currency" "period") (fn [data] (proto/decode db field-type data))
-                                          ;; If not a scalar type, it's a custom enum - delegate to protocol
+                                         "encrypted" (fn [data _] (denc/unseal-cell data))
+                                         "json" (fn [data _] (proto/decode db "json" data))
+                                         "boolean" (fn [data _] (proto/decode db "boolean" data))
+                                         "enum" (fn [data _] (proto/decode db "enum" data))
+                                         ("currency" "period") (fn [data _] (proto/decode db field-type data))
+                                         "timestamp" (fn [data _] (proto/decode db "timestamp" data))
                                          (if (and field-type (not (scalar-types field-type)))
-                                           (fn [data] (proto/decode db field-type data))
+                                           (fn [data _] (proto/decode db field-type data))
                                            nil))]
                          (if transform
                            (assoc r k transform)
@@ -1682,25 +1590,19 @@
                        r))
                    nil
                    (map key scalars))
+         ;; enum -> "enum" (a scalar type), so predicates bind a plain
+         ;; string; the PG enum type no longer exists (dataset 1.4.0).
          field->type (reduce
-                      (fn [result {f :key
-                                   t :type
-                                   e :enum/name}]
-                        (assoc result f (or e t)))
+                      (fn [result {f :key t :type}]
+                        (assoc result f t))
                       nil
                       fields)
-         ;; Operator + modifier keys recognized at any level of an args
-         ;; walk. Used to distinguish a legitimate args modifier from a
-         ;; typo'd attribute below. Per-field condition operators
-         ;; (`:_eq`, `:_in`, …) appear one level deeper than this walk
-         ;; reaches and are validated in process-where-conditions
-         ;; (UNKNOWN_OPERATOR throw at line 2099) — they're listed here
-         ;; defensively so a future change that walks deeper doesn't
-         ;; mistake them for typo'd attributes.
+         ;; Per-field condition operators (`:_eq` etc.) are listed here
+         ;; defensively though this walk never reaches them — see docs.
          args-operator-keys #{:_where :_or :_and :_not :_maybe :_count :_agg
                               :_limit :_offset :_order_by :_distinct :_join
                               :_eq :_neq :_lt :_lte :_le :_gt :_gte :_ge
-                              :_in :_nin :_not_in :_like :_ilike :_is_null}
+                              :_in :_nin :_not_in :_like :_ilike :_is_null :_is_not_null}
          arg-fields (letfn [(join-args
                               ([args] (join-args args #{}))
                               ([args result]
@@ -1710,27 +1612,21 @@
                                         (cond
                                           (valid-fields k)        (conj result k)
                                           (args-operator-keys k)  result
-                                          ;; Nested-relation args (`{movies: {_where ...}}`) — let the
-                                          ;; nested selection->schema call handle its own validation.
                                           (relation-key-set k)    result
-                                          ;; Plain attribute key at args top-level (the `{xid: "X"}` case)
-                                          ;; or any other unknown — typo. Throw with entity + attribute
-                                          ;; + hint so the client sees a typed error instead of an empty
-                                          ;; result from a silently-dropped predicate.
                                           :else
                                           (throw (ex-info
-                                                   (str "Unknown attribute " (pr-str k)
-                                                        " in args on entity "
-                                                        (:name (deployed-schema-entity entity-id)))
-                                                   (let [candidates (concat (map name valid-fields)
-                                                                            (map name relation-key-set))]
-                                                     (cond-> {:code "UNKNOWN_ATTRIBUTE"
-                                                              :entity (:name (deployed-schema-entity entity-id))
-                                                              :attribute (name k)
-                                                              :rule "schema_attribute"
-                                                              :path [:args]}
-                                                       (<= (count candidates) 200)
-                                                       (assoc :hint (suggest-similar (name k) candidates)))))))]
+                                                  (str "Unknown attribute " (pr-str k)
+                                                       " in args on entity "
+                                                       (:name (deployed-schema-entity entity-id)))
+                                                  (let [candidates (concat (map name valid-fields)
+                                                                           (map name relation-key-set))]
+                                                    (cond-> {:code "UNKNOWN_ATTRIBUTE"
+                                                             :entity (:name (deployed-schema-entity entity-id))
+                                                             :attribute (name k)
+                                                             :rule "schema_attribute"
+                                                             :path [:args]}
+                                                      (<= (count candidates) 200)
+                                                      (assoc :hint (suggest-similar (name k) candidates)))))))]
                                     (reduce clojure.set/union result'
                                             (concat
                                              (map join-args (vals (select-keys args [:_where :_maybe :_count :_agg])))
@@ -1738,37 +1634,24 @@
                                 result
                                 args)))]
                       (join-args args))
-         ;; Build encoders for query arguments using TypeCodec protocol
+         ;; A "uuid" ATTRIBUTE type stays pass-through (backend-unsafe to
+         ;; coerce blanket — uuid column on PG, TEXT on SQLite; the
+         ;; structural id key below is handled separately). See docs.
          encoders (cond->
                    (reduce
                     (fn [result field]
                       (let [t (get field->type field)]
                         (case t
-                          ;; Native types - no encoding needed. NOTE: a "uuid"
-                          ;; ATTRIBUTE type is left as pass-through here — it is a
-                          ;; uuid column on PG (string args would hit `uuid =
-                          ;; varchar`) but TEXT on SQLite, so a blanket coercion
-                          ;; is backend-unsafe. The structural id key is handled
-                          ;; below (euuid-gated). uuid-typed user attributes on PG
-                          ;; remain a separate, pre-existing gap.
                           ("boolean" "string" "int" "float" "json"
                                      "timeperiod" "currency"
                                      "uuid" "hashed" "transit" nil) result
-                          ;; Timestamp - use protocol for database-specific encoding
-                          ;; PostgreSQL: pass Instant directly (JDBC handles conversion)
-                          ;; SQLite: convert to ISO-8601 string (text comparison works)
                           "timestamp" (assoc result field
                                              (fn [v] (proto/encode *db* "timestamp" v)))
-                          ;; Default: enum types - use protocol
                           (assoc result field (fn [v] (proto/encode *db* t v))))))
                     nil
                     arg-fields)
-                   ;; The structural id column isn't a model attribute (no
-                   ;; field->type entry), so add its coercion explicitly via the
-                   ;; id seam. `id/coerce-arg` is a no-op in xid mode (varchar);
-                   ;; in euuid mode it binds a uuid (PG refuses uuid = varchar).
-                   true
-                   (assoc (id/key) id/coerce-arg))
+                    true
+                    (assoc (id/key) id/coerce-arg))
          objects (apply dissoc selection (keys scalars))
          narrow-relations (reduce-kv
                            (fn [rs rkey rdata]
@@ -1850,7 +1733,21 @@
                                     relations
                                     recursions))))
          aggregate-keys [:_count :_agg]
-         ;; Build base schema
+         ;; typed error instead of the old `:relation/table nil` NPE (see docs)
+         count-agg-rdata (fn [rkey]
+                           (or (get relations rkey)
+                               (throw (ex-info
+                                       (str "Unknown relation " (pr-str rkey)
+                                            " in selection on entity "
+                                            (:name (deployed-schema-entity entity-id)))
+                                       (let [candidates (map name (keys relations))]
+                                         (cond-> {:code "UNKNOWN_ATTRIBUTE"
+                                                  :entity (:name (deployed-schema-entity entity-id))
+                                                  :attribute (name rkey)
+                                                  :rule "schema_attribute"
+                                                  :path [:selections]}
+                                           (<= (count candidates) 200)
+                                           (assoc :hint (suggest-similar (name rkey) candidates))))))))
          base-schema (as-> (hash-map
                             :entity entity-id
                             :entity/as (str (gensym "data_"))
@@ -1886,7 +1783,7 @@
                                  (reduce-kv
                                   (fn [schema relation specifics]
                                     (let [rkey (keyword (name relation))
-                                          rdata (get relations rkey)
+                                          rdata (count-agg-rdata rkey)
                                           relation (->
                                                     rdata
                                                     (dissoc :_count)
@@ -1912,27 +1809,15 @@
                                   operations))
                                schema
                                fields)
-                              ;; `_agg` schema build, `_count`-pattern parity:
-                              ;;
-                              ;;   :_agg [{:selections {<rel>
-                              ;;           [{:alias? :args? :selections {<attr> [{:selections {<fn> nil}} ...]}}
-                              ;;            ...]}}]
-                              ;;
-                              ;; Each entry stores its own filtered/aliased view of
-                              ;; the same source relation. Entries on the same
-                              ;; relation SHARE one gensym pair (`link_X` /
-                              ;; `data_X`); per-entry predicates ride on each
-                              ;; entry's :args and surface only as SELECT-side
-                              ;; case-when material in `pull-numerics`. This is
-                              ;; the same Aggregate Hoist principle we use for
-                              ;; `_count`.
+                              ;; Aggregate Hoist principle (same as :_count) —
+                              ;; see docs.
                               :_agg
                               (reduce
                                (fn [schema {operations :selections}]
                                  (reduce-kv
                                   (fn [schema relation entries]
                                     (let [rkey (keyword (name relation))
-                                          rdata (get relations rkey)
+                                          rdata (count-agg-rdata rkey)
                                           base-rel (->
                                                     rdata
                                                     (dissoc :_agg)
@@ -1949,7 +1834,8 @@
                                                     entry-args  :args
                                                     agg-specifics :selections}]
                                          (let [akey (keyword (or entry-alias rkey))
-                                               ;; Same gensym as siblings; own predicate.
+                                               ;; Same gensym as siblings; own
+                                               ;; predicate.
                                                entry-rel (-> base-rel
                                                              (assoc :args (cond-> {:_join :LEFT}
                                                                             (seq entry-args) (merge entry-args))))
@@ -1990,39 +1876,31 @@
                                fields)))
                           schema
                           (select-keys selection aggregate-keys))))]
-     ;; NEW: Apply access enhancement
-     ;; The enhancement system uses dynamic bindings *user*, *roles*, *groups*
+     ;; Absent-:_join is interpreted at read time by `relation-left?`, not
+     ;; stamped here — see the FLAT-LEFT DECREE in docs.
      (enhance/apply-schema base-schema selection))))
 
 ;;; ============================================================================
 ;;; SQL Generation Functions (Shared - Database-Agnostic)
 ;;; ============================================================================
 
+(defn j-and
+  "Joins SQL condition strings with \" and \". [\"a\" \"b\"] => \"a and b\"."
+  [statements]
+  (clojure.string/join " and " statements))
+
 (defn distinct->sql
-  ([{{args :_distinct} :args
-     :as schema}]
-   (when args
-     (str
-      "distinct on ("
-      (clojure.string/join
-       ", "
-       (letfn [(process-distinct [{:keys [entity/as]
-                                   :as schema} {:keys [attributes]
-                                                :as args}]
-                 (reduce-kv
-                  (fn [result field distinct-on]
-                    (if (empty? distinct-on) result
-                        (into
-                         result
-                         (process-distinct (get-in schema [:relations field]) distinct-on))))
-                  (mapv #(vector as %) attributes)
-                  (dissoc args :attributes)))]
-         (reduce
-          (fn [result [table field]]
-            (conj result (str (when table (str table \.)) (name field))))
-          []
-          (process-distinct schema args))))
-      \)))))
+  "Emits a `distinct on (\"f1\", \"f2\") ` prefix for the root SELECT.
+
+   ponytail: root attributes only. Relation-scoped distinct-on isn't
+   supported — the level-oriented pull builds one SELECT per level and
+   never joins child tables into the root, so there's nothing to be
+   distinct *on* across levels."
+  [{{fields :_distinct} :args}]
+  (when (seq fields)
+    (str "distinct on ("
+         (clojure.string/join ", " (map #(str \" (name %) \") fields))
+         ") ")))
 
 (defn modifiers-selection->sql
   ([{operators :args
@@ -2074,16 +1952,9 @@
 (def ^:dynamic *ignore-maybe* true)
 (def ^:dynamic *deep* true)
 
-;; When TRUE, `query-selection->sql` skips `:_where` clauses for
-;; relations that declare `:_join "left"` — those predicates have
-;; already been embedded in the JOIN ON clause by `search-stack-from`,
-;; so re-emitting them in WHERE would double-apply (and turn LEFT
-;; into effective INNER via NULL-rejection).
-;;
-;; The root-query path (`search-entity-roots` etc.) binds this true.
-;; The pull-query path leaves it false — pull runs a separate SELECT
-;; against the relation's table, with no parent JOIN, so the relation's
-;; `:_where` belongs in WHERE there.
+;; When true, skips `:_where` for LEFT relations already embedded in the
+;; JOIN ON clause — re-emitting in WHERE would double-apply and turn LEFT
+;; into effective INNER via NULL-rejection. See docs.
 (def ^:dynamic *skip-left-where* false)
 
 (defn query-selection->sql
@@ -2095,17 +1966,6 @@
      field-types :field-types
      :as schema} data]
    (let [is-relation? (set (keys relations))
-         ;; Both Postgres and Cockroach store JSON as jsonb and need
-         ;; `column #>> '{}'` to extract a JSON string back to text for
-         ;; equality predicates. SQLite stores JSON as TEXT so no
-         ;; unwrapping needed.
-         postgres? (or (instance? synthigy.db.Postgres *db*)
-                       (instance? synthigy.db.Cockroach *db*))
-         ;; LEFT-joined relations: their `:_where` predicates belong in
-         ;; the JOIN ON clause (handled by `search-stack-from`), not in
-         ;; the global WHERE — otherwise NULL-rejection from the WHERE
-         ;; turns a LEFT JOIN into an effective INNER. We skip `:_where`
-         ;; here when the schema declares `:_join "left"`.
          left-relation? (= "left"
                            (some-> (:_join operators)
                                    ((fn [v] (if (keyword? v) (name v) v)))
@@ -2113,22 +1973,14 @@
      (reduce
       (fn [[statements data] [field constraints]]
         (let [field-type (get field-types field)
-              ;; For JSON fields on PostgreSQL, use ->> to extract as text for string comparisons
-              ;; This extracts the actual string value from JSON, not the JSON representation
-              ;; SQLite stores JSON as TEXT so no special handling needed
               field' (if (not-empty prefix) (str prefix \. (name field)) (name field))
-              field' (if (and postgres? (= "json" field-type))
-                       (str "(" field' " #>> '{}')")
+              field' (if (= "json" field-type)
+                       (db/json-text *db* field')
                        field')
-              ;; PG enum predicates need an explicit `::enum_type` cast on the
-              ;; placeholder. Without it JDBC binds the value as varchar and PG
-              ;; sees `enum = varchar` / `enum IN (varchar, ...)` with no
-              ;; matching operator (ERROR: operator does not exist). Enum field
-              ;; types carry the canonical PG enum name (e.g. "project_task_priority")
-              ;; — anything not in `scalar-types` is a custom enum. SQLite has
-              ;; no enums so `ph` stays `?`.
-              ph (if (and postgres? field-type (not (scalar-types field-type)))
-                   (str "?::" field-type)
+               ;; typed placeholders on backends where JDBC would otherwise
+               ;; bind a plain varchar — see db/Dialect.
+              ph (if (and field-type (not (scalar-types field-type)))
+                   (db/cast-placeholder *db* field-type)
                    "?")]
            ;;
           (if (boolean? constraints)
@@ -2139,16 +1991,13 @@
               [(conj statements (str (name field) " = " constraints))])
              ;;
             (if (is-relation? field)
-               ;; When specified field is nested relation
               (if-not *deep* [statements data]
                       (let [[statements' data'] (query-selection->sql (get-in schema [:relations field]))]
                         [(into statements statements')
                          (into data data')]))
 
-               ;; Handle fields. When LEFT relation + skip mode, drop
-               ;; everything except meta-keys — predicates and combinators
-               ;; (whether `:_where`/`:_or`/`:_and` or flat field keys)
-               ;; have moved to JOIN ON.
+               ;; LEFT relation + skip mode: drop everything but meta-keys —
+               ;; predicates already moved to JOIN ON (see *skip-left-where*).
               (let [meta-key? (or (= :_join field)
                                   (#{:_limit :_offset :_order_by :_distinct} field))
                     skip-pred? (and *skip-left-where* left-relation? (not meta-key?))]
@@ -2156,7 +2005,7 @@
                   skip-pred? [statements data]
                   :else
                   (case field
-                    ;;
+                     ;;
                     :_where
                     (cond
                       (not *deep*) [statements data]
@@ -2164,7 +2013,7 @@
                       (let [[statements' data'] (query-selection->sql (assoc schema :args constraints))]
                         [(conj statements [:and statements'])
                          (into data data')]))
-                ;; Ignore for now...
+                     ;; Ignore for now...
                     :_maybe
                     (if *ignore-maybe* [statements data]
                         (binding [*deep* false]
@@ -2174,10 +2023,10 @@
                                                          (dissoc :relations)))]
                             [(conj statements [:or statements'])
                              (into data data')])))
-                ;; Ignore join
+                     ;; Ignore join
                     :_join
                     [statements data]
-                ;;
+                     ;;
                     :_and
                     (update
                      (reduce
@@ -2199,7 +2048,7 @@
                                " and "
                                statements')
                               ")"))))
-                ;;
+                     ;;
                     :_or
                     (update
                      (reduce
@@ -2221,10 +2070,25 @@
                                " or "
                                statements')
                               ")"))))
-                 ;; Ignore limit distinct offset
+                     ;;
+                    :_not
+                     ;; negates the AND of its clause map; SQL 3-valued logic
+                     ;; applies
+                    (if-not *deep*
+                      [statements data]
+                      (let [[statements' data'] (query-selection->sql
+                                                 (assoc schema :args constraints))]
+                        (if (empty? statements')
+                          [statements data]
+                          [(conj statements
+                                 (str "not ("
+                                      (clojure.string/join " and " statements')
+                                      ")"))
+                           (into data data')])))
+                     ;; Ignore limit distinct offset
                     (:_limit :_offset :_order_by :_distinct)
                     [statements data]
-                ;; Default handlers
+                     ;; Default handlers
                     (if (keyword? constraints)
                       (case constraints
                         :is_null [(conj statements (format "%s is null" field')) data]
@@ -2242,9 +2106,9 @@
                                              :_in (if-not (empty? cv)
                                                     (format "%s in (%s)" field' (clojure.string/join "," (repeat (count cv) ph)))
                                                     "")
-                                             :_not_in (if-not (empty? cv)
-                                                        (format "%s not in (%s)" field' (clojure.string/join "," (repeat (count cv) ph)))
-                                                        "")
+                                             (:_nin :_not_in) (if-not (empty? cv)
+                                                                (format "%s not in (%s)" field' (clojure.string/join "," (repeat (count cv) ph)))
+                                                                "")
                                              (:_le  :_lte) (str field' " <= " ph)
                                              (:_ge  :_gte) (str field' " >= " ph)
                                              :_eq (str field' " = " ph)
@@ -2255,8 +2119,8 @@
                                              :_ilike (str field' " " (proto/like-operator *db* false) " " ph)
                                              :_limit (str field' " limit ?")
                                              :_offset (str field' " offset ?")
-                                             ;; Unknown operator — structured error so callers
-                                             ;; can branch and see what went wrong.
+                                             :_is_null (str field' (if cv " is null" " is not null"))
+                                             :_is_not_null (str field' " is not null")
                                              (do
                                                (log/error {:id ::nested-condition-error
                                                            :data {:constraint cn
@@ -2268,15 +2132,19 @@
                                                  (str "Unknown operator " (pr-str cn)
                                                       " in predicate. Supported: "
                                                       ":_eq :_neq :_lt :_lte :_gt :_gte "
-                                                      ":_in :_not_in :_like :_ilike :_is_null")
+                                                      ":_in :_nin :_not_in :_like :_ilike "
+                                                      ":_is_null :_is_not_null")
                                                  {:code "UNKNOWN_OPERATOR"
                                                   :operator cn
                                                   :path [:_where]}))))
                                  data (case cn
-                                        (:_in :_not_in) (into data'
-                                                              (if-let [e (get encoders field)]
-                                                                (map e cv)
-                                                                cv))
+                                        (:_in :_nin :_not_in) (into data'
+                                                                    (if-let [e (get encoders field)]
+                                                                      (map e cv)
+                                                                      cv))
+                                          ;; IS [NOT] NULL has no placeholder —
+                                          ;; bind nothing.
+                                        (:_is_null :_is_not_null) data'
                                         (conj data' (if-let [e (get encoders field)]
                                                       (e cv)
                                                       cv)))]
@@ -2332,27 +2200,15 @@
           data])))))
 
 (def ^:private meta-arg-keys
-  "Args keys that are NOT field predicates — they're metadata about the
-   query (join type, paging, ordering, distinct). Everything else in
-   args is either a field-name predicate or an explicit predicate
-   combinator (`:_or` / `:_and` / legacy `:_where` / `:_maybe`)."
+  "Args keys that are query metadata (join/paging/ordering/distinct), not field predicates."
   #{:_join :_limit :_offset :_order_by :_distinct :_count :_agg})
 
-(defn- relation-on-predicate
-  "Build a SQL predicate fragment + data values from a LEFT relation's
-   args, scoped to its `:entity/as` alias. Reads field predicates flat
-   from the args (everything except meta-keys); also accepts the legacy
-   `:_where` wrapper if present. Returns `[sql-fragment data-vec]`, or
-   nil if no predicate.
-
-   The fragment lands in the JOIN ON clause so LEFT semantics actually
-   keep parents without a matching joined row — without this, `WHERE`'s
-   null-rejection (`x = TRUE` is null when the LEFT join produced no
-   row) collapses LEFT into effective INNER."
+(defn relation-on-predicate
+  "Builds a LEFT relation's JOIN ON predicate fragment + data values; without it
+   WHERE's null-rejection would collapse LEFT into INNER."
   [relation-schema]
   (let [args      (:args relation-schema)
-        ;; Backward compat: if a client/test still wraps in :_where,
-        ;; unwrap it. New compile output emits flat.
+        ;; legacy :_where wrapper unwrapped for back-compat
         legacy    (:_where args)
         flat      (apply dissoc args (cons :_where meta-arg-keys))
         where-args (cond
@@ -2378,55 +2234,38 @@
 ;;; ============================================================================
 ;;; Inner-relation root scoping via EXISTS
 ;;; ============================================================================
-;;
-;; Root-finding must NOT join through constrained relations: a JOIN
-;; multiplies root rows (one per matching child), so `_limit` then slices
-;; the *joined* set and yields fewer than N distinct roots. The historic
-;; `DISTINCT ON` hotfix only collapsed those duplicates when no `_order_by`
-;; was present (Postgres requires the DISTINCT ON expr to lead ORDER BY).
-;; `EXISTS` correlated subqueries scope the root without multiplying rows,
-;; so `_limit` + `_order_by` are exact and no DISTINCT is needed.
+;; Root-finding must NOT join through constrained relations (row
+;; multiplication breaks _limit/_order_by) — EXISTS scopes without
+;; multiplying. See docs "inner-exists" for full rationale.
 
-(defn- sql-quote
+(defn sql-quote
   "Double-quote a SQL identifier."
   [s]
   (str \" (str/replace (name s) "\"" "") \"))
 
-(defn- sql-alias
+(defn sql-alias
   "A statement-unique SQL alias with prefix `p` (gensym-backed)."
   [p]
   (name (gensym (str "__" p))))
 
-(defn- relation-left?
-  "True when a relation's args mark it as a LEFT join — a left relation
-   never scopes its parent, so it contributes no root predicate."
-  [args]
-  (or (contains? args :_maybe)
-      (boolean (#{:left :LEFT "left" "LEFT"} (:_join args)))))
-
-(defn- relation-has-filter?
+(defn relation-has-filter?
   "True when a relation's args carry actual field predicates (not just
    query metadata like :_limit / :_order_by)."
   [args]
   (boolean (seq (apply dissoc args meta-arg-keys))))
 
+(defn relation-left?
+  "True when a relation does not scope its parent — see THE FLAT-LEFT DECREE in
+   docs; absent `:_join` is LEFT, unconditionally. PUBLIC and the single source
+   of truth."
+  [args]
+  (or (contains? args :_maybe)
+      (nil? (:_join args))
+      (boolean (#{:left :LEFT "left" "LEFT"} (:_join args)))))
+
 (defn inner-exists
-  "For each INNER (non-left) relation of `schema`, an `EXISTS (...)`
-   correlated subquery scoped to `alias`: the parent row is kept only
-   when a matching child exists.
-
-   Per XSQL.md line 232: `-rel` is INNER = 'drop parent if no child
-   match'. Existence-of-a-child IS the filter — so we emit an EXISTS
-   for every INNER relation, even when neither the relation nor any
-   deeper inner relation carries an additional predicate. Predicates
-   on the relation or on deeper inner relations narrow the EXISTS
-   further; the existence check itself is always present.
-
-   LEFT relations never scope their parent and are skipped. Returns
-   `[sql params]`, or nil when no inner relations are present.
-
-   Used by `search-entity-roots` to filter roots without JOINing through
-   relations — no row multiplication, so `_limit`/`_order_by` are exact."
+  "`[sql params]` (or nil) of EXISTS-scoped correlated subqueries for `schema`'s
+   INNER relations at `alias` — see EXISTS root-scoping perf note in docs."
   [schema alias]
   (let [preds
         (keep
@@ -2438,14 +2277,8 @@
                      [fsql fdata] (when (relation-has-filter? args)
                                     (relation-on-predicate rel))
                      [csql cdata] (inner-exists rel ex)
-                     ;; The junction row alone proves existence. Only join
-                     ;; through to the target entity (`ex`) when something
-                     ;; actually references it: a predicate ON the target
-                     ;; (`fsql`) or a deeper inner-exists correlated to `ex`
-                     ;; (`csql`). For a bare INNER relation (no filter, no
-                     ;; nested inner) the join makes Postgres materialize the
-                     ;; whole junction⨝target instead of an index-only semi
-                     ;; join — see EXISTS root-scoping perf notes.
+                     ;; Join through to target only if referenced — see EXISTS
+                     ;; root-scoping perf note in docs.
                      needs-target? (or (seq fsql) (seq csql))]
                  [(str "exists (select 1 from "
                        (if (:recursion? rel)
@@ -2465,12 +2298,9 @@
       [(str/join " and " (map first preds)) (vec (mapcat second preds))])))
 
 (defn search-stack-from
-  "For given schema function will return FROM statement
-  by joining tables in schema based on args available
-  in schema. Returns `[tables from-sql join-on-data]` —
-  `join-on-data` carries `?` parameter values for predicates
-  embedded in LEFT JOIN ON clauses (positional, in source order),
-  to be prepended to the WHERE-clause data when binding."
+  "Builds the FROM clause by joining schema's tables; returns `[tables from-sql
+   join-on-data]`, `join-on-data` carrying LEFT JOIN ON-clause params in source
+   order."
   [schema]
   (letfn [(targeting-args? [args]
             (when args
@@ -2511,6 +2341,8 @@
                             arg-locations)]
               (if-not (empty? targeted) targeted
                       [zipper])))
+          ;; INNER default deliberately NOT touched by the FLAT-LEFT decree —
+          ;; see docs "search-stack-from's ->join default".
           (->join [{:keys [args]}]
             (if (:_maybe args) "left"
                 (str/lower-case (name (:_join args :INNER)))))]
@@ -2530,17 +2362,17 @@
                                     (fn [[tables stack join-data] location]
                                       (loop [[[_ parent] [_ current] :as nodes]
                                              (conj (vec (clojure.zip/path location)) (clojure.zip/node location))
-                                    ;;
+                                             ;;
                                              tables tables
                                              stack stack
                                              join-data join-data]
                                         (if (empty? current)
-                                 ;; Return final result
+                                          ;; Return final result
                                           [(conj tables (:entity/as parent)) stack join-data]
-                                 ;; Otherwise recur
+                                          ;; Otherwise recur
                                           (let [{:keys [entity/as
                                                         entity/table]} parent
-                                       ;;
+                                                ;;
                                                 {as-child :entity/as
                                                  child-table :entity/table
                                                  as-link :relation/as
@@ -2548,9 +2380,9 @@
                                                  tf :to/field
                                                  link-table :relation/table} current
                                                 join (->join current)
-                                      ;; LEFT-relation predicates land here,
-                                      ;; embedded in the JOIN ON clause so
-                                      ;; the LEFT semantic survives.
+                                                ;; LEFT-relation predicates land here,
+                                                ;; embedded in the JOIN ON clause so
+                                                ;; the LEFT semantic survives.
                                                 [on-pred on-data] (when (= "left" join)
                                                                     (relation-on-predicate current))
                                                 on-suffix (if on-pred (str " and " on-pred) "")
@@ -2606,62 +2438,49 @@
                      :parents (vec parents)
                      :found-records (vec found-records)}}
              "Pulling entity for parents")
-  ;; Pull-query runs a separate SELECT per relation. There's no parent
-  ;; JOIN here, so `:_join "left"` on the relation's args is meaningless
-  ;; at this layer; strip it so the relation's own FROM uses the default
-  ;; INNER JOIN (link → target table). The relation's `:_where` stays
-  ;; in `:args` and lands in WHERE — which is correct here, since pull
-  ;; is filtering "give me only the joined rows that match."
-  (let [schema (update schema :args dissoc :_join)
-        [_ from maybe-data] (search-stack-from schema)
+  (let [level (-> schema (dissoc :relations) (update :args dissoc :_join))
+        [_ from maybe-data] (search-stack-from level)
         _ (log/trace {:id ::pull-where-args :data {:table table}}
                      "Looking for WHERE args")
-        [where d] (search-stack-args schema)
-        ; _ (log/tracef "[%s] Looking for FOUND args" table)
-        ; [found fd] (when-some [found-records (not-empty (keep #(when (some? %) %) found-records))]
-        ;              (search-stack-args
-        ;               (assoc schema :args
-        ;                      ; {:_eid {:_in found-records}})))
-        ;                      {:_eid {:_in parents}})))
+        [where d] (search-stack-args level)
         _ (log/trace {:id ::pull-parent-args :data {:table table}}
                      "Looking for PARENT args")
-        ;; RLS guards are already applied via [where d] above against the
-        ;; entity's own alias. Strip :rls here so enhance/args doesn't
-        ;; re-apply them against the junction alias (`ras` = link_NNN),
-        ;; which has no _eid column and explodes with "no such column".
         [parented pd] (if (= talias "_eid")
-                        ;; If direct binding (in entity table)
                         (search-stack-args
-                         (-> schema
+                         (-> level
                              (dissoc :rls)
                              (assoc :args {:_eid {:_in parents}}
                                     :entity/as ras)))
-                        ;; Otherwise
                         (search-stack-args
-                         (-> schema
+                         (-> level
                              (dissoc :rls)
                              (assoc :args {(keyword falias) {:_in parents}}
                                     :entity/as ras))))
-        ;; TODO - When using found records it breaks when _limit is set prior in query
-        ;; hierarchy... To the point... This will not work if lets say some search query
-        ;; is sent that has _limit: 100, because it will return 100 root records with
-        ;; and if there are some _eids in related data it will be limited to 100 in
-        ;; found records
-        ;; ignore found records so that search is restarted
-        ; [where data] [(clojure.string/join " and " (remove nil? [where found parented]))
-        ;               (reduce into [] (remove nil? [d fd pd]))]
-        [where data] [(clojure.string/join " and " (remove nil? [where parented]))
-                      (reduce into [] (remove nil? [d pd]))]
-        modifiers (modifiers-selection->sql schema)]
-    (into
-     [(str "select " (if (= talias "_eid")
-                       (str ras "._eid as " falias)
-                       (str ras \. falias \, ras \. talias))
-           (when-not (empty? fields) (str "," (extend-fields (keys fields) as)))
-           \newline "from " from
-           (when where (str "\nwhere " where))
-           (when modifiers (str \newline modifiers)))]
-     ((fnil into []) maybe-data data))))
+        [exists-sql exists-data] (inner-exists schema as)
+        where (clojure.string/join " and " (remove clojure.string/blank? [where parented exists-sql]))
+        data (reduce into [] (remove nil? [d pd exists-data]))
+        {:keys [_limit _offset]} (:args schema)
+        windowed? (or _limit _offset)
+        order-sql (modifiers-selection->sql (update level :args dissoc :_limit :_offset))
+        partition-col (if (= talias "_eid") (str ras "._eid") (str ras \. falias))
+        base (str "select " (if (= talias "_eid")
+                              (str ras "._eid as " falias)
+                              (str ras \. falias \, ras \. talias))
+                  (when-not (empty? fields) (str "," (extend-fields (keys fields) as)))
+                  (when windowed?
+                    (str ", row_number() over (partition by " partition-col
+                         (when-not (clojure.string/blank? order-sql) (str " " order-sql))
+                         ") as __rn"))
+                  \newline "from " from
+                  (when-not (clojure.string/blank? where) (str "\nwhere " where)))
+        sql (if windowed?
+              (let [lo (long (or _offset 0))]
+                (str "select * from (" base ") __w\nwhere __w.__rn > " lo
+                     (when _limit (str " and __w.__rn <= " (+ lo (long _limit))))
+                     "\norder by __w.__rn"))
+              (cond-> base
+                (not (clojure.string/blank? order-sql)) (str \newline order-sql)))]
+    (into [sql] ((fnil into []) maybe-data data))))
 
 (defn deep-merge
   "Deep merge multiple maps. nil values do not overwrite populated
@@ -2710,21 +2529,13 @@
                   (if-not (contains? schema :_count)
                     nil
                     (fetch-on-conn
-                     (let [;; Aggregate Hoist: entries in :_count that target the same
-                          ;; source relation share gensym aliases (selection->schema
-                          ;; assigns one :relation/as / :entity/as pair per source
-                          ;; relation, then reuses it across all entries pointing at
-                          ;; it). Group by that pair so the FROM walk emits exactly
-                          ;; one LEFT JOIN per group; the per-entry predicate moves
-                          ;; entirely into the SELECT-side `case when`.
+                     (let [;; Aggregate Hoist: group :_count entries sharing a gensym pair into one LEFT JOIN — see docs.
                            join-groups (group-by (fn [[_ s]]
                                                    [(:relation/as s) (:entity/as s)])
                                                  counted)
-                          ;; One representative per group → :relations for the FROM.
-                          ;; We force :_join :LEFT so search-stack-from emits LEFT
-                          ;; (the count must preserve parents-with-zero); we do NOT
-                          ;; carry per-entry predicate args here — those become
-                          ;; case-when conditions in the SELECT, never JOIN ON.
+                          ;; One rep per group, forced :_join :LEFT (count
+                          ;; preserves parents-with-zero); per-entry predicates
+                          ;; become case-when, not JOIN ON.
                            join-relations (into {}
                                                 (map (fn [[_ entries]]
                                                        (let [[k entry-schema] (first entries)]
@@ -2738,13 +2549,9 @@
                                       (cond-> (and parents (not root?))
                                         (update :args assoc-in [:_eid :_in] parents)))
                            [_ from] (search-stack-from schema)
-                          ;;
-                          ;; SELECT columns walk every entry (not the deduped set):
-                          ;; one count column per entry, sharing the join with its
-                          ;; group-mates via the common etable. query-selection->sql
-                          ;; renders predicate args as flat per-field stmts now —
-                          ;; no `_maybe` wrapping — so we AND-join them ourselves
-                          ;; for the case-when condition.
+                          ;; SELECT columns walk every entry, not the deduped
+                          ;; join set; predicate stmts AND-joined for the
+                          ;; case-when condition.
                            [count-selections from-data]
                            (reduce-kv
                             (fn [[statements data] as {etable :entity/as :as entry-schema}]
@@ -2763,14 +2570,11 @@
                                  (if (seq stmt-data) (into data stmt-data) data)]))
                             [[] []]
                             counted)
-                          ;;
                           ;; [where where-data]  (search-stack-args schema)
-                          ;; TODO - ignore where for now, as it should be part of
-                          ;; count-selections
-                          ;; A nested count is scoped by its parent JOIN; a root
-                          ;; count has no such JOIN, so the matched root _eids
-                          ;; become an explicit predicate — otherwise the count
-                          ;; aggregates the entire related table.
+                          ;; TODO - ignore where for now, as it should be part
+                          ;; of count-selections
+                          ;; Root count has no parent JOIN, so matched root
+                          ;; _eids become an explicit IN predicate — see docs.
                            [where where-data] (if (and root? (seq parents))
                                                 [(str as "._eid in ("
                                                       (str/join "," (repeat (count parents) "?"))
@@ -2824,20 +2628,12 @@
                     (empty? numerics) nil
                     :else
                     (fetch-on-conn
-                    ;; Aggregate Hoist for `_agg`: entries that share a
-                    ;; gensym pair (set in selection->schema once per
-                    ;; source relation) collapse into ONE LEFT JOIN.
-                    ;; Per-entry predicates surface only as SELECT-side
-                    ;; case-when, never in JOIN ON. Mirrors what
-                    ;; `pull-counts` does for `_count`.
                      (let [join-groups (group-by
                                         (fn [[_ rdata]]
                                           [(:relation/as rdata) (:entity/as rdata)])
                                         numerics)
-                          ;; One representative per group → :relations for the FROM
-                          ;; clause. Strip any per-entry predicate from the rep so
-                          ;; the JOIN ON is bare; predicates stay on each entry's
-                          ;; own rdata for case-when emission below.
+                          ;; One rep per group with bare JOIN ON; predicates
+                          ;; stay on each entry for case-when below.
                            join-relations (into {}
                                                 (map (fn [[_ entries]]
                                                        (let [[k rdata] (first entries)]
@@ -2886,14 +2682,15 @@
                             [[] []]
                             numerics)
                            [_ from] (search-stack-from aggregate-schema)
-                          ;; Root `_agg` is scoped to the matched root _eids; a
-                          ;; nested `_agg` keeps its relation-args WHERE.
+                          ;; Root `_agg` scoped to matched root _eids; nested
+                          ;; `_agg` keeps its relation-args WHERE.
                            [where where-data] (if (and root? (seq parents))
                                                 [(str as "._eid in ("
                                                       (str/join "," (repeat (count parents) "?"))
                                                       ")")
                                                  (vec parents)]
                                                 (search-stack-args aggregate-schema))
+                           ;;
                            [query-string :as query]
                            (as->
                             (format
@@ -2904,11 +2701,10 @@
                              (if-not where
                                query
                                (str query \newline "where " where))
-                            ;;
                              (str query \newline
                                   (format "group by %s._eid" as))
-                            ;;
                              (reduce into [query] (remove nil? [numerics-data where-data])))
+                           ;;
                            _ (log/trace {:id ::numerics-aggregate-query
                                          :data {:action :executed
                                                 :subject :sql
@@ -2926,9 +2722,8 @@
                                  (reduce-kv
                                   (fn [r k v]
                                     (let [[rkey operation k] (str/split (name k) #"\$")
-                                           ;; Coerce numeric values to BigDecimal for SQLite/PostgreSQL parity
                                           v' (if (number? v) (bigdec v) v)]
-                                      (assoc-in r [(keyword rkey) (keyword operation) (keyword k)] v')))
+                                      (assoc-in r [(keyword rkey) (keyword k) (keyword operation)] v')))
                                   nil
                                   (dissoc data :parent_id))))
                         nil
@@ -2937,13 +2732,13 @@
                 (let [[_ {:keys [entity/table fields
                                  decoders recursions entity/as args]}] (clojure.zip/node location)
                       expected-start-result (fetch-on-conn
-                                             {table (apply array-map
+                                             {table (apply hash-map
                                                            (reduce
                                                             (fn [r d]
                                                               (conj r
                                                                     (:_eid d)
                                                                     (reduce
-                                                                     (fn [data [k t]] (update data k t))
+                                                                     (fn [data [k t]] (update data k t d))
                                                                      d
                                                                      decoders)))
                                                             []
@@ -2957,9 +2752,13 @@
                                                                                  table
                                                                                  (clojure.string/join ", " records))
                                                                                 "")
-                                                                               ;; TODO - test if this is necessary
-                                                                               ;; This maybe obsolete since we already know what records
-                                                                               ;; to pull and in which order
+                                                                               ;; TODO - test if this
+                                                                               ;; is necessary
+                                                                               ;; This maybe obsolete
+                                                                               ;; since we already
+                                                                               ;; know what records
+                                                                               ;; to pull and in which
+                                                                               ;; order
                                                                               (str
                                                                                (when (= found-records {})
                                                                                  (modifiers-selection->sql {:args args}))))
@@ -3007,11 +2806,7 @@
                     (let [expected-result
                           (fetch-on-conn
                            (let [[_ {ptable :entity/table}] (clojure.zip/node (clojure.zip/up location))
-
-                                ;;
-                                 query (pull-query
-                                        (update schema :args dissoc :_limit :_offset)
-                                        (get found-records (keyword as)) parents)
+                                 query (pull-query schema (get found-records (keyword as)) parents)
                                  _ (log/trace {:id ::pull-query
                                                :data {:action :executed
                                                       :subject :sql
@@ -3020,18 +2815,9 @@
                                                       :sql (first query)
                                                       :params (vec (rest query))}}
                                               "Sending pull query")
-                                 relations (cond->
-                                            (sql/execute! *fetch-con* query core/*return-type*)
-                                            ;;
-                                             (some #(contains? args %) [:_offset :_limit])
-                                             (as-> relations
-                                                   (let [grouping (group-by (keyword falias) relations)]
-                                                     (vec
-                                                      (mapcat
-                                                       #(cond->> %
-                                                          (:_offset args) (drop (:_offset args))
-                                                          (:_limit args) (take (:_limit args)))
-                                                       (vals grouping))))))
+                                 relations (cond->> (sql/execute! *fetch-con* query core/*return-type*)
+                                              (or (:_limit args) (:_offset args))
+                                              (mapv #(dissoc % :__rn)))
 
                                  talias' (keyword talias)
                                  falias' (keyword falias)
@@ -3040,7 +2826,7 @@
                                          (assoc r (get d talias')
                                                 ;; TODO - Transform data here
                                                 (reduce-kv
-                                                 (fn [data k t] (update data k t))
+                                                 (fn [data k t] (update data k t d))
                                                  (dissoc d talias' falias')
                                                  decoders)))
                                        nil
@@ -3058,7 +2844,6 @@
                                   (assoc-in r [ptable f field] [etable t])))
                               result'
                               relations)))
-                        ;;
                           expected-counts (pull-counts result location)
                           expected-numerics (pull-numerics result location)]
                       (cond->
@@ -3070,12 +2855,10 @@
                                   :data {:entity-table etable :result result}}
                                  "Couldn't find parents for relation")
                       result))))
-            ;;
               (process-node [result location]
                 (if (= ::ROOT (key (clojure.zip/node location)))
                   (process-root result location)
                   (process-related result location)))]
-      ;;
         (let [result (doall (process-node nil zipper))]
           result)))))
 
@@ -3084,10 +2867,6 @@
   (binding [*ignore-maybe* false]
     (let [db (pull-cursors con schema found-records)]
       (construct-response schema db found-records))))
-
-;;; ============================================================================
-;;; Write Operations (Shared - Database-Agnostic)
-;;; ============================================================================
 
 (defn pull-references [tx reference-table references]
   (let [table-constraint-mapping
@@ -3138,7 +2917,86 @@
      nil
      table-constraint-mapping)))
 
+(declare execute-multi-row!)
+
+(defn resolve-one-satellites
+  "Function used to determine o2o related data xid if no
+  unique constraint pair was provided."
+  [tx analysis]
+  (let [idk (id/key)
+        idcol (name idk)]
+    (reduce-kv
+     (fn [analysis {ltable :table
+                    ftable :from/table
+                    ttable :to/table
+                    ffield :from/field
+                    tfield :to/field} pairs]
+       (let [indexed-children (set (vals (get-in analysis [:index ttable])))
+             ;; parent tmp -> the constraint values that identified it
+             tmp->cvals (reduce-kv
+                         (fn [m cvals tmp]
+                           (if (contains? m tmp) m (assoc m tmp cvals)))
+                         {}
+                         (get-in analysis [:index ftable]))
+             candidates (keep
+                         (fn [[ptmp ctmp]]
+                           (when (and ctmp
+                                      (not (contains? indexed-children ctmp))
+                                      (nil? (get-in analysis [:entity ttable ctmp idk])))
+                             (let [prow (get-in analysis [:entity ftable ptmp])
+                                   pident (if (some? (get prow idk))
+                                            {idk (get prow idk)}
+                                            (get tmp->cvals ptmp))]
+                               (when (and (seq pident)
+                                          (every? some? (vals pident)))
+                                 [pident ctmp]))))
+                         pairs)
+             by-shape (group-by (comp vec sort keys first) candidates)]
+         (reduce-kv
+          (fn [analysis shape entries]
+            (let [cols (mapv name shape)
+                  rows (mapv (fn [[pident _]] (mapv pident shape)) entries)
+                  group-? (str "("
+                               (clojure.string/join
+                                " and " (map #(str "p.\"" % "\" = ?") cols))
+                               ")")
+                  select-p (clojure.string/join
+                            ", " (map-indexed
+                                  (fn [i c] (str "p.\"" c "\" as __p" i)) cols))
+                  resolved (execute-multi-row!
+                            tx rows (count cols)
+                            (fn [n]
+                              (str "select c.\"" idcol "\" as __cid, " select-p
+                                   " from \"" ftable "\" p"
+                                   " join \"" ltable "\" l on l.\"" ffield "\" = p.\"_eid\""
+                                   " join \"" ttable "\" c on c.\"_eid\" = l.\"" tfield "\""
+                                   " where " (clojure.string/join " or " (repeat n group-?)))))
+                  cid-by-vals (reduce
+                               (fn [m row]
+                                 (assoc m
+                                        (mapv #(get row (keyword (str "__p" %)))
+                                              (range (count cols)))
+                                        (get row :__cid)))
+                               {}
+                               resolved)]
+              (reduce
+               (fn [analysis [pident ctmp]]
+                 (if-some [cid (get cid-by-vals (mapv pident shape))]
+                   (do
+                     (log/trace {:id ::satellite-resolved
+                                 :data {:table ttable :tmp ctmp :id cid}}
+                                "Resolved identity-less :one child to linked row")
+                     (assoc-in analysis [:entity ttable ctmp idk] cid))
+                   analysis))
+               analysis
+               entries)))
+          analysis
+          by-shape)))
+     analysis
+     (:relations/one analysis))))
+
 (defn prepare-references
+  "Looks up referenced releation. User, group, role etc..."
   [tx {:keys [reference]
        :as analysis}]
   (reduce
@@ -3166,34 +3024,12 @@
       [reference-table (pull-references tx reference-table references)])
     reference)))
 
-(defn- chunk-rows-for
-  "Rows per multi-row statement so the total bound-parameter count stays
-   under the backend's hard cap (`proto/max-bind-params`). `cols` is the
-   number of bound parameters one row contributes.
-
-   Each statement is filled as close to the cap as a whole row allows.
-   Multi-row INSERT / IN-list throughput climbs with batch size and then
-   plateaus far below any realistic cap, so the largest safe chunk also
-   issues the fewest round trips — fewest round trips is the fast path."
+(defn chunk-rows-for
   [cols]
-  (let [;; tiny headroom against driver miscounts; cost is ~0.1% of the cap
-        budget (- (proto/max-bind-params *db*) 64)]
+  (let [budget (- (proto/max-bind-params *db*) 64)]
     (max 1 (quot budget (max 1 cols)))))
 
-(defn- execute-multi-row!
-  "Run a multi-row statement in parameter-bounded chunks. `rows` is a seq
-   of equal-length parameter vectors; `cols` is the parameter count per
-   row; `sql-for` takes a chunk's row count and returns the statement
-   text carrying that many placeholder tuples. Every chunk runs on the
-   same `tx`; returns the concatenated `:edn` result rows.
-
-   Optional `trailing-params` is a vector of bind values appended once per
-   chunk after the per-row params. Used to thread constant params (e.g.,
-   RLS WHERE bind values on ON CONFLICT DO UPDATE) into the statement.
-
-   This is what keeps bulk writes correct on every backend: an unchunked
-   VALUES list overruns SQLite's 32766-param cap (and Postgres' 65535)
-   on large batches or wide tables."
+(defn execute-multi-row!
   ([tx rows cols sql-for]
    (execute-multi-row! tx rows cols sql-for nil))
   ([tx rows cols sql-for trailing-params]
@@ -3205,25 +3041,127 @@
                      (log/trace {:id ::multi-row-chunk
                                  :data {:rows (count chunk) :sql sql}}
                                 "Executing multi-row statement chunk")
-                     (sql/execute! tx params :edn))))
+                     (sql/execute! tx params :raw))))
          (partition-all (chunk-rows-for cols) rows))))
 
-(defn- delete-by-from-side!
-  "Chunked counterpart to `execute-multi-row!` for the pre-DELETE that
-   link-relations runs before re-inserting a from-side's links. The
-   inline `IN (?, ?, …)` list carries one bound parameter per id, so a
-   large `current` set overruns the same per-statement parameter cap
-   the INSERT path already respects. Splits `current` into chunks sized
-   by `chunk-rows-for` and runs one DELETE per chunk on the same `tx`."
-  [tx table from current]
-  (doseq [chunk (partition-all (chunk-rows-for 1) current)]
-    (let [sql (str "delete from \"" table "\" where \"" from "\" in ("
+(defn read-scope-guard
+  "Compiled :read RLS guard for `entity-id`'s table, or nil when the caller's
+   read window is the whole table."
+  [entity-id table]
+  (when entity-id
+    (let [{{:keys [enabled guards]} :rls} (deployed-schema-entity entity-id)]
+      (when (and enabled (rls-runtime/should-apply-guards? entity-id :read))
+        (or (rls-runtime/compile-guards-to-sql (str \" table \") guards :read)
+            {:sql "1=0" :params []})))))
+
+(defn write-mode
+  "Statement shape `entity-id`'s CRUDOB grants permit: :upsert (C+U),
+   :create-only or :update-only. Holding neither keeps :upsert — that row only
+   reaches the writer as link-only rows, which mint pointers under
+   :read by design."
+  [entity-id]
+  (let [c? (access/entity-allows? entity-id #{:create :owns})
+        u? (access/entity-allows? entity-id #{:update :owns})]
+    (cond
+      (and c? u?) :upsert
+      c?          :create-only
+      u?          :update-only
+      :else       :upsert)))
+
+(defn delete-by-from-side!
+  "Deletes a link table's from-side rows; with `guard` only the rows whose
+   to-side is inside the caller's read window (never widen this — an unscoped
+   delete destroys links the caller cannot see)."
+  ([tx table from current] (delete-by-from-side! tx table from current nil))
+  ([tx table from current {to-field :to/field to-table :to/table guard :guard}]
+   (let [scope (when guard
+                 (str " and \"" to-field "\" in (select \"_eid\" from \"" to-table
+                      "\" where " (:sql guard) ")"))
+         params (vec (:params guard))
+         budget (max 1 (- (chunk-rows-for 1) (count params)))]
+     (doseq [chunk (partition-all budget current)]
+       (let [sql (str "delete from \"" table "\" where \"" from "\" in ("
+                      (clojure.string/join ", " (repeat (count chunk) \?))
+                      ")" scope)]
+         (log/trace {:id ::delete-from-side-chunk
+                     :data {:table table :rows (count chunk) :sql sql}}
+                    "Deleting from-side rows (chunk)")
+         (sql/execute! tx (into (into [sql] chunk) params)))))))
+
+(defn occupied-from-side
+  "From-side values still linked after a scoped delete — i.e. holding an
+   occupant outside the caller's read window."
+  [tx table from froms]
+  (into #{}
+        (mapcat (fn [chunk]
+                  (let [sql (str "select \"" from "\" from \"" table "\" where \"" from "\" in ("
+                                 (clojure.string/join ", " (repeat (count chunk) \?))
+                                 ")")]
+                    (map (comp first vals)
+                         (sql/execute! tx (into [sql] chunk) :raw)))))
+        (partition-all (chunk-rows-for 1) (distinct froms))))
+
+(defn write-scope-guard
+  "Compiled :write RLS guard for `entity-id`'s table; 1=0 when RLS is on and no
+   guard covers :write."
+  [entity-id table]
+  (when entity-id
+    (let [{{:keys [enabled guards]} :rls} (deployed-schema-entity entity-id)]
+      (when (and enabled (rls-runtime/should-apply-guards? entity-id :write))
+        (or (rls-runtime/compile-guards-to-sql (str \" table \") guards :write)
+            {:sql "1=0" :params []})))))
+
+(defn row-writable?
+  "Whether `entity-id`'s row `id` is inside the bound principal's :write scope;
+   true whenever no guard applies. Row scope only — RBAC is entity-allows?."
+  [entity-id id]
+  (let [{:keys [table]} (deployed-schema-entity entity-id)]
+    (if-let [{:keys [sql params]} (write-scope-guard entity-id table)]
+      (boolean
+       (seq (sql/execute!
+             (into [(str "select 1 from \"" table "\" where \"" (id/field) "\" = ? and (" sql ")") id]
+                   params)
+             :raw)))
+      true)))
+
+(defn assert-from-side-writable!
+  "Throws ROW_FORBIDDEN unless every from-side row passes the origin's :write
+   guard."
+  [tx table from-table froms guard]
+  (let [sql (:sql guard)
+        params (vec (:params guard))
+        froms (into [] (comp (remove nil?) (distinct)) froms)
+        budget (max 1 (- (chunk-rows-for 1) (count params)))]
+    (doseq [chunk (partition-all budget froms)]
+      (let [q (str "select _eid from \"" from-table "\" where _eid in ("
                    (clojure.string/join ", " (repeat (count chunk) \?))
-                   ")")]
-      (log/trace {:id ::delete-from-side-chunk
-                  :data {:table table :rows (count chunk) :sql sql}}
-                 "Deleting from-side rows (chunk)")
-      (sql/execute! tx (into [sql] chunk)))))
+                   ") and not (" sql ")")]
+        (when-let [denied (seq (sql/execute! tx (into (into [q] chunk) params) :raw))]
+          (log/info {:id   :synthigy.iam.access/access-denied
+                     :data {:action :denied :subject :request :kind :relation
+                            :table table :from-table from-table
+                            :rows (count denied)}}
+                    "RLS denied relation write — origin outside write scope")
+          (throw
+           (ex-info
+            (str "You don't have sufficient privileges to write links of '"
+                 from-table "' — " (count denied) " row(s) outside your write scope")
+            {:type ::enforce-link-access
+             :code "ROW_FORBIDDEN"
+             :table table
+             :from-table from-table
+             :denied (count denied)})))))))
+
+(defn throw-slot-occupied
+  "Throws when a to-one slot's current occupant is outside the caller's read
+   window — never silently evict it."
+  [table]
+  (throw
+   (ex-info
+    (format "Cannot assign relation '%s': its current value is outside your access scope" table)
+    {:type ::slot-occupied
+     :code "SLOT_OCCUPIED"
+     :table table})))
 
 (defn link-relations
   ([tx analysis] (link-relations tx analysis true))
@@ -3263,18 +3201,18 @@
            mapping))
         result
         recursion))
-     ;; Link single relations — one multi-row INSERT per chunk (same shape as
-     ;; store-entity-records; NOT JDBC addBatch / execute-batch!). from_xid/
-     ;; to_xid are denormalized onto the relation row from the in-memory
-     ;; analysis (no per-row subselect) so the relation-audit substrate's
-     ;; cascade-DELETE triggers can read OLD.from_xid. In :euuid mode the
-     ;; from_xid/to_xid columns are omitted — same as pre-1.3.0 installs.
+     ;; Link single relations — delete on from side
+     ;; then link through execute multi
      (let [{:keys [:relations/one]} result
            xid-mode? (= :xid (id/key))]
        (reduce-kv
         (fn [result {:keys [table]
                      to :to/field
-                     from :from/field} bindings]
+                     from :from/field
+                     from-entity :from
+                     from-table :from/table
+                     to-entity :to
+                     to-table :to/table} bindings]
           (let [current (set (map first bindings))
                 cols (->> (if xid-mode? [from to "from_xid" "to_xid"] [from to])
                           (map #(str \" % \"))
@@ -3288,11 +3226,22 @@
                            (mapv (fn [[f t fx tx]] [f t fx tx])))
                       (->> bindings
                            (filter second)
-                           (mapv (fn [[f t]] [f t]))))]
+                           (mapv (fn [[f t]] [f t]))))
+                scope (when-let [guard (read-scope-guard to-entity to-table)]
+                        {:to/field to :to/table to-table :guard guard})]
+            ;; never gate after the delete — a denied write would still evict
+            (when-let [wg (write-scope-guard from-entity from-table)]
+              (assert-from-side-writable! tx table from-table current wg))
             (log/trace {:id ::delete-old-one-relations
                         :data {:table table :from-side-count (count current)}}
                        "Deleting old one-relations")
-            (delete-by-from-side! tx table from current)
+            (delete-by-from-side! tx table from current scope)
+            (when (and scope (seq new))
+              (when (seq (occupied-from-side tx table from (map first new)))
+                (log/info {:id ::slot-occupied
+                           :data {:table table}}
+                          "To-one slot holds a row outside the caller's read window")
+                (throw-slot-occupied table)))
             (execute-multi-row!
              tx new (if xid-mode? 4 2)
              (fn [n]
@@ -3307,7 +3256,11 @@
        (reduce-kv
         (fn [result {:keys [table]
                      to :to/field
-                     from :from/field} bindings]
+                     from :from/field
+                     from-entity :from
+                     from-table :from/table
+                     to-entity :to
+                     to-table :to/table} bindings]
           (let [current (set (map first bindings))
                 cols (->> (if xid-mode? [from to "from_xid" "to_xid"] [from to])
                           (map #(str \" % \"))
@@ -3322,11 +3275,19 @@
                       (->> bindings
                            (filter second)
                            (mapv (fn [[f t]] [f t]))))]
+            ;; never gate after the delete — a denied sync would still evict
+            (when-let [wg (write-scope-guard from-entity from-table)]
+              (assert-from-side-writable! tx table from-table current wg))
+            ;; sync replaces only the caller-VISIBLE window of the edge set —
+            ;; an unscoped delete destroys links to rows they cannot read.
             (when-not stack?
               (log/debug {:id ::delete-many-relations-overwrite
                           :data {:table table :from-side-count (count current)}}
                          "Deleting many-relations (overwrite mode)")
-              (delete-by-from-side! tx table from current))
+              (delete-by-from-side!
+               tx table from current
+               (when-let [guard (read-scope-guard to-entity to-table)]
+                 {:to/field to :to/table to-table :guard guard})))
             (execute-multi-row!
              tx new (if xid-mode? 4 2)
              (fn [n]
@@ -3338,45 +3299,8 @@
         many)))
    analysis))
 
-;; ----------------------------------------------------------------------------
-;; Relation-audit helpers (shared between Postgres and SQLite drainers)
-;; ----------------------------------------------------------------------------
-
-;; The app-path `publish-delta` that used to fan synthetic `:change`/
-;; `:link` envelopes is gone. Live notifications flow exclusively through
-;; the trigger substrate now: PG/SQLite triggers → `__entity_delta_queue`/
-;; `__relation_delta_queue` → drainer → `delta/dispatch!`. See
-;; `synthigy.dataset.postgres.audit` and `synthigy.dataset.sqlite.audit`.
-
-;;; ============================================================================
-;;; Unified Store Entity Records (Database-Agnostic via Protocol)
-;;; ============================================================================
-
 (defn store-entity-records
-  "Stores entity records in database with order-independent mapping.
-
-  This unified implementation works for all SQL databases by using the
-  SQLDialect protocol for database-specific syntax:
-  - placeholder-for-type: PostgreSQL uses ?::type for enums, SQLite uses ?
-  - excluded-ref: PostgreSQL uses EXCLUDED.col, SQLite uses excluded.col
-
-  ID Handling:
-  - Generates ID for records that don't have one
-  - Uses returned ID to build mapping (order-independent)
-  - Falls back to constraint-based mapping for updates
-
-  Mapping Reconstruction:
-  - Builds id->tmpid lookup before INSERT
-  - Builds constraint->tmpid lookup for fallback
-  - After INSERT, uses returned id first, then constraint values
-  - This approach works regardless of database result ordering
-
-  Database Compatibility:
-  - PostgreSQL: Works
-  - Aurora: Works
-  - Cockroach: Works
-  - SQLite: Works"
-  [tx {:keys [entity constraint]
+  [tx {:keys [entity constraint encrypted]
        :as analysis}]
   ; (def analysis analysis)
   (reduce-kv
@@ -3389,37 +3313,38 @@
                            :rows (vec rows)}}
                    "Storing entity table rows")
 
-          ;; === EARLY RETURN: Handle empty rows ===
         (if (empty? rows)
           analysis
 
-          (let [;; === STEP 1: Generate IDs for rows that don't have them ===
+          (let [table-encrypted (get encrypted entity-table)
                 rows-with-id (map (fn [[row-data tmp-id]]
                                     (let [entity-id (or (id/extract row-data)
                                                         (id/generate))
-                                          ;; The id arrives as a string (wire JSON
-                                          ;; has no uuid type; bootstrap/seed
-                                          ;; constants too). `id/coerce-arg` binds
-                                          ;; a uuid in euuid mode (PG refuses the
-                                          ;; implicit varchar→uuid cast); xid stays
-                                          ;; a string (no-op).
-                                          entity-id (id/coerce-arg entity-id)]
-                                      [(assoc row-data (id/key) entity-id) tmp-id entity-id]))
+                                          entity-id (id/coerce-arg entity-id)
+                                          row-data (assoc row-data (id/key) entity-id)
+                                          ;; Seal HERE, not via TypeCodec — the backends
+                                          ;; explicitly refuse to touch encrypted cells.
+                                          row-data (if table-encrypted
+                                                     (reduce
+                                                      (fn [rd field]
+                                                        (if (some? (get rd field))
+                                                          (update rd field denc/seal-cell)
+                                                          rd))
+                                                      row-data
+                                                      table-encrypted)
+                                                     row-data)]
+                                      [row-data tmp-id entity-id]))
                                   rows)
 
-                  ;; === STEP 2: Build Dual Mappings (id + constraint) ===
-                  ;; Primary mapping: id -> tmpid
+                ;; Dual mapping: id->tmpid primary, constraint-values->tmpid
+                ;; fallback (NULLs skipped) — see docs.
                 id->tmpid (into {}
                                 (map (fn [[_ tmp-id entity-id]] [entity-id tmp-id])
                                      rows-with-id))
 
-                  ;; Determine constraint for this batch
-                constraint-keys (if (contains? ks (id/key))
-                                  [(id/key)]
-                                  (some #(when (every? ks %) %)
-                                        (get constraint entity-table)))
+                constraint-keys (reference-constraint-keys
+                                 (get constraint entity-table) ks)
 
-                  ;; Fallback mapping: constraint-values -> tmpid (skip NULLs)
                 constraint->tmpid (reduce
                                    (fn [m [row tmp-id _]]
                                      (let [cvals (select-keys row constraint-keys)]
@@ -3431,12 +3356,10 @@
                                    {}
                                    rows-with-id)
 
-                  ;; === STEP 3: Ensure ID in Columns ===
                 ks' (if (contains? ks (id/key))
                       ks
                       (conj (vec ks) (id/key)))
 
-                  ;; === STEP 4: Extract Row Values (using ks' WITH id) ===
                 row-data (if (empty? ks')
                            (repeat (count rows-with-id) [])
                            (map (apply juxt ks')
@@ -3445,34 +3368,20 @@
                 columns-fn #(str \" (name %) \")
                 ks-quoted (map columns-fn ks')
 
-                  ;; Get field types for enum casting (database-specific via protocol)
-                entity-uuid (get-in analysis [:entity/mapping entity-table])
-                entity-schema (when entity-uuid
-                                (deployed-schema-entity entity-uuid))
+                entity-id (get-in analysis [:entity/mapping entity-table])
+                entity-schema (when entity-id
+                                (deployed-schema-entity entity-id))
                 field-types (when entity-schema
                               (reduce-kv
-                               (fn [m _ {:keys [key type]
-                                         ename :enum/name}]
-                                 (if ename
-                                   (assoc m key ename)  ; Store enum type name
-                                   (assoc m key type)))
+                               (fn [m _ {:keys [key type]}]
+                                 (assoc m key type))
                                {}
                                (:fields entity-schema)))
 
-                  ;; Declared (ERD) user-field keys. Declared attributes are
-                  ;; keyed in :fields by their attribute id; audit / augmented
-                  ;; fields are keyword-keyed. Classifying resolve-vs-write by
-                  ;; *declared* fields means audit stamps from enhance-write
-                  ;; never make a pure pointer look like a dirty row.
-                declared-keys (when entity-schema
-                                (->> (:fields entity-schema)
-                                     (keep (fn [[k v]]
-                                             (when-not (keyword? k) (:key v))))
-                                     set))
-
                 id-field (id/field)
 
-                  ;; Generate placeholders using protocol (PostgreSQL: ?::type, SQLite: ?)
+                ;; Generate placeholders using protocol (PostgreSQL: ?::type,
+                ;; SQLite: ?)
                 placeholder-fn (fn [k]
                                  (let [field-type (get field-types k)]
                                    (if (and field-type
@@ -3481,14 +3390,9 @@
                                      "?")))
                 values-? (str \( (str/join ", " (map placeholder-fn ks')) \))
 
-                  ;; === STEP 5: Classify group — resolve-only vs write ===
-                  ;; Dedupe RETURNING columns
                 return-cols (distinct (concat [:_eid (id/key)] constraint-keys))
                 return-sql (str/join ", " (map columns-fn return-cols))
 
-                  ;; Fields to update on conflict (exclude id + constraint
-                  ;; columns). Empty ⇒ the group's rows carry only identity /
-                  ;; constraint keys — pure pointers, nothing to write.
                 fields-to-update (remove
                                   (fn [k]
                                     (let [kname (name k)]
@@ -3496,76 +3400,97 @@
                                           (some #(= (name %) kname) constraint-keys))))
                                   ks')
 
-                  ;; Recursion (tree) FK columns — e.g. `mother`/`father`.
-                  ;; They live ON the entity table but are not in `:fields`,
-                  ;; so `declared-keys` misses them. A row carrying one is a
-                  ;; real write (`{:mother nil}` clears the FK), not a pure
-                  ;; pointer — count it as a user field.
-                recursion-keys (when entity-schema (:recursions entity-schema))
-
-                  ;; Declared user fields the row actually carries, outside
-                  ;; its identifying constraint. Computed from declared-keys
-                  ;; (+ recursion FK columns), so audit columns and other
-                  ;; injected fields don't count.
-                user-fields (filter (fn [k]
-                                      (and (or (and declared-keys (declared-keys k))
-                                               (and recursion-keys (recursion-keys k)))
-                                           (not (some #(= % k) constraint-keys))))
-                                    ks')
-
-                  ;; A resolve-only group is pointer rows resolvable by a
-                  ;; unique key — no declared field data to write. SELECT them
-                  ;; instead of upserting: no write to shared parent tables,
-                  ;; hence no cross-transaction lock contention (deadlock
-                  ;; source). Pointers that don't resolve fall through to a
-                  ;; create INSERT (find-or-create). No schema ⇒ can't
-                  ;; classify ⇒ fall back to the write/upsert path.
-                resolve-only? (and (some? declared-keys)
-                                   (empty? user-fields)
-                                   (not-empty constraint-keys))
-
-                  ;; === STEP 6: Execute — SELECT for resolve, INSERT for write ===
-                  ;; Every multi-row statement runs through execute-multi-row!
-                  ;; so the bound-parameter count is chunked under the
-                  ;; backend cap — large batches / wide tables can't overrun
-                  ;; SQLite's 32766 or Postgres' 65535.
+                ;; Resolve-only = pointer rows, no write, no deadlock-prone lock
+                ;; contention — see docs "Resolve-only classification".
+                resolve-only? (link-only?
+                               entity-schema
+                               (get constraint entity-table) ks)
+                link-only-gated? (boolean
+                                 (when-let [gated (get-in analysis [:link-only entity-table])]
+                                   (some gated (map second rows))))
                 result
                 (if resolve-only?
                   (let [key-cols   (map columns-fn constraint-keys)
                         tuple-?    (str \( (str/join ", " (repeat (count constraint-keys) "?")) \))
                         ckey-vals  (mapv (apply juxt constraint-keys)
                                          (map first rows-with-id))
-                        found      (execute-multi-row!
-                                    tx ckey-vals (count constraint-keys)
-                                    (fn [n]
-                                      (str "SELECT " return-sql
-                                           " FROM \"" entity-table "\" WHERE ("
-                                           (str/join ", " key-cols) ") IN ("
-                                           (str/join ", " (repeat n tuple-?))
-                                           ")")))
-                        found-set  (set (map (fn [r] (mapv #(get r %) constraint-keys))
-                                             found))
-                        missing    (remove
-                                    (fn [[row]]
-                                      (contains? found-set
-                                                 (mapv #(get row %) constraint-keys)))
-                                    rows-with-id)
-                        created    (when (seq missing)
-                                     (execute-multi-row!
-                                      tx (map (apply juxt ks') (map first missing))
-                                      (count ks')
-                                      (fn [n]
-                                        (str "INSERT INTO \"" entity-table "\" ("
-                                             (str/join ", " ks-quoted) ") VALUES "
-                                             (str/join ", " (repeat n values-?))
-                                             " RETURNING " return-sql))))]
+                        {:keys [enabled guards]} (:rls entity-schema)
+                        rls-read (when (and enabled (rls-runtime/should-apply-guards? entity-id :read))
+                                   (or (rls-runtime/compile-guards-to-sql
+                                        (str \" entity-table \")
+                                        guards
+                                        :read)
+                                       {:sql "1=0" :params []}))
+                        found (execute-multi-row!
+                               tx ckey-vals (count constraint-keys)
+                               (fn [n]
+                                 (str "SELECT " return-sql
+                                      " FROM \"" entity-table "\" WHERE ("
+                                      (str/join ", " key-cols) ") IN ("
+                                      (str/join ", " (repeat n tuple-?))
+                                      ")"
+                                      (when rls-read (str " AND (" (:sql rls-read) ")"))))
+                               (:params rls-read))
+                        found-set (set (map (fn [r] (mapv #(get r %) constraint-keys)) found))
+                        missing (remove
+                                 (fn [[row]]
+                                   (contains? found-set
+                                              (mapv #(get row %) constraint-keys)))
+                                 rows-with-id)
+                        ;; id-addressed miss CREATES a stub on purpose — forward
+                        ;; references during import: link now, row arrives later,
+                        ;; same-id upsert fills it (deploy itself relies on this)
+                        ;; never create when RLS scoped the lookup — hidden is not absent
+                        create? (and (not link-only-gated?) (nil? rls-read)
+                                     (not= :update-only (write-mode entity-id)))
+                        ;; a refused create on a row the CALLER submitted by
+                        ;; NATURAL KEY is a denied write — that shape is
+                        ;; get-or-create, so "not found" means it would have
+                        ;; been minted. Addressing by id asserts the row
+                        ;; already exists, so an unresolved one stays
+                        ;; REF_NOT_FOUND at link phase, as do nested pointers.
+                        refused (when (and (not create?)
+                                           (not= constraint-keys [(id/key)]))
+                                  (let [subjects (get-in analysis [:subject entity-table] #{})]
+                                    (filterv (fn [[_ tmp-id]] (contains? subjects tmp-id))
+                                             missing)))
+                        _ (when (seq refused)
+                            (log/info {:id :synthigy.iam.access/access-denied
+                                       :data {:action :denied
+                                              :subject :request
+                                              :kind :row
+                                              :entity entity-id
+                                              :table entity-table
+                                              :roles (vec (access/role-ids))}}
+                                      "Denied row create")
+                            (throw (ex-info
+                                    (str "You don't have privileges to create row(s) of '"
+                                         entity-table "'")
+                                    {:type ::enforce-write-access
+                                     ;; hidden is not absent — a guard-scoped
+                                     ;; lookup cannot claim the row is missing
+                                     :code (if rls-read "ROW_FORBIDDEN" "CREATE_FORBIDDEN")
+                                     :entity entity-id
+                                     :table entity-table
+                                     :rows (mapv (fn [[row]] (select-keys row constraint-keys))
+                                                 refused)})))
+                        created (when (and (seq missing) create?)
+                                  (execute-multi-row!
+                                   tx (map (apply juxt ks') (map first missing))
+                                   (count ks')
+                                   (fn [n]
+                                     (str "INSERT INTO \"" entity-table "\" ("
+                                          (str/join ", " ks-quoted) ") VALUES "
+                                          (str/join ", " (repeat n values-?))
+                                          " RETURNING " return-sql))))]
                     (log/trace {:id ::resolve-entity-group
                                 :data {:entity-table entity-table
                                        :resolved (count found)
                                        :created (count (or created []))}}
                                "Resolved entity group — pointers, no upsert")
                     (concat found created))
-                  (let [on-values (map columns-fn constraint-keys)
+                  (let [mode (write-mode entity-id)
+                        on-values (map columns-fn constraint-keys)
                         do-set (if (empty? fields-to-update)
                                  (str (columns-fn (keyword id-field)) "="
                                       (proto/excluded-ref *db* (str \" id-field \")))
@@ -3574,19 +3499,15 @@
                                                   (let [quoted (columns-fn col)]
                                                     (str quoted "=" (proto/excluded-ref *db* quoted))))
                                                 fields-to-update)))
-                        ;; RLS write-guard on ON CONFLICT DO UPDATE. When the
-                        ;; upsert matches an existing row, this WHERE gates
-                        ;; whether the principal may modify it. References the
-                        ;; existing row via the table name (PG/SQLite/CRDB
-                        ;; semantics). No principal / superuser / RLS disabled
-                        ;; → no injection (fast path). RLS enabled but no
-                        ;; :write guards applicable → 1=0 (fail-closed),
-                        ;; mirroring enhance-args.
+                        ;; RLS write-guard rides ON CONFLICT DO UPDATE's WHERE —
+                        ;; see docs "Upsert path" / RLS write guard.
                         {:keys [enabled guards]} (:rls entity-schema)
                         rls-write
                         (when (and enabled
                                    (not-empty constraint-keys)
-                                   (rls-runtime/should-apply-guards?))
+                                   ;; entity-aware: O/B role grants bypass row
+                                   ;; scope (CRUDOB) — O for writes here
+                                   (rls-runtime/should-apply-guards? entity-id :write))
                           (or (rls-runtime/compile-guards-to-sql
                                (str \" entity-table \")
                                guards
@@ -3595,37 +3516,123 @@
                         rls-where (when rls-write
                                     (str " WHERE " (:sql rls-write)))
                         rls-params (:params rls-write)]
+                    ;; no constraint key = nothing to match = every row is a create
+                    (when (and (= :update-only mode) (empty? constraint-keys))
+                      (throw (ex-info
+                              (str "You don't have privileges to create row(s) of '"
+                                   entity-table "'")
+                              {:type ::enforce-write-access
+                               :code "CREATE_FORBIDDEN"
+                               :entity entity-id
+                               :table entity-table
+                               :attempted (count row-data)
+                               :written 0})))
                     (log/trace {:id ::store-entity-group
                                 :data {:entity-table entity-table
                                        :constraint-keys (vec constraint-keys)
                                        :rows (count row-data)
+                                       :mode mode
                                        :rls-where rls-where}}
                                "Storing entity group with order-independent mapping")
-                    (execute-multi-row!
-                     tx row-data (count ks')
-                     (fn [n]
-                       (str
-                        "INSERT INTO \"" entity-table "\" ("
-                        (str/join ", " ks-quoted) ") VALUES "
-                        (str/join ", " (repeat n values-?))
-                        (when (not-empty constraint-keys)
-                          (str " ON CONFLICT (" (str/join ", " on-values)
-                               ") DO UPDATE SET " do-set
-                               rls-where))
-                        " RETURNING " return-sql))
-                     rls-params)))
+                    (let [qualified (str \" entity-table \" \.)
+                          written
+                          (case mode
+                            ;; the conflict IS the denial — existing rows never return
+                            :create-only
+                            (execute-multi-row!
+                             tx row-data (count ks')
+                             (fn [n]
+                               (str
+                                "INSERT INTO \"" entity-table "\" ("
+                                (str/join ", " ks-quoted) ") VALUES "
+                                (str/join ", " (repeat n values-?))
+                                (when (not-empty constraint-keys)
+                                  (str " ON CONFLICT (" (str/join ", " on-values)
+                                       ") DO NOTHING"))
+                                " RETURNING " return-sql)))
+
+                            ;; never an INSERT — absent rows never return
+                            :update-only
+                            (execute-multi-row!
+                             tx row-data (count ks')
+                             (fn [n]
+                               (str
+                                "UPDATE \"" entity-table "\" SET "
+                                (str/join ", "
+                                          (map (fn [col]
+                                                 (let [q (columns-fn col)]
+                                                   (str q "=v." q)))
+                                               (or (seq fields-to-update)
+                                                   [(keyword id-field)])))
+                                " FROM (VALUES " (str/join ", " (repeat n values-?))
+                                ") AS v (" (str/join ", " ks-quoted) ")"
+                                " WHERE " (str/join
+                                           " AND "
+                                           (map (fn [k]
+                                                  (let [q (columns-fn k)]
+                                                    (str qualified q "=v." q)))
+                                                constraint-keys))
+                                (when rls-write (str " AND (" (:sql rls-write) ")"))
+                                " RETURNING "
+                                (str/join ", " (map #(str qualified (columns-fn %))
+                                                    return-cols))))
+                             rls-params)
+
+                            (execute-multi-row!
+                             tx row-data (count ks')
+                             (fn [n]
+                               (str
+                                "INSERT INTO \"" entity-table "\" ("
+                                (str/join ", " ks-quoted) ") VALUES "
+                                (str/join ", " (repeat n values-?))
+                                (when (not-empty constraint-keys)
+                                  (str " ON CONFLICT (" (str/join ", " on-values)
+                                       ") DO UPDATE SET " do-set
+                                       rls-where))
+                                " RETURNING " return-sql))
+                             rls-params))
+                          short (- (count row-data) (count written))]
+                      ;; declined rows return silently — the ABSENT rows ARE the
+                      ;; denial; never look up which ones, see docs.
+                      (when (and (pos? short)
+                                 (or rls-where (not= :upsert mode)))
+                        (let [code (case mode
+                                     :create-only "UPDATE_FORBIDDEN"
+                                     ;; with a guard, absent and denied are
+                                     ;; indistinguishable without a lookup
+                                     :update-only (if rls-where
+                                                    "ROW_FORBIDDEN"
+                                                    "CREATE_FORBIDDEN")
+                                     "ROW_FORBIDDEN")]
+                          (log/info {:id   :synthigy.iam.access/access-denied
+                                     :data {:action  :denied
+                                            :subject :request
+                                            :kind    :row
+                                            :code    code
+                                            :entity  entity-id
+                                            :table   entity-table
+                                            :roles   (vec (access/role-ids))}}
+                                    "Denied row write")
+                          (throw (ex-info
+                                  (str "You don't have sufficient privileges to write "
+                                       short " row(s) of '" entity-table "'")
+                                  {:type ::enforce-write-access
+                                   :code code
+                                   :entity entity-id
+                                   :table entity-table
+                                   :attempted (count row-data)
+                                   :written (count written)}))))
+                      written)))
 
                 _ (log/trace {:id ::store-entity-result
                               :data {:entity-table entity-table :result result}}
                              "Stored entity group result")
 
-                  ;; === STEP 7: Reconstruct Mapping (Order-Independent with Fallback) ===
                 mapping (reduce
                          (fn [m result-row]
                            (let [entity-id (id/extract result-row)
                                  cvals (when (not-empty constraint-keys)
                                          (select-keys result-row constraint-keys))
-                                    ;; Normalize constraint values
                                  cvals-normalized (when cvals
                                                     (reduce-kv
                                                      (fn [m k v]
@@ -3635,9 +3642,8 @@
                                                                 v)))
                                                      {}
                                                      cvals))
-                                    ;; Try id lookup with type normalization
-                                 ;; id->tmpid keys are coerced (STEP 1 above), so
-                                 ;; normalize the lookup key through the same seam.
+                                 ;; id->tmpid keys are coerced above; normalize
+                                 ;; the lookup key the same way.
                                  tmp-id (or
                                          (get id->tmpid (id/coerce-arg entity-id))
                                          (get constraint->tmpid cvals)
@@ -3668,7 +3674,6 @@
                          {}
                          result)]
 
-              ;; === STEP 8: Merge Results Back ===
             (log/trace {:id ::final-mapping-size
                         :data {:entity-table entity-table :size (count mapping)}}
                        "Final mapping size")
@@ -3686,14 +3691,7 @@
    entity))
 
 (defn set-entity
-  "Set (create/update) entity data.
-
-  This is the main write operation that handles:
-  - Analyzing data structure
-  - Preparing references
-  - Storing entity records
-  - Linking relations
-  - Publishing deltas"
+  "Sets (creates/updates) entity data — see docs Write path pipeline."
   ([entity-id data]
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (jdbc/with-transaction [tx connection]
@@ -3703,16 +3701,6 @@
      (jdbc/with-transaction [tx connection]
        (set-entity tx entity-id data stack?))))
   ([tx entity-id data stack?]
-   ;; CONSIDERING (2026-06-03): drop pull-roots in favor of returning a
-   ;; thin `{tmp-id {_eid X :xid Y}}` mapping. Rationale: query-driven
-   ;; frontends never consume the fat record — they refetch the
-   ;; view-driving query or read deltas off the subscription substrate;
-   ;; either flow delivers the canonical post-write state. The only
-   ;; callers that *need* fields back from the write itself are
-   ;; programmatic non-reactive ones (CLIs, scripts, ETL, server-side
-   ;; chain-of-writes that can't use nested syntax), and they can do
-   ;; an explicit get-entity / search-entity follow-up. Decision pending
-   ;; SDK + lacinia-removal alignment; do not change yet.
    (letfn [(pull-roots [{:keys [root entity root/table]}]
              (log/trace {:id ::pull-root-after-mutation
                          :data {:entity-id entity-id :root root}}
@@ -3724,6 +3712,7 @@
        (log/trace {:id ::store-analysis :data {:analysis analysis}}
                   "Storing based on analysis")
        (as-> analysis result
+         (resolve-one-satellites tx result)
          (prepare-references tx result)
          (enhance-write tx result)
          (store-entity-records tx result)

@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.cockroach.fused
   "Per-level read compiler for CockroachDB (cloned from synthigy.dataset.postgres.fused —
    CRDB speaks the same wire and supports json_agg + LATERAL, see memory
@@ -22,7 +44,7 @@
    the engine fragments drop straight in.
 
    Invoked from the `db/ModelQueryProtocol` dispatch in
-   `synthigy.dataset.cockroach.query` via `requiring-resolve`. `try-search`
+   `synthigy.dataset.cockroach.query`. `try-search`
    / `try-get` return a 1-element vector on the fused path, or nil to
    signal fallback.
 
@@ -97,15 +119,17 @@
   "True if a relation's :args carry actual field predicates."
   [args] (seq (apply dissoc args meta-keys)))
 
-(defn- left? [args]
-  (or (contains? args :_maybe)
-      (boolean (#{:left :LEFT "left" "LEFT"} (:_join args)))))
+;; Absent-:_join semantics live in ONE place — core's `relation-left?`
+;; (the 2026-07-30 LEFT-default decree: bare pulls LEFT, predicates or an
+;; explicit :_join keep INNER). Delegate instead of carrying a copy that
+;; would silently drift.
+(def ^:private left? q/relation-left?)
 
 ;; engine builders, reused for full operator/predicate coverage
 (def ^:private relation-on-predicate @#'q/relation-on-predicate)
 
 (defn- inner-exists
-  "Inner-join parent scoping. Per XSQL.md line 232: `-rel` is INNER —
+  "Inner-join parent scoping. Per XSQL.md (Relations): `-rel` is INNER —
    parent is dropped when it has no matching child. Existence IS the
    filter, so we emit an EXISTS for every INNER relation regardless
    of whether the relation or any descendant carries a predicate.
@@ -245,15 +269,7 @@
                        (when (seq rls-sql) (str " and (" rls-sql ")")))
         child-obj  (str "json_build_object(" (str/join ", " (field-entries rel ex)) ")")
         agg-spec   (when agg (select-keys agg agg-fns))
-        agg-fields (distinct (for [[_ fm] agg-spec [f _] fm] f))
-        agg-pair   (fn [] (str (lit k) ", json_build_object("
-                               (str/join ", "
-                                         (for [[fnk fm] agg-spec]
-                                           (str (lit fnk) ", json_build_object("
-                                                (str/join ", " (for [[f _] fm]
-                                                                 (str (lit f) ", " (gensym))))
-                                                ")")))
-                               ")"))]
+        agg-fields (distinct (for [[_ fm] agg-spec [f _] fm] f))]
     ;; :one relations are routed to `emit-one-relation` by `emit-node`;
     ;; this fn only ever sees :many.
     (let [lat (gen "lat")
@@ -287,10 +303,11 @@
            :agg-pair   (when agg
                          (str (lit k) ", json_build_object("
                               (str/join ", "
-                                        (for [[fnk fm] agg-spec]
-                                          (str (lit fnk) ", json_build_object("
-                                               (str/join ", " (for [[f _] fm]
-                                                                (str (lit f) ", " lat ".__ag_"
+                                        (for [f agg-fields]
+                                          (str (lit f) ", json_build_object("
+                                               (str/join ", " (for [[fnk fm] agg-spec
+                                                                    :when (contains? fm f)]
+                                                                (str (lit fnk) ", " lat ".__ag_"
                                                                      (name fnk) "_" (name f))))
                                                ")")))
                               ")"))
@@ -311,10 +328,11 @@
            :agg-pair   (when agg
                          (str (lit k) ", json_build_object("
                               (str/join ", "
-                                        (for [[fnk fm] agg-spec]
-                                          (str (lit fnk) ", json_build_object("
-                                               (str/join ", " (for [[f _] fm]
-                                                                (str (lit f) ", " lat ".__ag_"
+                                        (for [f agg-fields]
+                                          (str (lit f) ", json_build_object("
+                                               (str/join ", " (for [[fnk fm] agg-spec
+                                                                    :when (contains? fm f)]
+                                                                (str (lit fnk) ", " lat ".__ag_"
                                                                      (name fnk) "_" (name f))))
                                                ")")))
                               ")"))
@@ -525,27 +543,26 @@
 (def ^:private float-types #{"float" "double" "decimal" "currency" "real"})
 
 (defn- coerce-agg
-  "Match the engine's `_agg` BigDecimal scale. The engine bigdec's whatever
-   JDBC handed it: `avg` returns a Double (`(bigdec (double v))` keeps the
-   `.0` scale), `count` stays a Long, `sum`/`min`/`max` -> `(bigdec v)`.
-   `_agg` shape is {relation-key {agg-fn {field value}}}."
+  "Match the engine's `_agg` BigDecimal scale: `avg` -> `(bigdec (double v))`,
+   `count` stays a Long, `sum`/`min`/`max` -> `(bigdec v)`.
+   `_agg` shape is {relation-key {field {agg-fn value}}}."
   [agg]
   (reduce-kv
-   (fn [m relk aggmap]
+   (fn [m relk fieldmap]
      (assoc m relk
             (reduce-kv
-             (fn [m2 fnk fieldmap]
-               (assoc m2 fnk
+             (fn [m2 fld fnmap]
+               (assoc m2 fld
                       (reduce-kv
-                       (fn [m3 fld v]
-                         (assoc m3 fld
+                       (fn [m3 fnk v]
+                         (assoc m3 fnk
                                 (cond
                                   (not (number? v)) v
                                   (= :count fnk)    v
                                   (= :avg fnk)      (bigdec (double v))
                                   :else             (bigdec v))))
-                       {} fieldmap)))
-             {} aggmap)))
+                       {} fnmap)))
+             {} fieldmap)))
    {} agg))
 
 (defn- coerce-node
@@ -563,9 +580,13 @@
                         (update m f double)
                         m))
                     obj (:field-types schema))
+          ;; timestamp rehydration (String -> java.util.Date) rides the
+          ;; per-field :decoders pass below — `selection->schema` wires a
+          ;; TypeCodec `decode "timestamp"` decoder, handled uniformly with
+          ;; the old JDBC path (no separate pass here).
           o (reduce (fn [m [f dec]]
                       (if (and (fn? dec) (some? (get m f)))
-                        (update m f dec)
+                        (update m f dec o)
                         m))
                     o (:decoders schema))
           o (if (:_agg o) (update o :_agg coerce-agg) o)

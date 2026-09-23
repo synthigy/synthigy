@@ -1,13 +1,33 @@
-(ns synthigy.dataset
-  "High-level dataset API (database-agnostic).
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
 
-  This namespace provides the public API for working with dataset models.
-  It delegates to database-specific implementations via protocols."
+(ns synthigy.dataset
+  "High-level dataset API (database-agnostic)."
   (:refer-clojure :exclude [sync])
   (:require
    [clojure.core.async :as async]
    [clojure.java.io :as io]
    [synthigy.log :as log]
+   [synthigy.supervisor :as supervisor]
    [patcho.patch :as patch]
    synthigy.dataset.access
    [synthigy.dataset.core :as core]
@@ -26,8 +46,6 @@
 ;; ============================================================================
 ;; Dataset Meta-Entity Definitions
 ;; ============================================================================
-;; Well-known dataset entity IDs from the meta-model (dataset.json).
-;; Uses compile-time multimethod registration for provider-agnostic ID resolution.
 
 (defdata :dataset/id
   :euuid #uuid "4ab2fe4f-9b74-4a23-8441-60b58be08e7e" :xid "AE18CKqkpn1txrdJxhU9v5")
@@ -35,12 +53,6 @@
 (defdata :dataset.model/version-1.0.3
   :euuid #uuid "d908a70f-a1fb-46bd-ac76-801bebe6ceed" :xid "ToR56Krq2zEUmkKmtrfmNU")
 
-;; v1.0.5 — Dataset + Dataset Version now opt into principal-aware audit
-;; (`:audit {:actions #{:created :modified}}` in dataset.json). Resource
-;; was carrying the config silently for a while; the deployed snapshot in
-;; dataset_version was older. Bumped here so `(patch/level! :synthigy.dataset/model)`
-;; re-deploys on next boot — schema validator then accepts modified-on /
-;; modified-by selections on those entities.
 (defdata :dataset.model/version-1.0.5
   :euuid #uuid "5e9704b0-cc4a-4763-96a7-5c11da57c05e" :xid "CgTka9ViKjvcSz1hmuaC53")
 
@@ -62,7 +74,6 @@
 ;; ============================================================================
 ;; Dataset Relation Definitions
 ;; ============================================================================
-;; Well-known relation IDs for dataset schema elements.
 
 (defrelation :dataset/dataset->versions
   :euuid #uuid "3c277257-916f-41ba-ac64-f591110c84a4" :xid "8Rq5Bu1E48EGKpFEPbUeh9")
@@ -79,24 +90,19 @@
 ;;; ============================================================================
 ;;; ID Format Management
 ;;; ============================================================================
-;; User-controlled EUUID/XID choice, stored via patcho version store.
 
 (def ^:private format-topic
-  "Patcho topic for ID format storage."
   :synthigy/id-format)
 
 (defn current-format
-  "Read the stored ID format from database.
-  Returns the stored format string, or nil if not stored.
-  Each DB implementation is responsible for handling nil (detection/defaults)."
+  "Read the stored ID format from database, or nil if not stored."
   []
   (let [stored (patch/read-version *db* format-topic)]
     (when (and stored (not= stored "0"))
       stored)))
 
 (defn set-format!
-  "Store the active ID format choice.
-  Format must be \"euuid\" or \"xid\"."
+  "Store the active ID format choice."
   [format]
   (assert (#{"euuid" "xid"} format)
           (str "Invalid format: " format ". Must be \"euuid\" or \"xid\"."))
@@ -105,14 +111,15 @@
              :data {:format format}}
             "Stored ID format choice"))
 
+(defn clear-format!
+  "Remove the stored ID format choice."
+  []
+  (patch/write-version *db* format-topic "0")
+  (log/info {:id ::id-format-cleared :data {:action :cleanup :subject :id-format}}
+            "Cleared stored ID format"))
+
 (defn initialize-provider!
-  "Set the global ID provider based on format.
-
-  Args:
-    format - \"xid\" or \"euuid\"
-
-  Each DB implementation is responsible for detecting/determining the format
-  and calling this function with the appropriate value."
+  "Set the global ID provider based on format."
   [format]
   (assert (#{"euuid" "xid"} format)
           (str "Invalid format: " format ". Must be \"euuid\" or \"xid\"."))
@@ -141,12 +148,7 @@
 (defonce publisher (async/pub subscription :topic))
 
 (defn save-model!
-  "Updates the deployed model and publishes :model/deployed event.
-
-  This is called after loading a model from the database or deploying
-  a new model version.
-
-  Publishes :model/deployed event for listeners (e.g., GraphQL schema regeneration)."
+  "Updates the deployed model and publishes :model/deployed event."
   [model]
   (reset! _model model)
   (async/put! subscription
@@ -154,16 +156,12 @@
                :model model}))
 
 (defn add-model-watch!
-  "Register a watch on the deployed-model atom. The watch fn is invoked
-   as `(f key ref old-model new-model)` whenever `save-model!` updates
-   the model. Idempotent per `key` — re-registering replaces the prior
-   binding."
+  "Register a watch on the deployed-model atom; idempotent per key."
   [key f]
   (add-watch _model key f))
 
 (defn remove-model-watch!
-  "Remove a previously-registered model watch by key. No-op if no watch
-   under that key is currently registered."
+  "Remove a previously-registered model watch by key."
   [key]
   (remove-watch _model key))
 
@@ -232,13 +230,19 @@
             nil)
         (throw e)))))
 
-(defn deployed-version-info
-  "Drift-stamp for codegen — `{:version, :version-id, :deployed-at}` for the
-   latest deployed version, or nil when none. Public, cheap (single meta-table
-   read); consumed by `/schema` (pull-time stamp) and `/.well-known/synthigy`
-   (runtime drift check)."
+(defn deployed-versions
+  "Drift stamp — `{dataset-id {:version :deployed-at}}` for every dataset's
+   latest deployed version. Public, cheap; consumed by `/schema`,
+   generated `schema.json` and `/.well-known/synthigy`."
   []
-  (model/latest-deployed-version-info))
+  (model/deployed-versions))
+
+(defn stamp-schema
+  "Adds the `:datasets` drift stamp to a schema map."
+  [schema]
+  (if-let [versions (not-empty (deployed-versions))]
+    (assoc schema :datasets versions)
+    schema))
 
 (comment
   (def dataset-id (id/data :dataset/id))
@@ -504,7 +508,7 @@
 
   entity-id can be a keyword (auto-resolved), UUID, or string."
   [entity-id args selection]
-  (db/slice-entity *db* (id/entity entity-id) args selection))
+  (db/slice-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn get-entity
   "Takes dataset entity id, arguments to pinpoint target row and selection
@@ -512,7 +516,7 @@
 
   entity-id can be a keyword (auto-resolved), UUID, or string."
   [entity-id args selection]
-  (db/get-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) selection))
+  (db/get-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn get-entity-tree
   "Takes dataset entity id, root record and constructs tree based 'on'.
@@ -520,17 +524,24 @@
 
   entity-id can be a keyword (auto-resolved), UUID, or string."
   [entity-id root on selection]
-  (db/get-entity-tree *db* (id/entity entity-id) root on selection))
+  (db/get-entity-tree *db* (id/entity entity-id) root on (normalize-selection selection)))
 
-;; Wire-arg normalization at the protocol entry. The JSON parser's pkey-fn
-;; blanket-replaces underscores with dashes, so the wire `_order_by` lands
-;; as `:-order-by` (kebab + dash prefix). Backends expect the snake-case
-;; meta-key form `:_order_by` — `dk/normalize-keys-deep` does that
-;; conversion via `preserve-prefix`. Without this step, `_order_by` (and
+;; Wire-arg normalization at the protocol entry. Backends expect the
+;; snake-case meta-key form `:_order_by` — `dk/normalize-keys-deep` resolves
+;; any inbound spelling to it via `preserve-prefix`. Callers that hand in
+;; kebab meta-keys (embedded/REPL/SDK) would otherwise have `_order_by` (and
 ;; siblings `_limit`, `_offset`, `_where`, `_join`, `_distinct`, `_count`,
 ;; `_agg`) sneak past the fused EXISTS-builder's `meta-keys` check in
 ;; postgres/fused.clj and get treated as filter predicates, silently
 ;; dropping rows. Idempotent — already-normalized args pass through.
+;;
+;; The `selection` gets the same treatment via `normalize-selection` — it
+;; carries model keys too (attribute names AND the nested relation `:args`/
+;; `_where` inside relation configs), and `selection->schema` validates them
+;; by EXACT match against the schema. Normalizing args but not the selection
+;; is why a kebab where key worked at the top level but not inside a relation
+;; pull or a projection. Both are model-key surfaces; the server owns their
+;; normalization so clients can send idiomatic kebab everywhere. Idempotent.
 
 (defn search-entity
   "Takes dataset entity id, arguments to pinpoint target rows and selection
@@ -538,7 +549,7 @@
 
   entity-id can be a keyword (auto-resolved), UUID, or string."
   [entity-id args selection]
-  (db/search-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) selection))
+  (db/search-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn search-entity-tree
   "Takes dataset entity id, arguments to pinpoint target rows based 'on'
@@ -547,7 +558,7 @@
 
   entity-id can be a keyword (auto-resolved), UUID, or string."
   [entity-id on args selection]
-  (db/search-entity-tree *db* (id/entity entity-id) on (dk/normalize-keys-deep args) selection))
+  (db/search-entity-tree *db* (id/entity entity-id) on (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn purge-entity
   "Find all records that match arguments, delete found records and return
@@ -555,10 +566,11 @@
 
   entity-id can be a keyword (auto-resolved), UUID, or string."
   [entity-id args selection]
-  (db/purge-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) selection))
+  (db/purge-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn delete-entity
-  "Function takes dataset entity id and data to delete entities from DB.
+  "Deletes entity records. `data` is a unique-key map (single row) or a
+  vector of xid strings (multirow, one transaction).
 
   entity-id can be a keyword (auto-resolved), UUID, or string."
   [entity-id data]
@@ -572,17 +584,6 @@
 ;;; surfaces as "who deployed what, when". The backend's lower-level
 ;;; `synthigy.dataset.postgres` schema-diff signals still fire underneath
 ;;; for the per-table detail; these are the *headline* events.
-
-(defn- current-actor-xid
-  "Resolve the calling principal's xid via `synthigy.iam.access/*principal*`
-   without a hard compile-time dependency on IAM (so data-only deployments
-   that don't load IAM still build). Returns nil for system-context calls
-   or when IAM isn't loaded."
-  []
-  (try
-    (when-let [v (resolve 'synthigy.iam.access/*principal*)]
-      (some-> @v :xid))
-    (catch Throwable _ nil)))
 
 (defn- version-summary
   "Pull the identifying bits of a version map for log payloads. Vary
@@ -604,7 +605,7 @@
    (failure) after — both carry the actor xid (when IAM is on) and a
    version summary so the System lens can answer 'who deployed what'."
   [version]
-  (let [actor   (current-actor-xid)
+  (let [actor   (log/current-principal-xid)
         summary (version-summary version)
         base    (cond-> (assoc summary :action :deploying :subject :dataset)
                   actor (assoc :actor-xid actor))]
@@ -630,26 +631,39 @@
    Emits `:synthigy.dataset/recalling` / `:synthigy.dataset/recalled` for
    System-lens visibility."
   [version]
-  (let [actor   (current-actor-xid)
+  (let [actor   (log/current-principal-xid)
         summary (version-summary version)
         base    (cond-> (assoc summary :subject :dataset)
-                  actor (assoc :actor-xid actor))]
-    (log/info {:id ::recalling
-               :data (assoc base :action :recalling)}
-              (str "Recalling dataset version "
-                   (or (:version-name summary) (:version-xid summary) "")))
-    (try
-      (let [result (core/recall! *db* version)]
-        (log/info {:id ::recalled
-                   :data (assoc base :action :recalled)}
-                  (str "Recalled dataset version "
+                  actor (assoc :actor-xid actor))
+        id      (id/extract version)
+        stored  (when id
+                  (get-entity :dataset/version {(id/key) id} {(id/key) nil :deployed nil}))]
+    (if (and stored (not (:deployed stored)))
+      ;; Never deployed — nothing is mounted, so drop the record and skip
+      ;; schema rollback entirely.
+      (do (delete-entity :dataset/version {(id/key) id})
+          (log/info {:id ::recalled
+                     :data (assoc base :action :recalled :deployed? false)}
+                    (str "Deleted undeployed dataset version "
+                         (or (:version-name summary) (:version-xid summary) "")))
+          nil)
+      (do
+        (log/info {:id ::recalling
+                   :data (assoc base :action :recalling)}
+                  (str "Recalling dataset version "
                        (or (:version-name summary) (:version-xid summary) "")))
-        result)
-      (catch Throwable e
-        (log/error! {:id ::recall-failed
-                     :data (assoc base :action :recall-failed)}
-                    e)
-        (throw e)))))
+        (try
+          (let [result (core/recall! *db* version)]
+            (log/info {:id ::recalled
+                       :data (assoc base :action :recalled)}
+                      (str "Recalled dataset version "
+                           (or (:version-name summary) (:version-xid summary) "")))
+            result)
+          (catch Throwable e
+            (log/error! {:id ::recall-failed
+                         :data (assoc base :action :recall-failed)}
+                        e)
+            (throw e)))))))
 
 (defn destroy!
   "Destroy a dataset — recalls all versions and removes all dataset data.
@@ -657,7 +671,7 @@
    This emit is at WARN level since destruction is operationally significant
    and should stand out in the System lens."
   [dataset]
-  (let [actor (current-actor-xid)
+  (let [actor (log/current-principal-xid)
         base  (cond-> {:subject :dataset
                        :dataset-name (:name dataset)
                        :dataset-xid  (:xid dataset)}
@@ -711,7 +725,7 @@
 
   Aliases supplied as strings are keywordized so the result-key set
   matches what the JSON parser produces (every JSON key becomes a
-  keyword via `synthigy.json/pkey-fn`)."
+  keyword via `synthigy.json/read-str`)."
   [selection]
   (reduce-kv
    (fn [m k v]
@@ -865,8 +879,12 @@
 (defn delete
   "Delete entity records.
 
+  `data` is a unique-key map (single row, boolean result) or a vector of
+  xid strings (multirow, returns the count deleted) — see delete-entity.
+
   Returns deleted record with kebab-case keys by default.
-  Data keys accept kebab-case (normalized to snake_case).
+  Map data keys accept kebab-case (normalized to snake_case); a vector of
+  xids is passed through as-is.
 
   Options:
     :key-format - :kebab (default), :snake, :camel"
@@ -874,9 +892,9 @@
    (delete entity-id data nil))
   ([entity-id data opts]
    (let [eid (id/entity entity-id)
-         key-fn (resolve-key-fn opts)]
-     (transform-output eid nil key-fn
-                       (delete-entity entity-id (dk/normalize-keys data))))))
+         key-fn (resolve-key-fn opts)
+         data (if (sequential? data) data (dk/normalize-keys data))]
+     (transform-output eid nil key-fn (delete-entity entity-id data)))))
 
 (defn slice
   "Slice relations from entity.
@@ -943,9 +961,17 @@
    (core/reload *db*)
 
 ;; Apply dataset feature patches (database transforms)
+   (supervisor/progress-update!
+    {:detail (str "patching :synthigy/dataset "
+                  (patch/deployed-version :synthigy/dataset) " \u2192 "
+                  (patch/version :synthigy/dataset))})
    (patch/level! :synthigy/dataset)
 
 ;; Apply dataset model patches (meta-model deployment)
+   (supervisor/progress-update!
+    {:detail (str "patching :synthigy.dataset/model "
+                  (patch/deployed-version :synthigy.dataset/model) " \u2192 "
+                  (patch/version :synthigy.dataset/model))})
    (patch/level! :synthigy.dataset/model)
    nil))
 
@@ -970,7 +996,7 @@
   (log/info {:id ::stopped :data {:action :stopped :subject :dataset}} "Datasets stopped")
   nil)
 
-(patch/current-version :synthigy/dataset "1.3.0")
+(patch/current-version :synthigy/dataset "1.5.0")
 
 (defn can-migrate-to-xid?
   "Check if system can migrate to XID format.

@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oidc
   (:require
    [buddy.core.codecs]
@@ -6,7 +28,9 @@
    [clojure.set :as set]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
+   [synthigy.dataset.id :as id]
    [synthigy.iam :as iam]
+   [synthigy.iam.context :as iam.context]
    [synthigy.iam.encryption :as encryption]
    [synthigy.oauth :as oauth]
    [synthigy.oauth.authorization-code :as ac]
@@ -14,6 +38,7 @@
     :refer [process-scope
             defscope
             resolve-scope-claims
+            user-claims
             all-supported-scopes
             all-supported-claims
             sign-token
@@ -24,7 +49,7 @@
    [synthigy.oauth.device-code :as dc]
    [synthigy.oauth.login :as login]
    [synthigy.oauth.token
-    :refer [get-token-session]]
+    :refer [get-token-session token-revoked?]]
    [synthigy.util :as util]))
 
 (s/def ::iss string?)
@@ -151,17 +176,26 @@
                               "email" "email_verified" "picture"
                               "created_at" "identities" "phone" "address"]})])
 
+(defn granted-claims
+  "Claim keys the token's scopes actually grant (OIDC Core 5.4), read from the
+   `defscope` registry so adding a scope automatically widens userinfo."
+  [scope]
+  (into #{}
+        (comp (remove str/blank?)
+              (mapcat (comp :claims core/claims-for)))
+        (str/split (or scope "") #"\s+")))
+
 (defn standard-claim
   [session claim]
-  (get-in
-   (get-session-resource-owner session)
-   [:person_info claim]))
+  (get (user-claims (get-session-resource-owner session)) claim))
 
 (defn add-standard-claim
   [tokens session claim]
   (assoc-in tokens [:id_token claim] (standard-claim session claim)))
 
-(let [default (util/minutes 30)]
+;; Seconds — same unit as access/refresh-token-expiry; consumption sites
+;; multiply by 1000.
+(let [default (* 60 10)]
   (defn id-token-expiry
     [{{{expiry "id"} "token-expiry"} :settings}]
     (or expiry default)))
@@ -170,28 +204,27 @@
 ;; OIDC Standard Scopes (RFC 5.4)
 ;; =============================================================================
 
-(defscope openid [:sub :iss :aud :exp :iat :auth_time :nonce :sid :acr :amr]
+(defscope openid [:sub :xid :iss :aud :exp :iat :auth_time :nonce :sid :acr :amr]
   :description "Your identity"
   :resolve (fn [session]
-             (let [{:keys [name]} (get-session-resource-owner session)
+             (let [{:keys [name] :as owner} (get-session-resource-owner session)
                    {:keys [authorized-at code]} (get-session session)
                    {:keys [nonce]} (ac/get-code-request code)
                    client (get-session-client session)
-                   ;; Get authentication context (acr/amr)
                    amr (core/get-session-amr session)
                    acr (core/get-session-acr session)]
                {:iss (domain+)
                 :aud (:id client)
                 :sub name
+                :xid (id/extract owner)
                 :iat (to-timestamp (java.util.Date.))
                 :exp (to-timestamp
-                      (java.util.Date. (+ (util/now) (id-token-expiry client))))
+                      (java.util.Date. (+ (util/now) (* 1000 (id-token-expiry client)))))
                 :sid session
                 :auth_time authorized-at
                 :nonce nonce
-                ;; OIDC Core 1.0 Section 2 - acr/amr claims
-                :acr acr   ; Authentication Context Class Reference
-                :amr amr})))  ; Authentication Methods References
+                :acr acr
+                :amr amr})))
 
 (defscope profile
   [:name :family_name :given_name :middle_name :nickname
@@ -216,27 +249,18 @@
     (encryption/sign-data
      (assoc data
             :exp (to-timestamp
-                  (java.util.Date. (+ (util/now) (id-token-expiry client)))))
+                  (java.util.Date. (+ (util/now) (* 1000 (id-token-expiry client))))))
      {:alg :rs256})))
 
 (defn get-access-token
-  "Extracts access token from request per RFC 6750.
-
-   Supports three methods (in order of preference):
-   1. Authorization header: Bearer <token>
-   2. Form body parameter: access_token (for POST requests)
-   3. Query parameter: access_token (least secure, not recommended)
-
-   Returns the access token string or throws exception if not found."
+  "Extract the access token from a request per RFC 6750: Authorization header,
+   form body, or query param, in that preference order; throws if not found."
   [{:keys [headers params form-params] :as request}]
   (let [authorization (get headers "authorization" "")
-        ;; Method 1: Authorization header (preferred)
         header-token (when (and authorization (.startsWith authorization "Bearer"))
                        (subs authorization 7))
-        ;; Method 2: Form body parameter (for POST with application/x-www-form-urlencoded)
         form-token (or (:access_token form-params)
                        (get form-params "access_token"))
-        ;; Method 3: Query parameter (least secure)
         query-token (or (:access_token params)
                         (get params "access_token"))]
     (or header-token
@@ -251,8 +275,8 @@
 ;; Ring Handlers (Pure Ring, no Pedestal dependencies)
 ;; =============================================================================
 
-(defn- base-server-metadata
-  "Returns base OAuth 2.0 server metadata shared between OIDC and OAuth endpoints."
+(defn base-server-metadata
+  "Base OAuth 2.0 server metadata shared between OIDC and OAuth endpoints."
   []
   {:issuer (domain+)
    :authorization_endpoint (domain+ "/oauth/authorize")
@@ -261,13 +285,13 @@
    :revocation_endpoint (domain+ "/oauth/revoke")
    :introspection_endpoint (domain+ "/oauth/introspect")
    :jwks_uri (domain+ "/oauth/jwks")
-   ;; RFC 7636 PKCE support
-   :code_challenge_methods_supported ["S256" "plain"]
-   ;; Token endpoint auth methods
+   ;; S256 only — "plain" is removed by OAuth 2.1/RFC 9700 and rejected by
+   ;; wrap-pkce-validation; not advertising it keeps a compliant client from
+   ;; ever offering it.
+   :code_challenge_methods_supported ["S256"]
    :token_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
    :introspection_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
    :revocation_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
-   ;; Response types and grant types
    :response_types_supported ["code"]
    :response_modes_supported ["query" "fragment"]
    :grant_types_supported ["authorization_code"
@@ -277,10 +301,7 @@
    :scopes_supported (all-supported-scopes)})
 
 (defn oauth-authorization-server-handler
-  "OAuth 2.0 Authorization Server Metadata handler (RFC 8414).
-
-   Returns OAuth server metadata at /.well-known/oauth-authorization-server.
-   This is the OAuth-specific metadata endpoint (vs OIDC discovery)."
+  "OAuth 2.0 Authorization Server Metadata handler (RFC 8414)."
   [request]
   (binding [core/*domain* (core/original-uri request)]
     (let [config (base-server-metadata)]
@@ -290,26 +311,20 @@
        :body (json/write-str config)})))
 
 (defn openid-configuration-handler
-  "OpenID Connect Discovery handler.
-
-   Returns OIDC configuration metadata (RFC 8414 + OpenID Connect Discovery 1.0).
-   Provides endpoint URLs and supported features for OIDC clients."
+  "OpenID Connect Discovery handler (RFC 8414 + OpenID Connect Discovery 1.0)."
   [request]
   (binding [core/*domain* (core/original-uri request)]
     (let [config (merge
                    (base-server-metadata)
-                   ;; OIDC-specific fields
                    {:userinfo_endpoint (domain+ "/oauth/userinfo")
                     :end_session_endpoint (domain+ "/oauth/logout")
                     :subject_types_supported ["public"]
                     :id_token_signing_alg_values_supported ["RS256"]
                     :claims_supported (mapv name (all-supported-claims))
-                    ;; ACR/AMR support (OIDC Core 1.0 Section 2)
                     :acr_values_supported ["0" "1" "2"
                                            "urn:mace:incommon:iap:bronze"
                                            "urn:mace:incommon:iap:silver"
                                            "urn:mace:incommon:iap:gold"]
-                    ;; OIDC optional features
                     :claims_parameter_supported false
                     :request_parameter_supported false
                     :request_uri_parameter_supported false})]
@@ -319,45 +334,45 @@
        :body (json/write-str config)})))
 
 (defn userinfo-handler
-  "OpenID Connect UserInfo endpoint handler.
-
-   Returns claims about the authenticated end-user.
-   Requires valid access token in Authorization header (Bearer scheme)."
+  "OpenID Connect UserInfo endpoint; requires a valid Bearer access token."
   [request]
   (try
     (let [authorization (get-in request [:headers "authorization"])
-          access-token (if (and authorization (.startsWith authorization "Bearer"))
-                         (subs authorization 7)
-                         (throw
-                          (ex-info
-                           "Authorization header doesn't contain access token"
-                           {:headers (:headers request)})))
-          session (get-token-session :access_token access-token)]
-      (if-not session
-        ;; Token not found (revoked or invalid)
+          access-token (when (and authorization (.startsWith authorization "Bearer"))
+                         (subs authorization 7))
+          ;; Stateless: unsign-data verifies signature but skips exp by design,
+          ;; so exp is checked here; token-revoked? adds the RFC 7009 check
+          ;; (row-less client_credentials tokens still pass on signature alone).
+          claims (some-> access-token encryption/unsign-data)
+          valid? (and claims
+                      (let [exp (:exp claims)]
+                        (or (nil? exp)
+                            (> exp (quot (System/currentTimeMillis) 1000))))
+                      (not (token-revoked? :access_token access-token)))]
+      (if-not valid?
         {:status 401
          :headers {"Content-Type" "application/json"
                    "WWW-Authenticate" "Bearer error=\"invalid_token\""}
          :body (json/write-str {:error "invalid_token"
                                 :error_description "Access token is invalid or has been revoked"})}
-        ;; Valid session - return user info
-        (let [{info :person_info
-               :keys [name]} (get-session-resource-owner session)]
+        ;; OIDC Core 5.4: the response MUST be limited to the claims the
+        ;; token's granted scopes cover — this used to return the whole
+        ;; person-info map regardless of consent.
+        (let [{:keys [name] :as user} (iam.context/get-user-details {:name (:sub claims)})
+              granted (granted-claims (:scope claims))
+              info (select-keys (user-claims user) granted)]
           {:status 200
            :headers {"Content-Type" "application/json"}
-           :body (json/write-str (-> info
-                                     (assoc :sub name)
-                                     ;; Add preferred_username from user name if not set
-                                     (update :preferred_username #(or % name))))})))
+           :body (json/write-str
+                  (cond-> (assoc info :sub name :xid (id/extract user))
+                    (contains? granted :preferred_username)
+                    (update :preferred_username #(or % name))))})))
     (catch Throwable _
       {:status 403
        :body "Not authorized"})))
 
 (defn jwks-handler
-  "JSON Web Key Set (JWKS) endpoint handler.
-
-   Returns public keys used for verifying JWT signatures (ID tokens).
-   Used by OIDC clients to validate tokens without shared secrets."
+  "JSON Web Key Set endpoint — public keys for verifying ID token signatures."
   [request]
   {:status 200
    :headers {"Content-Type" "application/json"}

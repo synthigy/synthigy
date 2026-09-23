@@ -1,25 +1,27 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.xsql.lint
-  "Schema-aware linter. Produces diagnostics
-   `[{:severity :error :from int :to int :message string} …]`.
-
-   Schema shape (Clojure-native, no JS marshalling):
-
-     {:entities
-      {\"User\" {:attributes {\"name\"   {:type \"string\"}
-                              \"active\" {:type \"boolean\"}}
-                 :relations  {\"roles\"  {:target \"Role\"
-                                           :cardinality \"o2m\"}}}}}
-
-   Attribute :type is one of: string, number, boolean, timestamp, enum.
-   Unknown types are tolerated — operator rules fall through.
-
-   Tier 1 rules (port of lint.js):
-   - Surface parser :error nodes as syntax errors (with coalescing)
-   - Unknown attribute / relation against the schema
-   - Demand-fields: relations must have at least one child
-   - Operator-type mismatch (e.g. `ilike` on boolean)
-   - Empty `in ()` / `not in ()` lists
-   - Path predicate validity (terminate at attribute, no walk past scalar)"
+  "Schema-aware linter, producing `[{:severity :from :to :message} …]`."
   (:require [clojure.string :as str]
             [synthigy.xsql.ast :as ast]
             [synthigy.xsql.parser :as parser]
@@ -42,23 +44,22 @@
 
 (def ^:private structural-recovery
   #{:newline :statement :block :relation :scalar
-    :count-block :count-child :agg-block :agg-relation :root-args})
+    :count-block :count-child :agg-block :agg-relation})
 
-(defn- error-diag [node msg]
+(defn error-diag [node msg]
   {:severity :error
    :from (first (:span node))
    :to   (second (:span node))
    :message msg})
 
-(defn- warning-diag [node msg]
+(defn warning-diag [node msg]
   {:severity :warning
    :from (first (:span node))
    :to   (second (:span node))
    :message msg})
 
-(defn- entity-name-of
-  "Best-effort reverse lookup of entity name from an entityDef.
-   Used in error messages."
+(defn entity-name-of
+  "Reverse lookup of entity name from an entity-def, for error messages."
   [entity-def schema]
   (or (some (fn [[name def]] (when (= def entity-def) name))
             (:entities schema))
@@ -66,9 +67,9 @@
 
 ;; ── Syntax error coalescing ─────────────────────────────────────────────
 
-(defn- last-content-offset
-  "Offset just past the last non-whitespace character. Errors after
-   this are 'user hasn't finished typing yet' and get suppressed."
+(defn last-content-offset
+  "Offset just past the last non-whitespace char — errors past here are
+   'user hasn't finished typing yet' and get suppressed."
   [^String source]
   (let [n (count source)]
     (loop [i (dec n)]
@@ -77,7 +78,7 @@
         (re-matches #"\s" (subs source i (inc i))) (recur (dec i))
         :else (inc i)))))
 
-(defn- slice-nearby [source from to max]
+(defn slice-nearby [source from to max]
   (let [n (count source)
         end (min (if (> to from) to (+ from max)) n)
         nl (str/index-of source "\n" from)
@@ -85,7 +86,7 @@
         out (str/trim (subs source from end))]
     (when (pos? (count out)) out)))
 
-(defn- describe-syntax-error
+(defn describe-syntax-error
   "Heuristic message for a parser :error node, mirroring lint.js."
   [err-node ^String source parent]
   (let [from (first (:span err-node))
@@ -94,7 +95,7 @@
         leading (when (< from (count source)) (subs source from (inc from)))]
     (cond
       (= "(" leading)
-      "Scalars take inline predicates, not parens. Compound logic belongs in `_args (…)` or `-rel (…)`."
+      "Inside `attr(…)` write operator-first predicates joined with and/or: `xid(= \"a\" or = \"b\")`, `priority(>= 3 and <= 9)`."
 
       (= :parens (:node parent))
       "Missing `)`"
@@ -107,11 +108,8 @@
         (str "Syntax error near `" snippet "`")
         "Syntax error"))))
 
-(defn- collect-syntax-errors
-  "Walk the AST, emit one diagnostic per error-run. Mirrors the
-   coalescing behavior in lint.js: only the first :error in a run
-   is reported; suppression resets when we hit a structural-recovery
-   node."
+(defn collect-syntax-errors
+  "Walk the AST, emitting one diagnostic per error-run (coalesced)."
   [ast ^String source]
   (let [last-content (last-content-offset source)
         diags (volatile! [])
@@ -140,7 +138,7 @@
 
 ;; ── Statement dispatch ───────────────────────────────────────────────────
 
-(defn- lint-statement [stmt-node entity-def ctx]
+(defn lint-statement [stmt-node entity-def ctx]
   (let [inner (first (:children stmt-node))]
     (case (:node inner)
       :scalar      (lint-scalar inner entity-def ctx)
@@ -151,27 +149,35 @@
 
 ;; ── Scalar ──────────────────────────────────────────────────────────────
 
-(defn- get-bare-identifiers
-  "Return :identifier children of `parent` that are NOT inside a
-   nested :alias, :join-marker, or :pred-op."
+(defn get-bare-identifiers
+  "`:identifier` children of `parent` not nested in
+   :alias/:join-marker/:pred-op."
   [parent]
   (filterv #(= :identifier (:node %)) (:children parent)))
 
-(defn- lint-scalar [scalar-node entity-def ctx]
+(defn lint-scalar [scalar-node entity-def ctx]
   (let [ids (get-bare-identifiers scalar-node)]
     (when (seq ids)
       (let [field-id (first ids)
             field-name (:text field-id)
             attr-def (get-in entity-def [:attributes field-name])
             rel-def  (get-in entity-def [:relations field-name])
-            ;; Detect a misplaced `:` after a valid field identifier —
-            ;; user almost certainly meant a relation alias and got the
-            ;; order wrong. Common form: `name: -roles` (intended
-            ;; `-name:roles`) or `display: name` (scalar aliases removed).
+            ;; A misplaced `:` after a valid field means the user meant a
+            ;; relation alias in the wrong order (`name: -roles`) or a
+            ;; scalar alias (unsupported).
             colon-err (some #(and (= :error (:node %))
                                   (= ":" (:text %)) %)
                             (:children scalar-node))]
         (cond
+          ;; `_args` was removed from the grammar — checked before schema
+          ;; lookups so the message helps even without a loaded schema.
+          (= "_args" field-name)
+          (vswap! (:diags ctx) conj
+                  (error-diag field-id
+                              (str "`_args` was removed — put args in parens on the "
+                                   "root or relation line: `entity (…)` / `-rel (…)`. "
+                                   "Parens may span multiple lines.")))
+
           colon-err
           (vswap! (:diags ctx) conj
                   (error-diag colon-err
@@ -197,10 +203,24 @@
 
 ;; ── Relation ────────────────────────────────────────────────────────────
 
-(defn- has-statement-child? [block]
+(defn has-statement-child? [block]
   (boolean (some #(= :statement (:node %)) (:children block))))
 
-(defn- lint-relation [rel-node entity-def ctx]
+(defn lint-redundant-alias
+  "Warn when `alias:rel` equals the relation name — bare `rel` is identical."
+  [node ctx]
+  (when-let [alias-node (ast/find-child node :alias)]
+    (let [alias-id (first (filter #(= :identifier (:node %)) (:children alias-node)))
+          rel-id   (first (get-bare-identifiers node))]
+      (when (and alias-id rel-id (= (:text alias-id) (:text rel-id)))
+        (vswap! (:diags ctx) conj
+                (warning-diag alias-id
+                              (str "Redundant alias — '" (:text alias-id) ":"
+                                   (:text rel-id) "' is the same as bare '"
+                                   (:text rel-id) "'")))))))
+
+(defn lint-relation [rel-node entity-def ctx]
+  (lint-redundant-alias rel-node ctx)
   (let [ids (get-bare-identifiers rel-node)]
     (when (seq ids)
       (let [rel-id (first ids)
@@ -240,8 +260,9 @@
 
 ;; ── _count ──────────────────────────────────────────────────────────────
 
-(defn- lint-count-block [count-node entity-def ctx]
+(defn lint-count-block [count-node entity-def ctx]
   (doseq [child (ast/find-children count-node :count-child)]
+    (lint-redundant-alias child ctx)
     (let [ids (get-bare-identifiers child)]
       (when (seq ids)
         (let [rel-id (first ids)
@@ -259,8 +280,9 @@
 
 ;; ── _agg ────────────────────────────────────────────────────────────────
 
-(defn- lint-agg-block [agg-node entity-def ctx]
+(defn lint-agg-block [agg-node entity-def ctx]
   (doseq [agg-rel (ast/find-children agg-node :agg-relation)]
+    (lint-redundant-alias agg-rel ctx)
     (let [ids (get-bare-identifiers agg-rel)]
       (when (seq ids)
         (let [rel-id (first ids)
@@ -292,14 +314,33 @@
 
 ;; ── Args inside parens ──────────────────────────────────────────────────
 
-(defn- lint-args-of-parens [parens-node entity-def ctx]
+(defn lint-order-restriction-set
+  "Validate a `?name:order(cols…)` restriction set: each column must be
+   a real scalar attribute of `entity-def` (schema-dependent, so it runs
+   inside the entity-tracking walk rather than the schema-blind pass)."
+  [param-ref-node entity-def ctx]
+  (doseq [col (:param-type-args param-ref-node)
+          :when (not (contains? (:attributes entity-def) col))]
+    (vswap! (:diags ctx) conj
+            (error-diag param-ref-node
+                        (str "Unknown order column '" col "' on "
+                             (entity-name-of entity-def (:schema ctx)))))))
+
+(defn lint-meta-key [meta-node entity-def ctx]
+  (when (and entity-def (= "order" (some-> meta-node :children first :text)))
+    (when-let [pref (first (filter #(= :param-ref (:node %)) (:children meta-node)))]
+      (lint-order-restriction-set pref entity-def ctx))))
+
+(defn lint-args-of-parens [parens-node entity-def ctx]
   (when-let [list (ast/find-child parens-node :arg-list)]
     (doseq [stmt (ast/find-children list :arg-stmt)]
       (let [inner (first (:children stmt))]
-        (when (= :or-expr (:node inner))
-          (lint-or-expr inner entity-def ctx))))))
+        (case (:node inner)
+          :or-expr  (lint-or-expr inner entity-def ctx)
+          :meta-key (lint-meta-key inner entity-def ctx)
+          nil)))))
 
-(defn- lint-or-expr [or-node entity-def ctx]
+(defn lint-or-expr [or-node entity-def ctx]
   (doseq [a (ast/find-children or-node :and-expr)]
     (doseq [p (ast/find-children a :primary-expr)]
       (let [inner (first (:children p))]
@@ -309,7 +350,7 @@
                            (lint-or-expr nested entity-def ctx))
           nil)))))
 
-(defn- lint-arg-predicate [pred-node entity-def ctx]
+(defn lint-arg-predicate [pred-node entity-def ctx]
   (let [path (ast/find-child pred-node :path)
         pred-op (ast/find-child pred-node :pred-op)]
     (when path
@@ -354,10 +395,9 @@
 
 ;; ── Operator / type compatibility ───────────────────────────────────────
 
-(defn- classify-pred-op
-  "Return [kind op-key] for a :pred-op node, or [nil nil] if the node
-   is incomplete (e.g. user typed just `is` or `not` mid-edit). Strict
-   sequence matching avoids spurious lint errors during typing."
+(defn classify-pred-op
+  "[kind op-key] for a :pred-op node, or [nil nil] for incomplete input
+   (e.g. `is`/`not` mid-edit) via strict sequence matching."
   [pred-op-node]
   (let [children (:children pred-op-node)
         first-text (-> children first :text)
@@ -387,12 +427,11 @@
    "_in" "in" "_not_in" "not in"
    "is_null" "is null" "is_not_null" "is not null"})
 
-(defn- lint-pred-op-against-type
+(defn lint-pred-op-against-type
   "Check operator/type compatibility and empty-list cases."
   [pred-op-node attr-def field-name ctx]
   (let [[kind op-key] (classify-pred-op pred-op-node)]
     (when op-key
-      ;; Empty list
       (when (#{"in" "not_in"} kind)
         (when-let [list-node (ast/find-child pred-op-node :list-literal)]
           (when (zero? (count (ast/find-children list-node :value)))
@@ -410,30 +449,20 @@
                                    " attribute '" field-name "'"))))))))
 
 ;; ── Op-specific rules (multimethod) ─────────────────────────────────────
-;;
-;; `lint` always runs syntax + schema-aware rules (the universal
-;; baseline). Per-op rules layer on top via this multimethod, dispatched
-;; on the wire op string. New ops with their own root-scope quirks
-;; register a `defmethod` here; nothing else needs to change.
-;;
-;; Method contract: takes `[op tree ctx]`, mutates `(:diags ctx)`. Return
-;; value is ignored.
+;; Per-op rules layer on top of the universal syntax/schema baseline.
+;; Contract: `[op tree ctx]`, mutates `(:diags ctx)`.
 
 (defmulti op-lint-rules
   "Apply op-specific lint rules. Dispatches on the wire op string;
-   `:default` is a no-op for ops that don't impose extra constraints."
+   `:default` is a no-op."
   (fn [op _tree _ctx] (or op :default)))
 
 (defmethod op-lint-rules :default [_ _ _] nil)
 
-(defn- lint-get-root-scalar
-  "Get-mode root-scalar check. A root scalar is either a bare projection
-   (no predicate) or `field = value` on a unique-constrained attribute.
-   Other operators (`!=`, `<`, `like`, `in`, `is null`, …) are errors at
-   the root. Compound parens forms (`field(… or …)`) are errors unless
-   they reduce to a single `=`. When the schema carries `:unique`
-   information for at least one attribute, non-unique attrs with a `=`
-   predicate at the root are also rejected."
+(defn lint-get-root-scalar
+  "Get-mode root-scalar check: bare projection or `field = value` on a
+   unique attr is valid; other operators, and non-`=` compound parens
+   forms, are errors."
   [scalar-node entity-def ctx]
   (let [pred-op  (ast/find-child scalar-node :pred-op)
         filter   (ast/find-child scalar-node :scalar-filter)
@@ -453,10 +482,9 @@
                                    (op-key->human op-key op-key)
                                    "` on '" field-name "' is not allowed.")))
 
-          ;; `=` with known attr but not unique-constrained — only flag
-          ;; when the schema actually carries `:unique` info (i.e. at
-          ;; least one attr on the entity has it). Avoids false-positives
-          ;; in environments where uniqueness isn't propagated yet.
+          ;; Only flag non-unique `=` when the schema carries :unique
+          ;; info for at least one attr (avoids false positives where
+          ;; uniqueness isn't propagated yet).
           (and (= "_eq" op-key)
                attr-def
                (not (:unique attr-def))
@@ -482,9 +510,9 @@
                                    "Compound or non-`=` predicates on '"
                                    field-name "' are not allowed."))))))))
 
-(defn- attr-identity?
-  "True if `field-name` `=`-matched (via `pred-op`) is a valid get identity:
-   the attribute is unique (or the schema carries no unique info at all)."
+(defn attr-identity?
+  "True when `field-name` `=`-matched is a valid get identity: the
+   attribute is unique (or the schema carries no unique info at all)."
   [field-name pred-op entity-def]
   (let [attr-def (when (and entity-def field-name)
                    (get-in entity-def [:attributes field-name]))]
@@ -494,9 +522,8 @@
              (or (:unique attr-def)
                  (not (some (fn [[_ a]] (:unique a)) (:attributes entity-def)))))))))
 
-(defn- root-parens-has-identity?
-  "True if the root parens (`Movie (xid = \"…\")`) carry a `=` predicate on a
-   unique-constrained attribute — the root-args form of get identity."
+(defn root-parens-has-identity?
+  "True if the root parens carry a `=` predicate on a unique attribute."
   [tree entity-def]
   (boolean
     (when-let [parens (:root-parens tree)]
@@ -510,10 +537,8 @@
                              entity-def))))
        (tree-seq :children :children parens)))))
 
-(defn- root-statement-has-identity?
-  "True if any root :statement carries a `=` predicate on a unique-
-   constrained attribute. Used by the get-mode 'must have identity'
-   check below."
+(defn root-statement-has-identity?
+  "True if any root :statement carries a `=` predicate on a unique attribute."
   [tree entity-def]
   (boolean
     (some
@@ -531,10 +556,6 @@
                   (let [[_ op-key] (classify-pred-op pred-op)]
                     (and (= "_eq" op-key)
                          (or (:unique attr-def)
-                             ;; If the schema doesn't carry :unique info,
-                             ;; accept any `=` — lint-get-root-scalar will
-                             ;; only flag non-unique attrs when the schema
-                             ;; does carry it for at least one attribute.
                              (not (some (fn [[_ a]] (:unique a))
                                         (:attributes entity-def))))))))))))
       (:children tree))))
@@ -544,21 +565,14 @@
   (let [entity-def (:root-entity-def ctx)]
     (doseq [c (:children tree)]
       (case (:node c)
-        :root-args
-        (vswap! (:diags ctx) conj
-                (error-diag c
-                            "`_args (…)` is not allowed for `get`. Express identity inline as root-level scalar predicates (e.g. `xid = \"…\"`)."))
-
         :statement
         (let [inner (first (:children c))]
           (when (= :scalar (:node inner))
             (lint-get-root-scalar inner entity-def ctx)))
 
         nil))
-    ;; `get` is row-identity, not 'search and take first' (XSQL.md L484).
-    ;; Require at least one root scalar with `=` on a unique-constrained
-    ;; attribute. Without it the server falls through to first-by-_eid,
-    ;; which makes invalid queries look successful.
+    ;; get is row-identity, not "search and take first" — without a root
+    ;; `=` on a unique attr the server falls through to first-by-_eid.
     (when (and entity-def
                (seq (:children tree))
                (not (root-statement-has-identity? tree entity-def))
@@ -569,46 +583,224 @@
                      :from 0
                      :to   (max 1 (count (:source ctx ""))))))))
 
-;; ── Named-parameter validation (schema-independent) ────────────────────
-;;
-;; Bare `?` and `?N` positional placeholders are rejected at the
-;; tokenizer level (emitted as :error tokens; `collect-syntax-errors`
-;; surfaces them). This pass catches the cases the parser swallowed
-;; successfully but still need flagging — currently just the unknown
-;; type token. Walks every `:param-ref` leaf in the AST.
+;; ── Tree ops (@search-tree / @get-tree) ─────────────────────────────────
 
-(defn- collect-param-ref-errors
+(def ^:private tree-ops #{"search-tree" "get-tree"})
+
+(defn on-meta-node?
+  [n]
+  (and (= :meta-key (:node n))
+       (= "_on" (some-> (first (:children n)) :text))))
+
+(defn root-on-nodes
+  "All `_on` :meta-key nodes inside the root parens."
+  [tree]
+  (if-let [p (:root-parens tree)]
+    (filterv on-meta-node? (tree-seq :children :children p))
+    []))
+
+(defn on-relation-id
+  "The relation identifier of an `_on` meta-key node."
+  [on-node]
+  (some #(when (and (= :identifier (:node %)) (not= "_on" (:text %))) %)
+        (:children on-node)))
+
+(defn lint-on-placement
+  "`_on` is only valid in the root parens of a tree op."
+  [op tree ctx]
+  (let [root-spans (into #{} (map :span) (root-on-nodes tree))
+        all-on     (concat (filter on-meta-node? (tree-seq :children :children tree))
+                           (root-on-nodes tree))]
+    (doseq [n all-on]
+      (cond
+        (not (contains? root-spans (:span n)))
+        (vswap! (:diags ctx) conj
+                (error-diag n "`_on` belongs in the ROOT parens — it names the relation a tree op recurses over"))
+
+        (and op (not (tree-ops op)))
+        (vswap! (:diags ctx) conj
+                (error-diag n (str "`_on` is only valid on @search-tree / @get-tree — not @" op)))))))
+
+(defn lint-tree-on
+  "Shared @search-tree/@get-tree rule: exactly one `_on <rel>` in the root
+   parens, naming a self-relation of the root entity."
+  [op tree ctx]
+  (let [entity-def (:root-entity-def ctx)
+        ons (root-on-nodes tree)]
+    (cond
+      (empty? ons)
+      (vswap! (:diags ctx) conj
+              {:severity :error
+               :from 0 :to (max 1 (count (:source ctx "")))
+               :message (str "`" op "` requires `_on <relation>` in the root parens — "
+                             "the self-relation to recurse over.")})
+
+      (> (count ons) 1)
+      (vswap! (:diags ctx) conj
+              (error-diag (second ons) "Only one `_on` per tree op"))
+
+      :else
+      (when entity-def
+        (let [n         (first ons)
+              rel-id    (on-relation-id n)
+              rel-name  (:text rel-id)
+              rel-def   (get-in entity-def [:relations rel-name])
+              root-name (entity-name-of entity-def (:schema ctx))]
+          (cond
+            (nil? rel-def)
+            (vswap! (:diags ctx) conj
+                    (error-diag (or rel-id n)
+                                (str "Unknown relation '" rel-name "' on " root-name)))
+
+            (not= (:target rel-def) root-name)
+            (vswap! (:diags ctx) conj
+                    (error-diag (or rel-id n)
+                                (str "`_on " rel-name "` must be a SELF-relation of "
+                                     root-name " — it targets " (:target rel-def))))))))))
+
+(defn root-parens-id-identity?
+  "True if the root parens carry `xid = …` (or `euuid = …`) — the ID
+   field, since a unique business attr isn't enough for @get-tree."
+  [tree]
+  (boolean
+    (when-let [parens (:root-parens tree)]
+      (some (fn [n]
+              (when (= :arg-predicate (:node n))
+                (let [path  (ast/find-child n :path)
+                      field (some #(when (= :identifier (:node %)) (:text %))
+                                  (:children path))
+                      pred  (ast/find-child n :pred-op)]
+                  (and (#{"xid" "euuid"} field)
+                       pred
+                       (= "_eq" (second (classify-pred-op pred)))))))
+            (tree-seq :children :children parens)))))
+
+(defmethod op-lint-rules "search-tree"
+  [op tree ctx]
+  (lint-tree-on op tree ctx))
+
+(defmethod op-lint-rules "get-tree"
+  [op tree ctx]
+  (lint-tree-on op tree ctx)
+  (when-not (root-parens-id-identity? tree)
+    (vswap! (:diags ctx) conj
+            {:severity :error
+             :from 0 :to (max 1 (count (:source ctx "")))
+             :message "`get-tree` requires the tree root's identity in the root parens: `xid = …`"})))
+
+;; ── Named-parameter validation (schema-independent) ────────────────────
+;; Bare `?`/`?N` are rejected at the tokenizer; this walk catches what
+;; parsed fine but still needs flagging (unknown type, misplaced :order).
+
+(defn order-default-diags
+  "Validate an :order param's inline `=\"col dir, …\"` default (mirrors
+   compile's normalize-order-specs; kept textual here so lint stays
+   throw-free)."
+  [n]
+  (when-let [d (:param-default n)]
+    (let [raw     (str/trim d)
+          s       (if (and (str/starts-with? raw "\"")
+                           (str/ends-with? raw "\"")
+                           (> (count raw) 1))
+                    (subs raw 1 (dec (count raw)))
+                    raw)
+          allowed (not-empty (set (:param-type-args n)))
+          pieces  (remove str/blank? (map str/trim (str/split s #",")))]
+      (if (empty? pieces)
+        [(error-diag n "An `:order` default must name at least one column")]
+        (vec (keep
+              (fn [p]
+                (let [[col dir & extra] (str/split p #"\s+")]
+                  (cond
+                    (seq extra)
+                    (error-diag n (str "Malformed order spec \"" p "\" in default"))
+                    (not (re-matches #"[a-z_][a-z0-9_]*" (or col "")))
+                    (error-diag n (str "Invalid order column \"" col "\" in default"))
+                    (and dir (not (#{"asc" "desc"} dir)))
+                    (error-diag n (str "Invalid direction \"" dir "\" in default (asc|desc)"))
+                    (and allowed (not (allowed col)))
+                    (error-diag n (str "Default orders by \"" col
+                                       "\" — outside its restriction set ("
+                                       (str/join ", " (sort allowed)) ")")))))
+              pieces))))))
+
+(defn collect-param-ref-errors
   [ast]
   (let [diags (volatile! [])]
-    (letfn [(walk [n]
+    (letfn [(walk [n in-order-by?]
               (when (= :param-ref (:node n))
-                (let [raw (:param-type-raw n)]
-                  (when (and raw
-                             (not (contains? sql-params/type-aliases
-                                             (str/lower-case raw))))
+                (let [raw    (some-> (:param-type-raw n) str/lower-case)
+                      ;; Type is inferred from position: an untyped param
+                      ;; in `order by` IS an order param.
+                      order? (or (= "order" raw) (and in-order-by? (nil? raw)))]
+                  (cond
+                    (and raw (not= "order" raw)
+                         (not (contains? sql-params/type-aliases raw)))
                     (vswap! diags conj
                             (error-diag n
                                         (str "Unknown parameter type `:" raw
                                              "`. Expected one of: "
                                              (str/join ", "
-                                                       (sort (keys sql-params/type-aliases)))))))))
+                                                       (sort (conj (set (keys sql-params/type-aliases))
+                                                                   "order"))))))
+
+                    (and (= "order" raw) (not in-order-by?))
+                    (vswap! diags conj
+                            (error-diag n "The `:order` parameter type is only valid in `order by` position"))
+
+                    (and in-order-by? raw (not= "order" raw))
+                    (vswap! diags conj
+                            (error-diag n (str "An order-by parameter's type is inferred — drop `:"
+                                               raw "` (or declare `:order`)")))
+
+                    order?
+                    (run! #(vswap! diags conj %) (order-default-diags n)))
+                  (when (and (:param-type-args n) (not order?))
+                    (vswap! diags conj
+                            (error-diag n "A restriction set `( … )` is only valid on order parameters")))))
+              (when (ast/container? n)
+                (let [order-meta? (and (= :meta-key (:node n))
+                                       (#{"_order_by" "order"}
+                                        (some-> n :children first :text)))]
+                  (run! #(walk % order-meta?) (:children n)))))]
+      (walk ast false))
+    @diags))
+
+;; ── Legacy meta-key spellings ──────────────────────────────────────────
+;;
+;; The bare SQL spellings (`limit`, `order by`, `distinct`, `join`, `on`)
+;; are canonical; the `_`-prefixed wire forms still parse. Nudge, don't
+;; break — migration per repo policy is codemod + escalating lint.
+
+(def ^:private legacy-meta-spelling
+  {"_limit" "limit" "_offset" "offset" "_order_by" "order by"
+   "_distinct" "distinct" "_join" "join" "_on" "on"})
+
+(defn collect-legacy-meta-key-warnings
+  [ast]
+  (let [diags (volatile! [])]
+    (letfn [(walk [n]
+              (when (= :meta-key (:node n))
+                (let [kw (some-> n :children first)]
+                  (when-let [bare (legacy-meta-spelling (:text kw))]
+                    (vswap! diags conj
+                            (assoc (warning-diag kw
+                                                 (str "`" (:text kw) "` is the wire spelling — prefer `"
+                                                      bare "`"))
+                                   :severity :info)))))
               (when (ast/container? n)
                 (run! walk (:children n))))]
       (walk ast))
     @diags))
 
 ;; ── Duplicate-sibling warnings ─────────────────────────────────────────
-;;
-;; XSQL has no scalar aliases (XSQL.md line 169) and bare (un-aliased)
-;; relations share a response key, so duplicates at the same scope are
-;; meaningless. We walk every scope (`:query` root + every `:block`) and
-;; warn on the second-and-later occurrences. Aliased relations
-;; (`-good:roles`) are skipped from the check — they legitimately repeat.
+;; XSQL has no scalar aliases and bare relations share a response key,
+;; so duplicates at the same scope (query root or any block) are warned
+;; on second-and-later occurrence; aliased relations are skipped.
 
-(defn- statement-bare-name
-  "If `stmt-node` contains a bare scalar or bare relation/count-child,
-   return `[:scalar|:relation identifier-node]`. Else nil. Aliased
-   relations are skipped."
+(defn statement-bare-name
+  "If `stmt-node` is a bare scalar or bare relation/count-child, return
+   `[:scalar|:relation identifier-node]`, else nil."
   [stmt-node]
   (let [inner (first (:children stmt-node))]
     (cond
@@ -623,10 +815,9 @@
                             (:children inner))]
           [:relation id])))))
 
-(defn- lint-duplicate-siblings
-  "Walk every scope (`:query` root + every `:block` node) and emit a
-   warning for each duplicate bare attribute or bare relation. The
-   first occurrence is unflagged; later ones get the warning."
+(defn lint-duplicate-siblings
+  "Warn on each duplicate bare attribute/relation at a scope; the first
+   occurrence is unflagged."
   [tree ctx]
   (letfn [(walk [node]
             (when (ast/container? node)
@@ -658,50 +849,49 @@
 ;; ── Public entry ────────────────────────────────────────────────────────
 
 (defn lint
-  "Lint an XSQL source against a schema and root entity.
-   Returns a vector of diagnostic maps.
-
-   `op` is the wire op string (\"search\" / \"get\" / …). When `op`
-   is `\"get\"`, additional root-scope rules apply: no `_args (…)`
-   block, only `=` predicates at the root."
+  "Lint an XSQL source against a schema and root entity, returning a
+   vector of diagnostic maps. `op` is the wire op string (\"search\" /
+   \"get\" / …); `\"get\"` additionally requires root identity."
   ([source]
    (lint source nil nil nil))
   ([source schema root-entity]
    (lint source schema root-entity nil))
   ([source schema root-entity op]
    (let [tree     (parser/parse source)
-         ;; Rooted XSQL is self-describing: prefer the entity at the query
-         ;; root over the (legacy) external arg. Falls back to the arg for
-         ;; a bodyless source.
-         root     (or (some-> (:root-entity tree) :text) root-entity)
+         ;; Query-root entity wins over the (legacy) external arg.
+         root-tok (:root-entity tree)
+         root     (or (some-> root-tok :text) root-entity)
+         ;; Root parens hang off :query under :root-parens, not
+         ;; :children — collectors must be pointed at them explicitly.
+         rp       (:root-parens tree)
          diags    (volatile! (vec
                               (concat (collect-syntax-errors tree source)
-                                      (collect-param-ref-errors tree))))
+                                      (when rp (collect-syntax-errors rp source))
+                                      (collect-param-ref-errors tree)
+                                      (when rp (collect-param-ref-errors rp))
+                                      (collect-legacy-meta-key-warnings tree)
+                                      (when rp (collect-legacy-meta-key-warnings rp)))))
          root-def (when (and schema root)
                     (get-in schema [:entities root]))
          ctx      {:source source
                    :schema schema
                    :root-entity-def root-def
                    :diags diags}]
+     (when (and schema root-tok (not root-def))
+       (vswap! diags conj
+               (error-diag root-tok
+                           (str "Unknown entity '" root "' — not found in the deployed model."))))
      (when root-def
+       (when-let [p (:root-parens tree)]
+         (lint-args-of-parens p root-def ctx))
        (doseq [c (:children tree)]
          (case (:node c)
-           :root-args
-           (let [arg-list (or (some-> (ast/find-child c :parens)
-                                      (ast/find-child :arg-list))
-                              (ast/find-child c :arg-list))]
-             (when arg-list
-               (doseq [stmt (ast/find-children arg-list :arg-stmt)]
-                 (let [inner (first (:children stmt))]
-                   (when (= :or-expr (:node inner))
-                     (lint-or-expr inner root-def ctx))))))
-
            :statement
            (lint-statement c root-def ctx)
 
            nil)))
-     ;; Schema-independent rule — runs even without root-def because
-     ;; duplicate detection only needs identifier text and tree shape.
+     ;; Duplicate detection is schema-independent — runs without root-def.
      (lint-duplicate-siblings tree ctx)
+     (lint-on-placement op tree ctx)
      (op-lint-rules op tree ctx)
      @diags)))

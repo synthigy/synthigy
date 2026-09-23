@@ -1,32 +1,36 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.xsql.ast
-  "AST data shape and dump utilities for the XSQL parser.
-
-   Nodes are plain maps. Container nodes carry `:children`; leaf
-   tokens carry `:text`:
-
-     {:node :scalar          ; container
-      :span [from to]
-      :children [<node>...]}
-
-     {:node :identifier      ; leaf
-      :span [from to]
-      :text \"name\"}
-
-   Naming convention: internal tags are kebab-case keywords
-   (`:scalar-or-expr`). The dump formats render them as CamelCase
-   strings (`\"ScalarOrExpr\"`) to match the lezer-style names used in
-   the existing JS test fixtures."
+  "AST data shape and dump utilities for the XSQL parser."
   (:require [clojure.string :as str]))
 
 ;; ── Constructors ──────────────────────────────────────────────────────────
 
 (defn node
-  "Container node with the given tag, span, and children vector."
   [tag span children]
   {:node tag :span span :children (vec children)})
 
 (defn leaf
-  "Leaf node carrying text from the source."
   ([tag span]      {:node tag :span span})
   ([tag span text] {:node tag :span span :text text}))
 
@@ -36,8 +40,7 @@
 ;; ── Walker ────────────────────────────────────────────────────────────────
 
 (defn walk
-  "Pre-order depth-first walk. Calls `(f node)` on every node, then
-   recurses into children. Return value of `f` is ignored."
+  "Pre-order depth-first walk calling `(f node)` for side effects."
   [n f]
   (f n)
   (when (container? n)
@@ -45,20 +48,17 @@
       (walk c f))))
 
 (defn find-children
-  "Return the children of `n` whose tag is `tag`."
   [n tag]
   (filterv #(= tag (:node %)) (:children n)))
 
 (defn find-child
-  "First child of `n` whose tag is `tag`, or nil."
   [n tag]
   (first (find-children n tag)))
 
 ;; ── Tag → CamelCase ───────────────────────────────────────────────────────
 
 (defn tag->camel
-  "Convert a kebab-case keyword tag to its CamelCase string form.
-   `:scalar-or-expr` → \"ScalarOrExpr\"."
+  "Convert a kebab-case keyword tag to its CamelCase string form."
   [kw]
   (->> (str/split (name kw) #"-")
        (map str/capitalize)
@@ -66,16 +66,14 @@
 
 ;; ── S-expression dump (treeToSexpr equivalent) ────────────────────────────
 
-(defn- sexpr-leaf-string [n]
+(defn sexpr-leaf-string [n]
   (let [name- (tag->camel (:node n))]
     (case (:node n)
-      ;; Match JS treeToSexpr: only Identifier/Arrow/Dash show their text.
       (:identifier :arrow :dash) (str "(" name- " " (pr-str (:text n)) ")")
       (str "(" name- ")"))))
 
 (defn ast->sexpr
-  "Compact S-expression dump. Diff-friendly snapshot for tests.
-   Mirrors the JS `treeToSexpr` output up to leaf-text rules."
+  "Compact S-expression dump of an AST."
   [n]
   (if (leaf? n)
     (sexpr-leaf-string n)
@@ -86,9 +84,6 @@
            ")"))))
 
 ;; ── Vector-shape dump (parse.test.js shape() equivalent) ──────────────────
-;;
-;; Each node becomes a vector starting with its CamelCase name, followed by
-;; its children's shapes. This is what the JS parse tests assert on.
 
 (defn ast->shape [n]
   (let [name- (tag->camel (:node n))]

@@ -1,149 +1,100 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.delta
-  "Single delta pipeline — the trigger substrate is the only source of
-   envelopes; every change becomes one envelope; subscribers register
-   declarative interest and receive matching envelopes through a per-
-   subscriber sliding-buffer channel + handler go-loop.
-
-   Producer:
-     (dispatch! envelope)            ; drainer calls this post-commit
-
-   Consumers:
-     (subscribe!   key interest handler)   ; key is `=`-comparable; replaces prior
-     (unsubscribe! key)                    ; no-op if unknown
-     (subscriptions)                       ; diagnostic — set of keys
-
-   Lifecycle:
-     (init!)                         ; called by :synthigy/dataset start
-     (shutdown!)                     ; tears down registry + channels
-     (ready?)                        ; true between init! and shutdown!
-
-   Interest descriptor — a map of sets and scalars; missing/empty key is
-   a wildcard for that dimension. A descriptor opts into the entity track
-   by setting any of `:entity-xids` / `:record-xids` / `:attribute-xids`,
-   and into the relation track by setting any of `:relation-xids` /
-   `:from-xids` / `:to-xids`. Both tracks can be active in one descriptor.
-
-     {;; Entity-track narrowing — empty/absent ⇒ no narrowing
-      :entity-xids    #{X Y}    ; match envelope :data :entity-xid
-      :record-xids    #{...}    ; match envelope :data :record-xid
-      :attribute-xids #{...}    ; any attribute in this set was touched
-                                ; (optional — most consumers don't care)
-
-      ;; Relation-track narrowing
-      :relation-xids  #{A B}    ; match envelope :element
-      :from-xids      #{...}
-      :to-xids        #{...}
-      :endpoint-xids  #{...}    ; OR-match on from-xid or to-xid — used
-                                ; by the wire's record-scoped subscriptions
-                                ; (subscribers don't care which side of the
-                                ; relation the record sits on)
-
-      ;; Op narrowing — applies to whichever track the envelope is on
-      :ops            #{:insert :update :delete :link :unlink}
-
-      ;; Cross-cutting — apply to either track
-      :tenant-xid X
-      :scope-xid  X
-      :actor-xid  X}
-
-   An empty descriptor `{}` is the firehose — matches every envelope.
-
-   Examples:
-     {:entity-xids #{user-xid}}                  ; any change to a User record
-     {:entity-xids #{user-xid}
-      :ops #{:delete}}                           ; only User deletions
-     {:relation-xids #{user-role-xid}}           ; any link/unlink on User-Role
-     {:entity-xids #{user-xid role-xid}
-      :relation-xids #{user-role-xid}}           ; User OR Role OR User-Role
-     {:entity-xids #{user-xid}
-      :attribute-xids #{email-attr-xid}}         ; only when User.email changes
-     {:tenant-xid t}                             ; firehose, scoped to one tenant"
+  "Delta pipeline: trigger plug is the only source of envelopes; subscribers register
+   declarative interest and get matching envelopes via a per-subscriber channel + go-loop.
+   See docs/core/synthigy/dataset/delta.md for the interest descriptor shape."
   (:require
     [clojure.core.async :as async]
-    [synthigy.log :as log]))
-
-;;; ===========================================================================
-;;; Registry — per-subscriber state
-;;; ===========================================================================
+    [synthigy.log :as log]
+    [synthigy.traffic :as traffic]))
 
 ;; key → {:interest <map> :handler (fn [env]) :ch <chan> :stop? (atom)}
-(defonce ^:private registry (atom {}))
+(defonce registry (atom {}))
 
-;; Tracks whether `init!` has been called and `shutdown!` hasn't undone it.
-;; The registry survives across init/shutdown cycles (defonce); this flag
-;; just tells `ready?` what to report.
-(defonce ^:private ready (atom false))
+;; ready lags shutdown!/init! independently of the defonce registry, which
+;; survives reloads
+(defonce ready (atom false))
 
-(def ^:private default-buffer-size 100)
+(def default-buffer-size 100)
 
-;;; ===========================================================================
-;;; Lifecycle
-;;; ===========================================================================
+(declare schedule-reconcile!)
 
 (defn init!
-  "Mark the pipe as ready. Called by `synthigy.dataset/start`. Registry
-   state survives REPL reloads (defonce), so consumers that subscribed
-   before init don't lose their slot."
+  "Marks the pipe as ready. Called by synthigy.dataset/start."
   []
   (reset! ready true)
   nil)
 
-(defn- close-subscriber!
+(defn close-subscriber!
   [{:keys [ch stop?]}]
   (when stop? (reset! stop? true))
   (when ch    (async/close! ch)))
 
 (defn shutdown!
-  "Tear the pipe down — close every subscriber's channel, signal its
-   go-loop to exit, drop the registry. Called by `synthigy.dataset/stop`."
+  "Tears the pipe down: closes every subscriber's channel, drops the registry.
+   Called by synthigy.dataset/stop."
   []
   (reset! ready false)
   (doseq [sub (vals @registry)]
     (close-subscriber! sub))
   (reset! registry {})
+  (schedule-reconcile!)
   nil)
 
 (defn ready?
-  "True when the delta pipe is initialized — between dataset start and stop."
+  "True between init! and shutdown!."
   []
   @ready)
 
-;;; ===========================================================================
-;;; Interest matching
-;;; ===========================================================================
-
-(defn- entity-shape-active?
-  "True iff the interest narrows on any entity-side dimension. When false,
-   entity envelopes only match a fully-empty interest (firehose)."
+(defn entity-shape-active?
+  "True iff the interest narrows on any entity-side dimension."
   [interest]
   (some #(seq (get interest %)) [:entity-xids :record-xids :attribute-xids]))
 
-(defn- relation-shape-active?
+(defn relation-shape-active?
   "True iff the interest narrows on any relation-side dimension."
   [interest]
   (some #(seq (get interest %))
         [:relation-xids :from-xids :to-xids :endpoint-xids]))
 
-(defn- envelope-track
-  "Classify envelope by its :delta :type namespace. Returns :entity or
-   :relation; nil for unknown shapes."
+(defn envelope-track
+  "Classifies envelope by its :delta :type namespace — :entity, :relation, or
+   nil."
   [envelope]
   (case (some-> envelope :delta :type namespace)
     "entity"   :entity
     "relation" :relation
     nil))
 
-(defn- envelope-op
-  "Unqualified op keyword pulled off the :delta :type — e.g. :insert,
-   :update, :delete, :link, :unlink. Matches the `:ops` set in interest
+(defn envelope-op
+  "Unqualified op keyword off :delta :type — matches the :ops set in interest
    descriptors."
   [envelope]
   (some-> envelope :delta :type name keyword))
 
-(defn- changed-attribute-xids
-  "Attribute xids touched by an entity envelope. For :insert all keys of
-   :after; for :update keys of :after whose value differs from :before;
-   for :delete the empty set (record-level event)."
+(defn changed-attribute-xids
+  "Attribute xids touched by an entity envelope, per op."
   [op data]
   (case op
     :insert (->> (or (:after data) {}) keys (mapv #(if (keyword? %) (name %) %)))
@@ -153,16 +104,14 @@
     :delete []
     []))
 
-(defn- matches-cross-cutting?
+(defn matches-cross-cutting?
   [{:keys [tenant-xid scope-xid actor-xid]} {:keys [tenant scope actor]}]
   (and (or (nil? tenant-xid) (= tenant-xid tenant))
        (or (nil? scope-xid)  (= scope-xid  scope))
        (or (nil? actor-xid)  (= actor-xid  actor))))
 
-(defn- matches-entity?
-  "Apply entity-side narrowing — entity-xids / record-xids / attribute-xids.
-   Empty/absent set on a dimension = no narrowing on that dimension. All
-   xids are nanoid strings."
+(defn matches-entity?
+  "Applies entity-side narrowing (entity-xids/record-xids/attribute-xids)."
   [interest envelope]
   (let [{:keys [entity-xids record-xids attribute-xids ops]} interest
         data (-> envelope :delta :data)
@@ -176,7 +125,7 @@
                (boolean (some attribute-xids changed))))
          (or (empty? ops) (contains? ops op)))))
 
-(defn- matches-relation?
+(defn matches-relation?
   [interest envelope]
   (let [{:keys [relation-xids from-xids to-xids endpoint-xids ops]} interest
         data (-> envelope :delta :data)
@@ -193,16 +142,7 @@
          (or (empty? ops) (contains? ops op)))))
 
 (defn matches?
-  "True iff `envelope` should be delivered to a subscriber holding
-   `interest`. Always returns a boolean.
-
-   Shape gating — a subscription opts into a track by setting any
-   narrowing field on that side; without those fields, envelopes of
-   that track are skipped. An interest with neither side active is
-   the firehose (every envelope passes shape gating).
-
-   Cross-cutting filters (`:tenant-xid` / `:scope-xid` / `:actor-xid`)
-   layer on top of whatever shape gating applies."
+  "True iff envelope should be delivered to a subscriber holding interest."
   [interest envelope]
   (let [track   (envelope-track envelope)
         e-on?   (entity-shape-active? interest)
@@ -220,17 +160,9 @@
           :entity   (if e-on? (matches-entity?   interest envelope) true)
           :relation (if r-on? (matches-relation? interest envelope) true))))))
 
-;;; ===========================================================================
-;;; Subscribe / unsubscribe / dispatch
-;;; ===========================================================================
-
-(defn- run-subscriber-loop!
-  "Spin a go-loop that pulls envelopes off the subscriber's channel and
-   invokes its handler. One slow handler can't backpressure others — the
-   channel is a fixed buffer and `dispatch!` uses non-blocking `offer!`,
-   so a full buffer drops (and signals `on-drop`) rather than stalling the
-   dispatcher. Handler exceptions are caught + logged so one bad subscriber
-   doesn't poison its sibling."
+(defn run-subscriber-loop!
+  "Go-loop pulling envelopes off a subscriber's channel; handler exceptions are
+   caught+logged."
   [key handler ch stop?]
   (async/go-loop []
     (when-not @stop?
@@ -244,15 +176,8 @@
         (recur)))))
 
 (defn subscribe!
-  "Register `handler` against `interest` under `key`. Returns `key`.
-   Re-subscribing under the same key replaces the prior binding (its
-   channel is closed, its go-loop exits). Safe to call before `init!`.
-
-   Optional `on-drop` (a 1-arg fn of the rejected envelope) is invoked when
-   the subscriber's buffer is full — the channel is a FIXED buffer, so
-   `offer!` returns false on overflow (dropping the newest) instead of
-   silently evicting the oldest. That false is the only signal a live drop
-   happened; consumers use it to trigger a durable resync."
+  "Registers handler against interest under key. Re-subscribing under the same key REPLACES
+   the prior binding, losing anything unconsumed — use retune! to change only the interest."
   ([key interest handler] (subscribe! key interest handler nil))
   ([key interest handler on-drop]
    (let [ch    (async/chan default-buffer-size)
@@ -265,15 +190,29 @@
                                 :stop?    stop?
                                 :on-drop  on-drop})
      (run-subscriber-loop! key handler ch stop?)
+     (schedule-reconcile!)
      key)))
 
+(defn retune!
+  "Atomically replaces the interest of the subscription under key, leaving channel/handler
+   untouched — the lossless way to follow a moving interest. No-op (nil) if key is unknown."
+  [key interest]
+  (let [[old _] (swap-vals! registry
+                            (fn [r]
+                              (if (contains? r key)
+                                (assoc-in r [key :interest] interest)
+                                r)))]
+    (when (contains? old key)
+      (schedule-reconcile!)
+      key)))
+
 (defn unsubscribe!
-  "Detach the subscription under `key`. Closes its channel + signals the
-   go-loop. No-op if unknown."
+  "Detaches the subscription under key. No-op if unknown."
   [key]
   (when-let [sub (get @registry key)]
     (close-subscriber! sub)
-    (swap! registry dissoc key))
+    (swap! registry dissoc key)
+    (schedule-reconcile!))
   nil)
 
 (defn subscriptions
@@ -282,23 +221,113 @@
   (set (keys @registry)))
 
 (defn dispatch!
-  "Walk the registry; for every subscription whose interest matches
-   `envelope`, non-blocking offer onto its channel. The drainer calls
-   this once per drained envelope. Safe before `init!` (registry empty
-   ⇒ no-op)."
+  "Non-blocking offer of envelope onto every matching subscriber's channel.
+   LOCAL fan-out only — producers go through publish!."
   [envelope]
-  (doseq [{:keys [interest ch on-drop]} (vals @registry)]
-    (try
-      (when (matches? interest envelope)
-        ;; Fixed buffer: offer! returns false when full. That's the live-drop
-        ;; signal — hand the rejected envelope to on-drop so the subscriber can
-        ;; resync from the durable store. No on-drop ⇒ best-effort, drop it.
-        (when (and (not (async/offer! ch envelope)) on-drop)
-          (on-drop envelope)))
-      (catch Throwable e
-        (log/error! {:id ::dispatch-match-failed
-                     :data {:envelope-type (some-> envelope :delta :type)}
-                     :msg "Match threw — interest may be malformed"}
-                    e))))
+  (let [matched (reduce
+                  (fn [matched {:keys [interest ch on-drop]}]
+                    (try
+                      (if (matches? interest envelope)
+                        ;; fixed buffer: offer! false on full is the live-drop
+                        ;; signal, hands to on-drop for durable resync
+                        (do (when-not (async/offer! ch envelope)
+                              (traffic/count! :deltas-dropped)
+                              ;; explicit :system topic: authoritative
+                              ;; :traffic/delta ids skip ns rules, so a DROP
+                              ;; (delivery health) needs this to be visible in
+                              ;; any lens
+                              (log/warn {:id ::delta-dropped
+                                         :topics #{:system}
+                                         :data {:seq (:seq envelope)
+                                                :envelope-type (some-> envelope :delta :type)
+                                                :resync? (some? on-drop)}}
+                                        "Subscriber buffer full — delta dropped")
+                              (when on-drop (on-drop envelope)))
+                            (inc matched))
+                        matched)
+                      (catch Throwable e
+                        (log/error! {:id ::dispatch-match-failed
+                                     :data {:envelope-type (some-> envelope :delta :type)}
+                                     :msg "Match threw — interest may be malformed"}
+                                    e)
+                        matched)))
+                  0
+                  (vals @registry))]
+    (log/debug {:id ::delta-published
+                :data {:seq (:seq envelope)
+                       :envelope-type (some-> envelope :delta :type)
+                       :subscribers matched}}
+               "Delta dispatched to live subscribers"))
   nil)
+
+;; cross-node transport seam, same idiom as wake/*wake-source* and
+;; audit/*audit-provider*
+(defprotocol DeltaProvider
+  (publish-deltas! [this envelopes]
+    "Delivers a drained batch toward every node's local dispatch!.")
+  (reconcile-interest! [this interests]
+    "Pushes this node's interest union to the transport as a source filter. Optimization only."))
+
+(defrecord Local []
+  DeltaProvider
+  (publish-deltas!     [_ envelopes] (run! dispatch! envelopes))
+  (reconcile-interest! [_ _] nil))
+
+(def ^:dynamic *delta-provider*
+  "The active DeltaProvider — Local for single-node, a broker (NATS/Kafka) for clustered payload delivery."
+  (->Local))
+
+(defn publish!
+  "Producer seam — the drainer calls this once per drained batch."
+  [envelopes]
+  (publish-deltas! *delta-provider* envelopes))
+
+(defn interests-union
+  "Pure coarse union of interest maps per track: {:entity <xid-set|:all|nil>
+   :relation <...>}."
+  [interests]
+  (let [merge-topic (fn [a b]
+                      (cond (nil? a) b
+                            (nil? b) a
+                            (or (= a :all) (= b :all)) :all
+                            :else (into a b)))
+        topic (fn [on? xids]
+                (when on? (or (not-empty (set xids)) :all)))]
+    (reduce (fn [acc interest]
+              (let [e-on? (boolean (entity-shape-active? interest))
+                    r-on? (boolean (relation-shape-active? interest))
+                    firehose? (not (or e-on? r-on?))]
+                (-> acc
+                    (update :entity merge-topic
+                            (topic (or e-on? firehose?)
+                                   (when e-on? (:entity-xids interest))))
+                    (update :relation merge-topic
+                            (topic (or r-on? firehose?)
+                                   (when r-on? (:relation-xids interest)))))))
+            {:entity nil :relation nil}
+            interests)))
+
+(defn node-interest
+  "This node's interests-union over the live registry."
+  []
+  (interests-union (map :interest (vals @registry))))
+
+(defonce reconcile-pending (atom false))
+
+(defn schedule-reconcile!
+  "Debounced (100ms) push of node-interest to the provider; coalesces
+   subscribe!/unsubscribe! bursts."
+  []
+  (when (compare-and-set! reconcile-pending false true)
+    (async/go
+      (async/<! (async/timeout 100))
+      ;; clear before computing: a registry change landing mid-cycle schedules a
+      ;; fresh cycle instead of being missed
+      (reset! reconcile-pending false)
+      (try
+        (reconcile-interest! *delta-provider* (node-interest))
+        (catch Throwable e
+          (log/warn {:id ::reconcile-failed
+                     :data {:action :recovering :subject :delta}}
+                    (.getMessage e)))))))
 

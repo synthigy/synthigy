@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.db.postgres
   "PostgreSQL connection management and lifecycle"
   (:require
@@ -30,7 +52,7 @@
    the same physical connection to receive notifications). Drawing it from a
    Hikari pool would permanently pin a pool slot and — because Hikari can't tell
    an intentionally long-lived connection from a leaked one — trip its leak
-   detector on every boot. So cache-coherence listeners (substrate wake, IAM
+   detector on every boot. So cache-coherence listeners (plug wake, IAM
    connector chain) take a raw `DriverManager` connection instead.
 
    Pulls the JDBC coordinates straight off the configured `HikariDataSource`.
@@ -39,7 +61,7 @@
   (DriverManager/getConnection (.getJdbcUrl ds) (.getUsername ds) (.getPassword ds)))
 
 (defn- build-drainer-pool
-  "Build a small, dedicated Hikari pool for the substrate drainer + wake
+  "Build a small, dedicated Hikari pool for the plug drainer + wake
    source so they never compete with the writer pool for connections.
 
    Sizing: default 2 conns for SKIP LOCKED drain transactions. The
@@ -58,7 +80,7 @@
                (.setPoolName "synthigy-drainer")
                (.setLeakDetectionThreshold 5000)
                (.setInitializationFailTimeout 0)
-               (.addDataSourceProperty "connectionInitSql" "SET TIME ZONE 'UTC'")
+               (.setConnectionInitSql "SET TIME ZONE 'UTC'")
                (.setMaximumPoolSize size)
                (.setMinimumIdle 1)
                (.setConnectionTestQuery "select 1")
@@ -88,7 +110,7 @@
                      (.setPassword password)
                      (.setLeakDetectionThreshold 2000)
                      (.setInitializationFailTimeout 0)
-                     (.addDataSourceProperty "connectionInitSql" "SET TIME ZONE 'UTC'")
+                     (.setConnectionInitSql "SET TIME ZONE 'UTC'")
                      (.setMaximumPoolSize max-connections)
                      (.setConnectionTestQuery "select 1")
                      ;; Hikari ignores keepaliveTime < 30s; 30s is the floor.
@@ -103,27 +125,6 @@
     (log/info {:id ::connected :data {:user user :url url}}
               "Connected to PostgresDB")
     (db/map->Postgres (assoc data :datasource datasource))))
-
-(defn clear-connections
-  "Terminates all connections to a PostgreSQL database.
-
-  Uses PostgreSQL-specific pg_terminate_backend function to forcefully
-  disconnect all active connections to the specified database.
-
-  Args:
-    con - JDBC connection (typically from admin database)
-    db-name - Name of database to clear connections from
-
-  Returns:
-    Result of pg_terminate_backend query
-
-  Example:
-    (with-open [admin-con (jdbc/get-connection admin-datasource)]
-      (clear-connections admin-con \"my_database\"))"
-  [con db-name]
-  (jdbc/execute-one!
-    con
-    [(str "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='" db-name "';")]))
 
 (defn check-connection-params
   [{:keys [host db user password]
@@ -148,113 +149,9 @@
                        :db db
                        :password password
                        :user user
-                       :max-connections (Integer/parseInt (env :hikari-max-pool-size "20")))]
+                       :max-connections (Integer/parseInt (env :postgres-pool-size "20")))]
     (check-connection-params data)
     data))
-
-(defn admin-from-env
-  "Builds Postgres instance from environment variables. Admin db should be
-  used to create new db for new tenants"
-  []
-  (let [host (env :postgres-host "localhost")
-        port (env :postgres-port 5432)
-        admin-db (env :postgres-admin-db (env :postgres-db "postgres"))
-        password (env :postgres-admin-password (env :postgres-password "password"))
-        user (env :postgres-admin-user (env :postgres-user "postgres"))
-        data (hash-map :host host
-                       :port port
-                       :db admin-db
-                       :password password
-                       :user user
-                       :max-connections (Integer/parseInt (env :hikari-max-pool-size "20")))]
-    (check-connection-params data)
-    data))
-
-(defn- db-exists?
-  "True when a database named `database-name` already exists on the server."
-  [datasource database-name]
-  (with-open [connection (jdbc/get-connection datasource)]
-    (some? (jdbc/execute-one!
-             connection
-             ["SELECT 1 FROM pg_database WHERE datname = ?" database-name]))))
-
-(defn create-db
-  "Ensure the database exists and return a HikariDataSource connection to it.
-
-  Checks `pg_database` first: if the database already exists we just connect —
-  no `CREATE DATABASE` attempt, so the common every-boot path doesn't raise
-  (and log) a benign 'already exists' error. Only a genuinely fresh database
-  triggers the CREATE + uuid-ossp extension setup."
-  [{:keys [host]
-    :as admin} database-name]
-  (let [admin-db (connect admin)]
-    (try
-      (if (db-exists? (:datasource admin-db) database-name)
-        (do
-          (log/info {:id ::database-exists :data {:database database-name :host host}}
-                    "Database already exists, connecting")
-          (connect (assoc admin :db database-name)))
-        (do
-          (log/info {:id ::creating-database :data {:database database-name :host host}}
-                    "Creating database")
-          (with-open [connection (jdbc/get-connection (:datasource admin-db))]
-            (jdbc/execute-one!
-              connection
-              [(format "create database %s" database-name)]))
-          (let [db (connect (assoc admin :db database-name))]
-            (try
-              (with-open [connection (jdbc/get-connection (:datasource db))]
-                (jdbc/execute-one!
-                  connection
-                  ["create extension \"uuid-ossp\""]))
-              (catch Throwable ex
-                (log/warn {:id ::uuid-ossp-failed :error ex}
-                          "Couldn't create uuid-ossp extension")
-                (throw ex)))
-            (log/info {:id ::database-created :data {:database database-name :host host}}
-                      "Database created")
-            db)))
-      (catch Throwable ex
-        ;; Genuine failure (or a lost CREATE race against another booter) —
-        ;; the caller's setup still guards "already exists" defensively.
-        (log/error! {:id ::create-database-failed :data {:database database-name}} ex)
-        (throw ex))
-      (finally
-        (.close (:datasource admin-db))))))
-
-(defn drop-db
-  "Removes DB from Postgres server"
-  [{:keys [host]
-    :as admin} database]
-  (log/info {:id ::dropping-database :data {:database database :host host}}
-            "Dropping database")
-  (let [admin (connect admin)]
-    (try
-      (with-open [con (:datasource admin)]
-        (clear-connections con database)
-        ;; Raw next.jdbc — `synthigy.db.sql/execute-one!` dispatches on a
-        ;; JDBCBackend and needs `*db*` bound; admin DDL runs with no `*db*`.
-        (jdbc/execute-one!
-          con
-          [(format "drop database if exists %s" database)]))
-      (finally
-        (.close (:datasource admin)))))
-  nil)
-
-(defn backup
-  "Function will connect to admin db and backup 'database' under 'backup' name"
-  [admin database backup]
-  (let [db (connect admin)]
-    (with-open [con (jdbc/get-connection (:datasource db))]
-      (jdbc/execute!
-        con
-        [(format "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='%s'" database)])
-      (jdbc/execute!
-        con
-        [(format "create database %s with template '%s'" backup database)]))
-    true))
-
-
 
 ;;; ============================================================================
 ;;; Patcho VersionStore Implementation
@@ -416,47 +313,21 @@
   {:depends-on [:synthigy/transit]
    :doc "JDBC pool + DB provisioning (PostgreSQL)"
    :setup (fn []
-            ;; One-time: Create database, patcho tables, and set stores
-            (let [admin (admin-from-env)
-                  config (from-env)
-                  db-name (:db config)]
+            ;; One-time: connect (the operator provisions the database
+            ;; itself — see check-connection-params), create patcho tables,
+            ;; set stores
+            (let [config (from-env)
+                  db-name (:db config)
+                  db (connect config)]
               (log/info {:id ::backend-starting :data {:action :starting :subject :db-backend :database db-name}}
                         "Setting up database")
-
-              ;; Create database (or connect if exists)
-              (let [db (try
-                         (create-db admin db-name)
-                         (catch Exception e
-                           (if (re-find #"already exists" (.getMessage e))
-                             (do
-                               (log/info {:id ::database-exists :data {:database db-name}}
-                                         "Database already exists, connecting")
-                               (connect config))
-                             (throw e))))]
-
-                ;; Create patcho tables
-                (log/info {:id ::creating-patcho-tables}
-                          "Creating patcho tables")
-                (ensure-lifecycle-table! db)
-                (ensure-version-table! db)
-
-                ;; Set *db* and stores so lifecycle can track setup completion
-                (alter-var-root #'db/*db* (constantly db))
-                (patch/set-store! db)
-                (lifecycle/set-store! db)
-
-                (log/info {:id ::backend-started :data {:action :started :subject :db-backend :database db-name}}
-                          "Setup complete"))))
-
-   :cleanup (fn []
-              ;; One-time: Drop database (DESTRUCTIVE)
-              (let [admin (admin-from-env)
-                    config (from-env)]
-                (log/info {:id ::cleanup-starting :data {:database (:db config)}}
-                          "Dropping database")
-                (drop-db admin (:db config))
-                (log/info {:id ::cleanup-complete :data {:database (:db config)}}
-                          "Cleanup complete")))
+              (ensure-lifecycle-table! db)
+              (ensure-version-table! db)
+              (alter-var-root #'db/*db* (constantly db))
+              (patch/set-store! db)
+              (lifecycle/set-store! db)
+              (log/info {:id ::backend-started :data {:action :started :subject :db-backend :database db-name}}
+                        "Setup complete")))
 
    :start (fn []
             ;; Runtime: Ensure connection pool and stores are set
@@ -473,6 +344,18 @@
            ;; Runtime: Close connections
            (log/info {:id ::lifecycle-stopping :data {:action :stopping}}
                      "Stopping database connection")
+           ;; Release the patcho stores BEFORE closing the pool — they hold
+           ;; THIS datasource. Leaving them pointed at a closed pool wedges the
+           ;; next `start!` beyond recovery: patcho reads the lifecycle store in
+           ;; `setup!`, which runs BEFORE this module's `:start` fn, so nothing
+           ;; downstream ever gets the chance to re-point them.
+           ;;
+           ;; nil, not a fresh AtomStore, is deliberate: an empty atom store
+           ;; reports `setup-complete?` false and would RE-RUN setup (schema
+           ;; creation). nil makes `start!` skip setup entirely, and `:start`
+           ;; re-points both stores at the new pool.
+           (patch/set-store! nil)
+           (lifecycle/set-store! nil)
            (stop)
            (log/info {:id ::lifecycle-stopped :data {:action :stopped}}
                      "Database connection stopped"))})
@@ -489,7 +372,7 @@
   - Other types: Pass through as-is
 
   Args:
-    return-type - :graphql, :edn, or :raw
+    return-type - :edn or :raw
 
   Returns:
     next.jdbc builder-fn that processes ResultSet rows"
@@ -503,17 +386,9 @@
 (def ^:private defaults
   "PostgreSQL-specific next.jdbc options for each return type.
 
-  :graphql - String keys, lowercase column names
   :edn - Keyword keys, kebab-case column names
   :raw - String keys, original column names"
-  {:graphql
-   {:builder-fn (postgres-result-builder :graphql)
-    :table-fn postgres
-    :label-fn str/lower-case
-    :qualifier-fn name
-    :column-fn postgres}
-
-   :edn
+  {:edn
    {:builder-fn (postgres-result-builder :edn)
     :table-fn postgres
     :label-fn (fn [w]
@@ -535,8 +410,32 @@
   (jdbc-options [_db return-type]
     (get defaults return-type (:raw defaults))))
 
+;;; ============================================================================
+;;; Dialect Protocol Implementation
+;;; ============================================================================
+
+(extend-type Postgres
+  db/Dialect
+
+  (json-param [_ s] (doto (PGobject.) (.setType "jsonb") (.setValue s)))
+  (json-column [_ v] (if (instance? PGobject v) (.getValue ^PGobject v) v))
+
+  (table-exists? [_ table]
+    (boolean (:to_regclass (execute-one! ["SELECT to_regclass(?)" (str "public." table)]))))
+
+  (column-exists? [_ table column]
+    (boolean (execute-one!
+              ["SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ? AND column_name = ?"
+               table column])))
+
+  (ddl [_] {:serial-pk "SERIAL PRIMARY KEY" :json "jsonb" :now "now()"})
+  (json-text [_ expr] (str "(" expr " #>> '{}')"))
+  (json-get-text [_ expr k] (str expr "->>'" k "'"))
+  (json-remove [_ expr k] (str expr " - '" k "'"))
+  (cast-placeholder [_ type] (str "?::" type))
+  (template-sql [_ raw-sql] raw-sql))
+
 
 (comment
   (lifecycle/setup! :synthigy/database)
-  (lifecycle/start! :synthigy/database)
-  (lifecycle/cleanup! :synthigy/database))
+  (lifecycle/start! :synthigy/database))

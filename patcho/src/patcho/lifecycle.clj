@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns patcho.lifecycle
   "Module lifecycle management with dependency resolution.
 
@@ -123,6 +145,53 @@
 (def ^{:doc "Registry of module errors. Structure: {topic {:error Exception :timestamp Date}}"}
   module-errors
   (atom {}))
+
+(defn default-on-lifecycle-event
+  "Default `*on-lifecycle-event*` binding: print transitions to the console.
+
+  Normal transitions go to stdout, failures to stderr. Patcho has no logging
+  dependency by design, so this is what makes a bare `(start! :my/api)`
+  observable with zero configuration — a module that starts, stops, or blows
+  up says so without the host wiring anything.
+
+  No stack trace is printed: `start!` rethrows the throwable, so whoever
+  catches it owns the trace. Printing here would just duplicate it."
+  [{:keys [phase topic error]}]
+  (case phase
+    :started (println (str "[patcho] " topic " started"))
+    :stopped (println (str "[patcho] " topic " stopped"))
+    :start-failed
+    (binding [*out* *err*]
+      (println (str "[patcho] " topic " FAILED to start: "
+                    (some-> error .getClass .getName) ": "
+                    (some-> error .getMessage))))
+    nil))
+
+(def ^:dynamic *on-lifecycle-event*
+  "1-arg fn invoked after every module phase transition. Patcho has no logging
+  dependency by design, so this is the seam a host application rebinds to route
+  lifecycle transitions into its own observability stack.
+
+  Receives a map:
+
+    {:phase :started      :topic :my/api}
+    {:phase :stopped      :topic :my/api}
+    {:phase :start-failed :topic :my/api :error <Throwable>}
+
+  Called for EVERY module, so a host gets guaranteed coverage without each
+  module having to remember to announce itself. Exceptions thrown by the fn
+  are swallowed — observability must never break a lifecycle transition.
+
+  Defaults to `default-on-lifecycle-event`, which prints to stdout/stderr.
+  Set to nil to silence patcho entirely."
+  default-on-lifecycle-event)
+
+(defn- notify-lifecycle!
+  "Fire *on-lifecycle-event*, never throwing."
+  [event]
+  (when-let [f *on-lifecycle-event*]
+    (try (f event) (catch Throwable _ nil)))
+  nil)
 
 ;;; ============================================================================
 ;;; LifecycleStore Protocol
@@ -259,13 +328,36 @@
      ;; Switch to DB - state auto-migrates
      (set-store! db/*db*)
 
-     (setup! :my/app)     ; Uses database store"
+     (setup! :my/app)     ; Uses database store
+
+  Migration is BEST-EFFORT and runs AFTER the new store is installed. See the
+  comment in the body — getting that order backwards makes a dead old store
+  unrecoverable."
   [store]
-  (alter-var-root #'*lifecycle-store*
-                  (fn [old-store]
-                    (when (and old-store (not= old-store store))
-                      (migrate-store! old-store store nil))
-                    store)))
+  (let [old-store *lifecycle-store*]
+    ;; Install FIRST, migrate SECOND. The obvious ordering — migrate, then
+    ;; swap — wedges the system permanently: if the old store is dead (its
+    ;; connection pool was closed by a module `:stop`), the migration read
+    ;; throws, and because that throw happened inside `alter-var-root`'s update
+    ;; fn it aborted the swap too. The var kept pointing at the dead store, so
+    ;; every later `set-store!` tried to migrate from it again and threw again.
+    ;; Only `alter-var-root` surgery could recover.
+    ;;
+    ;; Doing IO inside an `alter-var-root` fn was wrong regardless — that fn
+    ;; may be retried under contention.
+    (alter-var-root #'*lifecycle-store* (constantly store))
+    (when (and old-store store (not= old-store store))
+      (try
+        (migrate-store! old-store store nil)
+        (catch Throwable e
+          ;; Loud, not silent: a lost migration means setup-complete? flags may
+          ;; be missing and `setup!` could re-run. Not fatal though — the new
+          ;; store is installed and authoritative.
+          (binding [*out* *err*]
+            (println (str "[patcho] lifecycle store migration failed; new store is "
+                          "installed but prior state was NOT copied: "
+                          (some-> e .getClass .getName) ": " (ex-message e)))))))
+    store))
 
 (defn reset-store!
   "Reset lifecycle store to a fresh in-memory AtomLifecycleStore.
@@ -316,6 +408,12 @@
               :start        - fn taking no args to start runtime services
               :stop         - fn taking no args to stop runtime services
 
+  Any other keys in spec are kept as module metadata and surfaced by
+  module-info and system-report (e.g. :requires-license).
+
+  Re-registering an already-registered topic preserves its runtime :started?
+  state — reloading a namespace must not make a running module read as stopped.
+
   Example:
     (register-module! :my/database
       {:start (fn [] (connect! db-config))
@@ -327,7 +425,7 @@
        :cleanup (fn [] (drop-cache-tables!))
        :start (fn [] (start-cache!))
        :stop (fn [] (stop-cache!))})"
-  [topic {:keys [depends-on doc setup cleanup start stop]
+  [topic {:keys [depends-on doc setup cleanup start stop] :as spec
           :or {stop (fn [] nil)
                start (fn [] nil)}}]
   {:pre [(keyword? topic)
@@ -335,14 +433,16 @@
          (or (nil? doc) (string? doc))
          (fn? start)
          (fn? stop)]}
-  (swap! modules assoc topic
-         {:depends-on (or depends-on [])
-          :doc doc
-          :setup setup
-          :cleanup cleanup
-          :start start
-          :stop stop
-          :started? false})
+  (swap! modules
+         (fn [ms]
+           (assoc ms topic
+                  (merge (dissoc spec :depends-on :setup :cleanup :start :stop)
+                         {:depends-on (or depends-on [])
+                          :setup setup
+                          :cleanup cleanup
+                          :start start
+                          :stop stop
+                          :started? (boolean (get-in ms [topic :started?]))}))))
   nil)
 
 ;;; ============================================================================
@@ -378,10 +478,11 @@
      :cleanup-complete? true/false} ; Persistent (from *lifecycle-store*)"
   [topic]
   (when-let [module (get @modules topic)]
-    (let [base-info {:depends-on (:depends-on module)
-                     :started? (:started? module)
-                     :has-setup? (some? (:setup module))
-                     :has-cleanup? (some? (:cleanup module))}]
+    (let [base-info (merge (dissoc module :setup :cleanup :start :stop :started? :depends-on)
+                           {:depends-on (:depends-on module)
+                            :started? (:started? module)
+                            :has-setup? (some? (:setup module))
+                            :has-cleanup? (some? (:cleanup module))})]
       (if *lifecycle-store*
         (merge base-info
                (select-keys
@@ -420,16 +521,6 @@
                       {:module topic
                        :missing-dependencies missing
                        :registered (registered-modules)})))))
-
-(defn- get-active-dependents
-  "Returns set of registered modules that depend on this topic AND haven't been cleaned up yet."
-  [topic]
-  (when *lifecycle-store*
-    (set (keep (fn [[t module]]
-                 (when (and (some #{topic} (:depends-on module))
-                            (not (:cleanup-complete? (read-lifecycle-state *lifecycle-store* t))))
-                   t))
-               @modules))))
 
 ;;; ============================================================================
 ;;; Lifecycle Operations
@@ -478,12 +569,14 @@
          (swap! module-errors dissoc topic)
          (start)
          (swap! modules assoc-in [topic :started?] true)
+         (notify-lifecycle! {:phase :started :topic topic})
 
          (catch Exception e
            ;; Record error with timestamp
            (swap! module-errors assoc topic
                   {:error e
                    :timestamp (java.util.Date.)})
+           (notify-lifecycle! {:phase :start-failed :topic topic :error e})
            ;; Re-throw to maintain existing behavior
            (throw e))))))
   ([topic & more-topics]
@@ -508,7 +601,8 @@
     ;; Only stop if actually running
     (when started?
       (stop)
-      (swap! modules assoc-in [topic :started?] false))))
+      (swap! modules assoc-in [topic :started?] false)
+      (notify-lifecycle! {:phase :stopped :topic topic}))))
 
 (defn stop!
   "Stop a module and all its dependents RECURSIVELY.
@@ -959,10 +1053,13 @@
                                         deps (:depends-on info)
                                         all-registered (set all-modules)
                                         missing-deps (remove all-registered deps)
-                                        error-info (get errors topic)]
-                                    [topic (cond-> {:status (if (started? topic) :started :stopped)
-                                                    :depends-on deps
-                                                    :dependents (get-in graph [topic :dependents] [])}
+                                        error-info (get errors topic)
+                                        meta-info (dissoc info :depends-on :started? :has-setup? :has-cleanup?
+                                                          :setup-complete? :cleanup-complete?)]
+                                    [topic (cond-> (merge meta-info
+                                                          {:status (if (started? topic) :started :stopped)
+                                                           :depends-on deps
+                                                           :dependents (get-in graph [topic :dependents] [])})
                                              (seq missing-deps)
                                              (assoc :missing-dependencies (vec missing-deps))
 

@@ -1,0 +1,230 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
+(ns synthigy.embedded.gen
+  "Code generator: a folder of .xsql → committed Clojure source calling
+   synthigy.embedded."
+  (:require [synthigy.embedded :as embedded]
+            [patcho.lifecycle :as lifecycle]
+            ;; loading registers :synthigy/dataset — removing breaks clj -X:gen
+            synthigy.core
+            [synthigy.dataset :as dataset]
+            [jsonista.core :as json]
+            [clojure.java.io :as io]
+            [clojure.string :as str]))
+
+(def ^:private xsql-verbs
+  "Mirrors synthigy.xsql.program/doc-verbs — kept hand-copied to stay diffable with synthigy.gen."
+  #{"search" "get" "search-tree" "get-tree" "slice" "purge" "sql-template"})
+
+(def ^:private core-syms
+  (set (map str (keys (ns-publics 'clojure.core)))))
+
+(defn kebab
+  [s]
+  (-> (str s)
+      (str/replace #"([a-z0-9])([A-Z])" "$1-$2")
+      (str/replace #"[\s_]+" "-")
+      str/lower-case))
+
+(defn ns-seg
+  [op] (kebab (or (:namespace op) (:entity op))))
+
+(defn op-identity
+  [op]
+  (str (str/lower-case (or (:namespace op) (:entity op) ""))
+       "/" (str/lower-case (:name op))))
+
+(defn doc-for [op]
+  (or (:description op)
+      (str (:op op) " " (or (:namespace op) (:entity op))
+           (when (seq (:params op))
+             (str " — params: " (str/join ", " (map :name (:params op))))))))
+
+(defn read-source
+  "Every .xsql in `dir`, filename-sorted, joined into one program."
+  [dir]
+  (->> (.listFiles (io/file dir))
+       (filter #(and (.isFile ^java.io.File %)
+                     (str/ends-with? (.getName ^java.io.File %) ".xsql")))
+       (sort-by #(.getName ^java.io.File %))
+       (map slurp)
+       (str/join "\n\n")))
+
+(defn emit-fn
+  [op]
+  (let [fname  (kebab (:name op))
+        params (:params op)
+        opmap  (cond-> {:op (:op op)
+                        :source (if (= "sql-template" (:op op))
+                                  (:source op)
+                                  (str "@" (:op op) " " (:name op) "\n" (:source op)))}
+                 (:entity op) (assoc :entity (:entity op)))
+        destr  (if (seq params)
+                 (str "{:keys [" (str/join " " (map :name params)) "] :as params}")
+                 "params")
+        call   (str "(embedded/run-xsql " fname "-op params opts)")
+        watch  (:watch op)
+        wopts  (if (sequential? watch)
+                 (str "(merge {:entities " (pr-str (vec watch)) "} opts)")
+                 "opts")
+        wcall  (str "(embedded/watch-xsql " fname "-op params " wopts ")")
+        wfn    (when watch
+                 (str "\n\n(defn watch-" fname "\n"
+                      "  " (pr-str (str "Live " fname " — watch-query over the
+                       same op; returns the"
+                                        "closeable atom (deref / add-watch / embedded/close-watch!). "
+                                        "Accepts watch-query options (:acting-as :records "
+                                        ":entity-track :track-rows :debounce-ms)."))
+                      "\n"
+                      (if (every? :optional params)
+                        (str "  ([] (watch-" fname " {}))\n"
+                             "  ([" destr " & {:as opts}]\n"
+                             "   " wcall "))")
+                        (str "  [" destr " & {:as opts}]\n"
+                             "  " wcall ")"))))]
+    (str "(def ^:no-doc " fname "-op\n  " (pr-str opmap) ")\n\n"
+         "(defn " fname "\n"
+         "  " (pr-str (doc-for op)) "\n"
+         (if (every? :optional params)
+           (str "  ([] (" fname " {}))\n"
+                "  ([" destr " & {:as opts}]\n"
+                "   " call "))")
+           (str "  [" destr " & {:as opts}]\n"
+                "  " call ")"))
+         wfn)))
+
+(defn emit-ns [ns-prefix seg ops]
+  (let [full-ns  (str ns-prefix "." seg)
+        fnames   (map (comp kebab :name) ops)
+        excludes (distinct (filter core-syms fnames))]
+    (str ";; Generated by synthigy.embedded.gen — DO NOT EDIT.\n"
+         ";; Regenerate: (synthigy.embedded.gen/generate {...}) from a started system.\n"
+         "(ns " full-ns "\n"
+         (when (seq excludes)
+           (str "  (:refer-clojure :exclude [" (str/join " " excludes) "])\n"))
+         "  (:require [synthigy.embedded :as embedded]))\n\n"
+         (str/join "\n\n" (map emit-fn ops))
+         "\n")))
+
+(defn ns->path [out full-ns]
+  (str out "/" (-> full-ns (str/replace "." "/") (str/replace "-" "_")) ".clj"))
+
+(defn emit-files
+  "Pure half: IR `operations` → `{:files {path {:content s :ops n}} :skipped [op
+   …]}`, no I/O."
+  [operations {:keys [out ns-prefix] :or {out "src" ns-prefix "synthigy.ops"}}]
+  (let [ops     (filter #(xsql-verbs (:op %)) operations)
+        skipped (filter #(or (:batch %)
+                             (and (:op %) (not (xsql-verbs (:op %)))))
+                        operations)]
+    (doseq [[id os] (group-by op-identity ops)]
+      (when (> (count os) 1)
+        (throw (ex-info (str "duplicate operation '" id
+                             "' — (namespace, name) must be unique")
+                        {:identity id}))))
+    (when-let [orphans (seq (remove (comp seq ns-seg) ops))]
+      (throw (ex-info (str "op(s) with no root entity need @namespace: "
+                           (str/join ", " (map :name orphans)))
+                      {:ops (mapv :name orphans)})))
+    {:skipped skipped
+     :files (into (sorted-map)
+                  (for [[seg seg-ops] (group-by ns-seg ops)]
+                    [(ns->path out (str ns-prefix "." seg))
+                     {:content (emit-ns ns-prefix seg seg-ops)
+                      :ops     (count seg-ops)}]))}))
+
+(defn report-skipped [skipped]
+  (doseq [{:keys [op name entity batch]} skipped]
+    (println (if batch
+               (str "skipped @batch " name
+                    " — batches save a round-trip; in-process there is none. "
+                    "Call the member ops directly.")
+               (str "skipped @" op " " name
+                    " — mutations aren't generated; call (embedded/" op " :"
+                    (or entity "<entity>") " data) directly")))))
+
+(def ^:private pretty-json (json/object-mapper {:pretty true}))
+
+(defn write-schema!
+  "Write `<dir>/schema.json`, the snapshot XSQL editor tooling lints and
+   completes against."
+  [dir acting-as]
+  (let [path   (io/file dir "schema.json")
+        schema (dataset/stamp-schema (embedded/schema nil :acting-as acting-as))]
+    (io/make-parents path)
+    (spit path (str (json/write-value-as-string schema pretty-json) "\n"))
+    (println "wrote" (str path) (str "(" (count (:entities schema)) " entities)"))
+    path))
+
+(defn generate
+  "Read `:dir`'s .xsql, describe it in-process, and write generated namespaces
+   under `:out`/`:ns-prefix`."
+  [{:keys [dir acting-as] :as opts}]
+  (let [{:keys [operations]} (embedded/describe (read-source dir) :acting-as acting-as)
+        {:keys [files skipped]} (emit-files operations opts)]
+    (report-skipped skipped)
+    (doseq [[path {:keys [content]}] files]
+      (io/make-parents path)
+      (spit path content))
+    (try (write-schema! dir acting-as)
+         (catch Exception e
+           (binding [*out* *err*]
+             (println "warning: schema.json not refreshed —" (ex-message e)))))
+    (println (str "generated " (count files) " namespace(s) from "
+                  (count operations) " operation(s)"))
+    (vec (keys files))))
+
+(defn generate!
+  "`clj -X:gen` entry point — boots a REAL system and runs patch/level!; point
+   it at the database you intend to migrate."
+  [{:keys [acting-as] :as opts}]
+  (lifecycle/start! (if acting-as :synthigy/iam :synthigy/dataset))
+  (generate opts)
+  (shutdown-agents))
+
+(defn watch!
+  "Dev loop: poll `:dir` for .xsql changes, regenerate and load-file the
+   results; returns a 0-arg stop fn."
+  [{:keys [dir interval-ms] :or {dir "resources/xsql" interval-ms 500} :as opts}]
+  (let [running  (atom true)
+        done-src (atom ::none)
+        last-err (atom nil)
+        step!    (fn []
+                   (let [src (try (read-source dir) (catch Exception _ nil))]
+                     (when (and src (not= src @done-src))
+                       (try
+                         (run! load-file (generate opts))
+                         (reset! done-src src)
+                         (reset! last-err nil)
+                         (catch Exception e
+                           (when (not= (ex-message e) @last-err)
+                             (println "[gen/watch] regen failed (retrying):"
+                                      (ex-message e))
+                             (reset! last-err (ex-message e))))))))]
+    (doto (Thread. ^Runnable (fn [] (while @running
+                                      (step!)
+                                      (Thread/sleep (long interval-ms))))
+                   "synthigy.embedded.gen/watch!")
+      (.setDaemon true)
+      (.start))
+    (fn stop! [] (reset! running false))))

@@ -1,20 +1,49 @@
 #!/bin/sh
+#   Synthigy — model-driven IAM and data platform
+#   Copyright (C) 2026 Robert Geršak
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU Affero General Public License as
+#   published by the Free Software Foundation, either version 3 of the
+#   License, or (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public
+#   License along with this program.  If not, see
+#   <https://www.gnu.org/licenses/>.
+#
+#   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+#   in a proprietary product, or offering it as a service without
+#   releasing your source under section 13 — a commercial license is
+#   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 # Synthigy portal installer:
 #   curl -fsSL https://raw.githubusercontent.com/synthigy/synthigy/main/install.sh | sh
 # Pin a version:  curl ... | sh -s -- v0.1.0     (default: newest with binaries)
 # Installs the `synthigy` command to ~/.synthigy/bin (override:
 # SYNTHIGY_INSTALL_DIR) and adds it to PATH in your shell profile — both
 # idempotent: re-running updates the binary and never duplicates PATH lines.
+# Corporate networks: curl honors https_proxy/HTTPS_PROXY env; behind a
+# TLS-intercepting firewall set CURL_CA_BUNDLE=/path/corp-ca.pem (and later
+# SYNTHIGY_CA_BUNDLE for the synthigy command itself).
 set -eu
 
-REPO="synthigy/synthigy"
+# The portal BINARY ships from its own repo, always — never the engine
+# channel (SYNTHIGY_RELEASES_REPO picks db/obs jars for `synthigy up`, and
+# a nightly/custom engine mirror carries no portal binaries at all; see
+# runtime.PortalReleasesRepo / tooling/portal/CLAUDE.md).
+REPO="${SYNTHIGY_PORTAL_RELEASES_REPO:-synthigy/tooling}"
 DIR="${SYNTHIGY_INSTALL_DIR:-$HOME/.synthigy/bin}"
 VERSION="${1:-latest}"
 
 case "$(uname -s)" in
   Linux)  os=linux ;;
   Darwin) os=darwin ;;
-  *) echo "unsupported OS: $(uname -s) (Windows: irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex)"; exit 1 ;;
+  *) echo "unsupported OS: $(uname -s) (Windows: irm https://raw.githubusercontent.com/synthigy/synthigy/main/install.ps1 | iex)"; exit 1 ;;
 esac
 case "$(uname -m)" in
   x86_64|amd64)  arch=amd64 ;;

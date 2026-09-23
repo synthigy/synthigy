@@ -1,11 +1,32 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.db.cockroach
   "CockroachDB connection management and lifecycle.
 
   CRDB speaks the Postgres wire protocol so we reuse `org.postgresql.Driver`
   and `jdbc:postgresql://…` URLs. Differences from PG that this module
-  papers over: `pg_terminate_backend` doesn't exist (clear-connections
-  becomes a best-effort no-op), `CREATE EXTENSION \"uuid-ossp\"` parses
-  but is a no-op (UUID is built-in), and default port is 26257."
+  papers over: `CREATE EXTENSION \"uuid-ossp\"` parses but is a no-op (UUID
+  is built-in), and default port is 26257."
   (:require
     [camel-snake-kebab.core :as csk]
     [clojure.string :as str]
@@ -40,7 +61,7 @@
                      (.setPassword password)
                      (.setLeakDetectionThreshold 2000)
                      (.setInitializationFailTimeout 0)
-                     (.addDataSourceProperty "connectionInitSql" "SET TIME ZONE 'UTC'")
+                     (.setConnectionInitSql "SET TIME ZONE 'UTC'")
                      (.setMaximumPoolSize max-connections)
                      (.setConnectionTestQuery "select 1")
                      (.setKeepaliveTime 5000)
@@ -52,13 +73,6 @@
     (log/info {:id ::connected :data {:user user :url url}}
               "Connected to CockroachDB")
     (db/map->Cockroach (assoc data :datasource datasource))))
-
-(defn clear-connections
-  "No-op on CRDB — `pg_terminate_backend` doesn't exist and CRDB's
-  DROP DATABASE handles active sessions itself. Kept for parity with
-  the postgres backend so callers can target it uniformly."
-  [_con _db-name]
-  nil)
 
 (defn check-connection-params
   [{:keys [host db user password]
@@ -73,101 +87,21 @@
     (when-not user (check user "COCKROACH_USER not specified"))))
 
 (defn from-env
-  "Builds Cockroach instance from environment variables.
-   Falls back to POSTGRES_* names when COCKROACH_* aren't set, since
-   most operators reuse their PG envvars."
+  "Builds Cockroach instance from environment variables."
   []
-  (let [host (env :cockroach-host (env :postgres-host "localhost"))
-        port (env :cockroach-port (env :postgres-port 26257))
-        db   (env :cockroach-db   (env :postgres-db   "synthigy"))
-        password (env :cockroach-password (env :postgres-password ""))
-        user (env :cockroach-user (env :postgres-user "root"))
+  (let [host (env :cockroach-host "localhost")
+        port (env :cockroach-port 26257)
+        db   (env :cockroach-db   "synthigy")
+        password (env :cockroach-password "")
+        user (env :cockroach-user "root")
         data (hash-map :host host
                        :port port
                        :db db
                        :password password
                        :user user
-                       :max-connections (Integer/parseInt (env :hikari-max-pool-size "20")))]
+                       :max-connections (Integer/parseInt (env :cockroach-pool-size "20")))]
     (check-connection-params data)
     data))
-
-(defn admin-from-env
-  "Builds Cockroach admin instance from environment variables. CRDB
-  doesn't have a separate 'postgres' admin database — admin uses the
-  same root user against `defaultdb`."
-  []
-  (let [host (env :cockroach-host (env :postgres-host "localhost"))
-        port (env :cockroach-port (env :postgres-port 26257))
-        admin-db (env :cockroach-admin-db (env :postgres-admin-db "defaultdb"))
-        password (env :cockroach-admin-password (env :cockroach-password (env :postgres-password "")))
-        user (env :cockroach-admin-user (env :cockroach-user (env :postgres-user "root")))
-        data (hash-map :host host
-                       :port port
-                       :db admin-db
-                       :password password
-                       :user user
-                       :max-connections (Integer/parseInt (env :hikari-max-pool-size "20")))]
-    (check-connection-params data)
-    data))
-
-(defn create-db
-  "Setup new database using admin account. Returns HikariDataSource to the new db.
-
-  CRDB note: `CREATE EXTENSION \"uuid-ossp\"` parses on CRDB but is a no-op
-  (UUID is built-in). We still issue it for parity with the PG backend so
-  Postgres-shaped dataset code that calls `uuid_generate_v4()`-style fns
-  fails fast at runtime rather than silently."
-  [{:keys [host]
-    :as admin} database-name]
-  (let [admin-db (connect admin)]
-    (log/info {:id ::creating-database :data {:database database-name :host host}}
-              "Creating database")
-    (try
-      (with-open [connection (jdbc/get-connection (:datasource admin-db))]
-        (jdbc/execute-one!
-          connection
-          [(format "create database %s" database-name)]))
-      (let [db (connect (assoc admin :db database-name))]
-        (try
-          (with-open [connection (jdbc/get-connection (:datasource db))]
-            (jdbc/execute-one!
-              connection
-              ["create extension \"uuid-ossp\""]))
-          (catch Throwable ex
-            (log/warn {:id ::uuid-ossp-failed :error ex}
-                      "Couldn't create uuid-ossp extension (CRDB no-ops this; safe to ignore)")))
-        (log/info {:id ::database-created :data {:database database-name :host host}}
-                  "Database created")
-        db)
-      (catch Throwable ex
-        (log/error! {:id ::create-database-failed :data {:database database-name}} ex)
-        (throw ex))
-      (finally
-        (.close (:datasource admin-db))))))
-
-(defn drop-db
-  "Removes DB from CockroachDB cluster"
-  [{:keys [host]
-    :as admin} database]
-  (log/info {:id ::dropping-database :data {:database database :host host}}
-            "Dropping database")
-  (let [admin (connect admin)]
-    (try
-      (with-open [con (:datasource admin)]
-        (clear-connections con database)
-        (jdbc/execute-one!
-          con
-          [(format "drop database if exists %s cascade" database)]))
-      (finally
-        (.close (:datasource admin)))))
-  nil)
-
-(defn backup
-  "CRDB has its own BACKUP/RESTORE statements; the template-clone pattern
-  used in the postgres backend doesn't apply. Phase A leaves this
-  unimplemented."
-  [_admin _database _backup]
-  (throw (ex-info "synthigy.db.cockroach/backup not implemented — use CRDB's BACKUP statement" {})))
 
 ;;; ============================================================================
 ;;; Patcho VersionStore Implementation
@@ -317,42 +251,21 @@
   {:depends-on [:synthigy/transit]
    :doc "JDBC pool + DB provisioning (CockroachDB)"
    :setup (fn []
-            (let [admin (admin-from-env)
-                  config (from-env)
-                  db-name (:db config)]
+            ;; One-time: connect (the operator provisions the database
+            ;; itself — see check-connection-params), create patcho tables,
+            ;; set stores
+            (let [config (from-env)
+                  db-name (:db config)
+                  db (connect config)]
               (log/info {:id ::backend-starting :data {:action :starting :subject :db-backend :database db-name}}
                         "Setting up database")
-
-              (let [db (try
-                         (create-db admin db-name)
-                         (catch Exception e
-                           (if (re-find #"already exists" (.getMessage e))
-                             (do
-                               (log/info {:id ::database-exists :data {:database db-name}}
-                                         "Database already exists, connecting")
-                               (connect config))
-                             (throw e))))]
-
-                (log/info {:id ::creating-patcho-tables}
-                          "Creating patcho tables")
-                (ensure-lifecycle-table! db)
-                (ensure-version-table! db)
-
-                (alter-var-root #'db/*db* (constantly db))
-                (patch/set-store! db)
-                (lifecycle/set-store! db)
-
-                (log/info {:id ::backend-started :data {:action :started :subject :db-backend :database db-name}}
-                          "Setup complete"))))
-
-   :cleanup (fn []
-              (let [admin (admin-from-env)
-                    config (from-env)]
-                (log/info {:id ::cleanup-starting :data {:database (:db config)}}
-                          "Dropping database")
-                (drop-db admin (:db config))
-                (log/info {:id ::cleanup-complete :data {:database (:db config)}}
-                          "Cleanup complete")))
+              (ensure-lifecycle-table! db)
+              (ensure-version-table! db)
+              (alter-var-root #'db/*db* (constantly db))
+              (patch/set-store! db)
+              (lifecycle/set-store! db)
+              (log/info {:id ::backend-started :data {:action :started :subject :db-backend :database db-name}}
+                        "Setup complete")))
 
    :start (fn []
             (log/info {:id ::lifecycle-starting :data {:action :starting}}
@@ -367,6 +280,14 @@
    :stop (fn []
            (log/info {:id ::lifecycle-stopping :data {:action :stopping}}
                      "Stopping database connection")
+           ;; Release the patcho stores BEFORE closing the pool — see the same
+           ;; comment in synthigy.db.postgres. They hold THIS datasource, and
+           ;; `setup!` reads the lifecycle store before the next `:start` runs,
+           ;; so a stale one wedges restart beyond recovery. nil (not a fresh
+           ;; AtomStore) so `setup-complete?` isn't reported false and setup
+           ;; doesn't re-run.
+           (patch/set-store! nil)
+           (lifecycle/set-store! nil)
            (stop)
            (log/info {:id ::lifecycle-stopped :data {:action :stopped}}
                      "Database connection stopped"))})
@@ -388,14 +309,7 @@
   "CockroachDB next.jdbc options for each return type. The PG identifier
   quoter from next.jdbc.quoted works on CRDB unchanged (same PG-wire
   identifier syntax)."
-  {:graphql
-   {:builder-fn (cockroach-result-builder :graphql)
-    :table-fn postgres
-    :label-fn str/lower-case
-    :qualifier-fn name
-    :column-fn postgres}
-
-   :edn
+  {:edn
    {:builder-fn (cockroach-result-builder :edn)
     :table-fn postgres
     :label-fn (fn [w]
@@ -417,8 +331,33 @@
   (jdbc-options [_db return-type]
     (get defaults return-type (:raw defaults))))
 
+;;; ============================================================================
+;;; Dialect Protocol Implementation
+;;; ============================================================================
+;;; Same PG-wire dialect Postgres uses — CRDB speaks it natively.
+
+(extend-type Cockroach
+  db/Dialect
+
+  (json-param [_ s] (doto (PGobject.) (.setType "jsonb") (.setValue s)))
+  (json-column [_ v] (if (instance? PGobject v) (.getValue ^PGobject v) v))
+
+  (table-exists? [_ table]
+    (boolean (:to_regclass (execute-one! ["SELECT to_regclass(?)" (str "public." table)]))))
+
+  (column-exists? [_ table column]
+    (boolean (execute-one!
+              ["SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ? AND column_name = ?"
+               table column])))
+
+  (ddl [_] {:serial-pk "SERIAL PRIMARY KEY" :json "jsonb" :now "now()"})
+  (json-text [_ expr] (str "(" expr " #>> '{}')"))
+  (json-get-text [_ expr k] (str expr "->>'" k "'"))
+  (json-remove [_ expr k] (str expr " - '" k "'"))
+  (cast-placeholder [_ type] (str "?::" type))
+  (template-sql [_ raw-sql] raw-sql))
+
 
 (comment
   (lifecycle/setup! :synthigy/database)
-  (lifecycle/start! :synthigy/database)
-  (lifecycle/cleanup! :synthigy/database))
+  (lifecycle/start! :synthigy/database))

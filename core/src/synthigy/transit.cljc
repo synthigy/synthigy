@@ -1,9 +1,28 @@
-(ns synthigy.transit
-  "Transit serialization with custom handlers for Synthigy records.
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
 
-  Supports both:
-  - Synthigy transit records (synthigy.dataset.core.*)
-  - EYWA transit records (neyho.eywa.dataset.core.*) → converted to Synthigy"
+(ns synthigy.transit
+  "Transit serialization with custom handlers for Synthigy dataset/modeling
+   records, plus legacy EYWA tags (neyho.eywa.*) converted to Synthigy on read."
   (:require
     #?(:clj [patcho.lifecycle :as lifecycle])
     #?(:clj [patcho.patch :as patch])
@@ -84,10 +103,7 @@
      :cljs
      (fn [rep] (ctor rep))))
 
-;; Transit handler registration
-
 (letfn [(synthigy-write-handlers []
-          "Write handlers for Synthigy records"
           {synthigy.dataset.core.ERDRelation
            (record-write-handler
              "synthigy.dataset.core.ERDRelation"
@@ -124,7 +140,6 @@
              (keys (synthigy.modeling.core/map->Path nil)))})
 
         (synthigy-read-handlers []
-          "Read handlers for Synthigy records"
           {"synthigy.dataset.core.ERDRelation"
            (record-read-handler synthigy.dataset.core/map->ERDRelation)
 
@@ -147,7 +162,6 @@
            (record-read-handler synthigy.modeling.core/map->Path)})
 
         (eywa-read-handlers []
-          "Read handlers for EYWA records → Convert to Synthigy records"
           {"neyho.eywa.dataset.core.ERDRelation"
            (record-read-handler synthigy.dataset.core/map->ERDRelation)
 
@@ -170,12 +184,8 @@
            (record-read-handler synthigy.modeling.core/map->Path)})]
 
   (defn init
-    "Initialize transit handlers.
-
-    Supports:
-    - Writing Synthigy records with synthigy.* tags
-    - Reading Synthigy records (synthigy.* tags)
-    - Reading EYWA records (neyho.eywa.* tags) → Converted to Synthigy"
+    "Initialize transit read/write handlers — writes synthigy.* tags; reads
+     synthigy.* and legacy neyho.eywa.* tags (converted to Synthigy records)."
     []
     (init-transit-handlers
       {:write (synthigy-write-handlers)
@@ -198,4 +208,10 @@
      :synthigy/transit
      {:depends-on [:synthigy/log]
       :doc "Transit codec — read/write handler registry"
-      :start (fn [] (init))}))
+      ;; No :stop — the handler registry has nothing to tear down.
+      :start (fn []
+               (init)
+               (synthigy.log/info
+                 {:id ::lifecycle-started
+                  :data {:action :started :subject :transit}}
+                 "Transit codec started"))}))

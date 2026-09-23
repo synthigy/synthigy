@@ -1,45 +1,28 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.log.store
-  "Log substrate — `LogStore` protocol contract, the single shared dynvar
-  that holds the currently-bound store, and the in-memory `RingLogStore`
-  that ships as the dynvar's default.
-
-  ## Provider pattern
-
-  Mirrors `synthigy.dataset.access/*access-control*` (defonce'd to a
-  permissive `AllowAllAccess` record) and `synthigy.audit/*audit-provider*`
-  in shape:
-
-    `*log-store*` is defonce'd to a fresh `RingLogStore` so the dynvar
-    is never nil. Reads and writes flow against whatever store is bound.
-    A backend module (`:synthigy/observability`) is the ONLY thing that
-    swaps the dynvar at runtime — via `alter-var-root` on `:start` (after
-    snapshotting and draining the outgoing store) and back to a fresh
-    ring on `:stop`. `synthigy.log/install!` does NOT touch this dynvar;
-    it only owns the Telemere pipeline + handlers.
-
-  ## Two reference implementations
-
-    `RingLogStore`              — in-memory bounded ring; default
-    `:synthigy/observability`   — DuckDB (embedded) or ClickHouse (HTTP);
-                                  shadowed-ns picked by classpath alias
-
-  ## Why ring as the default
-
-  Logs are queryable from the moment the JVM is up — boot-phase signals
-  land in the ring, `synthigy.log.query/query` works, the cockpit Logs
-  lens renders. When observability starts, it `alter-var-root`'s the dynvar
-  to its durable record FIRST (so new signals land durably at once), then
-  `(store/snapshot s)` the now-orphaned ring and replays each buffered
-  signal into the durable backend. The old ring drops out of reference.
-  Observability stop rebinds a fresh `(create-ring)` so the queryable
-  surface survives backend teardown.
-
-  ## Wire-row shape
-
-  `search`/`recent`/`tail` return rows keyed with snake_case keywords
-  matching the wire-schema-v1 columns DuckDB and ClickHouse emit
-  (`:request_id`, `:user_xid`, `:error_class`, …), so cockpit + HTTP
-  serializers can't tell which store backed the response."
+  "Log plug — the `LogStore` protocol, the shared `*log-store*` dynvar, and
+   the in-memory `RingLogStore` default."
   (:require
    [clojure.string :as str]
    [environ.core :refer [env]])
@@ -54,52 +37,28 @@
 ;;; ============================================================================
 
 (defprotocol LogStore
-  "Seven-method contract for a log substrate implementation. Writers are
-  called by the Telemere bridge handler per signal. Readers serve the
-  cockpit Logs lens. `snapshot` lets the observability module hand off
-  buffered state when swapping backends."
+  "Contract for a log plug implementation."
 
   (write-signal! [this signal]
-    "Consume one Telemere signal map durably. Async-ok; the caller does
-     not wait. Must not throw — drop the signal, increment an internal
-     counter, optionally print to *err*. Returns nil.")
+    "Consume one Telemere signal map; must not throw.")
 
   (recent [this opts]
-    "Return up to `:limit` recent signals (default backend-specific).
-     opts: {:limit :ns-pattern :level :since}. Newest-first by default.
-     Returns a vector of wire-schema-v1 row maps with snake_case keys
-     matching synthigy.log/signal->json-line.")
+    "Return up to `:limit` recent wire-schema rows, newest-first.")
 
   (search [this opts]
-    "Filtered query over the store. opts is the validated filter-map from
-     synthigy.log.query (`:where :since :until :limit :order-by :group-by
-     :count?`). Returns a vector of wire-schema-v1 rows, or a Long when
-     `:count?` is true, or a vector of {group-by-field value :count n}
-     maps when `:group-by` is set.")
+    "Filtered query over the store using a validated filter-map from `synthigy.log.query`.")
 
   (tail [this opts]
-    "Cursor-based follow. opts: {:cursor :ns-pattern :level :limit}.
-     Returns {:rows [...] :next-cursor x} — the cursor is opaque, the
-     caller passes it back to resume. Stores may implement this on top
-     of `recent` if they have no native cursor support.")
+    "Cursor-based follow; returns {:rows [...] :next-cursor x}.")
 
   (clear! [this]
-    "Empty the store. Dev convenience for in-memory backends; durable
-     backends may no-op or implement DELETE. Returns nil.")
+    "Empty the store.")
 
   (health [this]
-    "Snapshot map describing store liveness. Conventional keys:
-       {:up? boolean :rows long :dropped long :backend keyword
-        :path string-or-nil}
-     Must not throw.")
+    "Snapshot map describing store liveness; must not throw.")
 
   (snapshot [this]
-    "Return a vector of raw Telemere signal maps currently held by this
-     store, in chronological (oldest-first) order. Used by
-     `:synthigy/observability` start to drain the transient default
-     `RingLogStore` into a durable backend before swapping `*log-store*`.
-     Durable backends should return nil to signal 'no transient state
-     to hand off'."))
+    "Raw Telemere signals held by this store, oldest-first, for backend handoff."))
 
 ;;; ============================================================================
 ;;; RingLogStore — bounded in-memory implementation; defonce default
@@ -107,7 +66,7 @@
 
 (def ^:private default-ring-size 10000)
 
-(defn- env-ring-size []
+(defn env-ring-size []
   (or (try (some-> (env :synthigy-log-ring-size) str/trim Integer/parseInt)
            (catch Throwable _ nil))
       default-ring-size))
@@ -115,31 +74,28 @@
 (def ^:private promoted-ctx-keys
   [:request-id :user-xid :tenant])
 
-(defn- id->str [id]
+(defn id->str [id]
   (cond
     (qualified-keyword? id) (str (namespace id) "/" (name id))
     (keyword? id)           (name id)
     (some? id)              (str id)))
 
-(defn- throwable-msg [^Throwable t]
+(defn throwable-msg [^Throwable t]
   (some-> t .getMessage))
 
-(defn- throwable-trace [^Throwable t]
+(defn throwable-trace [^Throwable t]
   (when t
     (let [sw (StringWriter.) pw (PrintWriter. sw)]
       (.printStackTrace t pw) (.flush pw) (.toString sw))))
 
-(defn- host-of [signal]
+(defn host-of [signal]
   (let [h (:host signal)]
     (cond (string? h) h
           (map? h)    (:name h)
           :else       nil)))
 
-(defn- signal-field
-  "Extract the value at `field` from a Telemere signal, in the shape the
-  query predicate evaluator expects. Returns nil if absent. Field
-  vocabulary matches `synthigy.log.query/built-in-columns` plus
-  `[:data k …]` / `[:ctx k …]` paths."
+(defn signal-field
+  "Extract the value at `field` from a Telemere signal."
   [signal field]
   (cond
     (= field :level) (some-> (:level signal) name)
@@ -177,9 +133,7 @@
 
     :else nil))
 
-(defn- normalize-scalar
-  "Filter values for `:level` / `:id` are typically keywords at call sites
-  but the field projection returns strings. Coerce so equality works."
+(defn normalize-scalar
   [field v]
   (cond
     (#{:level :id} field) (cond (keyword? v) (name v)
@@ -187,19 +141,18 @@
                                 :else        (str v))
     :else v))
 
-(defn- normalize-set [field s]
+(defn normalize-set [field s]
   (into #{} (map #(normalize-scalar field %)) s))
 
-(defn- nil-safe-compare
-  "Generic compare that does not throw on nil. Nil sorts last regardless
-  of direction (so empty fields don't dominate ordering)."
+(defn nil-safe-compare
+  "Compare that does not throw on nil; nil sorts last regardless of direction."
   [a b]
   (cond (= a b) 0
         (nil? a) 1
         (nil? b) -1
         :else    (try (compare a b) (catch Throwable _ 0))))
 
-(defn- cmp-op [op a b]
+(defn cmp-op [op a b]
   (let [c (nil-safe-compare a b)]
     (case op
       :>  (pos? c)
@@ -207,9 +160,9 @@
       :>= (and (or (zero? c) (pos? c)) (some? a))
       :<= (and (or (zero? c) (neg? c)) (some? a)))))
 
-(defn- str-or-nil [x] (when x (str x)))
+(defn str-or-nil [x] (when x (str x)))
 
-(defn- tuple-pred [field [op arg]]
+(defn tuple-pred [field [op arg]]
   (case op
     := (let [arg' (normalize-scalar field arg)]
          #(= (signal-field % field) arg'))
@@ -235,12 +188,14 @@
                       (boolean (re-find p s))))
     :exists?     #(some? (signal-field % field))
     :absent?     #(nil? (signal-field % field))
-    :has         (let [needle (name arg)]
-                   #(contains? (into #{} (map name) (or (signal-field % field) #{}))
+    ;; (subs (str kw) 1), not `name` — :traffic/sse must stay "traffic/sse"
+    :has         (let [topic-str #(if (keyword? %) (subs (str %) 1) (str %))
+                       needle    (topic-str arg)]
+                   #(contains? (into #{} (map topic-str) (or (signal-field % field) #{}))
                                needle))))
 
-(defn- where-pred
-  "Compile a `:where` map into a (signal → bool) predicate. Implicit AND."
+(defn where-pred
+  "Compile a `:where` map into a (signal → bool) predicate; implicit AND."
   [where]
   (if (empty? where)
     (constantly true)
@@ -265,23 +220,24 @@
 (def ^:private duration-re
   #"^(\d+)\s*([smhd])$")
 
-(defn- parse-time-ref
-  "Parse a string into an Instant. Accepts ISO-8601 instants or short
-  durations (`10s`, `5m`, `2h`, `1d`) interpreted as 'now - duration'."
+(defn parse-duration-ms
+  "Parse a short duration string (`10s`, `5m`, `2h`, `1d`) into milliseconds, or
+   nil."
+  [s]
+  (when-let [[_ n unit] (some->> s str/trim (re-matches duration-re))]
+    (* (Long/parseLong n) (case unit "s" 1000 "m" 60000 "h" 3600000 "d" 86400000))))
+
+(defn parse-time-ref
+  "Parse an ISO-8601 instant or short duration (interpreted as now - duration)
+   into an Instant."
   [s]
   (when (and s (string? s))
     (let [s (str/trim s)]
       (or (try (Instant/parse s) (catch Throwable _ nil))
-          (when-let [[_ n unit] (re-matches duration-re s)]
-            (let [n      (Long/parseLong n)
-                  millis (* n (case unit
-                                "s" 1000
-                                "m" 60000
-                                "h" 3600000
-                                "d" 86400000))]
-              (.minusMillis (Instant/now) millis)))))))
+          (when-let [ms (parse-duration-ms s)]
+            (.minusMillis (Instant/now) ms))))))
 
-(defn- within-window [since-inst until-inst]
+(defn within-window [since-inst until-inst]
   (cond
     (and since-inst until-inst)
     #(when-let [^Instant t (:inst %)]
@@ -295,7 +251,7 @@
        (not (.isAfter t until-inst)))
     :else (constantly true)))
 
-(defn- signal->wire-row
+(defn signal->wire-row
   [signal]
   (let [ctx-map      (or (:ctx signal) {})
         residual-ctx (apply dissoc ctx-map promoted-ctx-keys)
@@ -319,7 +275,10 @@
      :user_xid    (or (:user-xid signal)   (get ctx-map :user-xid))
      :tenant      (or (:tenant signal)     (get ctx-map :tenant))
      :host        (host-of signal)
-     :topics      (->> (:topics signal) (map name) sort vec)
+     ;; (subs (str kw) 1), not `name` — :traffic/sse must stay "traffic/sse"
+     :topics      (->> (:topics signal)
+                       (map #(if (keyword? %) (subs (str %) 1) (str %)))
+                       sort vec)
      :data        (or (:data signal) {})
      :ctx         residual-ctx
      :error_class err-class
@@ -328,11 +287,11 @@
 
 (def ^:private default-limit 100)
 
-(defn- order-by-key-fn [field]
+(defn order-by-key-fn [field]
   (fn [sig] (signal-field sig field)))
 
-(defn- run-search
-  [signals {:keys [where since until limit order-by count?] :as opts}]
+(defn run-search
+  [signals {:keys [where since until limit order-by count? bucket-ms] :as opts}]
   (let [group-field (:group-by opts)
         since-i  (parse-time-ref since)
         until-i  (parse-time-ref until)
@@ -349,6 +308,15 @@
                           survivors)
         limit    (or limit default-limit)]
     (cond
+      bucket-ms
+      (let [b (long bucket-ms)]
+        (->> survivors
+             (keep (fn [s] (when-let [^Instant t (:inst s)]
+                             (* b (quot (.toEpochMilli t) b)))))
+             frequencies
+             (sort-by key)
+             (mapv (fn [[bucket cnt]] [bucket (long cnt)]))))
+
       count?
       (long (count survivors))
 
@@ -361,7 +329,7 @@
       :else
       (->> sorted (take limit) (mapv signal->wire-row)))))
 
-(defn- push!
+(defn push!
   [buffer-atom ^AtomicLong dropped max-size signal]
   (let [popped? (volatile! false)]
     (swap! buffer-atom
@@ -416,8 +384,6 @@
     (vec @buffer)))
 
 (defn create-ring
-  "Build a fresh `RingLogStore`. `:size` overrides the default
-   (env `SYNTHIGY_LOG_RING_SIZE` or 10000)."
   ([] (create-ring nil))
   ([{:keys [size]}]
    (->RingLogStore (atom clojure.lang.PersistentQueue/EMPTY)

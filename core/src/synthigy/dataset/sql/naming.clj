@@ -1,13 +1,27 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.sql.naming
-  "Database-agnostic SQL naming conventions.
-
-  Handles:
-  - UUID hashing (base-36 encoding for compact table names)
-  - Name normalization (lowercase, replace special chars)
-  - Column and table name generation
-  - Relation table naming
-
-  Note: 63-character limit is used (PostgreSQL/MySQL standard)"
+  "Database-agnostic SQL naming conventions."
   (:require
     [clojure.string :as str]
     [synthigy.dataset.core :as core]
@@ -47,6 +61,11 @@
                          :type (type n)})))
       (str/lower-case
         (str/replace n npattern "_")))))
+
+(defn normalized-enum-value
+  "Replace dashes and whitespace in enum labels with underscores."
+  [value]
+  (str/replace value #"-|\s" "_"))
 
 (defn column-name
   "Returns quoted column name for SQL"
@@ -88,7 +107,7 @@
       field-name)
     (relation-field field-name)))
 
-(defn- short-table
+(defn short-table
   "Abbreviates table name for use in relation table names."
   [name]
   (str/join
@@ -116,7 +135,7 @@
 
 (defprotocol SQLNameResolution
   "Protocol for resolving SQL names in the context of a deployed model"
-  (table [this euuid] "Returns table name based on input euuid")
+  (table [this id] "Returns table name for the given entity id")
   (relation [this table label] "Returns relation table name based on label, that can be keyword or UUID")
   (related-table [this table label] "Returns related table name based on label, that can be keyword or UUID")
   (relation-from-field [this table label] "Returns name for relation field that is directed from current entity")

@@ -1,127 +1,54 @@
-(ns synthigy.dataset.enhance
-  "Schema enhancement for access control.
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
 
-  Provides a mechanism to inject access control conditions into query schemas
-  before they are executed. This allows for transparent enforcement of complex
-  access patterns like folder-based file permissions."
+(ns synthigy.dataset.enhance
+  "Injects access-control conditions into query schemas before execution."
   (:require
    [synthigy.log :as log]
    [synthigy.dataset.access :as access]
    [synthigy.dataset.rls :as rls]
-   [synthigy.db :refer [*db*]])
-  (:import
-   [synthigy.db Postgres SQLite]))
-
-;; ============================================================================
-;; Audit Enhancement Protocol
-;; ============================================================================
+   [synthigy.db :refer [*db*]]))
 
 (defprotocol AuditEnhancement
-  "Infrastructure enhancement for audit tracking across dataset operations.
-
-  Audit is NOT part of the domain model - it's added at infrastructure layer.
-  Allows pluggable audit implementations (IAM-based, system-based, etc.)"
+  "Pluggable infrastructure-layer audit tracking (not part of the domain model)."
 
   (transform-audit [db tx entities]
-    "Phase 1: Add audit columns to database tables (DDL).
-
-    Called after table creation during transform-database.
-
-    Args:
-      db       - Database instance
-      tx       - Current transaction
-      entities - Collection of newly created entities
-
-    Returns: nil (side effects only - executes ALTER TABLE)")
+    "Phase 1: adds audit columns via DDL, called after table creation.")
 
   (augment-schema [db entity]
-    "Phase 2: Add audit fields and relations to runtime schema (query building).
-
-    Called during model->schema for each entity.
-
-    Args:
-      db     - Database instance
-      entity - Entity record from ERD model
-
-    Returns:
-      Map with :fields and :relations keys to merge into entity schema:
-        {:fields {:modified_by {:key :modified_by
-                                :type \"user\"
-                                :reference/entity <user-uuid>}
-                  :modified_on {:key :modified_on
-                                :type \"timestamp\"}}
-         :relations {:modified_by {:from <entity-uuid>
-                                   :from/field :modified_by
-                                   :from/table \"table_name\"
-                                   :to <user-uuid>
-                                   :to/field :_eid
-                                   :to/table \"user\"
-                                   :table \"table_name\"
-                                   :type :one}}}")
+    "Phase 2: returns {:fields ... :relations ...} to merge into the runtime schema.")
 
   (audit [db entity-id data tx]
-    "Phase 3: Populate audit values during mutations.
-
-    Called during mutation pipeline in enhance-write.
-
-    Args:
-      db        - Database instance
-      entity-id - Entity UUID being mutated
-      data      - Mutation data structure (from analyze-data)
-      tx        - Current transaction
-
-    Returns: Enhanced data with audit values populated"))
-
-;; Default no-op implementation for Postgres and SQLite
-;; Allows dataset tests to run without IAM loaded
-(extend-protocol AuditEnhancement
-  Postgres
-  (transform-audit [_ _ _] nil)
-  (augment-schema [_ _] {})
-  (audit [_ _ data _] data)
-
-  SQLite
-  (transform-audit [_ _ _] nil)
-  (augment-schema [_ _] {})
-  (audit [_ _ data _] data))
-
-;; The RelationAuditEnhancement + EntityAuditEnhancement protocols lived
-;; here through 2026-05-25, dispatching reconcile/set-context/drainer work
-;; across (Postgres, SQLite). They were deleted in phase 7 of
-;; SUBSTRATE_OWNERSHIP_PLAN: substrate is now owned by per-backend Patcho
-;; modules (`:synthigy/subscriptions.postgres`,
-;; `:synthigy/subscriptions.sqlite`) with canonical impls in
-;; `synthigy.substrate.postgres` / `synthigy.substrate.sqlite` — plain
-;; defns. No protocol dispatch needed: every former caller is
-;; backend-specific (postgres/* calls substrate.postgres directly; sqlite/*
-;; calls substrate.sqlite directly).
-
-;; ============================================================================
-;; Model Enhancement Protocol
-;; ============================================================================
+    "Phase 3: populates audit values during the mutation pipeline."))
 
 (defprotocol ModelEnhancement
-  "Contribute attribute and relation additions to the runtime model.
-
-  Implementers walk the model themselves and return a new model with
-  their contribution applied. Used by synthigy.dataset.runtime to
-  compose: identity attrs (xid/euuid) → audit attrs → reference
-  relations.
-
-  Implementations:
-    - synthigy.dataset.id/UUIDProvider, NanoIDProvider — emit identity
-      attrs.
-    - synthigy.dataset.runtime/AuditEnhancer (private) — emit audit
-      attrs based on entity audit configuration.
-    - synthigy.dataset.runtime/ReferenceEnhancer (private) — emit
-      relations for any attr whose :type is in *reference-mapping*."
+  "Contributes attribute/relation additions to the runtime model. Composition order
+   in dataset.runtime: identity attrs -> audit attrs -> reference relations."
 
   (enhance-model [this model]
-    "Returns a new model with this enhancer's contribution applied.
-     Returns model unchanged if there's nothing to add."))
+    "Returns a new model with this enhancer's contribution applied."))
 
-;; Default no-op fallback so anything that doesn't extend
-;; ModelEnhancement is safe to pass through the composer.
+;; no-op fallback so anything not extending ModelEnhancement passes through the
+;; composer
 (extend-protocol ModelEnhancement
   Object
   (enhance-model [_ model] model)
@@ -129,25 +56,9 @@
   nil
   (enhance-model [_ model] model))
 
-;; ============================================================================
-;; Core Enhancement Protocol
-;; ============================================================================
-
 (defmulti schema
-  "Enhances a query schema with access control conditions.
-
-   Dispatches on entity UUID to allow entity-specific access patterns.
-   Uses dynamic bindings *user*, *roles*, and *groups* from context.
-
-   Args:
-     db          - database class
-     schema      - The query schema to enhance
-     entity-id   - UUID of the entity being queried
-
-   Returns:
-     Enhanced schema with additional access control conditions
-
-   Copied from EYWA: neyho.eywa.dataset.enhance/schema"
+  "Enhances a query schema with access control conditions; dispatches on [(class
+   db) entity-id]."
   (fn dispatch
     ([db _schema selection]
      [(class db) (:entity _schema)]))
@@ -155,23 +66,11 @@
 
 (defmethod schema ::default
   [_ _schema _]
-  ;; By default, no enhancement - rely on standard entity-level access control
   _schema)
 
 (defmulti args
-  "Enhances query arguments with access control conditions at any schema depth.
-   Called during search-stack-args processing.
-
-   Args:
-     db        - Database instance
-     schema    - Current schema node being processed
-     entity-id - Entity UUID of the current schema node
-     path      - Vector of relation keys from root to current node
-
-   Returns:
-     Enhanced schema with injected args
-
-   Copied from EYWA: neyho.eywa.dataset.enhance/args"
+  "Enhances query args with access control at any schema depth; dispatches on
+   [(class db) entity-id]."
   (fn [db {entity-id :entity
            :as schema} [stack data]]
     [(class db) entity-id])
@@ -179,14 +78,11 @@
 
 (defmethod args ::default
   [_ schema current-stack]
-  (rls/enhance-args schema current-stack rls/*operation*))
+  (rls/enhance-args schema current-stack (access/rls-operation)))
 
 (defn explain-enhancement
-  "Returns a human-readable explanation of what enhancements were applied.
-
-   Useful for debugging and audit trails.
-
-   Copied from EYWA: neyho.eywa.dataset.enhance/explain-enhancement"
+  "Diffs added/modified relations between original and enhanced schema, for
+   audit trails."
   [original-schema enhanced-schema entity-id]
   (let [original-relations (set (keys (:relations original-schema)))
         enhanced-relations (set (keys (:relations enhanced-schema)))
@@ -205,9 +101,7 @@
                                 [rel (get-in enhanced-schema [:relations rel :args])]))}))
 
 (defn log-enhancement
-  "Logs enhancement details for monitoring and debugging.
-
-   Copied from EYWA: neyho.eywa.dataset.enhance/log-enhancement"
+  "Logs enhancement details for monitoring and debugging."
   [schema entity-id enhanced-schema]
   (when (not= schema enhanced-schema)
     (log/debug {:id ::enhancement-applied
@@ -217,14 +111,8 @@
                "Access enhancement applied")))
 
 (defn ensure-path
-  "Creates a nested structure and optionally sets a value at the end.
-
-   Examples:
-   (ensure-path {} [:a :b :c] :leaf-value)
-   => {:a {:b {:c :leaf-value}}}
-
-   (ensure-path {} [:folder 0 :selections :read_users 0] {:selections {:euuid nil}})
-   => {:folder [{:selections {:read_users [{:selections {:euuid nil}}]}}]}"
+  "Builds a nested map/vector structure from a mixed key path (numeric keys =>
+   vectors)."
   ([m path]
    (ensure-path m path {}))
   ([m path leaf-value]
@@ -233,11 +121,9 @@
      (let [[k & ks] path
            next-k (first ks)]
        (cond
-         ;; Last key in path - set the value
          (empty? ks)
          (assoc m k leaf-value)
 
-         ;; Current key is numeric - ensure we have a vector
          (number? k)
          (let [v (if (vector? m) m [])
                v' (if (< k (count v))
@@ -247,130 +133,55 @@
                new-val (ensure-path existing ks leaf-value)]
            (assoc v' k new-val))
 
-         ;; Next key is numeric - current value should be a vector
          (number? next-k)
          (assoc m k (ensure-path (get m k []) ks leaf-value))
 
-         ;; Regular map navigation
          :else
          (assoc m k (ensure-path (get m k {}) ks leaf-value)))))))
 
 (defmulti write
-  "Checks if the current user can perform the mutation.
-
-   Args:
-     db         - Database instance
-     entity-id  - Entity UUID being mutated
-     data       - The mutation data
-     tx         - Current transaction
-
-   Returns:
-     returns updated data ready for storage
-
-   Copied from EYWA: neyho.eywa.dataset.enhance/write"
+  "Checks whether the current user can perform the mutation; dispatches on
+   [(class db) entity-id]."
   (fn [db entity-id data tx]
     [(class db) entity-id])
   :default ::default)
 
 (defmethod write ::default
   [_ _ data _]
-  ;; Default allows all mutations (relies on entity-level access)
   data)
 
 (defn apply-write
-  "Applies write enhancement to mutation data.
-
-  Copied from EYWA: neyho.eywa.dataset.enhance/apply-write"
+  "Applies write enhancement to mutation data."
   ([entity-id data tx] (apply-write *db* entity-id data tx))
   ([db entity-id data tx]
    (write db entity-id data tx)))
 
 (defn apply-audit
-  "Applies write enhancement to mutation data.
-
-  Copied from EYWA: neyho.eywa.dataset.enhance/apply-write"
+  "Applies audit enhancement to mutation data."
   ([entity-id data tx] (apply-audit *db* entity-id data tx))
   ([db entity-id data tx]
    (audit db entity-id data tx)))
 
 (defmulti delete
-  "Checks if the current user can perform the mutation.
-
-   Args:
-     db         - Database instance
-     entity-id  - Entity UUID being mutated
-     data       - The mutation data
-     tx         - Current transaction
-
-   Returns:
-     returns updated data ready for storage
-
-   Copied from EYWA: neyho.eywa.dataset.enhance/delete"
+  "Checks whether the current user can perform the mutation; dispatches on
+   [(class db) entity-id]."
   (fn [db entity-id data tx]
     [(class db) entity-id])
   :default ::default)
 
 (defmethod delete ::default
   [_ _ data _]
-  ;; Default allows all mutations (relies on entity-level access)
   data)
 
 (defn apply-delete
-  "Applies delete enhancement to mutation data.
-
-  Copied from EYWA: neyho.eywa.dataset.enhance/apply-delete"
+  "Applies delete enhancement to mutation data."
   ([entity-id data tx] (apply-delete *db* entity-id data tx))
   ([db entity-id data tx]
    (delete db entity-id data tx)))
 
-(defmulti purge
-  "Checks if the current user can perform the mutation.
-
-   Args:
-     db         - Database instance
-     entity-id  - Entity UUID being mutated
-     data       - The mutation data
-     tx         - Current transaction
-
-   Returns:
-     returns updated data ready for storage
-
-   Copied from EYWA: neyho.eywa.dataset.enhance/purge"
-  (fn [db entity-id data tx]
-    [(class db) entity-id])
-  :default ::default)
-
-(defmethod purge ::default
-  [_ _ data _]
-  ;; Default allows all mutations (relies on entity-level access)
-  data)
-
-(defn apply-purge
-  "Applies purge enhancement to mutation data.
-
-  Copied from EYWA: neyho.eywa.dataset.enhance/apply-purge"
-  ([entity-id data tx] (apply-purge *db* entity-id data tx))
-  ([db entity-id data tx]
-   (purge db entity-id data tx)))
-
-;; ============================================================================
-;; Apply Schema Enhancement
-;; ============================================================================
-
 (defn apply-schema
-  "Main entry point for schema enhancement.
-
-   Called by the query system to potentially add access control conditions
-   to a schema before query execution.
-
-   Args:
-     schema    - The query schema to enhance
-     selection - Original selection map
-
-   Returns:
-     Enhanced schema (or original if no enhancement needed)
-
-   Copied from EYWA: neyho.eywa.dataset.enhance/apply-schema"
+  "Entry point for schema enhancement — no-op when there is no current
+   principal."
   [_schema selection]
   (if (access/current-principal)
     (let [enhanced (schema *db* _schema selection)]
@@ -378,10 +189,4 @@
       enhanced)
     _schema))
 
-;; ============================================================================
-;; Protected Entities: Dataset & Dataset Version
-;;
-;; Delete requires dataset:delete scope.
-;; Purge is forbidden — use delete (which routes to recall!/destroy!).
-;; ============================================================================
 

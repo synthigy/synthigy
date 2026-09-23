@@ -1,0 +1,144 @@
+<!--
+      Synthigy — model-driven IAM and data platform
+      Copyright (C) 2026 Robert Geršak
+
+      This program is free software: you can redistribute it and/or modify
+      it under the terms of the GNU Affero General Public License as
+      published by the Free Software Foundation, either version 3 of the
+      License, or (at your option) any later version.
+
+      This program is distributed in the hope that it will be useful,
+      but WITHOUT ANY WARRANTY; without even the implied warranty of
+      MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+      GNU Affero General Public License for more details.
+
+      You should have received a copy of the GNU Affero General Public
+      License along with this program.  If not, see
+      <https://www.gnu.org/licenses/>.
+
+      Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+      in a proprietary product, or offering it as a service without
+      releasing your source under section 13 — a commercial license is
+      available: r.gersak@gmail.com  See COMMERCIAL.md.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in</title>
+  <link rel="icon" type="image/png" href="/oauth/images/favicon.png">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <!-- Reusing the built-in stylesheet so this works out of the box. Swap it for
+       your own to rebrand — the contract is the form below, not the CSS. -->
+  <link rel="stylesheet" href="/oauth/css/login.css">
+</head>
+<body>
+  <!--
+    CONTRACT
+    ========
+    The OAuth server redirected the browser here as:  <this-page>?state=<opaque>
+    `state` is an encrypted, tamper-proof blob (it IS the CSRF/replay protection).
+
+    This page is served under /login/ (GET-only), so the form CANNOT post to
+    itself. It must:
+      1. POST to /oauth/login  (explicit action)
+      2. carry `state` back — read from THIS url's ?state= into a hidden field.
+
+    We POST via fetch (JSON mode) so wrong-password errors stay on THIS page.
+    A plain <form action="/oauth/login"> also works, but on error the server
+    re-renders the built-in page and your branding is lost.
+  -->
+  <div class="sy-login">
+    <div class="sy-lockup"><h1>Acme</h1></div>
+    <form id="login" method="post" action="/oauth/login">
+      <input type="hidden" name="state" id="state">
+      <div class="row">
+        <input id="username" name="username" placeholder="Username" autocomplete="username">
+      </div>
+      <div class="row">
+        <input id="password" name="password" type="password" placeholder="Password" autocomplete="current-password">
+      </div>
+      <div class="row">
+        <span class="error" id="error"></span>
+      </div>
+      <button><h4>SIGN IN</h4></button>
+    </form>
+    <!-- Federated "Continue with X" buttons — populated at load time from
+         GET /oauth/federated/providers (public, never exposes secrets).
+         Stays empty (and invisible) when no provider is configured. -->
+    <div id="federated"></div>
+  </div>
+
+  <script src="/oauth/js/starfield.js"></script>
+  <script>
+    // Carry the opaque state from this page's URL into the form.
+    var STATE = new URLSearchParams(location.search).get('state') || '';
+    document.getElementById('state').value = STATE;
+
+    // Federated sign-in: discover active providers and render one link each.
+    // The link target is a plain server redirect — /oauth/federated/start
+    // owns PKCE/nonce/callback; this page only forwards the SAME opaque state
+    // the password form round-trips. No state (direct visit) → no buttons.
+    if (STATE) {
+      fetch('/oauth/federated/providers')
+        .then(function (r) { return r.json(); })
+        .then(function (providers) {
+          if (!providers.length) return;
+          // Same markup the built-in page renders, so login.css styles it:
+          // an "or" divider, then a .sy-federated flex box of .sy-fed-btn links.
+          var box = document.getElementById('federated');
+          var divider = document.createElement('div');
+          divider.className = 'sy-fed-divider';
+          divider.appendChild(document.createElement('span')).textContent = 'or';
+          box.appendChild(divider);
+          var list = document.createElement('div');
+          list.className = 'sy-federated';
+          providers.forEach(function (p) {
+            var a = document.createElement('a');
+            a.className = 'sy-fed-btn';
+            a.href = '/oauth/federated/start?' +
+              new URLSearchParams({ provider: p.name, state: STATE });
+            a.textContent = 'Continue with ' + p.label;
+            list.appendChild(a);
+          });
+          box.appendChild(list);
+        })
+        .catch(function () { /* no providers endpoint → password-only page */ });
+    }
+
+    var ERRORS = {
+      credentials: 'Wrong credentials. Check your username and password.',
+      expired_code: 'Your login session expired. Return to the app and retry.',
+      already_authorized: 'This device is already authorized.'
+    };
+
+    document.getElementById('login').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      var err = document.getElementById('error');
+      err.textContent = '';
+      var res = await fetch('/oauth/login', {
+        method: 'POST',
+        credentials: 'include', // so the idsrv.session cookie sticks on success
+        headers: { 'Accept': 'application/json',
+                   'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(new FormData(this))
+      });
+      var data = await res.json();
+      if (data.ok && data.redirect) { location = data.redirect; return; }
+      if (data.ok && data.form_post) {
+        // response_mode=form_post — build+submit a POST form to the client
+        var f = document.createElement('form');
+        f.method = 'post'; f.action = data.form_post.url;
+        Object.entries(data.form_post.params).forEach(function (kv) {
+          var i = document.createElement('input');
+          i.type = 'hidden'; i.name = kv[0]; i.value = kv[1]; f.appendChild(i);
+        });
+        document.body.appendChild(f); f.submit(); return;
+      }
+      err.textContent = ERRORS[data.error] || ('Sign-in failed: ' + (data.error || 'unknown'));
+    });
+  </script>
+</body>
+</html>

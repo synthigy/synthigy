@@ -1,0 +1,2018 @@
+/*
+ *   Synthigy — model-driven IAM and data platform
+ *   Copyright (C) 2026 Robert Geršak
+ *
+ *   This program is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU Affero General Public License as
+ *   published by the Free Software Foundation, either version 3 of the
+ *   License, or (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU Affero General Public License for more details.
+ *
+ *   You should have received a copy of the GNU Affero General Public
+ *   License along with this program.  If not, see
+ *   <https://www.gnu.org/licenses/>.
+ *
+ *   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+ *   in a proprietary product, or offering it as a service without
+ *   releasing your source under section 13 — a commercial license is
+ *   available: r.gersak@gmail.com  See COMMERCIAL.md.
+ */
+
+/* tyrell.js is a genuine UMD bundle (browser-detection wrapper, zero
+ * top-level import/export — verified against the built dist/tyrell.js).
+ * `head` loads it as a CLASSIC script (no type="module"), which makes it
+ * PARSER-BLOCKING: the browser can't parse/paint <body> until it finishes
+ * registering every component. There is no window where an un-upgraded
+ * `<ty-select>`/`<ty-button>`/etc. could ever be painted — body doesn't
+ * exist as parsed DOM yet when the script runs. This replaced an earlier
+ * `html:not(.ty-ready) body { visibility: hidden }` + JS onload/timeout
+ * scheme (2026-08-09) that hid the flash after the fact; blocking the
+ * script prevents it at the source instead, needs no JS wiring, and can't
+ * get stuck (a blocking script that fails to fetch is simply skipped by
+ * the browser, parsing continues — see the guard below for that case).
+ *
+ * The ONE remaining gap: if tyrell.js itself 404s/errors, the browser
+ * gives up on the blocking script and parses <body> anyway with NOTHING
+ * registered, ever — no onload will fire, nothing recovers. `ty-select`
+ * is the worst-looking failure there (an un-upgraded one dumps its every
+ * `<ty-option>`'s plain text — a full flat list of names — since it has
+ * no shadow DOM to hide them in), so it keeps its own guard as a graceful
+ * degradation for that one broken-load case; nothing else gets one, since
+ * every other tag just reads as a bit of plain unstyled text, which is
+ * tolerable in a true failure and not worth a rule per tag for. */
+ty-select:not(:defined) { display: none; }
+
+/* Synthigy Console — shell, chrome, and content primitives.
+ * Tokens live in tokens.css; nothing here hardcodes a colour that isn't an
+ * alpha-white overlay. See tokens.css for why the shell is hand-written
+ * rather than assembled from Tyrell classes.
+ *
+ * Conventions carried over from the modeler / cockpit, because they are what
+ * make the look feel deliberate rather than templated:
+ *   - anything uppercase gets letter-spacing, and the smaller the type, the
+ *     wider the tracking (10px -> 0.16em)
+ *   - counts, timestamps and durations are tabular-nums; ids are mono
+ *   - hairline 1px borders do the work; shadows stay near-flat
+ *   - .12s transitions on colour/background, .15s on anything that moves
+ */
+
+/* ==========================================================================
+ * Fonts — vendored so an air-gapped install renders correctly. Both faces
+ * are VARIABLE, so one file per family covers every weight we use.
+ * ======================================================================== */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/console/assets/fonts/inter-latin-var.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/console/assets/fonts/jetbrains-mono-latin-var.woff2') format('woff2');
+}
+
+/* ==========================================================================
+ * Base
+ * ======================================================================== */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--sy-font);
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: -0.005em;
+  color: var(--sy-text);
+  background: var(--sy-space-gradient), var(--sy-space-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: inherit; text-decoration: none; }
+
+*:focus-visible {
+  outline: 2px solid var(--sy-accent-border);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+::selection { background: rgba(255, 255, 255, 0.18); }
+
+/* Scrollbars — thin, and invisible until there's something to grab. */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--sy-border-strong); border-radius: 6px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--sy-text-mm); }
+* { scrollbar-width: thin; scrollbar-color: var(--sy-border-strong) transparent; }
+
+/* ==========================================================================
+ * Starfield backdrop
+ * ======================================================================== */
+
+/* Canvas painted by starfield.js — login only. */
+#sy-starfield {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* Static starfield for admin pages: TILED RADIAL GRADIENTS rather than a
+ * canvas, so nothing runs a rAF loop for the whole session behind a dense
+ * table.
+ *
+ * This used to be the splash's box-shadow trick — one shadow per star, which
+ * caps you at however many you're willing to hand-write. It was twenty, over
+ * a whole screen, at 0.32 opacity: not a starfield, a few specks. A tiled
+ * gradient gets ~500 on a 1080p screen out of twenty-one declarations,
+ * because each tile repeats.
+ *
+ * Three layers at deliberately non-multiple tile sizes (211 / 383 / 617, all
+ * prime) so their repeats don't line up into a visible grid — the giveaway
+ * that ruins a tiled starfield. Depth comes from size and brightness: dust is
+ * 1px and dim, the bright layer is 2px and twinkles, and only that one
+ * animates (opacity only, so it stays on the compositor). */
+.sy-stars {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    /* dust — the density that makes it read as sky rather than as dots */
+    radial-gradient(1px 1px at  23px  38px, rgba(255,255,255,.45), transparent),
+    radial-gradient(1px 1px at  71px 152px, rgba(255,255,255,.35), transparent),
+    radial-gradient(1px 1px at 134px  17px, rgba(255,255,255,.50), transparent),
+    radial-gradient(1px 1px at 186px 121px, rgba(255,255,255,.30), transparent),
+    radial-gradient(1px 1px at  47px 197px, rgba(255,255,255,.42), transparent),
+    radial-gradient(1px 1px at 159px  84px, rgba(255,255,255,.38), transparent),
+    radial-gradient(1px 1px at  98px  63px, rgba(255,255,255,.28), transparent),
+    /* mid — sparser, brighter, on a bigger tile so it drifts out of phase */
+    radial-gradient(1.4px 1.4px at  56px  91px, rgba(255,255,255,.62), transparent),
+    radial-gradient(1.4px 1.4px at 241px  46px, rgba(255,255,255,.50), transparent),
+    radial-gradient(1.4px 1.4px at 138px 268px, rgba(255,255,255,.58), transparent),
+    radial-gradient(1.4px 1.4px at 322px 189px, rgba(255,255,255,.44), transparent),
+    radial-gradient(1.4px 1.4px at 199px 331px, rgba(255,255,255,.54), transparent),
+    radial-gradient(1.4px 1.4px at  27px 224px, rgba(255,255,255,.40), transparent);
+  background-size:
+    211px 211px, 211px 211px, 211px 211px, 211px 211px,
+    211px 211px, 211px 211px, 211px 211px,
+    383px 359px, 383px 359px, 383px 359px,
+    383px 359px, 383px 359px, 383px 359px;
+}
+
+/* The bright few. Separate element so it can twinkle without animating the
+ * other ~450 stars, which would be a full-screen repaint every frame. */
+.sy-stars::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(2px 2px at 103px  77px, rgba(255,255,255,.95), transparent),
+    radial-gradient(2px 2px at 418px 253px, rgba(255,255,255,.80), transparent),
+    radial-gradient(2px 2px at 267px 431px, rgba(255,255,255,.88), transparent),
+    radial-gradient(2px 2px at 561px 118px, rgba(255,255,255,.72), transparent),
+    radial-gradient(2px 2px at  61px 389px, rgba(255,255,255,.85), transparent);
+  background-size: 617px 541px;
+  animation: sy-tw 7s ease-in-out infinite alternate;
+}
+
+@keyframes sy-tw { from { opacity: 1; } to { opacity: .45; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .sy-stars::after { animation: none; }
+}
+
+/* ==========================================================================
+ * Brand lockup — figurative mark + wordmark, both self-theming inline SVG.
+ * The marks sit low in their viewBox, hence the optical nudge.
+ * ======================================================================== */
+
+.sy-lockup { display: flex; align-items: center; gap: 9px; user-select: none; }
+.sy-lockup svg { display: block; }
+.sy-mark svg { height: 26px; width: auto; }
+.sy-verbal svg { width: 88px; height: auto; }
+
+/* ==========================================================================
+ * Admin shell — sidebar | topbar / content
+ * ======================================================================== */
+
+.console-shell {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 236px 1fr;
+  grid-template-rows: 56px 1fr;
+  grid-template-areas:
+    "sidebar topbar"
+    "sidebar content";
+  height: 100vh;
+}
+
+/* ---- Sidebar ---------------------------------------------------------- */
+
+/* Open to the sky: no fill and no backdrop-filter, so the starfield runs
+ * straight through the chrome and only the hairline seam says where the
+ * sidebar ends. Nothing to blur means nothing to keep in sync with the
+ * topbar either — the two read as one surface because neither is a surface. */
+.console-sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--sy-glass-border);
+}
+
+.console-sidebar-brand {
+  display: flex;
+  align-items: center;
+  padding: 16px 14px 14px;
+}
+
+.console-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 10px 10px;
+}
+
+/* Group eyebrow — the signature micro-label. */
+.console-nav-group {
+  padding: 14px 6px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--sy-text-mm);
+}
+
+.console-nav a,
+.console-nav button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  margin: 2px 0;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--sy-text-m);
+  transition: background .12s ease, color .12s ease;
+}
+
+.console-nav button {
+  width: 100%;
+  background: none;
+  border: 0;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.console-nav a:hover,
+.console-nav button:hover {
+  background: var(--sy-hover-overlay);
+  color: var(--sy-text-p);
+}
+
+/* Active: tinted fill + inset hairline ring + a bloom below, plus a glowing
+ * rail on the left edge. Monochrome, so the "glow" is white light. */
+.console-nav a.active {
+  background: var(--sy-accent-tint);
+  color: var(--sy-text-pp);
+  box-shadow:
+    inset 0 0 0 1px var(--sy-border-strong),
+    0 8px 24px -10px rgba(255, 255, 255, 0.3);
+}
+
+.console-nav a.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 0 4px 4px 0;
+  background: var(--sy-accent);
+  box-shadow: 0 0 8px var(--sy-accent);
+}
+
+.console-nav ty-icon { flex-shrink: 0; }
+
+/* ---- Sidebar footer: who you are, and the way out -------------------- */
+
+.console-user {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--sy-divider);
+}
+
+.console-avatar {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--sy-accent);
+  color: #141414;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+.console-user-meta { flex: 1; min-width: 0; }
+.console-user-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sy-text-p);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.console-user-sub {
+  font-size: 10.5px;
+  color: var(--sy-text-mm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.console-user form { margin: 0; display: flex; }
+
+/* ---- Topbar ----------------------------------------------------------- */
+
+/* Transparent, same as the sidebar. */
+.console-topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--sy-glass-border);
+}
+
+.console-crumb {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.console-crumb .sep { color: var(--sy-text-mm); display: flex; }
+.console-crumb .here { font-weight: 600; color: var(--sy-text-pp); }
+.console-crumb .root { color: var(--sy-text-m); }
+
+.console-topbar-spacer { flex: 1; }
+
+/* Search — filters the table on the current page (see page.clj). */
+.console-search { width: 280px; }
+.console-kbd {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--sy-glass);
+  border: 1px solid var(--sy-glass-border);
+  color: var(--sy-text-mm);
+  font-family: var(--sy-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* ---- Live indicator ---------------------------------------------------
+ * Reads the $live signal the SSE stream sets, so it reports the channel's
+ * real state. Offline is deliberately quiet (no pulse, muted text) — a
+ * console that has silently stopped updating should look inert, not calm. */
+
+/* Box chrome (background/border/radius/padding/height) is ty-tag's own —
+ * flavor="neutral-" + pill + size="sm". Only typographic/anti-shift
+ * overrides live here now. */
+.console-live {
+  justify-content: center;
+  /* Fixed, not min — the label toggles "OFFLINE" (7 chars) / "LIVE" (4),
+   * and every dropdown open/search/pick fires a @get that flips it via
+   * live-indicator-script, so this resizes constantly during normal use.
+   * A fixed width (sized for the wider "OFFLINE" state, centered) means
+   * that swap never changes the badge's own footprint or nudges anything
+   * after it in the topbar row — found live: reported as the row visibly
+   * "twitching" on every filter interaction. */
+  width: 104px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  transition: color .2s ease, border-color .2s ease;
+}
+
+.console-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sy-text-mm);
+  flex-shrink: 0;
+  transition: background .2s ease;
+}
+
+.console-live.connected { color: var(--sy-text-m); border-color: var(--sy-glass-border); }
+.console-live.connected .console-live-dot {
+  background: var(--sy-ok);
+  animation: sy-live 1.8s ease-out infinite;
+}
+
+/* Still ours: Tyrell has no "connection is alive" affordance. */
+@keyframes sy-live {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--sy-ok) 60%, transparent); }
+  70%  { box-shadow: 0 0 0 5px color-mix(in srgb, var(--sy-ok) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--sy-ok) 0%, transparent); }
+}
+
+/* ---- Change flash -----------------------------------------------------
+ * A patched row briefly lifts, then settles. Datastar swaps the element, so
+ * the animation re-runs on exactly the rows that changed rather than the
+ * whole table blinking on every push. */
+
+@keyframes sy-flash {
+  from { background: var(--sy-accent-tint); }
+  to   { background: transparent; }
+}
+
+.console-table tbody tr { animation: sy-flash 1.1s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .console-table tbody tr { animation: none; }
+  .console-live.connected .console-live-dot { animation: none; }
+}
+
+/* ---- Content ---------------------------------------------------------- */
+
+/* The content area is a FRAME, not a scroller: it never scrolls itself, so
+   the page has no global scrollbar and the sidebar/topbar never move. The
+   table's rows scroll inside their own ty-scroll-container instead.
+   `min-height: 0` on every link of the flex chain is what allows a child to
+   be shorter than its content — without it flex items refuse to shrink and
+   the overflow escapes to the window. */
+.console-content {
+  grid-area: content;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 26px 30px 30px;
+}
+
+/* 1240 rather than a full-bleed max: a four-column table stretched across a
+ * 2560px monitor puts a hand-span of dead space between a row's name and its
+ * counts, which reads as broken rather than airy. */
+.console-page {
+  max-width: 1240px;
+  margin: 0 auto;
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* Page header — eyebrow over title, the pattern every designed surface in
+ * this codebase opens with. Spacing to whatever follows comes from
+ * .console-page's own gap now, not a margin here — so it applies evenly
+ * to every sibling card (detail form, sessions/identities panels, …), not
+ * just the first one after the head. */
+.console-page-head { flex: none; }
+.console-eyebrow {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--sy-text-mm);
+  margin-bottom: 3px;
+}
+.console-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--sy-text-pp);
+}
+.console-subtitle {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: var(--sy-text-m);
+  max-width: 68ch;
+}
+/* ty-copy supplies its own label/field/copy-icon chrome — this only sets it
+   apart from the title above it. */
+.console-detail-id { margin-top: 8px; max-width: 22rem; }
+
+/* ==========================================================================
+ * Panel + table
+ * ======================================================================== */
+
+/* The tint is layered over a mostly-opaque base rather than applied alone:
+ * at 3.5% white on bare canvas the starfield shows through the rows and
+ * reads as dust on the data. Atmosphere belongs behind the panel, not in it. */
+.console-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background:
+    linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+    rgba(13, 13, 15, 0.72);
+  border: 1px solid var(--sy-border);
+  border-radius: 12px;
+  box-shadow: var(--sy-shadow-card);
+  overflow: hidden;
+}
+
+/* Fills the panel; its own shadow-DOM wrapper does the scrolling. Screen-size
+   awareness is just flex — no JS, no resize observer, no fixed pixel height:
+   whatever is left after the head and chrome IS the scroll viewport. */
+.console-panel ty-scroll-container { flex: 1; min-height: 0; }
+
+.console-table { width: 100%; border-collapse: collapse; }
+
+/* A filter that matches nothing. Says so, rather than leaving an empty tbody
+   under a header — which reads as a table that failed to load. */
+.console-table tr.console-no-match td {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--sy-text-m);
+}
+
+/* Header rides along inside the scroller, so it must stick. It also needs an
+   opaque backing — the panel tint is translucent over the starfield, and rows
+   would otherwise read through it while scrolling. Fully opaque, NO
+   backdrop-filter: blur on a sticky element is a known Chromium repaint
+   flicker (fires when content behind it changes — live SSE morphs, scroll),
+   and over a 100%-opaque backing it blurs nothing anyway. */
+.console-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+              rgb(13, 13, 15);
+}
+
+/* ty-tag's host carries no display rule, so it defaults to `inline` and its
+   inner flex div stretches to the whole cell. Shrink-wrap it here — this is
+   styling the component from outside, not re-implementing it. */
+.console-table ty-tag { display: inline-flex; vertical-align: middle; }
+
+/* Counts stay next to the data they describe instead of drifting to the far
+ * edge of a wide viewport. */
+.console-table th.num { width: 104px; }
+.console-table th.status-col { width: 150px; }
+.console-table th.sel, .console-table td.sel { width: 36px; padding-right: 0; }
+.console-table td.sel ty-checkbox { display: block; }
+/* The tick column exists whenever the caller may export, but only shows once
+ * they enter export mode — the table stays clean for plain browsing. */
+.console-table:not(.selecting) .sel { display: none; }
+
+.console-table th {
+  padding: 9px 14px;
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--sy-text-mm);
+  border-bottom: 1px solid var(--sy-border);
+  white-space: nowrap;
+}
+
+.console-nav-filters { display: flex; align-items: center; gap: 12px; }
+/* The trigger's own label grows on pick ("Roles" -> "Roles (2)") via a
+ * data-text binding — a FIXED (not min) outer width means it can't reflow
+ * the topbar row (shifting the live indicator/search box after it), and a
+ * fixed label width keeps that growth from shifting the end-slot icon
+ * WITHIN the button either — every piece has a known, constant footprint.
+ * Styling the slotted light-DOM ty-button from outside, same pattern as
+ * `.console-table ty-tag { display: inline-flex }`. */
+.console-nav-filters ty-button[slot="trigger"] { width: 112px; }
+.console-nav-filters ty-button[slot="trigger"] .console-nav-filter-label {
+  display: inline-block;
+  width: 68px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+/* Always rendered (never hidden — see ui.clj), just dimmed when there is
+ * nothing to clear, so it never adds or removes layout of its own either. */
+.console-nav-filters ty-button[slot="trigger"] [slot="end"] {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-left: 4px;
+  cursor: pointer;
+  transition: opacity .15s ease;
+}
+
+.console-table th.sortable { cursor: pointer; user-select: none; }
+.console-table th.sortable:hover { color: var(--sy-text-m); }
+.console-table .console-sort { margin-left: 5px; }
+
+.console-table td {
+  padding: 9px 14px;
+  font-size: 12.5px;
+  color: var(--sy-text);
+  border-bottom: 1px solid var(--sy-divider);
+}
+
+.console-table tbody tr:last-child td { border-bottom: none; }
+.console-table tbody tr { transition: background .12s ease; }
+.console-table tbody tr:hover { background: var(--sy-hover-overlay); }
+
+.console-table .name { font-weight: 600; color: var(--sy-text-p); }
+.console-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.console-table .mono {
+  font-family: var(--sy-font-mono);
+  font-size: 11px;
+  color: var(--sy-text-m);
+}
+
+.console-table td form { margin: 0; display: flex; justify-content: flex-end; }
+
+/* ==========================================================================
+ * Detail editor
+ * ======================================================================== */
+
+/* Back to the list. Sits in the eyebrow slot, so it inherits its size and
+ * tracking; the chevron is flipped rather than shipping a second glyph. */
+.console-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--sy-text-mm);
+  transition: color .12s ease;
+}
+.console-back:hover { color: var(--sy-text-p); }
+.console-back ty-icon { transform: rotate(180deg); }
+
+.console-detail { padding: 0; }
+
+/* Detail pages with :panels (sessions/identities on Users, connector
+ * dry-run, provider discovery check) go two columns: the editor keeps the
+ * wider, primary column; panels stack in a narrower side column instead
+ * of piling up full-width below the form (found too tall/wasteful once
+ * Sessions/Sign-in methods joined the panel list). Pages with no panels
+ * render the form alone, unwrapped — see `detail` in ui.clj. */
+.console-detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(280px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+}
+.console-detail-main { display: flex; flex-direction: column; min-height: 0; }
+/* min-height:0 + overflow-y:auto close out the flex chain the comment above
+ * describes — without them a tall side column (three stacked panels, or the
+ * tabs that replaced them) had nothing bounding it and just ran off the
+ * bottom of the frame uncontactable on a short viewport, since .console-
+ * content never scrolls itself. ty-tabs gets flex:1 so it fills the column
+ * (its own required `height` prop then resolves against a real number)
+ * rather than sizing to its own content like a plain panel does. */
+.console-detail-side {
+  display: flex; flex-direction: column; gap: 20px;
+  min-height: 0; overflow-y: auto;
+}
+.console-detail-side ty-tabs { flex: 1; min-height: 0; }
+.console-detail-side ty-tab { display: block; padding-top: 16px; }
+
+/* Three renderings of the same panel data (`ui/detail`'s `rendered`), one
+ * visible at a time by width — each is cheap to re-embed (same already-
+ * fetched rows, only the wrapper differs) and `panel-tabs`' id-prefix arg
+ * keeps their ty-tab ids from colliding while hidden copies sit in the DOM:
+ *   >=1600px  .console-detail-side-wide     — stacked, no tab chrome, the
+ *                                             "show everything" wide case
+ *   860-1599  .console-detail-side-desktop  — panel-tabs (today's default)
+ *   <860px    .console-detail-side-narrow   — panel-tabs, grid collapses to
+ *                                             one column above it (form
+ *                                             full-width, panels below) —
+ *                                             NOT form+panels as an outer
+ *                                             tab pair: that would've meant
+ *                                             a second copy of the FORM,
+ *                                             and its role/group pickers
+ *                                             carry their own ids
+ *                                             (`roles-select` etc, see
+ *                                             `link-control`) that a second
+ *                                             copy would collide on for
+ *                                             real — unlike the panels'
+ *                                             ids, those ARE load-bearing
+ *                                             (picker search/pagination). */
+.console-detail-side-wide { display: none; padding-right: 8px; }
+.console-detail-side-desktop { display: contents; }
+.console-detail-side-narrow { display: none; }
+
+@media (min-width: 1600px) {
+  .console-detail-side-wide { display: flex; flex-direction: column; gap: 20px; }
+  .console-detail-side-desktop { display: none; }
+}
+@media (max-width: 860px) {
+  .console-detail-layout { grid-template-columns: 1fr; grid-template-rows: none; }
+  .console-detail-side-desktop { display: none; }
+  .console-detail-side-narrow { display: contents; }
+}
+
+/* Secondary panel — connector dry-run, provider discovery check, now also
+ * Sessions/Sign-in methods on Users. flex:none — sits in the side column
+ * (or, on pageless-:panels layouts that predate the grid, directly below
+ * the form) and only ever takes the height its own content needs. */
+.console-tool-panel { flex: none; }
+.console-tool-panel .console-form-body { padding: 20px 24px 22px; }
+.console-tool-panel .console-field-hint { max-width: 62ch; }
+.console-tool-panel .console-fields { margin-top: 16px; }
+
+/* Discriminator display — the provider/connector-type readout at the top
+ * of the config section. A plain glass row, not a ty-tag pill: this is a
+ * fact about the row (fixed at create, see console/CLAUDE.md), not a
+ * status or a filterable attribute, so it shouldn't compete visually with
+ * the Active/Inactive tags that ARE state. */
+.console-badge-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px 6px 6px;
+  border-radius: 10px;
+  background: var(--sy-glass);
+  border: 1px solid var(--sy-glass-border);
+}
+.console-badge-swatch {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Official brand marks are drawn for a light background (Google's own
+ * guidelines require it; GitHub's mono mark reads as black-on-white or
+ * white-on-black — black-on-white matches the other three here). Marks
+ * that are ours, not a vendor's (connector type: database/webhook), get
+ * the ambient tinted swatch instead — a lucide glyph has no brand rule to
+ * honor and looks like a stray sticker on white. */
+.console-badge-swatch.brand { background: #fff; color: #18181b; }
+.console-badge-swatch.brand svg { width: 15px; height: 15px; }
+.console-badge-swatch.plain { background: var(--sy-glass-hover); color: var(--sy-text); }
+.console-badge-name { font-size: 13px; font-weight: 600; color: var(--sy-text-p); }
+
+/* Table-cell size — same badge, tighter for a row full of columns. */
+.console-badge-row.sm { padding: 3px 10px 3px 3px; gap: 7px; border-radius: 8px; }
+.console-badge-row.sm .console-badge-swatch { width: 19px; height: 19px; border-radius: 5px; }
+.console-badge-row.sm .console-badge-swatch.brand svg { width: 11px; height: 11px; }
+.console-badge-row.sm .console-badge-name { font-size: 12px; font-weight: 500; color: var(--sy-text); }
+
+/* The FORM is the flex frame, wrapping both the scroller and the footer — so
+ * Save and Cancel stay pinned no matter how long the body gets, and the
+ * submit button still belongs to the form without a `form=` reference. */
+.console-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.console-form ty-scroll-container { flex: 1; min-height: 0; }
+.console-form-body { padding: 22px 24px 26px; }
+
+/* Scalars in a single readable column — a form is read top to bottom, and
+ * three fields in a grid would be arranging for the sake of arranging. */
+.console-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 420px;
+}
+
+/* Detail page's top-level fields only (not settings/config sub-sections,
+ * not the create form) — compact controls (switch/enum/number) share a
+ * row instead of each claiming a full one; a genuinely long field
+ * (text/textarea) still spans the row via .wide. */
+.console-fields-wrap {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  max-width: 560px;
+}
+.console-fields-wrap .console-field { flex: 1 1 160px; min-width: 160px; }
+.console-fields-wrap .console-field.wide { flex-basis: 100%; }
+
+.console-field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--sy-text-mm);
+}
+
+.console-field-hint {
+  margin: 0 0 12px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--sy-text-mm);
+  max-width: 46ch;
+}
+
+/* ty-checkbox / ty-radio render ONLY the box — no label property exists on
+ * either. The text is ours, and the <label> wrapper is what makes clicking
+ * the words toggle the control (form-associated elements are labelable). */
+.console-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--sy-text);
+  user-select: none;
+}
+.console-check:hover { color: var(--sy-text-pp); }
+
+.console-radio-row { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+
+/* Grant pickers side by side when there is room, stacked when there isn't. */
+.console-link-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 28px;
+  margin-top: 32px;
+  padding-top: 26px;
+  border-top: 1px solid var(--sy-divider);
+}
+
+/* The picker needs to breathe — its popup is positioned against this box. */
+.console-picker ty-select { width: 100%; }
+
+/* A create-capable link gets the WHOLE grid row rather than sharing a
+ * ~280px column with its siblings — the two-column layout inside it
+ * (picker+selection left, add-new right) needs real width to not feel
+ * cramped, and squeezing that into a fraction of the row would defeat it. */
+.console-link-grid:has(.console-links-create) { grid-template-columns: 1fr; }
+
+/* ---- Rich OPTION rows (in the dropdown): name + owning-API badge,
+ * description underneath. Opt-in via `option-row`'s `show` — plain pickers
+ * (Users, Groups, Apps) render a bare name and never touch this. The same
+ * `.console-option-tag` badge is reused, unchanged, inside the SELECTED rows
+ * below — one badge style for "this scope belongs to that API", wherever it
+ * shows up. ---- */
+.console-option-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.console-option-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.console-option-tag {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--sy-glass);
+  border: 1px solid var(--sy-glass-border);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--sy-text-m);
+}
+.console-option-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--sy-text-mm);
+  white-space: normal;
+}
+/* {data-api}/{data-description} interpolate to "" for a link with no
+ * enrichment or a scope with no API — hide the empty badge/line rather
+ * than the template needing a conditional to know they're absent. */
+.console-option-tag:empty,
+.console-selected-desc:empty { display: none; }
+
+/* ---- Two-column create-capable link: manage (picker + selection) on the
+ * left, declare-a-new-one on the right. Wraps to one column on a narrow
+ * viewport — the create form needs its own room, not a squeeze into
+ * whatever's left of the picker's column. ---- */
+.console-link-columns {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 760px) {
+  .console-link-columns { grid-template-columns: 1fr; }
+}
+.console-link-manage { min-width: 0; }
+/* The add/edit card follows the list rather than stranding itself at the top
+   of a long one — `align-items:start` above is what lets it stick instead of
+   stretching to the row's full height. */
+.console-link-add { position: sticky; top: 12px; }
+
+/* ---- Rich link rows: a proper row per entry, not a chip — icon, name +
+ * badge, description, its own action button. Shared by BOTH shapes that
+ * render one: `ui/owned-list` (a plain server-rendered div — APIs' Scopes)
+ * and `ty-selected-tags` (a picker's chips — Roles' Scopes). The
+ * `!important` on display is for the latter: a custom element's own
+ * :host{display:…} otherwise wins. Everything else keeps the plain
+ * dismissible-pill `.console-chips` below. ---- */
+.console-selected-list {
+  display: flex !important;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.console-selected-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--sy-border);
+  border-radius: 10px;
+  background: var(--sy-glass);
+  transition: border-color .12s ease, background .12s ease;
+}
+.console-selected-row:hover { border-color: var(--sy-glass-border); background: var(--sy-glass-hover); }
+/* Top-aligns cleanly with any description length (0 lines to N) — a
+ * multi-line description under `align-items:center` floats the icon in
+ * the middle of the whole block instead of level with the name. The
+ * dismiss/edit controls stay their own `align-self:center` since a
+ * click target should sit centered regardless of how tall the text is. */
+.console-selected-row > ty-button,
+.console-selected-actions { align-self: center; }
+/* Same tinted-swatch language as `.console-badge-swatch` (the provider/
+ * connector-type readout) — one "icon in a rounded square" convention
+ * across the console, not a fresh one invented per list. */
+.console-selected-icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--sy-glass-hover);
+  color: var(--sy-text);
+}
+.console-selected-row.editing {
+  border-color: var(--sy-accent);
+  background: var(--sy-glass-hover);
+}
+/* Same shadow-DOM [hidden] override .console-toolbar needs — a ty-* element's
+   own :host{display:…} beats the UA's bare [hidden] rule. */
+.console-selected-row ty-tag[hidden],
+.console-create [hidden] { display: none !important; }
+.console-selected-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.console-selected-name { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--sy-text-p); }
+.console-selected-desc { font-size: 11.5px; line-height: 1.4; color: var(--sy-text-mm); }
+.console-selected-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Inline "declare a new row and offer it here" affordance — opt-in per link
+ * via :create. A quiet dashed-border tray rather than a second panel: it is
+ * a shortcut off the picker, not a peer of it. Fields stack — this only
+ * ever lives in the narrow right column, never beside the picker. Doubles
+ * as the edit form (see `create-form`) — same box, heading/button text swap
+ * via `data-text` rather than a visually distinct second state. */
+.console-create {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px dashed var(--sy-border-strong);
+  border-radius: 10px;
+  background: var(--sy-glass);
+}
+.console-create-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--sy-text-p);
+}
+.console-create-hint {
+  margin: 0 0 14px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--sy-text-mm);
+}
+.console-create-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.console-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* App settings — a single JSON attribute, so it reads as its own labelled
+ * block rather than blending into the plain-attribute fields above it. */
+.console-settings {
+  margin-top: 32px;
+  padding-top: 26px;
+  border-top: 1px solid var(--sy-divider);
+}
+.console-settings-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 18px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--sy-text-m);
+}
+.console-settings .console-fields { max-width: 560px; gap: 22px; }
+
+/* Access / Refresh / ID side by side — they are one setting, not three. */
+.console-expiry-row { display: flex; gap: 12px; }
+.console-expiry-row ty-input { flex: 1; }
+
+/* Pinned footer. flex:none against the form's flex frame, so it never
+ * scrolls away; the actions are the one thing that must always be reachable. */
+.console-form-actions {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--sy-border);
+  background: linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+              rgba(13, 13, 15, 0.96);
+}
+
+/* The name cell becomes the way in. Underline on hover only — 100 permanently
+   underlined links is a table that looks like it is shouting. */
+.console-row-link { transition: color .12s ease; }
+.console-row-link:hover { color: var(--sy-text-pp); text-decoration: underline; }
+
+/* Empty state — an explanation, not a shrug. */
+.console-empty {
+  padding: 40px 24px;
+  text-align: center;
+}
+.console-empty ty-icon { color: var(--sy-text-mm); }
+.console-empty h2 {
+  margin: 12px 0 5px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--sy-text-p);
+}
+.console-empty p {
+  margin: 0 auto;
+  max-width: 46ch;
+  font-size: 12.5px;
+  color: var(--sy-text-m);
+}
+
+/* Rows hidden by the topbar filter. */
+.console-table tbody tr[hidden] { display: none; }
+
+/* ==========================================================================
+ * Login — centered over the full starfield, no shell chrome.
+ * ======================================================================== */
+
+.console-login {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  width: 100%;
+  max-width: 340px;
+  margin: 0 auto;
+  padding: 2rem;
+  min-height: 100vh;
+  justify-content: center;
+}
+
+.console-login .sy-mark svg { height: 44px; }
+.console-login .sy-verbal svg { width: 132px; }
+
+.console-login-hint {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.console-login form {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 14px;
+}
+
+/* Tyrell's widgets, re-dressed for the login without forking the components —
+ * both expose the custom properties their shadow DOM reads. */
+
+/* The required marker renders as `color: var(--ty-color-danger)`. Every field
+ * on this form is required, so a red asterisk on each carries no information
+ * and would be the only chroma on the page. Muted to a neutral tone here
+ * only — a real danger colour still means danger everywhere else. */
+.console-login ty-input { --ty-color-danger: var(--sy-text-mm); }
+
+/* Glass, blurring the starfield behind it — the same treatment the OAuth
+ * login's submit button gets, so the two pages read as one product. */
+.console-login ty-button {
+  --ty-button-bg: var(--sy-glass);
+  --ty-button-bg-hover: var(--sy-glass-hover);
+  --ty-button-border: var(--sy-glass-border);
+  --ty-button-color: var(--sy-text);
+  --ty-solid-neutral: var(--sy-glass);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 8px;
+}
+
+.console-login-error {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--sy-error-tint);
+  border: 1px solid color-mix(in srgb, var(--sy-error) 35%, transparent);
+  color: var(--sy-error);
+  font-size: 12px;
+  text-align: center;
+}
+
+.console-fed-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--sy-text-mm);
+}
+.console-fed-divider::before,
+.console-fed-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--sy-glass-border);
+}
+
+.console-federated {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 8px;
+}
+.console-fed-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--sy-glass);
+  border: 1px solid var(--sy-glass-border);
+  color: var(--sy-text);
+  font-size: 13px;
+  text-decoration: none;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: background .12s ease;
+}
+.console-fed-btn:hover { background: var(--sy-glass-hover); }
+.console-fed-mark { display: flex; flex: none; }
+.console-fed-mark svg { width: 16px; height: 16px; }
+
+/* Guided create (ty-wizard + ty-step) — Identity Providers' create flow.
+ * The panel drops its own padding: ty-wizard draws the step indicators and
+ * the panel surface, so each step supplies its own inset instead.
+ *
+ * ty-wizard's panels viewport is `overflow: hidden` and each ::slotted(ty-step)
+ * is height:100% (verified in ty's styles/wizard.ts), so a step taller than the
+ * wizard's `height` would be CLIPPED, not scrolled — hence the per-step
+ * ty-scroll-container and the min-height:0 flex chain that lets it shrink. */
+.console-wizard-panel { padding: 0; }
+.console-wizard-panel .console-form { gap: 0; }
+
+/* ty-wizard seeds its accents from the BRAND ramp — `--ty-color-primary` for
+ * the active step and `--ty-color-success` for completed. `--ty-success-hue`
+ * is deliberately 135 (tokens.css keeps real success green), so a finished
+ * step rendered green: the only chroma on a monochrome page. Completed and
+ * active both take --sy-accent here — a done step should read as DONE, and
+ * on this palette "done" is the same near-white ink as "current"; the check
+ * glyph and the filled-vs-ringed circle carry the difference, not hue.
+ *
+ * `--ty-color-success-strong` is the completed circle's BORDER and is not
+ * exposed as a --ty-wizard-* var, so it is neutralised on the host directly.
+ * Safe to scope here: nothing inside a wizard step is success-flavoured.
+ *
+ * `--ty-surface-elevated` is the PENDING circle's background. Left at its
+ * translucent default the progress line runs visibly straight THROUGH the
+ * not-yet-reached circles (the line is z-index 0 behind them, but you can
+ * see it). An opaque value — panel tint composited over the space bg, i.e.
+ * what the card actually resolves to — is what makes the circle occlude it.
+ *
+ * Surfaces otherwise go transparent: .console-panel is already the card, so
+ * without this the wizard paints a second one inside the first. */
+.console-wizard-panel ty-wizard {
+  flex: 1;
+  min-height: 0;
+  --ty-wizard-bg: transparent;
+  --ty-wizard-header-bg: transparent;
+  --ty-wizard-panels-bg: transparent;
+  --ty-wizard-border: transparent;
+  --ty-wizard-shadow: none;
+  --ty-wizard-radius: 0;
+  --ty-wizard-header-border: var(--sy-border);
+  --ty-wizard-active-accent: var(--sy-accent);
+  --ty-wizard-completed-accent: var(--sy-accent);
+  --ty-wizard-pending-accent: var(--sy-text-mm);
+  --ty-wizard-progress-track: var(--sy-border-strong);
+  --ty-wizard-progress-fill: var(--sy-accent);
+  --ty-wizard-focus-outline: var(--sy-accent-border);
+  --ty-color-success-strong: var(--sy-accent);
+  --ty-surface-elevated: color-mix(in srgb, #fff 3.5%, var(--sy-space-bg));
+  /* Step LABELS are not exposed as --ty-wizard-* vars and the
+   * `indicator-{id}` slot only replaces a circle's CONTENT, so the only hook
+   * is the neutral ramp itself: Tyrell paints the active label
+   * neutral-strong and BOTH the completed and pending ones plain neutral,
+   * which at the console's 0.496 read as barely-there under a bright
+   * circle. Lifted so a finished step is legible; the completed-vs-pending
+   * distinction is carried by the circle (filled + check vs dim ring),
+   * which is the component's own design, not something to fight. */
+  --ty-color-neutral: var(--sy-text-m);
+  --ty-color-neutral-strong: var(--sy-text-pp);
+}
+.console-wizard-step {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.console-wizard-step ty-scroll-container { flex: 1; min-height: 0; }
+
+/* Centred both ways, not parked in the top-left corner: `margin-inline:auto`
+ * centres the measure-bounded column horizontally, and `min-height:100%` +
+ * `justify-content:center` centres it vertically WITHOUT costing the ability
+ * to scroll — a step taller than the viewport simply grows past 100% and the
+ * scroll container takes over. The step bodies here are short (a list, a few
+ * fields) against a full-height panel, so top-left left most of the card
+ * empty and the eye had to hunt for the content. */
+.console-wizard-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px 22px;
+  min-height: 100%;
+  width: 100%;
+  max-width: 620px;
+  margin-inline: auto;
+}
+
+/* The measure grows with the viewport, but only so far: these steps are
+ * mostly prose, and past ~80ch a numbered list stops being scannable. The
+ * config step benefits most, which is why it grows at all. Breakpoints match
+ * the ones .console-detail-layout already uses. */
+@media (min-width: 1280px) { .console-wizard-body { max-width: 700px; } }
+@media (min-width: 1600px) { .console-wizard-body { max-width: 780px; } }
+/* Centred, not right-aligned like the detail editor's Save/Cancel: a wizard
+ * footer is the flow's own Back/Next pair, and it sits under a centred body. */
+.console-wizard-step .console-form-actions {
+  padding: 14px 22px;
+  justify-content: center;
+}
+
+/* The choose step is a centred column, so its lead sentence centres with the
+ * buttons rather than hanging left of them. Step 2's instruction list stays
+ * left-aligned — centred body copy is only readable at a sentence or two. */
+.console-wizard-lead {
+  text-align: center;
+  max-width: 46ch;
+  margin-inline: auto;
+  margin-bottom: 4px;
+}
+
+/* Provider choice — same ty-button + brand-mark shape as the account page's
+ * Connect buttons, not the login page's .console-fed-btn anchors: these open
+ * the next step, they are not external navigation. */
+.console-wizard-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(340px, 100%);
+  margin-inline: auto;
+}
+
+/* Narrow viewports: the indicator strip breaks first — Azure puts SIX labels
+ * across one row, and ty-wizard ships no width media queries of its own
+ * (checked the built styles: only prefers-reduced-motion). The circle size
+ * and header padding are the two knobs it does expose, so the shrinking is
+ * done through those rather than by reaching into its shadow DOM. Plain media
+ * queries, not ty-resize-observer: the panel's width here is a pure function
+ * of the viewport (the shell's sidebar is a fixed 236px), so there is no
+ * content-driven measurement for an observer to do. */
+/* The step LABEL is `font-size: var(--ty-font-sm)`, which resolves to 1rem
+ * here — six of those across a narrow strip collide and wrap to two lines
+ * (measured). That token is the only reach into the label, so it is shrunk on
+ * the host and restored on the step body, keeping the change to the indicator
+ * strip rather than quietly shrinking every control inside the steps. */
+.console-wizard-step { --ty-font-sm: 1rem; }
+
+@media (max-width: 1180px) {
+  .console-wizard-panel ty-wizard {
+    --ty-wizard-circle-size: 27px;
+    --ty-wizard-header-padding: 18px 12px 13px;
+    --ty-font-sm: 12.5px;
+  }
+  .console-wizard-body { padding: 20px 18px; gap: 14px; }
+  .console-wizard-steps { padding-left: 18px; gap: 9px; font-size: 12.5px; }
+}
+
+@media (max-width: 900px) {
+  .console-wizard-panel ty-wizard {
+    --ty-wizard-circle-size: 23px;
+    --ty-wizard-header-padding: 14px 8px 11px;
+    --ty-font-sm: 11px;
+  }
+  .console-wizard-body { padding: 16px 14px; }
+  .console-wizard-step .console-form-actions { padding: 12px 14px; }
+  .console-wizard-steps { padding-left: 16px; font-size: 12px; }
+}
+
+.console-wizard-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--sy-text-m);
+}
+.console-wizard-steps li::marker { color: var(--sy-text-mm); font-variant-numeric: tabular-nums; }
+.console-wizard-link { color: var(--sy-text); text-decoration: underline; text-underline-offset: 2px; }
+
+/* The redirect URI is the one value the admin must carry to the provider
+ * verbatim, so it gets its own framed row rather than sitting in the prose. */
+.console-wizard-callback {
+  padding: 12px 14px;
+  border: 1px solid var(--sy-border);
+  border-radius: 10px;
+  background: var(--sy-glass);
+}
+
+/* Secondary line inside a table cell — the IP under a device name. */
+.console-subtle {
+  margin-top: 2px;
+  font-size: 11px;
+  font-family: var(--sy-font-mono);
+  color: var(--sy-text-mm);
+}
+
+/* Linking a provider from the account page. .console-federated is sized for
+   the login card's full width, which is far too wide on an admin page. */
+.console-connect {
+  flex: none;
+  padding: 20px;
+  background:
+    linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+    rgba(13, 13, 15, 0.72);
+  border: 1px solid var(--sy-border);
+  border-radius: 12px;
+  box-shadow: var(--sy-shadow-card);
+}
+.console-connect .console-field-hint { margin: -10px 0 14px; }
+.console-confirm .console-federated { max-width: 340px; }
+
+/* One provider per row wasted the whole width of an admin panel and made two
+ * providers look like a list to work through. A wrapping row sizes each button
+ * to its own label and drops to a column only when there genuinely isn't room.
+ * Modifier on top of .console-federated, not a redefinition of it: the login
+ * card and the connect modal's "Verify with X" links still want the stacked
+ * full-width column that class exists for. `wide` is dropped from the buttons
+ * here for the same reason — it forces 100% and would defeat the wrap. */
+.console-connect .console-federated-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 10px;
+  max-width: none;
+}
+
+/* Per-page transfer affordances. Export/Import ride on each admin browse
+ * page (and Export on detail) rather than a standalone Transfer page. */
+.console-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.console-page-head { position: relative; }
+.console-detail-actions { position: absolute; top: 0; right: 0; display: flex; gap: 8px; }
+
+/* The import dialog needs form room; the confirm card's 30rem is for a
+ * sentence and two buttons. */
+.console-import-card {
+  width: min(44rem, 92vw);
+  max-width: none;
+}
+.console-import-card h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--sy-text-pp);
+}
+
+.console-transfer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.console-transfer-form .console-field-hint { margin: 0; max-width: 60ch; }
+
+.console-radio-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* In-flow notice with its own edges — the base .console-notice style assumes
+   a parent panel to butt its border-bottom against. */
+.console-rounded-notice {
+  border: 1px solid var(--sy-border);
+  border-radius: 8px;
+}
+
+.console-transfer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* The UA's [hidden]{display:none} loses to a custom element's own
+ * :host{display:…} shadow rule (author > UA), so ty-button ignores the bare
+ * attribute without this. Harmless on native buttons, load-bearing on ty-*. */
+.console-toolbar [hidden],
+.console-create-actions [hidden],
+.console-nav-filters [hidden] { display: none !important; }
+
+/* The buttons here are ty-buttons; the flow-advancing one carries
+ * flavor="primary" (solid) while its neighbours stay outlined/ghost, so at
+ * every step exactly one button reads as "the next step". */
+
+/* Notice — an outcome the user asked for, not a page-level alert. Sits inside
+   the panel it concerns so a live patch replaces it along with the rows. */
+.console-notice {
+  padding: 9px 14px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--sy-border);
+}
+.console-notice.ok { color: var(--sy-ok); background: color-mix(in srgb, var(--sy-ok) 10%, transparent); }
+.console-notice.warn { color: var(--sy-warn); background: var(--sy-warn-tint); }
+.console-secret-reveal {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.console-secret-reveal code {
+  font-family: var(--sy-font-mono);
+  word-break: break-all;
+  user-select: all;
+}
+
+/* Confirm dialog body. ty-modal supplies the backdrop and dismissal, but its
+   own dialog box resets to `background: transparent` deliberately (verified
+   in the vendored bundle) — the card surface is the CALLER's job, which this
+   rule was missing entirely until it read as a bare floating text block. */
+.console-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 24px 26px 20px;
+  max-width: 30rem;
+  background: linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+              rgba(13, 13, 15, 0.92);
+  border: 1px solid var(--sy-border);
+  border-radius: 12px;
+  box-shadow: var(--sy-shadow-card);
+}
+.console-confirm h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--sy-text-pp);
+}
+.console-confirm p { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--sy-text-m); }
+
+/* A control plus the hint that belongs to IT — tighter internally than the
+ * modal's own 14px rhythm, so the hint reads as part of the field rather
+ * than the next thought. */
+.console-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.console-modal-field .console-field-hint { margin: 0; max-width: none; }
+
+.console-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* Step-up block inside the confirm dialog — present only when the session is
+   no longer fresh, so it reads as an extra hurdle, not a standard field. */
+.console-confirm-reauth {
+  padding-top: 14px;
+  border-top: 1px solid var(--sy-divider);
+}
+.console-confirm-reauth .hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--sy-warn);
+}
+
+/* Selected grants, rendered by ty-selected-tags from its <template>. The host
+   sets display:contents itself, so the wrapper needs a real box to lay chips
+   out in — hence the override rather than styling children alone. */
+.console-chips {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  min-height: 22px;
+}
+
+/* ---- Floating popups --------------------------------------------------
+ * Tyrell paints a dropdown's header AND its options list with
+ * `var(--input-bg, var(--ty-input-bg))` — the same variable as an inline
+ * field. That is right when a field is inset in a panel and wrong the moment
+ * it floats: `--ty-input-bg` resolves (via tyrell-brand.css) to
+ * `--ty-surface-input`, a 4% white overlay, so the popup renders see-through
+ * over the starfield with the page showing between its rows.
+ *
+ * `--input-bg` / `--input-border` are the per-instance escape hatch Tyrell
+ * provides for exactly this. Setting them on the host inherits into the
+ * shadow tree — including the <dialog>, which moves to the top LAYER but
+ * stays put in the DOM tree, and custom properties follow the tree.
+ *
+ * Scoped to popup-bearing components rather than set globally, so inline
+ * ty-input keeps its translucent inset look. */
+ty-select,
+ty-date-picker,
+ty-popup {
+  --input-bg: var(--sy-floating);
+  --input-border: var(--sy-floating-border);
+}
+
+/* Infinite-scroll sentinel inside a picker's option list. A plain div, so
+   ty-select never mistakes it for an option; it scrolls into view, Datastar's
+   intersect plugin fires, and the response replaces it with the next page
+   plus a fresh sentinel. Styled as a quiet status row rather than hidden —
+   an invisible trigger is one you can't debug. */
+.console-option-more {
+  padding: 10px 12px;
+  font-size: 11.5px;
+  color: var(--sy-text-mm);
+  text-align: center;
+  user-select: none;
+}
+
+/* ==========================================================================
+ * Slot cards — the `:cards` index variant (Identity Providers)
+ * ======================================================================== */
+
+/* auto-fit, not a fixed column count: the slot vocabulary is spec data and
+   can grow by one enum value without touching this rule. */
+.console-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 260px));
+  gap: 16px;
+  align-content: start;
+}
+
+/* Same surface as .console-panel, but never flex:1 — a card sizes to its
+   content instead of stretching to fill the page. */
+.console-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px;
+  background:
+    linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+    rgba(13, 13, 15, 0.72);
+  border: 1px solid var(--sy-border);
+  border-radius: 12px;
+  box-shadow: var(--sy-shadow-card);
+}
+
+.console-card-mark { display: flex; }
+.console-card ty-button { margin-top: auto; }
+
+/* `:detail :sections` — a minor block between the fields and the first major
+ * section. `.console-form-body` is a plain block with no gap; .console-link-grid
+ * and .console-settings each carry their own margin-top + border-top rule, so
+ * they self-space. Sections carried nothing and sat flush against the field
+ * above (reported: zero space under ACTIVE). Deliberately NO border-top —
+ * that treatment marks a MAJOR break, and this is a continuation of the same
+ * subject. Same max-width as .console-fields-wrap so its hint text wraps on
+ * the field column's measure instead of the full panel width. */
+.console-form-sections {
+  margin-top: 26px;
+  max-width: 560px;
+}
+
+/* System page — module status head: label left, clear-errors right. */
+.console-system-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 0;
+}
+.console-system-head .console-settings-head { margin-bottom: 0; }
+.console-table td.num ty-button { margin-left: 6px; }
+
+/* System page — fact tiles. Informative strip, no interaction. */
+.console-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  flex: none;
+}
+.console-tile {
+  background:
+    linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+    rgba(13, 13, 15, 0.72);
+  border: 1px solid var(--sy-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.console-tile-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--sy-text-m);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.console-tile-value {
+  margin-top: 6px;
+  color: var(--sy-text-p);
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.console-tile.warn { border-color: var(--sy-warn); }
+.console-tile.warn .console-tile-value { color: var(--sy-warn); }
+
+/* Component versions rides the flex chain like every other scrollable panel
+ * — it is the ONLY flex:1 child on the Overview page (head, tiles and the
+ * live region are all flex:none), so it absorbs whatever height is left and
+ * ty-scroll-container makes that the viewport. It previously carried
+ * `flex:none; max-height:320px`, which capped it at 320px on ANY window and
+ * clipped the table mid-row with dead space below.
+ *
+ * min-height is a FLOOR, not the capped ceiling that was just removed:
+ * Overview stacks four blocks (head + tiles + headline cards + this), and
+ * measured in a real browser the panel collapsed to 2px at a 700px viewport
+ * once it was free to shrink. The floor keeps it usable and makes the page
+ * itself scroll instead (see .console-page-scroll) — same "bound it and let
+ * it scroll" resolution the detail page's side column already uses. */
+.console-versions { min-height: 200px; }
+
+/* Overview is the one page that stacks enough flex:none blocks to overflow a
+ * short viewport. .console-content is overflow:hidden (it expects each page
+ * to bound itself), so without this the overflow is CLIPPED and unreachable
+ * rather than scrollable. Scoped to this page — browse/detail bound
+ * themselves via a single flex:1 panel and must not grow a second
+ * scrollbar. */
+.console-page-scroll { overflow-y: auto; }
+
+/* Overview page — attention panel + headline module cards. */
+.console-live-region {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  flex: none;
+}
+.console-attention { flex: none; max-height: 300px; }
+.console-headline { display: flex; flex-direction: column; gap: 10px; }
+.console-headline-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+}
+.console-headline-card {
+  background:
+    linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+    rgba(13, 13, 15, 0.72);
+  border: 1px solid var(--sy-border);
+  border-radius: 10px;
+  padding: 13px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.console-headline-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.console-headline-name {
+  font-family: var(--sy-font-mono);
+  font-size: 12.5px;
+  color: var(--sy-text-p);
+  white-space: nowrap;
+}
+.console-headline-doc { color: var(--sy-text-m); font-size: 12px; }
+.console-headline-meta {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  color: var(--sy-text-m);
+  font-size: 11.5px;
+}
+.console-topo-link {
+  color: var(--sy-text-m);
+  font-size: 12.5px;
+  text-decoration: none;
+  align-self: flex-start;
+}
+.console-topo-link:hover { color: var(--sy-text-p); text-decoration: underline; }
+
+/* Topology page — layered dependency graph, server on top. */
+.console-topo-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  cursor: grab;
+  border: 1px solid var(--sy-border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.console-topo-viewport.grabbing { cursor: grabbing; user-select: none; }
+/* Generous bottom padding on purpose — the fixed detail card overlaps the
+ * lowest layer, so the graph must pan far enough to lift it clear. */
+.console-topo-graph { position: relative; padding: 34px 40px 260px; width: max-content; min-width: 100%; }
+.console-topo-edges { position: absolute; inset: 0; pointer-events: none; }
+.console-topo-edges path {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.13);
+  stroke-width: 1.2;
+  transition: stroke 0.15s, opacity 0.15s;
+}
+.console-topo-edges path.on { stroke: rgba(255, 255, 255, 0.75); stroke-width: 1.7; }
+.console-topo-edges path.on-soft { stroke: rgba(255, 255, 255, 0.2); stroke-width: 1.4; }
+.console-topo-edges path.dimmed { opacity: 0.12; }
+.console-topo-layer {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  margin-bottom: 46px;
+  width: max-content;
+  min-width: 100%;
+}
+.console-topo-layer:last-child { margin-bottom: 0; }
+.console-topo-node {
+  background:
+    linear-gradient(var(--sy-panel-bg), var(--sy-panel-bg)),
+    rgba(13, 13, 15, 0.8);
+  border: 1px solid var(--sy-border);
+  border-radius: 10px;
+  padding: 9px 13px 8px;
+  cursor: pointer;
+  transition: opacity 0.15s, border-color 0.15s, transform 0.15s;
+}
+.console-topo-name {
+  font-family: var(--sy-font-mono);
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  color: var(--sy-text-p);
+}
+.console-topo-doc {
+  color: var(--sy-text-mm);
+  font-size: 11px;
+  margin-top: 3px;
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.console-topo-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.console-topo-node.running .console-topo-dot { background: var(--sy-ok); box-shadow: 0 0 6px rgba(158, 206, 106, 0.55); }
+.console-topo-node.stopped { border-style: dashed; }
+.console-topo-node.stopped .console-topo-name { color: var(--sy-text-m); }
+.console-topo-node.stopped .console-topo-dot { background: transparent; border: 1.5px solid var(--sy-text-mm); }
+.console-topo-node.failed { border-color: var(--sy-error); }
+.console-topo-node.failed .console-topo-dot,
+.console-topo-node.missing .console-topo-dot { background: var(--sy-error); }
+.console-topo-node.missing { border-color: var(--sy-warn); }
+.console-topo-node.locked { border-color: rgba(224, 175, 104, 0.45); border-style: dashed; }
+.console-topo-node.locked .console-topo-name { color: var(--sy-warn); }
+.console-topo-node.locked .console-topo-dot { background: transparent; border: 1.5px solid var(--sy-warn); }
+/* Chain emphasis is tiered on purpose: focus > needs (chain-up) >
+ * needed-by (chain-down) > dimmed. */
+.console-topo-node.focus { border-color: var(--sy-text-p); transform: translateY(-1px); }
+.console-topo-node.chain-up { border-color: rgba(255, 255, 255, 0.55); }
+.console-topo-node.chain-down { border-color: rgba(255, 255, 255, 0.18); opacity: 0.8; }
+.console-topo-node.dimmed { opacity: 0.22; }
+.console-topo-node.dimmed .console-topo-dot { box-shadow: none; }
+.console-topo-detail {
+  position: fixed;
+  left: 280px;
+  bottom: 26px;
+  z-index: 5;
+  background: rgba(16, 16, 19, 0.95);
+  border: 1px solid var(--sy-border-strong);
+  border-radius: 12px;
+  padding: 14px 34px 14px 18px;
+  max-width: 560px;
+  min-width: 320px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  display: none;
+}
+.console-topo-detail #topo-close { position: absolute; top: 8px; right: 8px; }
+.console-topo-detail.show { display: block; }
+.console-topo-detail .name {
+  font-family: var(--sy-font-mono);
+  font-size: 13px;
+  color: var(--sy-text-p);
+}
+.console-topo-detail .doc {
+  color: var(--sy-text-m);
+  font-size: 12.5px;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+.console-topo-detail .rel {
+  color: var(--sy-text-mm);
+  font-size: 11.5px;
+  margin-top: 8px;
+  font-family: var(--sy-font-mono);
+  overflow-wrap: anywhere;
+}
+.console-topo-detail .rel b { color: var(--sy-text-m); font-weight: 500; }
+.console-topo-detail ty-button { margin-top: 10px; }
+.console-topo-detail ty-button[hidden] { display: none !important; }
+
+/* Encryption custody ladder — three rungs side by side, current one
+ * highlighted. Inactive rungs are dimmed via COLOR TOKENS, never a whole-li
+ * opacity: opacity multiplies against already-muted hint text and produced
+ * genuinely unreadable copy (reported from a real screenshot). */
+.console-ladder {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 4px 0 22px;
+  padding: 0;
+  list-style: none;
+}
+@media (max-width: 1100px) { .console-ladder { grid-template-columns: 1fr; } }
+.console-ladder li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--sy-border);
+  border-radius: 8px;
+}
+.console-ladder li ty-icon { margin-top: 2px; flex: none; color: var(--sy-text-mm); }
+.console-ladder-label { font-size: 12.5px; font-weight: 600; color: var(--sy-text-m); }
+.console-ladder li.active {
+  border-color: var(--sy-accent);
+  background: color-mix(in oklab, var(--sy-accent) 8%, transparent);
+}
+.console-ladder li.active ty-icon { color: var(--sy-accent); }
+.console-ladder li.active .console-ladder-label { color: var(--sy-text-p); }
+.console-ladder p.console-field-hint { margin: 3px 0 0; }
+
+/* Encryption pages — breathing room between the blocks, readable hint
+ * measure, and the migrate guide's prose column. */
+#encryption-panel .console-form-body > * + * { margin-top: 16px; }
+#encryption-panel .console-form-body > .console-ladder { margin-top: 18px; }
+#encryption-panel .console-form-body > p.console-field-hint { max-width: 72ch; }
+.console-guide { max-width: 76ch; }
+.console-guide h3 {
+  margin: 20px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--sy-text-m);
+}
+.console-guide h3:first-child { margin-top: 0; }
+.console-guide p, .console-guide li {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--sy-text-p);
+}
+.console-guide ul { margin: 6px 0 0; padding-left: 20px; }
+.console-guide li { margin-bottom: 5px; }
+
+/* Panel-head action groups — siblings breathe instead of touching. */
+.console-head-actions { display: flex; align-items: center; gap: 8px; }
+
+/* Migrate-custody tabs. Hidden until the element upgrades — same raw-content
+ * flash guard as ty-select. Panels carry their own padding via
+ * .console-tab-body; the guide prose inside keeps its 76ch measure. */
+ty-tabs:not(:defined) { display: none; }
+/* The tabs fill whatever the panel has left after the intro — no fixed
+ * pixel height at any window size. height="100%" on the element is
+ * load-bearing: ty-tabs writes its height attribute to an INLINE
+ * --tabs-height, so a stylesheet var can never win; the attribute must
+ * carry the 100% itself. flex + min-height:0 does the rest, same chain
+ * the wizard panel uses. */
+.console-migrate-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.console-migrate-body .console-guide { flex: none; }
+.console-migrate-tabs {
+  flex: 1 1 auto;
+  min-height: 0;
+  --ty-color-primary: var(--sy-accent);
+}
+/* Prose keeps its measure; the FORM (and its footer row) spans the whole
+ * tab, with the footer pinned to the panel's bottom edge — it follows the
+ * tabs, not the text column. */
+.console-tab-body {
+  padding: 18px 0 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 100%;
+}
+.console-tab-body > .console-guide { padding-right: 18px; }
+.console-tab-body .console-fields { padding-bottom: 28px; }
+.console-tab-body .console-form-actions { margin-top: auto; }
+.console-code {
+  margin: 6px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--sy-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  font-family: var(--sy-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--sy-text-p);
+  overflow-x: auto;
+  white-space: pre;
+}
+.console-guide code {
+  font-family: var(--sy-mono, ui-monospace, monospace);
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+}

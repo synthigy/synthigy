@@ -1,65 +1,28 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth.handlers
-  "Pre-built OAuth/OIDC endpoint handlers with complete middleware stacks.
-
-  This namespace provides ready-to-use Ring handlers for integrating OAuth 2.0
-  and OpenID Connect into any Ring-based web application.
-
-  All handlers are pure Ring functions with zero Pedestal dependencies.
-  They work with Compojure, Reitit, Luminus, Kit, and plain Ring applications.
-
-  ## Quick Start
-
-  ### Compojure
-  ```clojure
-  (require '[synthigy.oauth.handlers :as oauth])
-
-  (defroutes app
-    (POST \"/oauth/token\" [] oauth/token)
-    (GET \"/oauth/authorize\" [] oauth/authorize)
-    (ANY \"/oauth/login\" [] oauth/login)
-    (ANY \"/oauth/logout\" [] oauth/logout))
-  ```
-
-  ### Reitit
-  ```clojure
-  (require '[synthigy.oauth.handlers :as oauth])
-
-  (def routes
-    [[\"/oauth\"
-      [\"/token\" {:post oauth/token}]
-      [\"/authorize\" {:get oauth/authorize}]
-      [\"/login\" {:get oauth/login :post oauth/login}]
-      [\"/logout\" {:get oauth/logout :post oauth/logout}]]])
-  ```
-
-  ## Available Handlers
-
-  - `token` - OAuth token endpoint (all grant types)
-  - `authorize` - OAuth authorization endpoint
-  - `login` - OAuth login page (GET/POST)
-  - `logout` - OAuth logout endpoint
-  - `revoke` - OAuth token revocation endpoint
-  - `device-authorization` - Device code authorization (RFC 8628)
-  - `device-activation` - Device code user activation
-  - `userinfo` - OpenID Connect UserInfo endpoint
-  - `jwks` - JSON Web Key Set endpoint
-  - `openid-configuration` - OpenID Connect Discovery endpoint
-
-  ## Middleware Stacks
-
-  Each handler includes the necessary middleware for OAuth compliance:
-  - Parameter parsing (query string + form body)
-  - Cookie handling (for sessions)
-  - Keywordization of parameters
-  - OAuth-specific transformations (scope->set, basic auth, etc.)
-
-  ## Notes
-
-  - All handlers are thread-safe and stateless (state is managed via atoms)
-  - Session cookies use secure settings (http-only, secure, same-site)
-  - PKCE (Proof Key for Code Exchange) is fully supported
-  - All OAuth 2.0 flows are supported (authorization_code, refresh_token, client_credentials, device_code)
-  - OpenID Connect is fully supported (UserInfo, JWKS, Discovery)"
+  "Pre-built OAuth/OIDC Ring handlers with full middleware stacks, zero Pedestal
+   dependencies. See docs/core/synthigy/oauth/handlers.md."
   (:require
    [clojure.string :as str]
    [environ.core :refer [env]]
@@ -72,6 +35,9 @@
    [synthigy.oauth.federated :as federated]
    [synthigy.oauth.introspect :as introspect]
    [synthigy.oauth.login :as login]
+   [synthigy.oauth.credentials :as credentials]
+   [synthigy.oauth.onboarding :as onboarding]
+   [synthigy.oauth.page.status :as page.status]
    [synthigy.oauth.ring :as ring]
    [synthigy.oauth.token :as token-ns]
    [synthigy.oidc :as oidc]))
@@ -80,25 +46,16 @@
 ;; CORS Configuration
 ;; =============================================================================
 
-(defn- allowed-origins
-  "Get allowed origins from environment configuration.
-
-   Reads from :synthigy-allowed-origins (comma-separated) and
-   :synthigy-iam-root-url (fallback/compatibility).
-
-   Returns a set of allowed origin URLs."
+(defn allowed-origins
+  "Allowed CORS origins: SYNTHIGY_SERVER_ALLOWED_ORIGINS (comma-separated)
+   plus SYNTHIGY_IAM_ROOT_URL as fallback."
   []
-  (let [origins-str (env :synthigy-allowed-origins "")
+  (let [origins-str (env :synthigy-server-allowed-origins "")
         origins (remove empty? (str/split origins-str #"\s*,\s*"))
         iam-root (env :synthigy-iam-root-url "http://localhost:7887")]
     (set (conj origins iam-root))))
 
-(defn- wrap-identity-provider-cors
-  "Wrap handler with CORS middleware configured for identity provider endpoints.
-
-   Uses environment variables to configure allowed origins:
-   - SYNTHIGY_ALLOWED_ORIGINS (comma-separated list)
-   - SYNTHIGY_IAM_ROOT_URL (fallback, defaults to http://localhost:7887)"
+(defn wrap-identity-provider-cors
   [handler]
   (ring/wrap-cors handler {:allowed-origins (allowed-origins)}))
 
@@ -107,22 +64,8 @@
 ;; =============================================================================
 
 (def token
-  "OAuth 2.0 token endpoint with complete middleware stack.
-
-   Handles all OAuth grant types:
-   - authorization_code
-   - refresh_token
-   - client_credentials
-   - device_code (urn:ietf:params:oauth:grant-type:device_code)
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)
-   - wrap-scope->set (OAuth scope transformation)
-   - wrap-pkce-validation (PKCE security)
-   - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
-  (-> token-ns/token-handler
+  "OAuth 2.0 token endpoint (all grant types), fully wrapped."
+  (-> #'token-ns/token-handler
       core/wrap-scope->set
       oauth/wrap-pkce-validation
       core/wrap-basic-authorization
@@ -131,17 +74,8 @@
       wrap-cookies))
 
 (def revoke
-  "OAuth 2.0 token revocation endpoint with complete middleware stack.
-
-   Revokes access tokens or refresh tokens.
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)
-   - wrap-session-read (session cookie extraction)
-   - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
-  (-> token-ns/revoke-token-handler
+  "OAuth 2.0 token revocation endpoint, fully wrapped."
+  (-> #'token-ns/revoke-token-handler
       core/wrap-session-read
       core/wrap-basic-authorization
       wrap-keyword-params
@@ -149,38 +83,16 @@
       wrap-cookies))
 
 (def introspect
-  "OAuth 2.0 token introspection endpoint with complete middleware stack (RFC 7662).
-
-   Allows resource servers to query the authorization server about
-   token validity and metadata.
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)
-   - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
-  (-> introspect/introspect-handler
+  "OAuth 2.0 token introspection endpoint (RFC 7662), fully wrapped."
+  (-> #'introspect/introspect-handler
       core/wrap-basic-authorization
       wrap-keyword-params
       wrap-params
       wrap-cookies))
 
 (def authorize
-  "OAuth 2.0 authorization endpoint with complete middleware stack.
-
-   Initiates authorization code flow. Either:
-   1. Returns authorization code immediately (silent flow with prompt=none)
-   2. Redirects to login page to collect user credentials
-
-   Supports PKCE (code_challenge/code_challenge_method).
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)
-   - wrap-session-read (session cookie extraction)
-   - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
-  (-> oauth/authorization-handler
+  "OAuth 2.0 authorization endpoint (PKCE-supported); returns a code immediately (prompt=none) or redirects to login."
+  (-> #'oauth/authorization-handler
       core/wrap-session-read
       core/wrap-basic-authorization
       wrap-keyword-params
@@ -192,46 +104,16 @@
 ;; =============================================================================
 
 (def login
-  "OAuth login page handler (GET/POST) with complete middleware stack.
-
-   GET: Display login form
-   POST: Authenticate user and create session
-
-   Supports both authorization_code and device_code flows.
-
-   IMPORTANT: Session cookies are set with secure attributes:
-   - http-only: true
-   - secure: true
-   - same-site: :none
-   - path: /
-
-   Middleware stack:
-   - wrap-identity-provider-cors (CORS for cross-origin login)
-   - wrap-cookies (session cookie management)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)"
-  (-> login/login-handler
+  "OAuth login page handler (GET displays the form, POST authenticates and creates a session)."
+  (-> #'login/login-handler
       wrap-keyword-params
       wrap-params
       wrap-cookies
       wrap-identity-provider-cors))
 
 (def logout
-  "OAuth logout handler with complete middleware stack.
-
-   Terminates session and optionally redirects to post_logout_redirect_uri.
-   Requires either id_token_hint or idsrv/session cookie.
-
-   Session cookies are removed (max-age set to 0).
-
-   Middleware stack:
-   - wrap-identity-provider-cors (CORS for cross-origin logout)
-   - wrap-cookies (session cookie removal)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)
-   - wrap-session-read (session cookie extraction)
-   - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
-  (-> login/logout-handler
+  "OAuth logout handler; terminates the session and optionally redirects to post_logout_redirect_uri."
+  (-> #'login/logout-handler
       core/wrap-session-read
       core/wrap-basic-authorization
       wrap-keyword-params
@@ -239,47 +121,28 @@
       wrap-cookies
       wrap-identity-provider-cors))
 
+(def oauth-status
+  "User-facing terminal status page (/oauth/status, /oauth/device/status) for flows with no client redirect."
+  (-> #'page.status/status-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
 ;; =============================================================================
 ;; OAuth 2.0 Device Code Flow (RFC 8628)
 ;; =============================================================================
 
 (def device-authorization
-  "OAuth 2.0 Device Authorization handler (RFC 8628) with complete middleware stack.
-
-   Initiates device code flow for devices with limited input capabilities
-   (smart TVs, CLI tools, IoT devices).
-
-   Returns device_code, user_code, and verification URIs.
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)
-   - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
-  (-> device/device-authorization-handler
+  "OAuth 2.0 Device Authorization handler (RFC 8628); returns device_code/user_code/verification URIs."
+  (-> #'device/device-authorization-handler
       core/wrap-basic-authorization
       wrap-keyword-params
       wrap-params
       wrap-cookies))
 
 (def device-activation
-  "OAuth 2.0 Device Activation handler with complete middleware stack.
-
-   Handles both GET and POST methods:
-   - GET: Display activation form (with or without user_code pre-filled)
-   - POST: Process activation (confirm/cancel) and redirect to login
-
-   Security validations:
-   - User code validation
-   - IP address verification
-   - User agent verification
-   - Expiration check
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)"
-  (-> device/device-activation-handler
+  "OAuth 2.0 Device Activation handler (GET displays the form, POST confirms/cancels)."
+  (-> #'device/device-activation-handler
       wrap-keyword-params
       wrap-params
       wrap-cookies))
@@ -289,63 +152,30 @@
 ;; =============================================================================
 
 (def userinfo
-  "OpenID Connect UserInfo endpoint handler with complete middleware stack.
-
-   Returns claims about the authenticated end-user.
-   Requires valid access token in Authorization header (Bearer scheme).
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)
-   - wrap-basic-authorization (HTTP Basic Auth for client credentials)"
-  (-> oidc/userinfo-handler
+  "OpenID Connect UserInfo endpoint; requires a valid Bearer access token."
+  (-> #'oidc/userinfo-handler
       core/wrap-basic-authorization
       wrap-keyword-params
       wrap-params
       wrap-cookies))
 
 (def jwks
-  "JSON Web Key Set (JWKS) endpoint handler with complete middleware stack.
-
-   Returns public keys used for verifying JWT signatures (ID tokens).
-   Used by OIDC clients to validate tokens without shared secrets.
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)"
-  (-> oidc/jwks-handler
+  "JSON Web Key Set endpoint — public keys for verifying ID token signatures."
+  (-> #'oidc/jwks-handler
       wrap-keyword-params
       wrap-params
       wrap-cookies))
 
 (def openid-configuration
-  "OpenID Connect Discovery handler with complete middleware stack.
-
-   Returns OIDC configuration metadata (RFC 8414 + OpenID Connect Discovery 1.0).
-   Provides endpoint URLs and supported features for OIDC clients.
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)"
-  (-> oidc/openid-configuration-handler
+  "OpenID Connect Discovery 1.0 handler — endpoint URLs and supported features."
+  (-> #'oidc/openid-configuration-handler
       wrap-keyword-params
       wrap-params
       wrap-cookies))
 
 (def oauth-authorization-server
-  "OAuth 2.0 Authorization Server Metadata handler (RFC 8414).
-
-   Returns OAuth server metadata at /.well-known/oauth-authorization-server.
-   This is the OAuth-specific metadata endpoint (vs OIDC discovery).
-
-   Middleware stack:
-   - wrap-cookies (session tracking)
-   - wrap-keyword-params (parameter normalization)
-   - wrap-params (query string + form body parsing)"
-  (-> oidc/oauth-authorization-server-handler
+  "OAuth 2.0 Authorization Server Metadata handler (RFC 8414)."
+  (-> #'oidc/oauth-authorization-server-handler
       wrap-keyword-params
       wrap-params
       wrap-cookies))
@@ -355,17 +185,85 @@
 ;; =============================================================================
 
 (def federated-start
-  "Start a federated (social) login. GET /oauth/federated/start?provider=&state=
-   Bounces the browser to the upstream IdP. Same middleware as `login`."
-  (-> federated/start-handler
+  "GET /oauth/federated/start?provider=&state= — bounces to the upstream IdP."
+  (-> #'federated/start-handler
       wrap-keyword-params
       wrap-params
       wrap-cookies))
 
 (def federated-callback
-  "Upstream IdP callback. GET /oauth/federated/callback — validates the response
-   and finishes the downstream authorization_code flow (sets the session cookie)."
-  (-> federated/callback-handler
+  "GET /oauth/federated/callback — upstream IdP callback."
+  (-> #'federated/callback-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def federated-providers
+  "GET /oauth/federated/providers — public list of active federation providers."
+  #'federated/providers-handler)
+
+(def federated-identities
+  "GET /oauth/federated/identities — the current user's linked sign-in methods."
+  (-> #'federated/identities-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def federated-unlink
+  "POST /oauth/federated/unlink — remove one of the current user's linked identities."
+  (-> #'federated/unlink-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def federated-client-identities
+  "GET /oauth/federated/client/identities?user=<xid> — client-scoped identity listing for an administered user."
+  (-> #'federated/client-identities-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def federated-client-unlink
+  "POST /oauth/federated/client/unlink — client-scoped identity unlink for an administered user."
+  (-> #'federated/client-unlink-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+;; Account onboarding/claim — NOT federation-specific (federation is one of the
+;; claim methods, alongside password); lives in synthigy.oauth.onboarding.
+
+(def onboard
+  "POST /oauth/onboard — mint a one-time onboarding claim link (confidential client whose principal administers the user)."
+  (-> #'onboarding/onboard-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def claim
+  "GET /oauth/claim?token=... — the onboarding claim page."
+  (-> #'onboarding/claim-page-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def claim-password
+  "POST /oauth/claim/password — bootstrap method #1 (password) as a claim action."
+  (-> #'onboarding/claim-password-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def change-password
+  "POST /oauth/password — the authenticated subject replaces its own password."
+  (-> #'credentials/change-password-handler
+      wrap-keyword-params
+      wrap-params
+      wrap-cookies))
+
+(def onboard-complete
+  "POST /oauth/onboard/complete — indirect (non-browser) onboarding completion."
+  (-> #'onboarding/onboard-complete-handler
       wrap-keyword-params
       wrap-params
       wrap-cookies))
@@ -375,9 +273,7 @@
 ;; =============================================================================
 
 (def oauth-routes
-  "Map of OAuth 2.0 endpoint paths to handlers.
-
-   Use this for quick integration with routing libraries."
+  "Map of OAuth 2.0 endpoint paths to handlers."
   {"/oauth/token" {:post token}
    "/oauth/authorize" {:get authorize}
    "/oauth/login" {:get login :post login}
@@ -389,20 +285,28 @@
    ;; Federated (social) login — Synthigy brokering to upstream IdPs
    "/oauth/federated/start" {:get federated-start}
    "/oauth/federated/callback" {:get federated-callback}
+   "/oauth/federated/providers" {:get federated-providers}
+   "/oauth/federated/identities" {:get federated-identities}
+   "/oauth/federated/unlink" {:post federated-unlink}
+   "/oauth/federated/client/identities" {:get federated-client-identities}
+   "/oauth/federated/client/unlink" {:post federated-client-unlink}
+   ;; Account onboarding/claim — federation is one claim method among several
+   "/oauth/onboard" {:post onboard}
+   "/oauth/onboard/complete" {:post onboard-complete}
+   "/oauth/claim" {:get claim}
+   "/oauth/claim/password" {:post claim-password}
+   ;; Subject-driven credential change — not onboarding, no ticket
+   "/oauth/password" {:post change-password}
    ;; RFC 8414 - OAuth 2.0 Authorization Server Metadata
    "/.well-known/oauth-authorization-server" {:get oauth-authorization-server}})
 
 (def oidc-routes
-  "Map of OpenID Connect endpoint paths to handlers.
-
-   Use this for quick integration with routing libraries."
+  "Map of OpenID Connect endpoint paths to handlers."
   {"/oauth/userinfo" {:get userinfo}
    "/oauth/jwks" {:get jwks}
    ;; OpenID Connect Discovery 1.0
    "/.well-known/openid-configuration" {:get openid-configuration}})
 
 (def all-routes
-  "Map of all OAuth/OIDC endpoint paths to handlers.
-
-   Combines oauth-routes and oidc-routes for complete OAuth/OIDC support."
+  "Map of all OAuth/OIDC endpoint paths to handlers."
   (merge oauth-routes oidc-routes))

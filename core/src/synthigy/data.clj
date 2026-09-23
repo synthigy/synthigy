@@ -1,22 +1,28 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.data
-  "Well-known system data entities.
-
-  These are actual data records (not schema elements) with stable,
-  well-known identifiers that persist across deployments.
-
-  Uses compile-time multimethod registration for provider-agnostic ID resolution.
-
-  Usage:
-    ;; Get the ID via multimethod (resolves based on provider)
-    (data :data/root-role)  ;; => UUID or XID
-
-    ;; Or extract from record (checks both :euuid and :xid)
-    (id/extract *ROOT*)  ;; => UUID or XID based on provider"
+  "Well-known system data records with stable, provider-agnostic identifiers."
   (:require [synthigy.dataset.id :refer [defdata] :as id]))
-
-;; =============================================================================
-;; Well-Known Data ID Definitions
-;; =============================================================================
 
 (defdata :data/synthigy-user
   :euuid #uuid "c5a67922-351e-4ca3-95c2-fa52a7a3e2b5" :xid "RQb935cnLog5tiFsXgfMhv")
@@ -29,12 +35,6 @@
 
 (defdata :data/public-user
   :euuid #uuid "762d9076-4b78-4918-9eec-262a56a94e95" :xid "FbQG7q3EYXeR7N3oBhd2Gk")
-
-;; =============================================================================
-;; System Data Records
-;; =============================================================================
-;; Records include BOTH :euuid and :xid keys for compatibility.
-;; Use id/extract to get the appropriate ID based on current provider.
 
 (def ^:dynamic *SYNTHIGY*
   {:euuid (id/data :data/synthigy-user :euuid)

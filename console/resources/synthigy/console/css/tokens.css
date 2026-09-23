@@ -1,0 +1,198 @@
+/*
+ *   Synthigy — model-driven IAM and data platform
+ *   Copyright (C) 2026 Robert Geršak
+ *
+ *   This program is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU Affero General Public License as
+ *   published by the Free Software Foundation, either version 3 of the
+ *   License, or (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU Affero General Public License for more details.
+ *
+ *   You should have received a copy of the GNU Affero General Public
+ *   License along with this program.  If not, see
+ *   <https://www.gnu.org/licenses/>.
+ *
+ *   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+ *   in a proprietary product, or offering it as a service without
+ *   releasing your source under section 13 — a commercial license is
+ *   available: r.gersak@gmail.com  See COMMERCIAL.md.
+ */
+
+/* Synthigy Console — design tokens.
+ *
+ * Dark only. There is no light block and no `prefers-color-scheme` here: the
+ * console commits to the deep-space look the OAuth pages and the modeler
+ * splash already establish, and a second palette would be a second thing to
+ * keep honest for no benefit. `<html>` ships `class="dark" data-theme="dark"`
+ * permanently — `.dark` is what Tyrell's own sheet keys off, `data-theme` is
+ * what the modeler's CSS keys off, and emitting both means either family of
+ * selectors resolves correctly if more of it gets ported here later.
+ *
+ * Two systems, deliberately (the same split the modeler and the robotics
+ * frontend arrived at independently):
+ *
+ *   1. --sy-*  — the SHELL: sidebar, topbar, panels, the space canvas. Layout
+ *      and chrome only, because Tyrell ships no shell components.
+ *   2. --ty-*  — EVERYTHING ELSE. ty-button / ty-tag / ty-input / ty-tooltip /
+ *      ty-modal do the work; they are NOT re-implemented here. Tyrell computes
+ *      their palette from the OKLCH seeds below, so retuning the seeds retunes
+ *      every widget without touching a component.
+ *
+ * Load order matters: tyrell.css -> tyrell-brand.css -> THIS -> console.css.
+ * Custom properties resolve at use time, so overriding a seed here re-derives
+ * every colour Tyrell computes from it.
+ *
+ * Values are lifted from the existing palette rather than invented:
+ * the space canvas/glass set from core/resources/oauth/css/common.css, the
+ * surface/text ladder from the modeler's erd.css dark block.
+ */
+
+:root {
+  /* ---- Brand mark ------------------------------------------------------
+   * figurative.svg / verbal.svg fill against these (that's why they're
+   * inlined as SVG and not <img> — an <img> can't read a CSS variable). */
+  --logo-primary: #ffffff;
+  --logo-secondary: #5b5b5b;
+
+  /* ---- Deep space canvas ----------------------------------------------
+   * The gradient is the modeler splash's, verbatim. Stars are painted over
+   * it by starfield.js (login) or the static constellation (admin). */
+  --sy-space-bg: #0f0f10;
+  --sy-space-gradient: radial-gradient(
+    130% 110% at 62% 30%,
+    #16161a 0%,
+    #0f0f10 55%,
+    #0a0a0b 100%
+  );
+  --sy-star-rgb: 255, 255, 255; /* read by starfield.js */
+
+  /* ---- Text ladder: pp > p > base > m > mm ---------------------------- */
+  --sy-text-pp: #ffffff;
+  --sy-text-p: #f0f0f0;
+  --sy-text: #d6d6d6;
+  --sy-text-m: #8b8b8b;
+  --sy-text-mm: #5b6068;
+
+  /* ---- Glass surfaces --------------------------------------------------
+   * Everything in the shell floats above the starfield, so surfaces are
+   * translucent white over the space bg rather than opaque grays. */
+  --sy-glass: rgba(255, 255, 255, 0.06);
+  --sy-glass-hover: rgba(255, 255, 255, 0.13);
+  --sy-glass-border: rgba(255, 255, 255, 0.12);
+
+  /* No --sy-chrome-bg / --sy-topbar-bg: the sidebar and topbar are fully
+   * transparent, so the starfield runs through them and a hairline seam is
+   * the only chrome. Panels still get --sy-panel-bg below — atmosphere
+   * belongs behind the data, not in it. */
+  --sy-panel-bg: rgba(255, 255, 255, 0.035); /* cards / tables */
+
+  --sy-border: rgba(255, 255, 255, 0.08);
+  --sy-border-strong: rgba(255, 255, 255, 0.18);
+  --sy-divider: rgba(255, 255, 255, 0.06);
+
+  /* ---- Accent: ink carrying the brand hue ------------------------------
+   * Still "maximum contrast against the canvas" — near-white on dark — but
+   * tinted 177 so actives, rails and focus read as Synthigy rather than as
+   * generic gray chrome. --sy-brand is the saturated form, for the few
+   * places that should actually show colour. */
+  --sy-accent: oklch(0.9 0.03 177);
+  --sy-accent-hover: oklch(0.97 0.02 177);
+  --sy-brand: oklch(0.72 0.075 177);
+  --sy-accent-tint: color-mix(in oklch, var(--sy-brand) 16%, transparent);
+  --sy-accent-border: color-mix(in oklch, var(--sy-brand) 45%, transparent);
+
+  /* ---- Floating surfaces ----------------------------------------------
+   * OPAQUE, and that is the whole point. Everything else in this console is
+   * a translucent overlay because it sits on a panel that already has a
+   * background. A popup has nothing behind it but the starfield, so an
+   * overlay makes it see-through and the list underneath becomes unreadable.
+   * Anything that leaves the document flow — dropdowns, popovers, menus —
+   * uses this. */
+  --sy-floating: #17171a;
+  --sy-floating-border: rgba(255, 255, 255, 0.14);
+
+  --sy-hover-overlay: rgba(255, 255, 255, 0.05);
+  --sy-active-overlay: rgba(255, 255, 255, 0.1);
+
+  /* ---- The three hues that earn their place ---------------------------
+   * Everything else is gray. Red = danger, amber = attention, green = live.
+   * Semantic weight elsewhere is carried by gray INTENSITY, not by hue. */
+  --sy-error: #f7768e;
+  --sy-error-tint: rgba(247, 118, 142, 0.15);
+  --sy-warn: #e0af68;
+  --sy-warn-tint: rgba(224, 175, 104, 0.14);
+  --sy-ok: #9ece6a;
+
+  /* ---- Type ------------------------------------------------------------ */
+  --sy-font: "Inter", system-ui, -apple-system, sans-serif;
+  --sy-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* ---- Elevation -------------------------------------------------------
+   * Depth comes from the hairline border; the shadow is near-flat. Only
+   * floating chrome (popovers, modals) gets a real drop. */
+  --sy-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sy-shadow-pop: 0 24px 56px -16px rgba(0, 0, 0, 0.7);
+
+  color-scheme: dark;
+}
+
+/* ==========================================================================
+ * Tyrell retune — near-monochrome, branded.
+ *
+ * Tyrell derives every colour from a handful of OKLCH seeds, so retuning the
+ * seeds retunes all 29 components at once. NEUTRALS go to zero chroma (pure
+ * gray surfaces, text, borders); BRAND keeps the wordmark's hue at low chroma;
+ * danger/warning/success keep enough to mean something. The result is
+ * ink-plus-one-tone rather than either a rainbow or flat gray.
+ * ======================================================================== */
+
+:root,
+html.dark {
+  /* Brand hue taken from the Synthigy wordmark itself: web.page's logo is
+   * rgb(68,99,91) = oklch(0.473 0.039 176.7) — a desaturated teal. Hue is
+   * kept; chroma is raised only slightly above the mark's own so accents,
+   * focus rings and active states read as branded rather than gray.
+   *
+   * NEUTRAL chroma stays 0 on purpose: surfaces, text and borders remain
+   * pure monochrome, so the console is ink-plus-one-tone, not a colourful
+   * admin panel. Zeroing EVERY seed (which this file used to do) meant
+   * loading a 40K brand engine and computing gray with it. */
+  --ty-brand-hue: 177;
+  --ty-brand-chroma: 0.055;
+  --ty-neutral-chroma: 0;
+  --ty-success-hue: 135;
+  --ty-success-chroma: 0.06;
+  --ty-warning-hue: 75;
+  --ty-warning-chroma: 0.09;
+  --ty-danger-hue: 6;
+  --ty-danger-chroma: 0.1;
+
+  /* Pin Tyrell's surfaces onto the space canvas so its widgets sit on the
+   * same material as the shell instead of punching opaque gray holes in it. */
+  --ty-surface-canvas: transparent;
+  --ty-surface-content: transparent;
+  --ty-surface-elevated: rgba(255, 255, 255, 0.04);
+  --ty-surface-floating: var(--sy-floating);
+  --ty-surface-input: rgba(255, 255, 255, 0.04);
+
+  --ty-input-border: rgba(255, 255, 255, 0.12);
+  --ty-input-border-hover: rgba(255, 255, 255, 0.24);
+  --ty-input-border-focus: var(--sy-brand);
+  --ty-input-shadow-focus: color-mix(
+    in oklch,
+    var(--sy-brand) 18%,
+    transparent
+  );
+  --ty-label-color: var(--sy-text-m);
+
+  --ty-text: var(--sy-text);
+  --ty-text-bold: var(--sy-text-p);
+  --ty-text-strong: var(--sy-text-pp);
+  --ty-text-soft: var(--sy-text-m);
+  --ty-text-faint: var(--sy-text-mm);
+  --ty-border: var(--sy-border);
+}

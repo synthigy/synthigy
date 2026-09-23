@@ -1,28 +1,48 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.iam.audit
   "SQLite PRINCIPAL-AWARE audit enhancement.
 
-   Mirror of synthigy.iam.audit (postgres). Layered on the SQLite
-   timestamp-only default established by
-   `synthigy.dataset.sqlite.audit-enhancer`. Protocol swap is driven by
-   the `:synthigy/audit` lifecycle module's :start/:stop hooks; not by
-   ns load.
+   Mirror of synthigy.iam.audit (postgres). Extended once at ns load;
+   degradation to timestamp-only is decided per call inside each method
+   against the real precondition (user table / user entity / bound
+   `*principal*`), not against lifecycle state.
 
    See the postgres counterpart for the design rationale."
   (:require
-    [next.jdbc :as jdbc]
-    [patcho.lifecycle :as lifecycle]
-    [patcho.patch :as patch]
-    [synthigy.dataset :refer [deployed-model deployed-entity]]
-    [synthigy.dataset.access :as access]
-    [synthigy.dataset.core :as core]
-    [synthigy.dataset.enhance :as enhance]
-    [synthigy.dataset.id :as id]
-    [synthigy.dataset.sqlite :as dataset-sqlite]
-    [synthigy.dataset.sql.naming :refer [entity->table-name normalize-name]]
-    [synthigy.db :refer [*db*]]
-    [synthigy.db.sql :refer [execute! execute-one!]]
-    [synthigy.db.sqlite]  ; Load SQLite JDBCBackend implementation
-    [synthigy.log :as log]))
+   [next.jdbc :as jdbc]
+   [patcho.lifecycle :as lifecycle]
+   [patcho.patch :as patch]
+   [synthigy.dataset :refer [deployed-model deployed-entity]]
+   [synthigy.dataset.access :as access]
+   [synthigy.dataset.core :as core]
+   [synthigy.dataset.enhance :as enhance]
+   [synthigy.dataset.id :as id]
+   [synthigy.dataset.sql.naming :refer [entity->table-name normalize-name]]
+   [synthigy.db :refer [*db*]]
+   [synthigy.db.sql :refer [execute! execute-one!]]
+   [synthigy.db.sqlite]  ; Load SQLite JDBCBackend implementation
+   [synthigy.log :as log]))
 
 ;; ============================================================================
 ;; Helper Functions
@@ -52,12 +72,12 @@
           (update-in data [:entity table]
                      (fn [mapping]
                        (reduce-kv
-                         (fn [data tmp-id _]
-                           (cond-> data
-                             modified? (assoc-in [tmp-id :modified_by] current-user-eid)
-                             created? (assoc-in [tmp-id :created_by] current-user-eid)))
-                         mapping
-                         mapping))))))))
+                        (fn [data tmp-id _]
+                          (cond-> data
+                            modified? (assoc-in [tmp-id :modified_by] current-user-eid)
+                            created? (assoc-in [tmp-id :created_by] current-user-eid)))
+                        mapping
+                        mapping))))))))
 
 ;; ============================================================================
 ;; SQLite-Specific Protocol Implementations
@@ -72,6 +92,18 @@
          (into #{}))
     (catch Exception _ #{})))
 
+(defn- user-table-exists?
+  "Check if the user table exists. Mirrors the Postgres/Cockroach guard —
+   SQLite doesn't resolve FK targets at DDL time, so an unguarded
+   `REFERENCES \"user\"` succeeds on deploy and only bites later on write
+   with `PRAGMA foreign_keys=ON`."
+  [tx]
+  ;; Row-presence rather than count(*) — dodges the qualified-vs-unqualified
+  ;; result-key shift that bites `table-columns` above.
+  (boolean
+   (seq (jdbc/execute! tx ["SELECT name FROM sqlite_master
+                            WHERE type = 'table' AND name = 'user'"]))))
+
 (defn- transform-audit-impl
   "Ensure audit columns + triggers on every audited entity table (SQLite).
 
@@ -82,75 +114,86 @@
 
   Called by:
     - deploy! per :new/entities (legacy path, still works)
-    - deploy! at the end over ALL current entities (substrate reconcile),
+    - deploy! at the end over ALL current entities (plug reconcile),
       so flipping :audit ON for an existing entity actually adds columns
       + triggers without needing a one-off Patcho upgrade.
 
   Four audit fields:
-    modified_by  - INTEGER FK to user(_eid) ON DELETE SET NULL
+    modified_by  - INTEGER, FK to user(_eid) ON DELETE SET NULL
     modified_on  - TEXT, CURRENT_TIMESTAMP default, bumped by AFTER UPDATE trigger
-    created_by   - INTEGER FK to user(_eid) ON DELETE SET NULL
-    created_on   - TEXT, CURRENT_TIMESTAMP default, preserved on UPDATE"
+    created_by   - INTEGER, FK to user(_eid) ON DELETE SET NULL
+    created_on   - TEXT, CURRENT_TIMESTAMP default, preserved on UPDATE
+
+  The `_by` FKs are emitted only when the user table already exists — same
+  guard as the Postgres/Cockroach impls. Without it the columns are added
+  bare and `setup!` attaches the FK when :synthigy/audit later runs."
   [_db tx entities]
-  (log/info {:id ::transform-audit-starting :data {:count (count entities)}}
-            "Reconciling audit columns + triggers")
+  (let [has-user-table (user-table-exists? tx)
+        by-column (fn [col]
+                    (if has-user-table
+                      (format "%s INTEGER REFERENCES \"user\"(_eid) ON DELETE SET NULL" col)
+                      (format "%s INTEGER" col)))]
+    (log/info {:id ::transform-audit-starting
+               :data {:count (count entities)
+                      :user-table (if has-user-table "exists" "not yet created")}}
+              "Reconciling audit columns + triggers")
 
-  (doseq [{:keys [name]
-           :as entity} entities
-          :let [table (entity->table-name entity)
-                modified? (core/audit-modified? entity)
-                created? (core/audit-created? entity)
-                cols (when (or modified? created?) (table-columns tx table))]
-          :when (or modified? created?)]
+    (doseq [{:keys [name]
+             :as entity} entities
+            :let [table (entity->table-name entity)
+                  modified? (core/audit-modified? entity)
+                  created? (core/audit-created? entity)
+                  cols (when (or modified? created?) (table-columns tx table))]
+            :when (or modified? created?)]
 
-    (when modified?
-      (when-not (contains? cols "modified_by")
-        (execute! tx
-                  [(format "ALTER TABLE \"%s\" ADD COLUMN modified_by INTEGER REFERENCES \"user\"(_eid) ON DELETE SET NULL"
-                           table)]))
-      (when-not (contains? cols "modified_on")
-        (execute! tx
-                  [(format "ALTER TABLE \"%s\" ADD COLUMN modified_on TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
-                           table)]))
-      (let [trigger-name (str "update_" (normalize-name name) "_modified_on")]
-        (execute! tx
-                  [(format "DROP TRIGGER IF EXISTS %s"
-                           trigger-name)])
-        (execute! tx
-                  [(format "CREATE TRIGGER %s
-                            AFTER UPDATE ON \"%s\"
-                            FOR EACH ROW
-                            BEGIN
-                              UPDATE \"%s\" SET modified_on = strftime('%%Y-%%m-%%d %%H:%%M:%%f', 'now') WHERE _eid = NEW._eid;
-                            END"
-                           trigger-name table table)])))
+      (when modified?
+        (when-not (contains? cols "modified_by")
+          (execute! tx
+                    [(format "ALTER TABLE \"%s\" ADD COLUMN %s"
+                             table (by-column "modified_by"))]))
+        (when-not (contains? cols "modified_on")
+          (execute! tx
+                    [(format "ALTER TABLE \"%s\" ADD COLUMN modified_on TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                             table)]))
+        (let [trigger-name (str "update_" (normalize-name name) "_modified_on")]
+          (execute! tx
+                    [(format "DROP TRIGGER IF EXISTS %s"
+                             trigger-name)])
+          (execute! tx
+                    [(format "CREATE TRIGGER %s
+                              AFTER UPDATE ON \"%s\"
+                              FOR EACH ROW
+                              BEGIN
+                                UPDATE \"%s\" SET modified_on = strftime('%%Y-%%m-%%d %%H:%%M:%%f', 'now') WHERE _eid = NEW._eid;
+                              END"
+                             trigger-name table table)])))
 
-    (when created?
-      (when-not (contains? cols "created_by")
-        (execute! tx
-                  [(format "ALTER TABLE \"%s\" ADD COLUMN created_by INTEGER REFERENCES \"user\"(_eid) ON DELETE SET NULL"
-                           table)]))
-      (when-not (contains? cols "created_on")
-        (execute! tx
-                  [(format "ALTER TABLE \"%s\" ADD COLUMN created_on TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
-                           table)]))
-      (let [preserve-trigger-name (str "preserve_" (normalize-name name) "_created_audit")]
-        (execute! tx
-                  [(format "DROP TRIGGER IF EXISTS %s"
-                           preserve-trigger-name)])
-        (execute! tx
-                  [(format "CREATE TRIGGER %s
-                            AFTER UPDATE ON \"%s\"
-                            FOR EACH ROW
-                            WHEN (NEW.created_by != OLD.created_by OR NEW.created_on != OLD.created_on)
-                            BEGIN
-                              UPDATE \"%s\" SET created_by = OLD.created_by, created_on = OLD.created_on WHERE _eid = NEW._eid;
-                            END"
-                           preserve-trigger-name table table)])))
+      (when created?
+        (when-not (contains? cols "created_by")
+          (execute! tx
+                    [(format "ALTER TABLE \"%s\" ADD COLUMN %s"
+                             table (by-column "created_by"))]))
+        (when-not (contains? cols "created_on")
+          (execute! tx
+                    [(format "ALTER TABLE \"%s\" ADD COLUMN created_on TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                             table)]))
+        (let [preserve-trigger-name (str "preserve_" (normalize-name name) "_created_audit")]
+          (execute! tx
+                    [(format "DROP TRIGGER IF EXISTS %s"
+                             preserve-trigger-name)])
+          (execute! tx
+                    [(format "CREATE TRIGGER %s
+                              AFTER UPDATE ON \"%s\"
+                              FOR EACH ROW
+                              WHEN (NEW.created_by != OLD.created_by OR NEW.created_on != OLD.created_on)
+                              BEGIN
+                                UPDATE \"%s\" SET created_by = OLD.created_by, created_on = OLD.created_on WHERE _eid = NEW._eid;
+                              END"
+                             preserve-trigger-name table table)])))
 
-    (log/debug {:id ::table-audited
-                :data {:table table :modified modified? :created created?}}
-               "Reconciled audit on table")))
+      (log/debug {:id ::table-audited
+                  :data {:table table :modified modified? :created created?}}
+                 "Reconciled audit on table"))))
 
 (defn- augment-schema-impl
   "Returns audit field and relation definitions for SQLite runtime schema.
@@ -162,7 +205,7 @@
       {}
       (let [entity-id (id/extract entity)
             entity-table (entity->table-name entity)
-            user-entity (core/reference-entity-uuid "user")
+            user-entity (core/reference-entity-id "user")
             user-table (when user-entity
                          (some-> (deployed-model)
                                  (core/get-entity user-entity)
@@ -204,20 +247,11 @@
 ;; Protocol Extension (Top-Level - Runs at Namespace Load)
 ;; ============================================================================
 
-(defn install-principal-aware!
-  "Re-extend `AuditEnhancement` against SQLite with principal-aware impl."
-  []
-  (extend-protocol enhance/AuditEnhancement
-    synthigy.db.SQLite
-    (transform-audit [db tx entities] (transform-audit-impl db tx entities))
-    (augment-schema  [db entity]      (augment-schema-impl db entity))
-    (audit           [db entity-id data tx] (enhance-audit-data entity-id data))))
-
-(defn uninstall-principal-aware!
-  "Revert SQLite to the timestamp-only default installed by
-   synthigy.dataset.sqlite at ns load."
-  []
-  (dataset-sqlite/install-default-audit-enhancement!))
+(extend-protocol enhance/AuditEnhancement
+  synthigy.db.SQLite
+  (transform-audit [db tx entities] (transform-audit-impl db tx entities))
+  (augment-schema  [db entity]      (augment-schema-impl db entity))
+  (audit           [db entity-id data tx] (enhance-audit-data entity-id data)))
 
 ;; ============================================================================
 ;; Migration Utilities
@@ -367,15 +401,18 @@
                (let [entities (core/get-entities (deployed-model))
                      backfill-count (atom 0)]
                  (with-open [conn (jdbc/get-connection (:datasource *db*))]
-                   (doseq [{:keys [name]
-                            :as entity} entities
-                           :let [table (entity->table-name entity)]]
+                   (doseq [{:as entity} entities
+                           :let [table     (entity->table-name entity)
+                                 modified? (core/audit-modified? entity)
+                                 created?  (core/audit-created? entity)]
+                           ;; setup! only adds audit columns the entity's model config asks
+                           ;; for, so an unaudited table has neither column to read nor write.
+                           :when (and modified? created?)]
                      (try
                        (let [{result :jdbc.next/update-count}
                              (execute-one! conn
                                            [(format "UPDATE \"%s\" SET created_by = modified_by WHERE created_by IS NULL"
                                                     table)])]
-                         (def result result)
                          (swap! backfill-count + (or (first result) 0))
                          (log/debug {:id ::table-backfilled
                                      :data {:rows (or (first result) 0) :table table}}
@@ -392,23 +429,21 @@
 ;;; ============================================================================
 
 (lifecycle/register-module!
-  :synthigy/audit
-  {:depends-on [:synthigy/iam]
-   :doc "Audit trail — principal _by columns + change capture"
-   :setup (fn []
+ :synthigy/audit
+ {:depends-on [:synthigy/iam]
+  :doc "Audit trail — principal _by columns + change capture"
+  :setup (fn []
             ;; One-time: retrofit `_by` columns onto any tables that
             ;; lack them (e.g. tables created in a previous bare session).
-            (log/info {:id ::lifecycle-setup-starting :data {:action :setup :subject :audit-fields}}
-                      "Retrofitting principal-aware audit columns (SQLite)")
-            (setup!)
-            (log/info {:id ::lifecycle-setup-complete :data {:action :setup-complete :subject :audit-fields}}
-                      "SQLite audit retrofit complete"))
-   :start (fn []
-            (install-principal-aware!)
-            (log/info {:id ::lifecycle-started :data {:action :started :subject :principal-audit}}
-                      "Principal-aware audit enhancement active (SQLite)")
-            (core/reload *db*))
-   :stop (fn []
-           (uninstall-principal-aware!)
-           (log/info {:id ::lifecycle-stopped :data {:action :stopped :subject :principal-audit}}
-                     "Reverted to timestamp-only audit enhancement (SQLite)"))})
+           (log/info {:id ::lifecycle-setup-starting :data {:action :setup :subject :audit-fields}}
+                     "Retrofitting principal-aware audit columns (SQLite)")
+           (setup!)
+           (log/info {:id ::lifecycle-setup-complete :data {:action :setup-complete :subject :audit-fields}}
+                     "SQLite audit retrofit complete"))
+  :start (fn []
+           (log/info {:id ::lifecycle-started :data {:action :started :subject :principal-audit}}
+                     "Principal-aware audit enhancement active (SQLite)")
+           (core/reload *db*))
+  :stop (fn []
+          (log/info {:id ::lifecycle-stopped :data {:action :stopped :subject :principal-audit}}
+                    "Reverted to timestamp-only audit enhancement (SQLite)"))})

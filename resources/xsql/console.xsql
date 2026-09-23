@@ -1,0 +1,124 @@
+--   Synthigy — model-driven IAM and data platform
+--   Copyright (C) 2026 Robert Geršak
+--
+--   This program is free software: you can redistribute it and/or modify
+--   it under the terms of the GNU Affero General Public License as
+--   published by the Free Software Foundation, either version 3 of the
+--   License, or (at your option) any later version.
+--
+--   This program is distributed in the hope that it will be useful,
+--   but WITHOUT ANY WARRANTY; without even the implied warranty of
+--   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+--   GNU Affero General Public License for more details.
+--
+--   You should have received a copy of the GNU Affero General Public
+--   License along with this program.  If not, see
+--   <https://www.gnu.org/licenses/>.
+--
+--   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+--   in a proprietary product, or offering it as a service without
+--   releasing your source under section 13 — a commercial license is
+--   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
+@workspace "Console"
+@namespace console
+
+@sql-template users-table
+@watch
+@returns xid:string, name:string, active:boolean, type:string, roles:int, groups:int, sessions:int
+select {user.xid} as xid,
+       {user.name},
+       {user.active},
+       {user.type},
+       count(distinct {user->groups.xid}) as groups,
+       count(distinct {user->roles.xid}) as roles,
+       count(distinct {user->sessions.xid})
+         filter (where {user->sessions.active}) as sessions
+where {user.name} ilike ?q?
+  and {user->groups.xid} in ?groups?[]
+  and {user->roles.xid} in ?roles?[]
+group by {user.xid}, {user.name}, {user.active}, {user.type}
+order by ?sort:order(name, active, sessions, groups, roles)="name desc"
+limit ?limit:int=100
+offset ?offset:int=0
+
+@sql-template groups-table
+@watch
+@returns xid:string, name:string, active:boolean, type:string, users:int, roles:int
+select {user_group.xid} as xid,
+       {user_group.name},
+       {user_group.active},
+       {user_group.type},
+       count(distinct {user_group->users.xid}) as users,
+       count(distinct {user_group->roles.xid}) as roles
+where {user_group.name} ilike ?q?
+group by {user_group.xid}, {user_group.name}, {user_group.active}, {user_group.type}
+order by ?sort:order(name, active, users, roles)="name desc"
+limit ?limit:int=100
+offset ?offset:int=0
+
+@sql-template roles-table
+@watch
+@returns xid:string, name:string, active:boolean, users:int, scopes:int
+select {user_role.xid} as xid,
+       {user_role.name},
+       {user_role.active},
+       count(distinct {user_role->users.xid}) as users,
+       count(distinct {user_role->scopes.xid}) as scopes
+where {user_role.name} ilike ?q?
+group by {user_role.xid}, {user_role.name}, {user_role.active}
+order by ?sort:order(name, active, users, scopes)="name desc"
+limit ?limit:int=100
+offset ?offset:int=0
+
+@sql-template apps-table
+@watch
+@returns xid:string, name:string, active:boolean, type:string, apis:int
+select {oauth_client.xid} as xid,
+       {oauth_client.name} as name,
+       {oauth_client.active} as active,
+       {oauth_client.type} as type,
+       count(distinct {oauth_client->apis.xid}) as apis
+where {oauth_client.name} ilike ?q?
+group by {oauth_client.xid}, {oauth_client.name}, {oauth_client.active}, {oauth_client.type}
+order by ?sort:order(name, active, apis)="name desc"
+limit ?limit:int=100
+offset ?offset:int=0
+
+@sql-template apis-table
+@watch
+@returns xid:string, name:string, audience:string, apps:int, scopes:int
+select {oauth_api.xid} as xid,
+       {oauth_api.name},
+       {oauth_api.audience},
+       count(distinct {oauth_api->clients.xid}) as apps,
+       count(distinct {oauth_api->scopes.xid}) as scopes
+where {oauth_api.name} ilike ?q?
+group by {oauth_api.xid}, {oauth_api.name}, {oauth_api.audience}
+order by ?sort:order(name, apps, scopes)="name desc"
+limit ?limit:int=100
+offset ?offset:int=0
+
+@sql-template providers-table
+@watch
+@returns xid:string, provider:string, active:boolean
+select {federation_provider.xid} as xid,
+       {federation_provider.provider},
+       {federation_provider.active}
+where {federation_provider.provider}::text ilike ?q?
+order by ?sort:order(provider, active)="provider asc"
+limit ?limit:int=100
+offset ?offset:int=0
+
+@sql-template connectors-table
+@watch
+@returns xid:string, name:string, type:string, priority:int, enabled:boolean
+select {auth_connector.xid} as xid,
+       {auth_connector.name},
+       {auth_connector.type},
+       {auth_connector.priority},
+       {auth_connector.enabled}
+where {auth_connector.name} ilike ?q?
+order by ?sort:order(priority, name, type, enabled)="priority asc, name asc"
+limit ?limit:int=100
+offset ?offset:int=0

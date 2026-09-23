@@ -1,0 +1,16 @@
+{
+  "active" : true,
+  "description" : "External identity surface: federation providers and auth connectors.",
+  "name" : "Identity Admin",
+  "owned_entities" : [ {
+    "xid" : "CLAE8TtQwCKDKy5v6y5Qw1"
+  }, {
+    "xid" : "gn4FV5gXEQwiJQeRYfQjzZ"
+  } ],
+  "read_entities" : [ {
+    "xid" : "3spdYL3uzZXgTbJn9Rxd58"
+  }, {
+    "xid" : "WN5xU8Do5pcdhTkxXvEYwt"
+  } ],
+  "xid" : "barGnX3LFnhj9Qus5DwR4T"
+}

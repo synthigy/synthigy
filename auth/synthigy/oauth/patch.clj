@@ -1,17 +1,28 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth.patch
-  "OAuth-specific model patches and migrations.
-
-  This namespace defines patches for the :synthigy.iam.oauth/model topic.
-  These patches handle OAuth schema evolution and data migrations.
-
-  Examples of patches:
-  - Client secret hashing migration (plaintext → bcrypt)
-  - Token revocation schema updates
-  - Session management improvements
-
-  To level OAuth:
-    (require '[patcho.patch :as patch])
-    (patch/level! :synthigy.iam.oauth/model)"
+  "OAuth-specific model patches and migrations for the :synthigy.iam.oauth/model
+   topic. See docs/core/synthigy/oauth/patch.md."
   (:require
     [buddy.hashers :as hashers]
     [synthigy.log :as log]
@@ -26,20 +37,11 @@
 ;;; ============================================================================
 
 (defn hash-client-secrets!
-  "Migrates all OAuth clients to use hashed secrets.
-
-  This function:
-  1. Searches for all OAuth clients (app entities)
-  2. Identifies clients with plaintext secrets (not starting with bcrypt prefix)
-  3. Hashes those secrets using bcrypt
-  4. Updates the client records with hashed secrets
-
-  Returns:
-    Map with :total, :hashed, :skipped counts"
+  "Migrate all OAuth clients with plaintext secrets to hashed (bcrypt) secrets;
+   returns {:total :hashed :skipped}."
   []
   (log/info {:id ::hash-secrets-start :data {:action :migrating :subject :client-secrets}} "Migrating client secrets to hashed format")
-  (let [;; Query all clients with secrets
-        clients (dataset/search-entity
+  (let [clients (dataset/search-entity
                   :iam/app
                   nil
                   {(id/key) nil
@@ -47,8 +49,8 @@
                    :secret nil
                    :type nil})
 
-        ;; Filter to confidential clients with plaintext secrets
-        ;; Bcrypt hashes start with "$2a$", "$2b$", "$2y$" or "bcrypt+sha512$" (synthigy format)
+        ;; Bcrypt hashes start with "$2a$", "$2b$", "$2y$" or synthigy's
+        ;; "bcrypt+sha512$"
         plaintext-clients (filter
                             (fn [{:keys [secret type]}]
                               (and secret
@@ -91,28 +93,7 @@
      :hashed plaintext-count
      :skipped (- total-count plaintext-count)}))
 
-;;; ============================================================================
-;;; OAuth Model Versioning (:synthigy.iam.oauth/model)
-;;; ============================================================================
-;;
-;; This topic tracks the version of the OAuth model and related features.
-;;
-;; OAuth model includes:
-;; - Client credentials (app entities)
-;; - Session management
-;; - Token storage (access, refresh, id tokens)
-;; - Authorization codes
-;;
-;; Patches handle data migrations and schema evolution.
-;;
-
-;; Current model version (hardcoded - represents target version)
 (patch/current-version :synthigy.iam.oauth/model "1.0.4")
-
-
-;;; ============================================================================
-;;; OAuth Model Patches
-;;; ============================================================================
 
 ;; Patch 1.0.4 - Hash client secrets
 (patch/upgrade :synthigy.iam.oauth/model

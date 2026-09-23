@@ -1,17 +1,36 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth.persistence
   (:require
-    [buddy.sign.jwt :as jwt]
     [clojure.core.async :as async]
-    [clojure.string :as str]
     [synthigy.log :as log]
     [patcho.lifecycle :as lifecycle]
     [synthigy.dataset :as dataset]
     [synthigy.dataset.encryption :as dataset-encryption]
     [synthigy.dataset.id :as id]
     [synthigy.iam :as iam]
+    [synthigy.iam.access :as access]
     [synthigy.iam.encryption :as encryption]
-    [synthigy.oauth.core :as core]
-    [synthigy.oauth.token :as token]
     [synthigy.util :as util])
   (:import
     [java.security KeyFactory]
@@ -44,6 +63,14 @@
 (id/defentity :oauth/key-pair
   :euuid #uuid "fd76f554-1158-4101-9469-98cd70dcbe68"
   :xid "YJLVrcBtVdFHQxqrbAVoiw")
+
+(id/defentity :oauth/authorization-code
+  :euuid #uuid "54208f11-3cc1-49c7-b63a-87057e9dbd07"
+  :xid "BPXXE6RC9coRP1yMrntzRk")
+
+(id/defentity :oauth/device-code
+  :euuid #uuid "5ce63576-6da8-482c-b93a-f323f7fb540f"
+  :xid "CUMT1ViWgeBMrDA3AmweY6")
 
 (id/defdata :oauth/dataset-version
   :euuid #uuid "0f9bb720-4b94-445c-9780-a4af09e8536c"
@@ -106,54 +133,6 @@
                           {:kid kid
                            :active false})))
 
-(defn on-token-revoke
-  [{token-type :token/key
-    token :token/data}]
-  (dataset/stack-entity
-    (if (= token-type :access_token)
-      (id/entity :oauth/access-token)
-      (id/entity :oauth/refresh-token))
-    {:value token
-     :revoked true}))
-
-(defn on-tokens-grant
-  [{{refresh-token :refresh_token
-     access-token :access_token} :tokens
-    :keys [session]}]
-  (let [{:keys [kid]} (jwt/decode-header access-token)]
-    (when access-token
-      (dataset/stack-entity
-        (id/entity :oauth/access-token)
-        {:value access-token
-         :session {:id session}
-         :expires-at (core/expires-at access-token)
-         :signed_by {:kid kid}}))
-    (when refresh-token
-      (dataset/stack-entity
-        (id/entity :oauth/refresh-token)
-        {:value refresh-token
-         :session {:id session}
-         :expires-at (core/expires-at refresh-token)
-         :signed_by {:kid kid}}))))
-
-(defn on-session-create
-  [{:keys [session audience user scope client]}]
-  (dataset/stack-entity
-    (id/entity :oauth/session)
-    {:id session
-     :user {(id/key) (id/extract user)}
-     :audience audience
-     :active true
-     :client {(id/key) client}
-     :scope (str/join " " scope)}))
-
-(defn on-session-kill
-  [{:keys [session]}]
-  (dataset/stack-entity
-    (id/entity :oauth/session)
-    {:id session
-     :active false}))
-
 (defn current-version
   []
   (dataset/<-resource "dataset/oauth_session.json"))
@@ -171,85 +150,33 @@
                         :deployed-version deployed-version}}
                 "Store version differs from deployed; deploying")
       (dataset/deploy! store-dataset)
-      (dataset/reload))))
+      (dataset/reload)
+      ;; The store model owns the User Role → scopes relation; IAM access
+      ;; starts earlier and skips scope loading when the relation is absent,
+      ;; so a level that (first) brings it in must load scopes itself.
+      (access/load-scopes))))
 
-(defn load-session
-  [{[{access-token :value}] :access_tokens
-    [{refresh-token :value}] :refresh_tokens
-    session :id
-    user :user
-    client :client}]
-  (if-let [{audience "aud"
-            scope "scope"} (and access-token (encryption/unsign-data access-token))]
-    (let [scope (set (str/split (or scope "") #" "))
-          user-details (core/get-resource-owner (:name user))
-          client-id (id/extract client)]
-      (core/set-session session {:client client-id
-                                 :last-active (java.util.Date.)})
-      (token/set-session-tokens session audience
-                                {:access_token access-token
-                                 :refresh_token refresh-token})
-      (core/set-session-audience-scope session audience scope)
-      (core/set-session-resource-owner session user-details)
-      (core/set-session-authorized-at session (java.util.Date.)))
-    (log/warn {:id ::skip-unverifiable-session
-               :data {:action :loading :subject :oauth-store
-                      :session session}}
-              "Skipping persisted session: access token missing or unverifiable")))
-
-(defn load-sessions
-  []
-  (let [;; "not revoked" preserves 3-valued logic that the legacy
-        ;; `:_boolean :NOT_TRUE` carried — match rows where revoked is
-        ;; explicitly false OR the column is NULL (default state).
-        not-revoked {:_or [{:revoked {:_eq false}}
-                           {:revoked :is_null}]}
-        sessions
-        (dataset/search-entity
-          (id/entity :oauth/session)
-          {:active {:_eq true}}
-          {(id/key) nil
-           :id nil
-           :client [{:selections {(id/key) nil}}]
-           :user [{:selections {:name nil}}]
-           :access_tokens [{:selections {:value nil}
-                            :args {:_where not-revoked
-                                   :_order_by {:expires_at :desc}}}]
-           :refresh_tokens [{:selections {:value nil}
-                             :args {:_maybe not-revoked}}]})]
-    (doseq [session sessions] (load-session session))))
-
-(defn- redact-keypair
-  "Strip key material from a keypair map, keeping :kid for traceability.
-   RSA*KeyImpl getters expose private exponent via bean-style serialization
-   used by JSON sinks — never let raw keypair maps reach a log."
+;; RSA*KeyImpl getters expose the private exponent via bean-style
+;; serialization used by JSON sinks — never let raw keypair maps reach a log.
+(defn redact-keypair
   [kp]
   (when kp
     {:kid (:kid kp) :public :redacted :private :redacted}))
 
-(defn- redact-event
-  "Sanitize a publisher event before logging. Token and keypair payloads
-   carry credential material that must not appear in log sinks."
+(defn redact-event
   [data]
   (case (:topic data)
     :keypair/added   (update data :key-pair redact-keypair)
     :keypair/removed (update data :key-pairs #(some->> % (mapv redact-keypair)))
-    :oauth.grant/tokens
-    (update data :tokens (fn [tokens]
-                           (when tokens
-                             (reduce-kv (fn [m k _] (assoc m k :redacted))
-                                        {} tokens))))
-    :oauth.revoke/token (assoc data :token/data :redacted)
     data))
 
 (defn open-store
+  "Deploy/level the store dataset and wire keypair persistence."
   []
   (level-store)
   (let [kps (not-empty (get-key-pairs))
         store-messages (async/chan (async/sliding-buffer 200))
-        topics [:keypair/added :keypair/removed
-                :oauth.revoke/token :oauth.grant/tokens
-                :oauth.session/created :oauth.session/killed]]
+        topics [:keypair/added :keypair/removed]]
     (doseq [topic topics]
       (log/info {:id ::subscribing-to-topic
                  :data {:topic topic}}
@@ -269,10 +196,6 @@
           (condp test-message data
             :keypair/removed :>> on-key-pair-remove
             :keypair/added :>> on-key-pair-add
-            :oauth.session/created :>> on-session-create
-            :oauth.session/killed :>> on-session-kill
-            :oauth.grant/tokens :>> on-tokens-grant
-            :oauth.revoke/token :>> on-token-revoke
             nil)
           (catch Throwable ex
             (log/error! {:id ::message-processing-failed
@@ -280,56 +203,26 @@
                          :data {:message (redact-event data)}}
                         ex)))
         (recur (async/<! store-messages))))
-    ;; Hydrate the provider from DB. Anything already in the provider's
-    ;; in-memory atom at this point came from a prior in-memory rotation
-    ;; (typical case: encryption was sealed at boot, the dev-fallback in
-    ;; on-encryption-enabled minted a keypair, and we're now unsealing).
-    ;; Capture that pre-load set so we can persist what isn't already in DB.
+    ;; Order-sensitive: capture the provider's PRE-LOAD in-memory keypairs
+    ;; (from a prior in-memory-only rotation) before loading DB keypairs in,
+    ;; so anything not yet in DB can be persisted below.
     (let [pre-load (encryption/list-keypairs encryption/*encryption-provider*)
           db-kids  (into #{} (map :kid) kps)]
       (doseq [kp kps]
         (encryption/add-keypair encryption/*encryption-provider* kp))
 
-      ;; Provider is now initialised. Ask it the question the iam.encryption
-      ;; start used to ask prematurely: do we have any keypairs? If not, mint
-      ;; one — add-keypair will publish :keypair/added so the store loop
-      ;; persists it.
       (when (empty? (encryption/list-keypairs encryption/*encryption-provider*))
         (encryption/rotate-keypair encryption/*encryption-provider*))
 
-      ;; Persist any pre-load (in-memory) keypairs that aren't already in DB.
-      ;; On normal boot pre-load is empty and this is a no-op. On the
-      ;; encryption-unsealed-after-in-memory path it carries over the
-      ;; dev-fallback keypair that signed tokens before storage existed.
+      ;; Persist any pre-load keypair not already in DB (e.g. a dev-fallback
+      ;; keypair that signed tokens before storage existed).
       (doseq [k pre-load
               :when (not (contains? db-kids (:kid k)))]
-        (iam/publish :keypair/added {:key-pair k})))
-
-    ;; Sessions: when DB had no keypairs we're bootstrapping, so flush
-    ;; whatever is in *sessions* to storage. Otherwise load from DB.
-    (if (empty? kps)
-      (doseq [[session {user-id :resource-owner
-                        client-id :client
-                        :keys [scopes tokens]}] (deref core/*sessions*)
-              :let [audiences (keys tokens)]]
-        (doseq [audience audiences
-                :let [signed-tokens (get tokens audience)]]
-          (iam/publish
-            :oauth.session/created
-            {:session session
-             :client client-id
-             :audience audience
-             :scope (get scopes audience)
-             :user {(id/key) user-id}})
-          (iam/publish
-            :oauth.grant/tokens
-            {:tokens signed-tokens
-             :session session})))
-      (load-sessions))))
+        (iam/publish :keypair/added {:key-pair k})))))
 
 (defn on-encryption-enabled
-  "Auto-activate persistence when dataset encryption is available.
-   Falls back to in-memory only mode if encryption is not initialized."
+  "Auto-activate persistence when dataset encryption is available; falls back to
+   in-memory only otherwise."
   []
   (if (dataset-encryption/initialized?)
     (open-store)
@@ -337,6 +230,43 @@
       (log/warn {:id ::encryption-not-initialized :data {:action :ready :subject :encryption}}
                 "Dataset encryption not initialized; running in-memory only")
       (encryption/rotate-keypair encryption/*encryption-provider*))))
+
+(def session-row-retention
+  "How long killed session rows survive for inspection before purge."
+  (util/days 7))
+
+(defn clean-expired-rows!
+  "Janitor for the DB-first token/session store; deletes token rows only once
+   past expiry (+1h slack) so revoked-but-unexpired rows keep surviving
+   revocation checks."
+  []
+  (let [cutoff (java.util.Date. (- (util/now) (util/hours 1)))]
+    (doseq [entity [:oauth/access-token :oauth/refresh-token]]
+      (dataset/purge-entity (id/entity entity)
+                            {:_where {:expires_at {:_le cutoff}}}
+                            {:xid nil}))
+    (let [retention-cutoff (java.util.Date. (- (util/now) session-row-retention))
+          dead (->> (dataset/search-entity
+                     (id/entity :oauth/session)
+                     {:_where {:_and [{:active {:_eq false}}
+                                      {:finished {:_le retention-cutoff}}]}}
+                     {:xid nil
+                      :access_tokens [{:selections {:xid nil}
+                                       :args {:_join :left :_limit 1}}]
+                      :refresh_tokens [{:selections {:xid nil}
+                                        :args {:_join :left :_limit 1}}]})
+                    (filter #(and (empty? (:access_tokens %))
+                                  (empty? (:refresh_tokens %))))
+                    (mapv :xid))]
+      (doseq [chunk (partition-all 500 dead)]
+        (dataset/purge-entity (id/entity :oauth/session)
+                              {:_where {:xid {:_in (vec chunk)}}}
+                              {:xid nil}))
+      (when (seq dead)
+        (log/info {:id ::janitor-swept
+                   :data {:action :cleanup :subject :oauth-store
+                          :sessions (count dead)}}
+                  "Swept finished token-less session rows")))))
 
 (defn purge-key-pairs
   ([] (purge-key-pairs 0))
@@ -361,6 +291,11 @@
   (dataset/purge-entity (id/entity :oauth/access-token) nil {(id/key) nil})
   (dataset/purge-entity (id/entity :oauth/refresh-token) nil {(id/key) nil}))
 
+(defn purge-codes
+  []
+  (dataset/purge-entity (id/entity :oauth/authorization-code) nil {:code nil})
+  (dataset/purge-entity (id/entity :oauth/device-code) nil {:device_code nil}))
+
 (defn start
   []
   (on-encryption-enabled)
@@ -379,15 +314,12 @@
 (lifecycle/register-module!
   :synthigy/oauth.persistence
   {:depends-on [:synthigy/oauth :synthigy.iam/encryption]
-   :doc "Persists OAuth clients/tokens to DB; survives restarts"
+   :doc "Levels the OAuth store dataset and persists RSA keypairs; session/token rows are written DB-first at their call sites"
    :start (fn []
-            ;; Runtime: Subscribe to encryption events, initialize token handlers
             (log/info {:id ::starting :data {:action :starting :subject :oauth-persistence}} "Starting OAuth persistence")
             (start)
             (log/info {:id ::started :data {:action :started :subject :oauth-persistence}} "OAuth persistence started"))
-   :stop (fn []
-           ;; No stop function needed - async channel cleanup happens automatically
-           nil)})
+   :stop (fn [] nil)})
 
 
 (comment

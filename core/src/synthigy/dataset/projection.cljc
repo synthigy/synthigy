@@ -1,16 +1,28 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.projection
-  "Projection protocol implementations for dataset records.
-
-  Implements ERDModelProjectionProtocol for:
-  - ERDEntityAttribute
-  - ERDEntity
-  - ERDRelation
-  - ERDModel
-
-  Projections track changes between models using metadata:
-  - :added? - element was added
-  - :removed? - element was removed
-  - :diff - differences between versions"
+  "ERDModelProjectionProtocol implementations. Diff/projection state lives in
+   metadata (:added?/:removed?/:diff under :dataset/projection), never in the record."
   (:require
     [clojure.data]
     [synthigy.dataset.core :as dataset
@@ -21,8 +33,6 @@
              entity-changed? attribute-changed?
              projection-data]]
     [synthigy.dataset.id :as id]))
-
-;; Extend ERDModelProjectionProtocol for ERDEntityAttribute
 
 (extend-protocol ERDModelProjectionProtocol
   ;; ENTITY ATTRIBUTE
@@ -47,9 +57,8 @@
     {:pre [(or
              (nil? that)
              (instance? synthigy.dataset.core.ERDEntityAttribute that))]}
-    ;; FIXME configuration should also implement this protocol or
-    ;; at least some multimethod that would return configuration diff
-    ;; based on attribute type
+    ;; FIXME: configuration should implement this protocol itself (or a
+    ;; type-dispatched multimethod)
     (if (nil? that)
       (dataset/mark-removed this)
       (let [this-id (id/extract this)
@@ -60,17 +69,14 @@
                      {:this this
                       :that that})))
         (letfn [(focus-attribute [attribute]
-                  (select-keys attribute [:name :type :constraint :configuration]))]
+                  (select-keys attribute [:name :type :constraint :configuration :active]))]
           (let [[{config :configuration} n _]
                 (clojure.data/diff
                   (focus-attribute that)
                   (focus-attribute this))]
-            ;; 1. Check configuration has been extended and that contains more
-            ;;    information than this
-            ;; 2. Check if some existing attribute changes were made
             (if (or (some? n) (not-empty config))
-              ;; Wrap config under :configuration key so postgres.clj can find it
-              ;; when extracting dconfig via (let [{... dconfig :configuration} diff])
+              ;; wrapped under :configuration so postgres.clj can extract
+              ;; dconfig from the diff
               (dataset/mark-diff that (or n (when config {:configuration config})))
               that))))))
 
@@ -117,7 +123,6 @@
     {:pre [(or
              (nil? that)
              (instance? synthigy.dataset.core.ERDEntity that))]}
-    ;; If that exists
     (if (nil? that)
       (dataset/mark-removed this)
       (let [this-id (id/extract this)
@@ -129,9 +134,7 @@
                       :that that})))
         (let [that-ids (set (map id/extract (:attributes that)))
               this-ids (set (map id/extract (:attributes this)))
-              ;; Separate new ids from old and same ids
               [oid nid sid] (clojure.data/diff this-ids that-ids)
-              ;; Check if name has changed
               [o _ _] (when (and this that)
                         (clojure.data/diff
                           (select-keys this [:name])
@@ -140,7 +143,6 @@
               that-attribute-ids (set (map id/extract that-attributes))
               this-attributes (remove (comp that-attribute-ids id/extract) (:attributes this))
               attributes' (reduce
-                            ;; Reduce attributes
                             (fn [as attribute]
                               (let [id (id/extract attribute)]
                                 (conj
@@ -150,16 +152,14 @@
                                       (not-empty nid)
                                       (nid id))
                                     dataset/mark-added
-                                    ;;
+
                                     (and
                                       (set? sid)
                                       (sid id))
-                                    ;; Project this attribute to that attribute
+                                    ;; entity rename may affect enum spec — mark
+                                    ;; :entity/name diff unless the attribute
+                                    ;; already has one
                                     (as-> a (dataset/project (get-attribute this id) a)
-                                      ;; if entity name has changed that might affect enum
-                                      ;; specification... So check if attribute already has diff
-                                      ;; if it does do nothing
-                                      ;; if it doesn't mark attribute diff for :entity/name
                                       (if (and (:name o) (not (dataset/diff? a)))
                                         (dataset/mark-diff a {:entity/name (:name o)})
                                         a))))))
@@ -167,35 +167,23 @@
                             (concat
                               that-attributes
                               this-attributes))
-              cso (get-in this [:configuration :constraints :unique])
-              csn (get-in that [:configuration :constraints :unique])
-              ;; Audit toggle ({:audit {:actions #{:created :modified}}})
-              ;; lives under :configuration. The deploy drawer needs to
-              ;; surface this so users can see "audit enabled" / "audit
-              ;; disabled" as a deployable diff (audit-added attrs and
-              ;; columns/triggers materialise only after deploy — see
-              ;; synthigy.dataset.runtime/AuditEnhancer for the runtime
-              ;; side). Stored shape mirrors :constraints :unique: the
-              ;; old (deployed) value goes in the projection meta so
-              ;; postgres.clj-style consumers can extract `dconfig`.
-              audit-old (get-in this [:configuration :audit])
-              audit-new (get-in that [:configuration :audit])
-              audit-changed? (not= audit-old audit-new)
+              ;; whole-configuration diff, minus :rls (which has its own
+              ;; dual-base projection) —
+              ;; storing the complete old config, not just the changed key,
+              ;; fixes suppress too
+              config-old (dissoc (:configuration this) :rls)
+              config-new (dissoc (:configuration that) :rls)
               changed-attributes (vec (filter attribute-changed? attributes'))]
           (cond->
             (assoc that :attributes attributes')
-            ;; TODO - ENUMs are affected when entity name changes as well... we should mark
-            ;; attribute of type enum as diffed so that those attributes are then
-            ;; renamed!
+            ;; TODO: enum-typed attributes should be force-marked diffed on
+            ;; entity rename
             (some? o)
             (vary-meta assoc-in [:dataset/projection :diff] o)
-            ;;
-            (not= cso csn)
-            (vary-meta assoc-in [:dataset/projection :diff :configuration :constraints :unique] cso)
-            ;;
-            audit-changed?
-            (vary-meta assoc-in [:dataset/projection :diff :configuration :audit] audit-old)
-            ;;
+
+            (not= config-old config-new)
+            (vary-meta assoc-in [:dataset/projection :diff :configuration] config-old)
+
             (not-empty changed-attributes)
             (vary-meta assoc-in [:dataset/projection :diff :attributes] changed-attributes))))))
 
@@ -229,18 +217,13 @@
              (and
                (instance? synthigy.dataset.core.ERDRelation that)
                (= (id/extract this) (id/extract that))))]}
-    ;; If that exists
     (if (some? that)
-      ;; Check if relations are the same
       (let [ks [:from-label :to-label :cardinality]
             this (normalize-relation this)
             that (normalize-relation that)
-            ;; Compute difference between this and that
             [o _] (clojure.data/diff
                     (select-keys this ks)
                     (select-keys that ks))
-            ;; Check only entity names since that might
-            ;; affect relation
             from-projection (when (not=
                                     (:name (:from this))
                                     (:name (:from that)))
@@ -249,16 +232,17 @@
                                   (:name (:to this))
                                   (:name (:to that)))
                             {:name (:name (:to that))})
+            ;; whole-configuration diff — relation RBAC lives at [:configuration
+            ;; :rbac <direction> :enabled]
+            config-old (:configuration this)
+            config-new (:configuration that)
             o' (cond-> o
                  from-projection (assoc :from from-projection)
-                 to-projection (assoc :to to-projection))]
-        ;; And if there is some difference than
+                 to-projection (assoc :to to-projection)
+                 (not= config-old config-new) (assoc :configuration config-old))]
         (if (some? o')
-          ;; return that with projected difference
           (dataset/mark-diff that o')
-          ;; otherwise return that
           that))
-      ;; If that does't exist than return this with projected removed metadata
       (dataset/mark-removed this)))
 
   ;; MODEL
@@ -296,8 +280,8 @@
           (set-relation m (dataset/project (get-relation this (id/extract r)) r)))
         projection
         (get-relations projection))
-      ;; Take into account relations that are missing
-      ;; in that and entites have been changed in that
+      ;; second pass: relations missing in `that` whose endpoint entities
+      ;; changed in `that`
       (let [that-relations (get-relations projection)
             this-relations (distinct
                              (mapcat

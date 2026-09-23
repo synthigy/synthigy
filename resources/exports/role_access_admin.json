@@ -1,0 +1,23 @@
+{
+  "active" : true,
+  "description" : "Operates the RBAC matrix: which roles hold which create/read/update/delete/owners/browse rules on which entities, relations and attributes. Decides WHAT privilege contains, never who holds it. Cannot assign roles or alter the data model.",
+  "name" : "Access Admin",
+  "read_entities" : [ {
+    "xid" : "46uqZWNio5gQF6ZNU1QQDp"
+  }, {
+    "xid" : "5FdHiW1BHsJSPFNcT1Dsd5"
+  }, {
+    "xid" : "9ptmMENqHWqLFbyidsyF9Y"
+  }, {
+    "xid" : "LrqagSaDABNV272TRWfx9G"
+  } ],
+  "scopes" : [ {
+    "xid" : "1SuTjA1tfZi5Z6kqrb3LMc"
+  }, {
+    "xid" : "7ipbiNugGoy2y2DTNZWgEo"
+  } ],
+  "update_entities" : [ {
+    "xid" : "9ptmMENqHWqLFbyidsyF9Y"
+  } ],
+  "xid" : "MHjEDbnYRMpTbQ9o3psnwe"
+}

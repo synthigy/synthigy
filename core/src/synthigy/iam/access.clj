@@ -1,32 +1,39 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.iam.access
   (:require
    [clojure.core.async :as async]
    [clojure.set :as set]
+   [clojure.string :as str]
    [synthigy.log :as log]
    [synthigy.data :refer [*ROOT* *SYNTHIGY*]]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.access.protocol :as access.protocol]
    [synthigy.dataset.core :as core]
    [synthigy.dataset.delta :as delta]
-   [synthigy.dataset.id :as id]))
-
-;;; ============================================================================
-;;; Dynamic Context Vars
-;;; ============================================================================
-;;;
-;;; Unidirectional identifier discipline:
-;;;
-;;;   ROLES → RBAC → xid set (*role-xids*)
-;;;     Looked up in *rules* / *scopes*, which are keyed by id-key.
-;;;     Stable across deploys; appears in token claims.
-;;;
-;;;   GROUPS → RLS → _eid set (*group-eids*)
-;;;     Joined against bigint membership columns in RLS predicates.
-;;;     Local-only; never crosses the wire.
-;;;
-;;; Both projections are computed ONCE when the principal binds for a
-;;; request (`with-principal`) and read by a single dyn-var deref on the
-;;; hot path — no per-call set construction.
+   [synthigy.dataset.id :as id]
+   [synthigy.dataset.sql.naming :as naming]
+   [synthigy.iam.keys]))
 
 (defonce ^{:dynamic true
            :doc "Materialized principal map for the current request scope. See synthigy.iam.context/get-user-details for shape."}
@@ -37,6 +44,10 @@
   *role-xids* nil)
 
 (defonce ^{:dynamic true
+           :doc "Pre-materialized set of role _eids (longs) for the current request. RLS :role match emits these into IN (?,?,?). Same roles as *role-xids*, different identifier form."}
+  *role-eids* nil)
+
+(defonce ^{:dynamic true
            :doc "Pre-materialized set of group _eids (longs) for the current request. RLS :group match emits these into IN (?,?,?)."}
   *group-eids* nil)
 
@@ -44,66 +55,83 @@
 (defonce ^:dynamic *scopes* nil)
 
 (defn project-role-xids
-  "Public so the `with-principal` macro can resolve it at call sites."
   [principal]
   (when principal
     (into #{} (keys (:roles principal)))))
 
+(defn project-role-eids
+  [principal]
+  (when principal
+    (into #{} (keep :_eid) (vals (:roles principal)))))
+
 (defn project-group-eids
-  "Public so the `with-principal` macro can resolve it at call sites."
   [principal]
   (when principal
     (into #{} (keep :_eid) (vals (:groups principal)))))
 
 (defmacro with-principal
-  "Bind `*principal*`, `*role-xids*`, and `*group-eids*` for the duration
-   of `body`. Projections are computed once at bind time so every access
-   check on the hot path is a single dyn-var deref."
+  "Bind `*principal*` and its role/group projections for the duration of `body`."
   [principal & body]
   `(let [p# ~principal]
      (binding [*principal*   p#
                *role-xids*   (project-role-xids p#)
+               *role-eids*   (project-role-eids p#)
                *group-eids*  (project-group-eids p#)]
        ~@body)))
 
-(defn- role-xids
-  "Fast accessor. Returns the pre-bound projection when called inside
-   `with-principal`; falls back to recomputing from `*principal*` for
-   legacy `(binding [*principal* …] …)` callsites and tests."
+(defn role-xids
   []
   (or *role-xids* (project-role-xids *principal*)))
 
-(defn- group-eids*
+(defn role-eids*
+  []
+  (or *role-eids* (project-role-eids *principal*)))
+
+(defn group-eids*
   []
   (or *group-eids* (project-group-eids *principal*)))
 
-;; Key under which the IAM rules+scopes invalidation subscription is
-;; registered in `synthigy.dataset.delta`. Single subscription per process.
 (def ^:private delta-sub-key ::rules-and-scopes-invalidator)
 
-;;; ============================================================================
-;;; RULES
-;;; ============================================================================
+(def entity-grants
+  "CRUDOB entity rule -> the User Role grant relation carrying it."
+  {:create :iam/role->create-entities
+   :read   :iam/role->read-entities
+   :update :iam/role->update-entities
+   :delete :iam/role->delete-entities
+   :owners :iam/role->owned-entities
+   :browse :iam/role->browse-entities})
+
+(def relation-grants
+  "[traversal-direction rule] -> the User Role grant relation carrying it. The
+   direction is deliberately the opposite of the relation's name — see the
+   name-by-TARGET section in docs iam/access.md."
+  {[:to   :read]   :iam/role->from-read-relations
+   [:to   :write]  :iam/role->from-write-relations
+   [:to   :delete] :iam/role->from-delete-relations
+   [:from :read]   :iam/role->to-read-relations
+   [:from :write]  :iam/role->to-write-relations
+   [:from :delete] :iam/role->to-delete-relations})
+
+(defn grant-field
+  "Wire field on User Role for a grant relation, or nil when that relation is
+   not in the deployed model. Derived from the deployed labels so a renamed
+   grant follows automatically — never hardcode the field name."
+  [relation-key]
+  (let [role-id (id/entity :iam/user-role)
+        {:keys [from from-label to-label]}
+        (dataset/deployed-relation (id/relation relation-key))]
+    (when-let [label (if (= role-id (id/extract from)) to-label from-label)]
+      (keyword (naming/normalize-name (str/trim label))))))
 
 (defn get-roles-access-data
   []
-  (dataset/search-entity
-   :iam/user-role
-   nil
-   {(id/key) nil
-    :name nil
-     ;; Entities
-    :write_entities [{:selections {(id/key) nil}}]
-    :read_entities [{:selections {(id/key) nil}}]
-    :delete_entities [{:selections {(id/key) nil}}]
-    :owned_entities [{:selections {(id/key) nil}}]
-     ;; Relations
-    :to_read_relations [{:selections {(id/key) nil}}]
-    :to_write_relations [{:selections {(id/key) nil}}]
-    :to_delete_relations [{:selections {(id/key) nil}}]
-    :from_read_relations [{:selections {(id/key) nil}}]
-    :from_write_relations [{:selections {(id/key) nil}}]
-    :from_delete_relations [{:selections {(id/key) nil}}]}))
+  (let [grant [{:selections {(id/key) nil}}]
+        fields (keep grant-field (concat (vals entity-grants) (vals relation-grants)))]
+    (dataset/search-entity
+     :iam/user-role
+     nil
+     (into {(id/key) nil :name nil} (map #(vector % grant)) fields))))
 
 (comment
   (dataset/search-entity :iam/user nil {(id/key) nil
@@ -131,30 +159,32 @@
                  (update-in r [:relation relation k rule] (fnil conj #{}) role)))
              result
              relations))]
-    (reduce
-     (fn [r role-data]
-       (let [role-id (id/extract role-data)
-             {:keys [write_entities read_entities delete_entities owned_entities
-                     to_read_relations to_write_relations to_delete_relations
-                     from_read_relations from_write_relations from_delete_relations]} role-data]
-         (-> r
-             (x-entity role-id :read (map id/extract read_entities))
-             (x-entity role-id :write (map id/extract write_entities))
-             (x-entity role-id :delete (map id/extract delete_entities))
-             (x-entity role-id :owners (map id/extract owned_entities))
-              ;; From and to refer to entities. There is no from and to, both are
-              ;; from. Because of modeling and how relations are stored, users
-              ;; that read model, read it in inverted... This is why at this point
-              ;; we have to invert back rules, so that they follow first mindfuck
-              ;; logic... donno
-             (x-relation role-id :to :read (map id/extract from_read_relations))
-             (x-relation role-id :to :write (map id/extract from_write_relations))
-             (x-relation role-id :to :delete (map id/extract from_delete_relations))
-             (x-relation role-id :from :read (map id/extract to_read_relations))
-             (x-relation role-id :from :write (map id/extract to_write_relations))
-             (x-relation role-id :from :delete (map id/extract to_delete_relations)))))
-     nil
-     data)))
+    (let [field (fn [rule->relation k] (grant-field (get rule->relation k)))
+          ;; pre-CRUDOB models carry ONE relation for both halves (create
+          ;; entities IS write entities renamed), so it must satisfy :update too
+          merged-write? (nil? (field entity-grants :update))
+          granted (fn [role-data f] (when f (map id/extract (get role-data f))))]
+      (reduce
+       (fn [r role-data]
+         (let [role-id (id/extract role-data)
+               r (reduce-kv
+                  (fn [r rule relation-key]
+                    (let [f (grant-field relation-key)
+                          ids (granted role-data f)
+                          ids (if (and merged-write? (= :update rule))
+                                (granted role-data (field entity-grants :create))
+                                ids)]
+                      (x-entity r role-id rule ids)))
+                  r
+                  entity-grants)]
+           (reduce-kv
+            (fn [r [direction rule] relation-key]
+              (x-relation r role-id direction rule
+                          (granted role-data (grant-field relation-key))))
+            r
+            relation-grants)))
+       nil
+       data))))
 
 (comment
   (dataset/deployed-relation #uuid "7efa7244-ae20-4248-9792-7623d12cea9e")
@@ -168,29 +198,52 @@
   ([] (superuser? (role-xids)))
   ([roles]
    (or
-    ;; No principal bound — internal/system path
     (nil? *principal*)
-    ;; Principal is the SYNTHIGY system user (match by _eid OR id-key)
     (let [synthigy-eid (:_eid *SYNTHIGY*)
           synthigy-id  (id/extract *SYNTHIGY*)
           principal-eid (:_eid *principal*)
           principal-id  (id/extract *principal*)]
       (or (and synthigy-eid principal-eid (= synthigy-eid principal-eid))
           (and synthigy-id principal-id (= synthigy-id principal-id))))
-    ;; Principal has the ROOT role
     (contains? (or roles #{}) (id/extract *ROOT*)))))
 
+(defn roles->schema-principal
+  "Resolve role names to a synthetic principal for `with-principal`; the caller
+   must hold every requested role or be superuser."
+  [role-names]
+  (let [wanted (set role-names)
+        found  (dataset/search-entity
+                :iam/user-role
+                {:name {:_in (vec wanted)}}
+                {(id/key) nil :_eid nil :name nil})
+        by-name (into {} (map (juxt :name identity)) found)
+        missing (remove by-name wanted)]
+    (when (seq missing)
+      (throw (ex-info (str "Unknown role(s): " (str/join ", " missing))
+                      {:code "UNKNOWN_ROLE" :roles (vec missing)})))
+    (let [target-xids (into #{} (map id/extract) found)]
+      (when-not (or (superuser?)
+                    (and (seq target-xids)
+                         (set/subset? target-xids (role-xids))))
+        (throw (ex-info (str "Not permitted to project schema for role(s): "
+                             (str/join ", " wanted))
+                        {:code "FORBIDDEN" :roles (vec wanted)}))))
+    {:roles (into {} (map (juxt id/extract identity)) found)}))
+
 (defn entity-allows?
+  "Whether a principal holding `roles` may perform any of `rules` on `entity`."
   ([entity rules] (entity-allows? entity rules (role-xids)))
   ([entity rules roles]
    (try
      (cond
        (nil? entity) false
-       (or (nil? *rules*) (superuser? roles)) true
+       (superuser? roles) true
        (not (core/rbac-enabled? (dataset/deployed-entity entity))) true
        :else (letfn [(ok? [rule]
                        (boolean (not-empty (set/intersection roles (get-in *rules* [:entity entity rule])))))]
-               (boolean (some ok? rules))))
+               (boolean (or (ok? :owners)
+                            (and (some #{:read} rules) (ok? :browse))
+                            (some ok? rules)))))
      (catch Throwable ex
        (log/error! {:id ::entity-allows-failed
                     :msg "Couldn't evaluate entity-allows"
@@ -198,13 +251,36 @@
                    ex)
        (throw ex)))))
 
+(defn credential-attribute?
+  "The User column the login path authenticates against."
+  [attribute]
+  (and attribute (= (id/data :iam.user/password) (id/extract attribute))))
+
+(defn attribute-allows?
+  "Whether the principal may perform `op` (:read / :write) on `attribute` of
+   `entity`. The login credential is superuser-only either way — writing it is
+   becoming that user, reading it is holding the auth material."
+  ([entity attribute op] (attribute-allows? entity attribute op (role-xids)))
+  ([entity attribute op roles]
+   (boolean
+    (if (credential-attribute? attribute)
+      (superuser? roles)
+      (or (superuser? roles)
+          (core/attribute-allows-op? entity attribute op (or roles #{})))))))
+
 (defn relation-allows?
   ([relation direction rules] (relation-allows? relation direction rules (role-xids)))
   ([relation direction rules roles]
    (try
      (cond
-       (or (nil? *rules*) (superuser? roles)) true
+       (superuser? roles) true
        (not (core/relation-rbac-enabled? (dataset/deployed-relation relation) direction)) true
+       ;; Owning BOTH endpoint entities implies the link.
+       (let [[from-e to-e] direction
+             owns? (fn [e] (boolean (not-empty (set/intersection
+                                                roles (get-in *rules* [:entity e :owners])))))]
+         (and from-e to-e (owns? from-e) (owns? to-e)))
+       true
        :else (letfn [(ok? [rule]
                        (boolean
                         (not-empty
@@ -242,13 +318,6 @@
      false
      (select-keys *scopes* roles)))))
 
-(comment
-  (def roles #{#uuid "7fc035e2-812e-4861-a25c-eb172b39577f"
-               #uuid "48ef8d6d-e067-4e31-b4db-2a1ae49a0fcb"
-               #uuid "082ef416-d35c-40ab-a5ff-c68ff871ba4e"})
-  (time (scope-allowed? roles "dataset:delete")))
-
-;; SCOPES
 (defn get-roles-scope-data
   []
   (dataset/search-entity
@@ -269,25 +338,41 @@
    {}
    roles))
 
-(defn load-scopes
+(defn scopes-deployed?
+  "True when the OAuth store model's User Role → scopes relation is deployed."
   []
-  (alter-var-root #'*scopes* (fn [_] (transform-scope-data (get-roles-scope-data)))))
+  (let [model (dataset/deployed-model)
+        role (core/get-entity model (some-> (id/entity :iam/user-role) str))]
+    (boolean (some #(and (:active %) (= "scopes" (:to-label %)))
+                   (core/focus-entity-relations model role)))))
+
+(defn load-scopes
+  "Scopes are OAuth's model, not IAM's — on installations where the OAuth
+   store hasn't deployed (or leveled) yet, there is no scope concept and
+   *scopes* stays nil, which disables scope checks by design."
+  []
+  (if (scopes-deployed?)
+    (alter-var-root #'*scopes* (fn [_] (transform-scope-data (get-roles-scope-data))))
+    (log/info {:id ::no-scope-model
+               :data {:subject :role-access}}
+              "OAuth store model not deployed; scope enforcement inactive")))
 
 (defn roles-scopes
   [roles]
   (reduce set/union (vals (select-keys *scopes* roles))))
 
-(comment
-  (def roles
-    [#uuid "0a757182-9a8e-11ee-87ee-02a535895d2d"
-     #uuid "228df5f6-86c7-4308-8a9e-4a578c5e4af7"
-     #uuid "7fc035e2-812e-4861-a25c-eb172b39577f"]))
+(defn roles-scope-ids
+  "Scope row ids (not names) granted to any of `roles`."
+  [roles]
+  (into #{}
+        (comp (mapcat :scopes) (map id/extract))
+        (dataset/search-entity :iam/user-role
+                               {(id/key) {:_in (vec roles)}}
+                               {:scopes [{:selections {(id/key) nil}}]})))
 
-(defn- debounced
-  "Returns a fn that re-arms a 5s timer on each call; only the latest
-   call's timer actually fires `f`. Earlier scheduled gos detect a tick
-   mismatch and bail. Used to coalesce bursts of rule/scope-touching
-   deltas into a single reload."
+(defn debounced
+  "Return a delta handler that runs `f` once, `ms` after the last call in a
+   burst."
   [ms f]
   (let [latest (atom 0)]
     (fn [_env]
@@ -301,40 +386,36 @@
 
 (defn start
   []
+  (log/info {:id ::starting :data {:action :starting :subject :iam-access}}
+            "Starting IAM access control")
   (let [model        (dataset/deployed-model)
-        ;; :iam/user-role is a magic-keyword alias resolved via the id
-        ;; registry, not by `core/get-entity` directly. Resolve to the
-        ;; runtime xid first, then look up the entity record.
         role-xid     (some-> (id/entity :iam/user-role) str)
         role-entity  (core/get-entity model role-xid)
         relations    (core/focus-entity-relations model role-entity)
-        ;; Exclude the to-Permission and to-User relations — those fire
-        ;; for unrelated reasons and would thrash the reload. (Same UUIDs
-        ;; the legacy code disj'd from the per-element subscribe set.)
-        excluded     #{#uuid "16ca53f4-0fe3-4122-93dd-1e86fd1b58db"
-                       #uuid "1a2cc45d-1301-4fdd-bb02-650362165b37"}
-        relation-xids (into #{}
-                            (comp (remove #(contains? excluded (id/extract %)))
-                                  (keep #(some-> % id/extract str)))
-                            relations)]
+        relation-xids (into #{} (keep #(some-> % id/extract str)) relations)]
     (log/info {:id ::subscribing-delta
                :data {:role-xid role-xid
                       :relation-count (count relation-xids)}}
               "Subscribing to role+relation deltas")
-    (delta/subscribe!
-      delta-sub-key
-      (cond-> {}
-        role-xid           (assoc :entity-xids #{role-xid})
-        (seq relation-xids) (assoc :relation-xids relation-xids))
-      (debounced 5000
-                 (fn []
-                   (log/info {:id ::reloading-role-access
-                              :data {:action :reloading :subject :role-access}}
-                             "Reloading role access (rules + scopes)")
-                   (load-rules)
-                   (load-scopes))))
     (load-rules)
-    (load-scopes)))
+    (load-scopes)
+    (delta/subscribe!
+     delta-sub-key
+     (cond-> {}
+       role-xid            (assoc :entity-xids #{role-xid})
+       (seq relation-xids) (assoc :relation-xids relation-xids))
+     (debounced 5000
+                (fn []
+                  (log/info {:id ::reloading-role-access
+                             :data {:action :reloading :subject :role-access}}
+                            "Reloading role access (rules + scopes)")
+                  (load-rules)
+                  (load-scopes))))
+    (log/info {:id ::started
+               :data {:action :started :subject :iam-access
+                      :rules  (count *rules*)
+                      :scopes (count *scopes*)}}
+              "IAM access control started")))
 
 (defn stop
   []
@@ -342,16 +423,11 @@
 
   (delta/unsubscribe! delta-sub-key)
 
-  ;; Clear rules and scopes
   (alter-var-root #'*rules* (constantly nil))
   (alter-var-root #'*scopes* (constantly nil))
 
   (log/info {:id ::stopped :data {:action :stopped :subject :iam-access}} "IAM access control stopped")
   nil)
-
-;;; ============================================================================
-;;; Dataset Access Protocol Implementation
-;;; ============================================================================
 
 (defrecord IAMAccessControl []
   access.protocol/AccessControl
@@ -360,9 +436,6 @@
     (entity-allows? entity-id (vec operations) (role-xids)))
 
   (relation-allows? [_ relation-id operations]
-    ;; Coarse-grained "can the principal touch this relation at all?" check
-    ;; — used by callers that don't carry direction (e.g. the per-relation
-    ;; gate in fused.clj). Allow if either direction allows.
     (let [{:keys [from to]} (dataset/deployed-relation relation-id)
           from-id (id/extract from)
           to-id   (id/extract to)
@@ -373,6 +446,13 @@
 
   (relation-allows? [_ relation-id from-to operations]
     (relation-allows? relation-id from-to (vec operations) (role-xids)))
+
+  (attribute-allows? [_ entity-id attribute-id op]
+    (let [entity (dataset/deployed-entity entity-id)
+          target (str (if (keyword? attribute-id) (name attribute-id) attribute-id))
+          attribute (some #(when (= target (str (id/extract %))) %)
+                          (:attributes entity))]
+      (attribute-allows? entity attribute op (role-xids))))
 
   (scope-allowed? [_ scope]
     (scope-allowed? (role-xids) scope))
@@ -392,5 +472,16 @@
   (role-ids [_]
     (or (role-xids) #{}))
 
+  (role-eids [_]
+    (or (role-eids*) #{}))
+
   (group-eids [_]
-    (or (group-eids*) #{})))
+    (or (group-eids*) #{}))
+
+  access.protocol/RLSBypass
+  (rls-bypass? [_ entity-id operation]
+    (let [roles (role-xids)
+          ok?   (fn [rule]
+                  (boolean (not-empty (set/intersection roles (get-in *rules* [:entity entity-id rule])))))]
+      (or (ok? :owners)
+          (and (= :read operation) (ok? :browse))))))

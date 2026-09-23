@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.iam.audit
   "CockroachDB-specific PRINCIPAL-AWARE audit enhancement.
 
@@ -17,22 +39,23 @@
      - Column DEFAULTs (`localtimestamp`) still handle insert-time fill
        for raw-SQL inserts; only UPDATE refresh is lost.
 
-   The protocol swap happens at LIFECYCLE BOUNDARIES, not ns load."
+   Extended once at ns load; degradation to timestamp-only is decided per
+   call inside each method against the real precondition, not against
+   lifecycle state. See the postgres counterpart."
   (:require
-    [next.jdbc :as jdbc]
-    [patcho.lifecycle :as lifecycle]
-    [patcho.patch :as patch]
-    [synthigy.dataset :refer [deployed-model deployed-entity]]
-    [synthigy.dataset.access :as access]
-    [synthigy.dataset.core :as core]
-    [synthigy.dataset.enhance :as enhance]
-    [synthigy.dataset.id :as id]
-    [synthigy.dataset.cockroach :as dataset-cockroach]
-    [synthigy.dataset.sql.naming :refer [entity->table-name normalize-name]]
-    [synthigy.db :refer [*db*]]
-    [synthigy.db.cockroach]  ; Load Cockroach JDBCBackend implementation
-    [synthigy.db.sql :refer [execute! execute-one!]]
-    [synthigy.log :as log]))
+   [next.jdbc :as jdbc]
+   [patcho.lifecycle :as lifecycle]
+   [patcho.patch :as patch]
+   [synthigy.dataset :refer [deployed-model deployed-entity]]
+   [synthigy.dataset.access :as access]
+   [synthigy.dataset.core :as core]
+   [synthigy.dataset.enhance :as enhance]
+   [synthigy.dataset.id :as id]
+   [synthigy.dataset.sql.naming :refer [entity->table-name normalize-name]]
+   [synthigy.db :refer [*db*]]
+   [synthigy.db.cockroach]  ; Load Cockroach JDBCBackend implementation
+   [synthigy.db.sql :refer [execute! execute-one!]]
+   [synthigy.log :as log]))
 
 ;; ============================================================================
 ;; Helper Functions
@@ -62,12 +85,12 @@
           (update-in data [:entity table]
                      (fn [mapping]
                        (reduce-kv
-                         (fn [data tmp-id _]
-                           (cond-> data
-                             modified? (assoc-in [tmp-id :modified_by] current-user-eid)
-                             created? (assoc-in [tmp-id :created_by] current-user-eid)))
-                         mapping
-                         mapping))))))))
+                        (fn [data tmp-id _]
+                          (cond-> data
+                            modified? (assoc-in [tmp-id :modified_by] current-user-eid)
+                            created? (assoc-in [tmp-id :created_by] current-user-eid)))
+                        mapping
+                        mapping))))))))
 
 ;; ============================================================================
 ;; Postgres-Specific Protocol Implementations
@@ -147,7 +170,7 @@
       {}
       (let [entity-id (id/extract entity)
             entity-table (entity->table-name entity)
-            user-entity (core/reference-entity-uuid "user")
+            user-entity (core/reference-entity-id "user")
             user-table (when user-entity
                          (some-> (deployed-model)
                                  (core/get-entity user-entity)
@@ -186,28 +209,14 @@
                          :type :one})))))))
 
 ;; ============================================================================
-;; Protocol Swap — driven by lifecycle, not ns load
+;; Protocol Extension — once, at ns load
 ;; ============================================================================
 
-(defn install-principal-aware!
-  "Re-extend `AuditEnhancement` against Cockroach with the principal-aware
-   impl (adds `_by` columns + FK to user + write-time fill from
-   `*principal*`). Idempotent; safe to call anywhere. Called by the
-   `:synthigy/audit` module's `:start`."
-  []
-  (extend-protocol enhance/AuditEnhancement
-    synthigy.db.Cockroach
-    (transform-audit [db tx entities] (transform-audit-impl db tx entities))
-    (augment-schema  [db entity]      (augment-schema-impl db entity))
-    (audit           [_ entity-id data _] (enhance-audit-data entity-id data))))
-
-(defn uninstall-principal-aware!
-  "Revert to the timestamp-only default that the dataset.cockroach
-   namespace installs at load. Called by `:stop`. New deploys get
-   bare-mode audit semantics; previously-added `_by` columns stay
-   (just no longer auto-populated)."
-  []
-  (dataset-cockroach/install-default-audit-enhancement!))
+(extend-protocol enhance/AuditEnhancement
+  synthigy.db.Cockroach
+  (transform-audit [db tx entities] (transform-audit-impl db tx entities))
+  (augment-schema  [db entity]      (augment-schema-impl db entity))
+  (audit           [_ entity-id data _] (enhance-audit-data entity-id data)))
 
 ;; ============================================================================
 ;; Migration Utilities
@@ -300,7 +309,6 @@
 
 (patch/current-version :synthigy.iam/audit "1.0.2")
 
-
 (comment
   (patch/read-version *db* :synthigy.iam/audit))
 
@@ -332,7 +340,12 @@
                        backfill-count (atom 0)]
                    (with-open [conn (jdbc/get-connection (:datasource *db*))]
                      (doseq [{:as entity} entities
-                             :let [table (entity->table-name entity)]]
+                             :let [table     (entity->table-name entity)
+                                   modified? (core/audit-modified? entity)
+                                   created?  (core/audit-created? entity)]
+                             ;; setup! only adds audit columns the entity's model config asks
+                             ;; for, so an unaudited table has neither column to read nor write.
+                             :when (and modified? created?)]
                        (try
                          (let [{result :jdbc.next/update-count}
                                (execute-one! conn
@@ -363,29 +376,22 @@
 ;;; ============================================================================
 
 (lifecycle/register-module!
-  :synthigy/audit
-  {:depends-on [:synthigy/iam]
-   :doc "Audit trail — principal _by columns + change capture"
-   :setup (fn []
+ :synthigy/audit
+ {:depends-on [:synthigy/iam]
+  :doc "Audit trail — principal _by columns + change capture"
+  :setup (fn []
             ;; One-time: retrofit `_by` columns + FK constraints onto any
             ;; tables that exist but lack them (e.g. tables created in a
             ;; previous bare-mode session). Idempotent.
-            (log/info {:id ::lifecycle-setup-starting :data {:action :setup :subject :audit-fields}}
-                      "Retrofitting principal-aware audit columns onto existing tables")
-            (setup! *db* (deployed-model))
-            (log/info {:id ::lifecycle-setup-complete :data {:action :setup-complete :subject :audit-fields}}
-                      "Audit retrofit complete"))
-   :start (fn []
-            ;; Swap the AuditEnhancement protocol from timestamp-only
-            ;; (the default loaded at boot) to principal-aware. Every
-            ;; subsequent deploy + write picks up the IAM-enriched impl.
-            (install-principal-aware!)
-            (log/info {:id ::lifecycle-started :data {:action :started :subject :principal-audit}}
-                      "Principal-aware audit enhancement active")
-            (core/reload *db*))
-   :stop (fn []
-           ;; Restore timestamp-only behaviour. Subsequent deploys add
-           ;; only `modified_on`/`created_on` + their UPDATE triggers.
-           (uninstall-principal-aware!)
-           (log/info {:id ::lifecycle-stopped :data {:action :stopped :subject :principal-audit}}
-                     "Reverted to timestamp-only audit enhancement"))})
+           (log/info {:id ::lifecycle-setup-starting :data {:action :setup :subject :audit-fields}}
+                     "Retrofitting principal-aware audit columns onto existing tables")
+           (setup! *db* (deployed-model))
+           (log/info {:id ::lifecycle-setup-complete :data {:action :setup-complete :subject :audit-fields}}
+                     "Audit retrofit complete"))
+  :start (fn []
+           (log/info {:id ::lifecycle-started :data {:action :started :subject :principal-audit}}
+                     "Principal-aware audit enhancement active")
+           (core/reload *db*))
+  :stop (fn []
+          (log/info {:id ::lifecycle-stopped :data {:action :stopped :subject :principal-audit}}
+                    "Reverted to timestamp-only audit enhancement"))})

@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.cockroach.query
   (:require
    clojure.set
@@ -9,10 +31,12 @@
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.cockroach.fused :as fused]
-   [synthigy.substrate.cockroach :as substrate]
+   [synthigy.plug.cockroach :as plug]
+   [synthigy.util :as util]
    synthigy.dataset.sql.naming
+   [synthigy.dataset.access :refer [*operation-rules*]]
    [synthigy.dataset.sql.query :as sql-query
-    :refer [*operation-rules*
+    :refer [
             entity-accessible?
             construct-response
             focus-order
@@ -21,7 +45,6 @@
             shave-schema-arguments
             shave-schema-relations
             shave-schema-aggregates
-            pprint
             j-and
             pull-cursors
             pull-roots
@@ -97,12 +120,12 @@
   [entity-id data stack?]
   (let [result (with-open [connection (jdbc/get-connection (:datasource *db*))]
                  (jdbc/with-transaction [tx connection]
-                   (substrate/set-context! *db* tx)
+                   (plug/set-context! *db* tx)
                    (sql-query/set-entity tx (id/entity entity-id) data stack?)))]
     ;; CRDB has no LISTEN/NOTIFY, so the trigger queues a row but doesn't
     ;; wake the drainer. Nudge it now (post-commit). No-op when the active
     ;; WakeSource is push-driven (PostgresNotify-style).
-    (substrate/wake-drainer!)
+    (plug/wake-drainer!)
     result))
 
 (defn search-entity-roots
@@ -147,7 +170,7 @@
                        nil
                        (do
                          (log/trace {:id :synthigy.dataset.sql/roots-query
-                                     :data {:query query :data (pprint data)}}
+                                     :data {:query query :data (util/pprint-str data)}}
                                     "Query for roots")
                          (sql/execute!
                           connection (into [query] data)
@@ -198,7 +221,7 @@
    (let [result
          (with-open [connection (jdbc/get-connection (:datasource *db*))]
            (jdbc/with-transaction [tx connection]
-             (substrate/set-context! *db* tx)
+             (plug/set-context! *db* tx)
              (binding [*operation-rules* #{:purge :delete}]
                (let [schema (selection->schema entity-id selection args)
                      roots (search-entity-roots connection schema)]
@@ -222,7 +245,7 @@
                          (sql/execute! connection query core/*return-type*))
                        response))
                    [])))))]
-     (substrate/wake-drainer!)
+     (plug/wake-drainer!)
      result)))
 
 (defn get-entity
@@ -239,8 +262,8 @@
    (entity-accessible? entity-id operations)
    (log/debug {:id :synthigy.dataset.sql/getting-entity
                :data {:entity-id entity-id
-                      :args (pprint args)
-                      :selection (pprint selection)}}
+                      :args (util/pprint-str args)
+                      :selection (util/pprint-str selection)}}
               "Getting entity")
    (let [args (reduce-kv
                (fn [args k v]
@@ -256,7 +279,7 @@
                    response (first roots')]
                (log/trace {:id :synthigy.dataset.sql/response-returned
                            :data {:entity-id entity-id
-                                  :response (pprint response)}}
+                                  :response (util/pprint-str response)}}
                           "Returning response")
                response))))))))
 
@@ -443,34 +466,35 @@
 ;; protocol methods at the bottom of this file throw on call so any
 ;; remaining caller fails loudly instead of silently degrading.
 
+(declare delete-entity-batch)
+
 (defn delete-entity
+  "See PG delete-entity for the RLS-injection rationale and RLS-denied vs
+   nonexistent disambiguation. `args` is filtered to unique-constraint keys
+   (+ id-key); no unique key surviving the filter throws
+   UNIQUE_KEY_REQUIRED, a matched-row count above 1 throws NON_UNIQUE_MATCH.
+   A vector `args` is multirow delete by id-key — see `delete-entity-batch`."
   ([entity-id args]
    (let [result (with-open [connection (jdbc/get-connection (:datasource *db*))]
                   (jdbc/with-transaction [tx connection]
-                    (substrate/set-context! *db* tx)
-                    (delete-entity tx entity-id args)))]
-     (substrate/wake-drainer!)
+                    (plug/set-context! *db* tx)
+                    (if (sequential? args)
+                      (delete-entity-batch connection entity-id args)
+                      (delete-entity tx entity-id args))))]
+     (plug/wake-drainer!)
      result))
   ([connection entity-id args]
    (binding [*operation-rules* #{:delete}]
      (let [entity-schema (sql-query/deployed-schema-entity entity-id)
            table (:table entity-schema)
-           uniques (set (flatten ((comp :unique :constraints) entity-schema)))
-           unique-attribute-keys (as-> (:fields entity-schema) result
-                                   (select-keys result uniques)
-                                   (vals result)
-                                   (conj (map :key result) (id/key)))
-           filtered-args (select-keys args unique-attribute-keys)
-           predicate-args (reduce-kv
-                           (fn [acc k v] (assoc acc k {:_eq v}))
-                           nil
-                           filtered-args)]
+           {:keys [filtered-args predicate-args]} (sql-query/delete-unique-args entity-schema args)]
        (enhance/apply-delete entity-id args nil)
        (boolean
         (when (and (not-empty predicate-args) table)
           (let [schema (selection->schema entity-id nil predicate-args)
                 roots (search-entity-roots connection schema)
                 eids (when (seq roots) (first (vals roots)))]
+            (sql-query/assert-single-match! entity-schema filtered-args eids)
             (cond
               (seq eids)
               (let [sql [(format "delete from \"%s\" where _eid=any(?)" table)
@@ -503,6 +527,47 @@
                        :args filtered-args})))
                   true))))))))))
 
+(defn delete-entity-batch
+  "Multirow delete by a vector of id-key values. See PG's
+   `delete-entity-batch` for the rationale — same shape."
+  [connection entity-id xids]
+  (binding [*operation-rules* #{:delete}]
+    (let [xids (sql-query/check-delete-batch! xids)
+          entity-schema (sql-query/deployed-schema-entity entity-id)
+          table (:table entity-schema)
+          id-col (name (id/key))]
+      (if (or (empty? xids) (nil? table))
+        0
+        (let [schema (selection->schema entity-id nil {(id/key) {:_in xids}})
+              roots (search-entity-roots connection schema)
+              visible (set (when (seq roots) (first (vals roots))))
+              probe-sql (format "select \"%s\", _eid from \"%s\" where \"%s\" in (%s)"
+                                id-col table id-col (str/join "," (repeat (count xids) "?")))
+              existing (into {}
+                             (map (juxt (keyword id-col) :_eid))
+                             (sql/execute! connection (into [probe-sql] xids) core/*return-type*))
+              hidden (into {} (remove (fn [[_ eid]] (contains? visible eid))) existing)]
+          (when (seq hidden)
+            (throw
+             (ex-info
+              (format "You don't have permission to delete %d %s record(s)"
+                      (count hidden) (:name entity-schema))
+              {:type ::delete-rls-denied
+               :code "DELETE_FORBIDDEN"
+               :entity entity-id
+               :entity-name (:name entity-schema)
+               :xids (vec (keys hidden))})))
+          (doseq [x (keys existing)]
+            (enhance/apply-delete entity-id {(id/key) x} nil))
+          (when (seq visible)
+            (let [sql [(format "delete from \"%s\" where _eid=any(?)" table)
+                       (long-array visible)]]
+              (log/trace {:id :synthigy.dataset.sql/deleting-entity-batch
+                          :data {:entity-id entity-id :count (count visible)}}
+                         "Deleting entity batch")
+              (sql/execute! connection sql core/*return-type*)))
+          (count visible))))))
+
 ;; FIXME
 (defn slice-entity
   ;; CRDB-side: trigger queues but doesn't wake. wake-drainer! after the
@@ -510,16 +575,24 @@
   ([entity-id args selection]
    (let [result (with-open [connection (jdbc/get-connection (:datasource *db*))]
                   (jdbc/with-transaction [tx connection]
-                    (substrate/set-context! *db* tx)
+                    (plug/set-context! *db* tx)
                     (slice-entity tx entity-id args selection)))]
-     (substrate/wake-drainer!)
+     (plug/wake-drainer!)
      result))
   ([tx entity-id args selection]
    (letfn [(targeting-args? [args]
              (when args
                (if (vector? args)
                  (some targeting-args? args)
-                 (let [args' (dissoc args :_offset :_limit)
+                 ;; SLICE IS ALWAYS INNER. It removes exactly the links the
+                 ;; caller named — join mode is a READ concern (how to project
+                 ;; parents), never a write one, so `:_join` must not influence
+                 ;; which link rows get deleted. Same for :_order_by /
+                 ;; :_distinct / :_on: all query metadata, not row constraints.
+                 ;; Counting `:_join` here made a bare relation look "targeted",
+                 ;; which built a target subselect carrying no real predicate
+                 ;; and slice silently stopped cutting links.
+                 (let [args' (dissoc args :_offset :_limit :_join :_order_by :_distinct :_on)
                        some-constraint? (not-empty (dissoc args' :_and :_or :_where :_maybe))]
                    (if some-constraint?
                      true

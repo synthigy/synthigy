@@ -1,0 +1,88 @@
+<!--
+      Synthigy — model-driven IAM and data platform
+      Copyright (C) 2026 Robert Geršak
+
+      This program is free software: you can redistribute it and/or modify
+      it under the terms of the GNU Affero General Public License as
+      published by the Free Software Foundation, either version 3 of the
+      License, or (at your option) any later version.
+
+      This program is distributed in the hope that it will be useful,
+      but WITHOUT ANY WARRANTY; without even the implied warranty of
+      MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+      GNU Affero General Public License for more details.
+
+      You should have received a copy of the GNU Affero General Public
+      License along with this program.  If not, see
+      <https://www.gnu.org/licenses/>.
+
+      Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+      in a proprietary product, or offering it as a service without
+      releasing your source under section 13 — a commercial license is
+      available: r.gersak@gmail.com  See COMMERCIAL.md.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OAuth Error</title>
+  <link rel="icon" type="image/png" href="/oauth/images/favicon.png">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono&display=swap">
+  <link rel="stylesheet" href="/oauth/css/error.css">
+</head>
+<body>
+  <!--
+    CONTRACT
+    ========
+    The server redirects here as:  /login/error.html?error=<code>&secure=<bool>
+    (+ optional context keys, e.g. client-name, invalid-value). No POST, no token.
+    `secure=true` → a potentially malicious client: warn "do not enter credentials".
+    Full code list + copy live in oauth/page/error.clj (error-messages).
+  -->
+  <div class="oauth-container">
+    <div class="error-card">
+      <div class="header"><h2 id="title">Authorization Error</h2></div>
+      <div class="message" id="message"></div>
+      <div class="error-code" id="code"></div>
+      <div class="help-text" id="help" hidden>
+        If you were redirected here unexpectedly, close this window.
+      </div>
+    </div>
+  </div>
+
+  <script src="/oauth/js/starfield.js"></script>
+  <script>
+    var q = new URLSearchParams(location.search);
+    var error = q.get('error') || 'unknown';
+    var secure = q.get('secure') === 'true';
+
+    var TITLES = {
+      no_redirections: 'Authorization Blocked',
+      redirect_missmatch: 'Authorization Blocked',
+      client_not_registered: 'Unknown Application',
+      invalid_login_page: 'Configuration Error',
+      corrupt_session: 'Session Error'
+    };
+    var MESSAGES = {
+      no_redirections: 'This application has no configured redirect addresses. The request cannot be completed safely.',
+      redirect_missmatch: "The return address doesn't match this application's configuration. Do not enter any credentials.",
+      client_not_registered: 'This application is not recognized by the authorization server. Do not enter any credentials.',
+      corrupt_session: 'Your authorization session could not be verified. Please try again or contact support.',
+      invalid_login_page: 'This client has an invalid login-page setting. Please contact the application developer.'
+    };
+
+    document.getElementById('title').textContent = TITLES[error] || 'Authorization Error';
+    document.getElementById('message').textContent =
+      MESSAGES[error] || 'An error occurred during authorization. Please contact support.';
+    document.getElementById('code').textContent = 'Error: ' + error;
+
+    if (secure) {
+      document.querySelector('.error-card').classList.add('security');
+      document.getElementById('message').classList.add('security');
+      document.getElementById('help').hidden = false;
+    }
+  </script>
+</body>
+</html>

@@ -1,19 +1,27 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.codegen
-  "XSQL program → language-neutral codegen IR.
-
-   The server parses XSQL and derives result types ONCE (it owns the grammar
-   AND the IAM-filtered schema); per-language emitters consume the IR JSON and
-   just render syntax — they never parse XSQL. This is what `op:\"describe\"`
-   returns.
-
-   The IR is language-neutral: no TS/Go names, no casing decisions, no struct
-   naming. Path-named types, snake-vs-camel, `?:` vs `Option<T>` are all the
-   emitter's job. Names here are snake_case (XSQL is snake-strict and the schema
-   is snake-projected, so selection keys match schema keys directly — no bridge).
-
-   Reads (search/get/slice/purge) get a selection-derived `:result` tree. Writes
-   (sync/stack/delete) and sql-template carry name+verb+entity only — their input
-   types are schema-derived and their result is engine-fixed / unsolved."
+  "XSQL program → language-neutral codegen IR (what op:\"describe\" returns)."
   (:require [synthigy.xsql.program :as prog]
             [synthigy.xsql.sql-params :as sp]
             [clojure.string :as str]))
@@ -21,14 +29,11 @@
 (def ^:private read-verbs #{"search" "get" "slice" "purge"})
 
 (def ^:private op-start-re
-  "Lookahead splitter / matcher for an operation-start `@verb` line. Excludes
-   header directives (@namespace/@watch/@returns/@description), which live WITHIN
-   an op and must not start a new segment."
+  "Matches an operation-start `@verb` line; header directives excluded."
   #"@(?:search|get|sql-template|slice|purge|sync|stack|delete|batch)\b")
 
-(defn- returns->result
-  "Synthesize a result tree from a sql-template `@returns` spec
-   ('a:int, b:float?, …'). `?` ⇒ nullable column. sql-templates carry no xid."
+(defn returns->result
+  "Synthesizes a result tree from a sql-template `@returns` spec."
   [spec]
   {:kind "object"
    :fields (->> (str/split spec #",")
@@ -40,15 +45,10 @@
                             (not nul) (assoc :nullable false))
                           {:key col :type "unknown"}))))})
 
-(defn- derive-result
-  "Selection × snake schema → typed result tree:
-     {:kind \"object\" :fields [{:key, :type, :nullable?, :enum?} |
-                                {:key, :kind \"relation\", :cardinality, :optional, :fields}]}"
+(defn derive-result
+  "Derives the typed result tree for a selection against the snake schema."
   [schema entity-name selection]
   (let [ent (get-in schema [:entities entity-name])]
-    ;; HARD FAIL: an unresolvable entity means the schema we were handed is wrong
-    ;; (e.g. the keywordized-vs-string-keyed landmine) — refuse to emit garbage
-    ;; types instead of silently producing `type:"unknown"` / `cardinality:null`.
     (when (and entity-name (nil? ent))
       (throw (ex-info (str "describe: schema has no entity '" entity-name
                            "' — refusing to emit untyped result")
@@ -59,22 +59,18 @@
            (fn [acc k v]
              (let [kname (name k)]
                (cond
-                 ;; aggregates — `_count` is string→number, `_agg` is a deep,
-                 ;; varied tree. We type them as honest maps rather than a precise
-                 ;; nested type (not worth the machinery) — and critically, BEFORE
-                 ;; the relation test, since their wire shape mimics a relation and
-                 ;; would otherwise be mistyped as a relation-of-xids.
+                 ;; _count/_agg must be tested BEFORE the relation branch —
+                 ;; their
+                 ;; wire shape mimics a relation and would be mistyped
+                 ;; otherwise.
                  (= kname "_count")
                  (conj acc {:key "_count" :kind "map" :value "int" :optional true})
                  (= kname "_agg")
                  (conj acc {:key "_agg" :kind "map" :value "unknown" :optional true})
 
                  (and (vector? v) (map? (first v)))
-                 ;; relation
                  (let [{:keys [selections alias]} (first v)
                        rel (get-in ent [:relations kname])]
-                   ;; HARD FAIL: relation not in schema, or missing cardinality →
-                   ;; the array-vs-singleton typing would be wrong. Don't guess.
                    (when (nil? rel)
                      (throw (ex-info (str "describe: '" kname "' is not a relation on '" entity-name "'")
                                      {:code "SCHEMA_UNKNOWN_RELATION" :entity entity-name :relation kname})))
@@ -86,78 +82,71 @@
                               :cardinality (:cardinality rel)
                               :optional    true
                               :fields      (:fields (derive-result schema (:to rel) selections))}))
-                 ;; scalar — xid is prepended structurally, skip it in selection walk
                  :else
                  (if (= kname "xid") acc
                      (let [attr (get-in ent [:attributes kname])]
-                       ;; HARD FAIL: selected field is neither attribute, relation,
-                       ;; nor _count/_agg — it would emit `type:"unknown"`.
                        (when (nil? attr)
                          (throw (ex-info (str "describe: '" kname "' is not an attribute on '" entity-name "'")
                                          {:code "SCHEMA_UNKNOWN_ATTRIBUTE" :entity entity-name :attribute kname})))
                        (conj acc (cond-> {:key kname :type (:type attr)}
                                    (= false (:nullable attr)) (assoc :nullable false)
                                    (:enum attr)               (assoc :enum (:enum attr)))))))))
-           [{:key "xid" :type "string" :nullable false}] ; structural at every level
+           [{:key "xid" :type "string" :nullable false}]
            selection)
           (filterv some?))}))
 
-(defn- ir-params
-  "Typed params scanned from one op's source segment. `:default` ⇒ optional."
+(defn ir-params
+  "Typed params scanned from one op's source segment."
   [segment]
-  (mapv (fn [{:keys [name raw-type array? default]}]
+  (mapv (fn [{:keys [name raw-type array? default optional? type-args]}]
           (cond-> {:name name :type raw-type :array (boolean array?)}
-            (some? default) (assoc :optional true)))
+            (or (some? default) optional?) (assoc :optional true)
+            type-args       (assoc :values type-args)))
         (sp/scan-placeholders segment)))
 
-(defn- op-segments
-  "Split a program into per-operation source segments — one per op-start `@verb`
-   line (NOT header directives). Drops any leading non-op content (a buffer-level
-   `@namespace`, blank lines) so segments zip 1:1 with the non-anonymous ops from
-   `prog/compile` (params scope to their own op)."
+(defn op-segments
+  "Splits a program into per-operation source segments."
   [source]
   (->> (str/split source (re-pattern (str "(?m)^(?=" op-start-re ")")))
        (map str/trim)
        (filterv #(re-find (re-pattern (str "^" op-start-re)) %))))
 
-(defn- op-body
-  "The rooted XSQL body of an op segment — the @-header (`@verb name`,
-   `@description` + its indented continuation) stripped, leaving the
-   root-entity body the generated client embeds and sends."
+(defn op-body
+  "Strips the @-header from an op segment, leaving the rooted XSQL body."
   [segment]
   (let [lines (str/split-lines segment)
-        start (->> (map-indexed vector lines)
-                   (some (fn [[i l]]
-                           ;; first flush-left, non-`@` line = the root entity
-                           (when (and (seq l) (not (str/starts-with? l "@"))
-                                      (not (str/starts-with? l " ")))
-                             i))))]
+        start (loop [i 0, in-desc? false]
+                (when (< i (count lines))
+                  (let [l (nth lines i)]
+                    (cond
+                      in-desc?
+                      (recur (inc i) (not (str/includes? l "\"")))
+                      (and (str/starts-with? l "@description")
+                           (odd? (count (re-seq #"\"" l))))
+                      (recur (inc i) true)
+                      (and (seq l) (not (str/starts-with? l "@"))
+                           (not (str/starts-with? l " ")))
+                      i
+                      :else (recur (inc i) false)))))]
     (if start (str/trim (str/join "\n" (drop start lines))) "")))
 
 (defn describe
-  "XSQL program source → codegen IR `{:operations [...]}`. Read ops get a typed
-   `:result` tree + per-op `:params`; writes/sql-template carry name+op+entity;
-   batches carry `:batch true :members` (member op names, composed by the emitter).
-   `schema` is the IAM-filtered snake projection (daccess/schema)."
+  "XSQL program source → codegen IR `{:operations [...]}`."
   [schema source _params]
-  ;; Compile in TOOLING mode (nil params) — we derive TYPES, not values, so
-  ;; missing required params must resolve to nil, not throw PARAM_MISSING.
-  ;; Drop the anonymous leading chunk (`:op` nil) so ops zip 1:1 with op-segments.
   (let [ops  (filterv #(or (:op %) (:batch %)) (prog/compile source nil))
         segs (op-segments source)]
     {:operations
      (mapv (fn [op seg]
              (if (:batch op)
                {:name (:name op) :batch true :members (vec (:members op))}
-               ;; Scan params from the BODY only — `@returns name:type?` in the
-               ;; header carries `?` (nullable), which would alias the ?param sigil.
+               ;; scan params from the body only — @returns' `?` (nullable)
+               ;; in the header would alias the ?param sigil
                (let [body (op-body seg)]
                 (cond-> {:name   (:name op)
                         :op     (:op op)
                         :entity (:entity op)
                         :params (ir-params body)
                         :source body}
-                 ;; identity + metadata, resolved by the canonical parser
                  (:description op) (assoc :description (:description op))
                  (:namespace op) (assoc :namespace (:namespace op))
                  (:watch op)     (assoc :watch (:watch op))

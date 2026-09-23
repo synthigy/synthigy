@@ -1,13 +1,29 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.sql.rls
-  "RLS compilation - converts UUID-based config to SQL-ready schema.
-
-   This namespace handles the compile-time transformation of RLS guard
-   configurations from entity model UUIDs into table/column names that
-   can be used at query time for SQL generation.
-
-   Called during model->schema to pre-compile :rls data for each entity.
-   Database-agnostic - works for PostgreSQL, SQLite, etc."
+  "RLS compilation - converts id-based guard config to SQL-ready schema."
   (:require
+    [clojure.string :as str]
     [synthigy.log :as log]
     [synthigy.dataset.core :as core]
     [synthigy.dataset.id :as id]
@@ -17,32 +33,14 @@
              entity->relation-field
              entity->table-name]]))
 
-;; =============================================================================
-;; IAM entity identification — id-AGNOSTIC, via the seam.
-;;
-;; RLS names no representation. It identifies the IAM user/group/role entities
-;; through `(id/entity :iam/…)` (resolves to whatever the active provider uses
-;; — euuid, xid, a future format) and tracks the graph by `(id/extract node)`.
-;; No raw uuid constants, no euuid↔xid round-trip: swap the provider and this
-;; works unchanged. Stored conditions reference ids already in the model's
-;; key form, so direct `get-entity`/`get-relation` lookups need no translation.
-;; =============================================================================
-
-
-;; =============================================================================
-;; RLS Compilation Functions
-;; =============================================================================
-
-(defn- compile-ref-condition
-  "Compile a :ref condition from UUID to SQL-ready structure.
-   Returns {:type :ref :column \"name\" :match :user/:group/:role}
-   or nil if attribute not found/invalid."
+(defn compile-ref-condition
+  "Compile a :ref condition; nil if the attribute is missing or invalid."
   [entity condition]
   (let [attr-uuid (:attribute condition)
-        ;; Safe lookup — a removed attribute is simply absent (or inactive),
-        ;; and a dangling reference must DROP the rule, never throw. `core/
-        ;; get-attribute` throws on a missing id, so resolve directly here.
-        attr (some #(when (= attr-uuid (id/extract %)) %) (:attributes entity))]
+        ;; dangling attr must DROP the rule, never throw — get-attribute throws;
+        ;; audit who-cols are synthetic, hence the concat
+        attr (some #(when (= attr-uuid (id/extract %)) %)
+                   (concat (:attributes entity) (core/audit-ref-attrs entity)))]
     (when (and attr (:active attr))
       (let [attr-type (:type attr)]
         (when (#{"user" "group" "role"} attr-type)
@@ -51,17 +49,14 @@
            :match (keyword attr-type)})))))
 
 
-(defn- compile-relation-step
-  "Compile a single relation step to table/field names.
-   Returns {:table \"x\" :from-field \"y\" :to-field \"z\" :from-entity <uuid> :to-entity <uuid>}
-   or nil if relation not found."
+(defn compile-relation-step
+  "Compile a single relation step to table/field names; nil if relation not
+   found."
   [model step from-entity-id]
-  (let [rel-id (:relation-id step)               ; format-decoupled key; value is active id form
+  (let [rel-id (:relation-id step)
         relation (core/get-relation model rel-id)]
     (when (and relation (:active relation))
       (let [{:keys [from to]} relation
-            ;; Direction: which endpoint matches the entity we're coming from.
-            ;; All ids in the active form via the seam — no representation named.
             forward? (= (id/extract from) from-entity-id)]
         {:table (relation->table-name relation)
          :from-field (entity->relation-field (if forward? from to))
@@ -70,11 +65,9 @@
          :to-entity (if forward? (id/extract to) (id/extract from))}))))
 
 
-(defn- entity-id->match-type
-  "Determine match type by comparing an entity id (active form, from
-   `id/extract`) against the seam-resolved IAM entity ids. `id/entity`
-   returns the id in whatever form the active provider uses, so the
-   comparison is representation-agnostic. Returns :user, :group, :role, nil."
+(defn entity-id->match-type
+  "Match an entity id against the IAM user/group/role entity ids; returns :user,
+   :group, :role, or nil."
   [entity-id]
   (condp = entity-id
     (id/entity :iam/user)       :user
@@ -83,10 +76,8 @@
     nil))
 
 
-(defn- compile-relation-condition
-  "Compile a :relation condition from UUIDs to SQL-ready structure.
-   Returns {:type :relation :match :user/:group/:role :hops [...]}
-   or nil if any relation not found."
+(defn compile-relation-condition
+  "Compile a :relation condition; nil if any relation is not found."
   [model entity condition]
   (let [steps (:steps condition)]
     (loop [remaining-steps steps
@@ -94,12 +85,10 @@
            compiled-hops []
            final-entity-id nil]
       (if (empty? remaining-steps)
-        ;; Done - determine match type from final entity
         (when-let [match (entity-id->match-type final-entity-id)]
           {:type :relation
            :match match
            :hops compiled-hops})
-        ;; Process next step
         (let [step (first remaining-steps)
               compiled-step (compile-relation-step model step current-entity-id)]
           (if compiled-step
@@ -107,14 +96,12 @@
                    (:to-entity compiled-step)
                    (conj compiled-hops (dissoc compiled-step :from-entity :to-entity))
                    (:to-entity compiled-step))
-            ;; Relation not found or inactive - abort
             nil))))))
 
 
-(defn- compile-hybrid-condition
-  "Compile a :hybrid condition (relation hops + final ref attribute).
-   Returns {:type :hybrid :match :user/:group/:role :hops [...] :final-table \"x\" :final-column \"y\"}
-   or nil if invalid."
+(defn compile-hybrid-condition
+  "Compile a :hybrid condition (relation hops + final ref attribute); nil if
+   invalid."
   [model entity condition]
   (let [steps (:steps condition)
         attr-uuid (:attribute condition)]
@@ -123,10 +110,13 @@
            compiled-hops []
            final-entity-id (id/extract entity)]
       (if (empty? remaining-steps)
-        ;; Done with hops - resolve final attribute. final-entity-id is the
-        ;; active id form (same as the model's keys), so look it up directly.
         (let [final-entity (core/get-entity model final-entity-id)
-              final-attr (when final-entity (core/get-attribute final-entity attr-uuid))]
+              ;; dangling attr drops the rule, never throw — same safe lookup as
+              ;; compile-ref-condition
+              final-attr (when final-entity
+                           (some #(when (= attr-uuid (id/extract %)) %)
+                                 (concat (:attributes final-entity)
+                                         (core/audit-ref-attrs final-entity))))]
           (when (and final-attr (:active final-attr))
             (let [attr-type (:type final-attr)]
               (when (#{"user" "group" "role"} attr-type)
@@ -135,7 +125,6 @@
                  :hops compiled-hops
                  :final-table (entity->table-name final-entity)
                  :final-column (normalize-name (:name final-attr))}))))
-        ;; Process next step
         (let [step (first remaining-steps)
               compiled-step (compile-relation-step model step current-entity-id)]
           (if compiled-step
@@ -143,32 +132,29 @@
                    (:to-entity compiled-step)
                    (conj compiled-hops (dissoc compiled-step :from-entity :to-entity))
                    (:to-entity compiled-step))
-            ;; Relation not found or inactive - abort
             nil))))))
 
 
-(defn- compile-rls-condition
+(def self-guard
+  "Injected on the IAM User entity: a principal can always read its own row."
+  {:id "__self__"
+   :operation #{:read}
+   :conditions [{:type :ref :column "_eid" :match :user}]})
+
+
+(defn compile-rls-condition
   "Compile a single RLS condition based on its type."
   [model entity condition]
   (case (:type condition)
     :ref (compile-ref-condition entity condition)
     :relation (compile-relation-condition model entity condition)
     :hybrid (compile-hybrid-condition model entity condition)
-    ;; Unknown type - skip
     nil))
 
 
-(defn- compile-rls-guard
-  "Compile a single guard's conditions.
-
-   A guard's conditions are AND'd together (see rls/guard-to-sql), so the guard
-   is only meaningful if EVERY condition resolves. If ANY condition references a
-   removed/inactive attribute, relation, or entity, the WHOLE guard is dropped.
-
-   This is the fail-safe choice when a dataset removes a referenced element:
-   dropping the rule (an OR-branch) only ever NARROWS access, whereas keeping a
-   guard with a missing AND-term would silently BROADEN it. Removing what a rule
-   depends on drops the rule; it never weakens it."
+(defn compile-rls-guard
+  "Compile a guard's conditions; if ANY condition fails to resolve the WHOLE
+   guard is dropped — a missing AND-term would silently broaden access."
   [model entity guard]
   (let [conditions (:conditions guard)
         compiled (map #(compile-rls-condition model entity %) conditions)]
@@ -176,10 +162,8 @@
       {:id (:id guard)
        :operation (:operation guard)
        :conditions (vec compiled)}
-      ;; Dropping is the fail-safe choice, but it must be LOUD: a dropped
-      ;; :write/:delete guard fail-closes those operations (1=0) and the
-      ;; symptom downstream is a write that echoes success yet changes
-      ;; nothing — near-undebuggable without this trace.
+      ;; drop must be LOUD — a dropped :write/:delete guard fail-closes (1=0)
+      ;; and writes silently no-op
       (do
         (log/warn {:id ::guard-dropped
                    :data {:action :dropped
@@ -199,15 +183,90 @@
         nil))))
 
 
+(defn unresolved-conditions
+  "Conditions of `guard` that cannot compile against `model`, described for an
+   operator."
+  [model entity guard]
+  (into []
+        (comp (remove #(compile-rls-condition model entity %))
+              (map (fn [c]
+                     (cond-> {:type (:type c)}
+                       (:attribute c) (assoc :attribute (:attribute c))
+                       (:steps c) (assoc :relations (mapv :relation-id (:steps c)))))))
+        (:conditions guard)))
+
+(defn broken-guards
+  "Guards in `model` that would be dropped at compile time — an empty guard, or
+   one whose condition points at an inactive/missing attribute or relation."
+  [model]
+  (vec
+   (for [entity (core/get-entities model)
+         :when (and (:active entity) (core/rls-enabled? entity))
+         guard (core/get-rls-guards entity)
+         :let [unresolved (unresolved-conditions model entity guard)]
+         :when (or (empty? (:conditions guard)) (seq unresolved))]
+     {:entity (:name entity)
+      :entity-id (id/extract entity)
+      :guard-id (:id guard)
+      :operation (:operation guard)
+      :unresolved unresolved})))
+
+(defn declares-guard?
+  "Whether `model` is the model that authors this guard."
+  [model {:keys [entity-id guard-id]}]
+  (boolean
+   (when-let [entity (core/get-entity model entity-id)]
+     (some #(= guard-id (:id %)) (core/get-rls-guards entity)))))
+
+(defn describe-broken
+  [broken]
+  (str/join
+   "; "
+   (map (fn [{:keys [entity guard-id operation unresolved]}]
+          (str entity " guard " guard-id " ("
+               (str/join "," (map name (sort operation)))
+               ") → " (if (seq unresolved)
+                        (pr-str unresolved)
+                        "no conditions")))
+        broken)))
+
+(defn assert-guards-compile!
+  "Throws when `candidate` breaks a guard it authors itself; a guard some OTHER
+   dataset authors only warns — a stale copy of a foreign entity must not hold
+   an unrelated deployment hostage."
+  [model candidate]
+  (let [broken (broken-guards model)
+        {own true foreign false} (group-by #(declares-guard? candidate %) broken)]
+    (when (seq foreign)
+      (log/warn {:id ::guards-would-drop
+                 :data {:action :dropping :subject :rls-guard
+                        :guards (mapv #(select-keys % [:entity :guard-id :operation :unresolved])
+                                      foreign)}}
+                (str "Deployment drops RLS guards authored by another dataset: "
+                     (describe-broken foreign)
+                     ". Those operations will FAIL CLOSED — refresh this model's copy "
+                     "of the entity, or delete the guard.")))
+    (when (seq own)
+      (throw
+       (ex-info
+        (str "RLS guards would be dropped by this deployment: "
+             (describe-broken own)
+             ". Those operations would fail closed — delete the guard or keep what "
+             "it references active.")
+        {:type ::broken-rls-guards
+         :code "RLS_GUARD_BROKEN"
+         :guards (vec own)})))))
+
 (defn compile-entity-rls
-  "Compile all RLS configuration for an entity.
-   Returns compiled :rls map or nil if disabled/no valid guards."
+  "Compile all RLS configuration for an entity; nil when RLS is disabled."
   [model entity]
   (when (core/rls-enabled? entity)
-    (let [guards (core/get-rls-guards entity)
-          compiled-guards (->> guards
+    (let [compiled-guards (->> (core/get-rls-guards entity)
                                (keep #(compile-rls-guard model entity %))
-                               vec)]
-      (when (seq compiled-guards)
-        {:enabled true
-         :guards compiled-guards}))))
+                               vec)
+          compiled-guards (cond-> compiled-guards
+                            (= (id/extract entity) (id/entity :iam/user))
+                            (conj self-guard))]
+      ;; never nil while enabled — a missing :rls key reads as "no RLS" downstream
+      {:enabled true
+       :guards compiled-guards})))

@@ -1,9 +1,33 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 {:mvn/repos {"rpl" {:url "https://nexus.redplanetlabs.com/repository/maven-public-releases"}
              "central" {:url "https://repo1.maven.org/maven2/"}
              "clojars" {:url "https://repo.clojars.org/"}}
 
- ;; Core paths - shared code that doesn't depend on a specific database or server
- :paths ["core/src" "lacinia" "resources" "auth" "xsql/src"]
+ ;; Core paths - the engine: dataset, IAM, xsql, the /data verb executor.
+ ;; No server, no OAuth provider, no console — those are :server/:oauth/
+ ;; :console aliases. synthigy.embedded runs on this alone.
+ :paths ["core/src" "resources" "xsql/src"]
 
  :deps
  {org.clojure/clojure {:mvn/version "1.12.0"}
@@ -20,7 +44,6 @@
   ;; Utilities
   nano-id/nano-id {:mvn/version "1.1.0"}
   dev.gersak/patcho {:local/root "patcho"}
-  camel-snake-kebab/camel-snake-kebab {:mvn/version "0.4.3"}
   com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
   babashka/fs {:mvn/version "0.5.22"}
 
@@ -36,12 +59,7 @@
   com.taoensso/telemere-slf4j {:mvn/version "1.2.1"}}
 
  :aliases
- {;; GraphQL
-  :graphql
-  {:extra-paths ["lacinia"]
-   :extra-deps {com.walmartlabs/lacinia {:mvn/version "1.2.2"}}}
-
-  ;; =========================================================================
+ {;; =========================================================================
   ;; Database Backends
   ;; =========================================================================
   ;; Choose ONE database backend - these provide synthigy.db namespace
@@ -60,25 +78,25 @@
                 com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
 
   ;; CockroachDB — packages as synthigy-crdb. Speaks PG wire so uses the
-  ;; postgres JDBC driver, but has its own dataset / substrate / audit
+  ;; postgres JDBC driver, but has its own dataset / plug / audit
   ;; ports under cockroach/src (CRDB plpgsql differences, no LISTEN/NOTIFY,
-  ;; no statement-level triggers — substrate follows the SQLite pattern).
+  ;; no statement-level triggers — plug follows the SQLite pattern).
   :crdb
   {:extra-paths ["cockroach/src"]
    :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}
                 com.zaxxer/HikariCP        {:mvn/version "6.2.1"}}}
 
-  ;; DuckDB — embedded columnar observability substrate. NOT a system DB
+  ;; DuckDB — embedded columnar observability plug. NOT a system DB
   ;; backend; the JDBC jar is bundled here so the optional
   ;; :synthigy/observability module under duckdb/src can serve as durable
   ;; storage for logs + audit without needing a separate server. In-memory
-  ;; by default; flip to file via SYNTHIGY_OBSERVABILITY_PATH. Pick this
+  ;; by default; flip to file via DUCKDB_PATH. Pick this
   ;; for OSS dev (queryable cockpit history with zero ops).
   :duckdb
   {:extra-paths ["duckdb/src"]
    :extra-deps {org.duckdb/duckdb_jdbc {:mvn/version "1.1.3"}}}
 
-  ;; ClickHouse observability substrate — analytical scale, multi-node.
+  ;; ClickHouse observability plug — analytical scale, multi-node.
   ;; CH speaks pure HTTP so no JDBC driver needed; the impl uses Java 11+
   ;; java.net.http. The :synthigy/observability module under clickhouse/src
   ;; provides the same shadowed namespace as the DuckDB variant — operators
@@ -91,35 +109,81 @@
   {:extra-paths ["dummy/src"]}
 
   ;; =========================================================================
+  ;; Identity & Wire
+  ;; =========================================================================
+  ;; The engine (base :paths) runs standalone — synthigy.embedded proves it.
+  ;; Everything below is delivery: an OAuth/OIDC provider, then the ring
+  ;; handlers + supervisor daemon that expose it over HTTP. A combo needs
+  ;; :server to boot; :server needs :oauth on the same classpath (routes.clj
+  ;; requires synthigy.oauth.handlers) — both are separate aliases so an
+  ;; embedded-library consumer can take neither.
+
+  :oauth
+  {:extra-paths ["auth"]
+   :extra-deps {ring/ring-core {:mvn/version "1.12.2"}
+                hiccup/hiccup {:mvn/version "2.0.0-RC3"}}}
+
+  :server
+  {:extra-paths ["server/src"]}
+
+  ;; Server console (console/ submodule) — server-rendered admin +
+  ;; self-service at /console. Add to the combo to bundle it
+  ;; (SYNTHIGY_COMBO=postgres:httpkit:console); runtime start stays opt-in
+  ;; via `lifecycle/start! :synthigy/console`.
+  ;;
+  ;; :local/root, so the console's paths AND its deps come from
+  ;; console/deps.edn — adding a console dependency is a change in the
+  ;; submodule that needs it, not here. Not a cycle: tools.deps reads that
+  ;; project's :paths and :deps only, and its :deps deliberately omits core
+  ;; (the edge back lives in ITS :dev alias, which nothing here activates).
+  ;; Also pulls :oauth+:server's paths directly (console requires both) so
+  ;; `-M:postgres:httpkit:console:dev` keeps working without also naming
+  ;; them — deps.edn has no "alias requires alias", so this is listed
+  ;; wherever it's needed; tools.deps dedupes the repeated paths.
+  :console
+  {:extra-paths ["auth" "server/src"]
+   :extra-deps {dev.synthigy/console {:local/root "console"}}}
+
+  ;; =========================================================================
   ;; Server Backends
   ;; =========================================================================
-  ;; Choose ONE server backend - these provide synthigy.server and synthigy.admin
-  ;; namespaces that shadow core and load server-specific implementations
+  ;; Choose ONE server backend - these provide synthigy.server
+  ;; namespaces that shadow core and load server-specific implementations.
+  ;; Each also pulls :oauth+:server's paths (every adapter's own code
+  ;; requires synthigy.server.* / synthigy.oauth* directly) — see :console's
+  ;; comment above for why this is repeated rather than referenced once.
 
   :pedestal
-  {:extra-paths ["pedestal/src"]
+  {:extra-paths ["pedestal/src" "auth" "server/src"]
    :extra-deps {io.pedestal/pedestal.service {:mvn/version "0.7.0"}
                 io.pedestal/pedestal.route {:mvn/version "0.7.0"}
                 io.pedestal/pedestal.jetty {:mvn/version "0.7.0"}
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}}}
 
   :httpkit
-  {:extra-paths ["httpkit/src"]
+  {:extra-paths ["httpkit/src" "auth" "server/src"]
    :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}
                 ring/ring-core {:mvn/version "1.12.2"}
-                hiccup/hiccup {:mvn/version "2.0.0-RC3"}}}
+                hiccup/hiccup {:mvn/version "2.0.0-RC3"}
+                ;; Datastar SSE adapter for this backend. Pulls http-kit
+                ;; 2.9.0-beta3 transitively; our 2.8.0 pin wins (:use-top).
+                dev.data-star.clojure/http-kit {:mvn/version "1.0.0-RC11"}}}
 
   :undertow
-  {:extra-paths ["undertow/src"]
+  {:extra-paths ["undertow/src" "auth" "server/src"]
    :extra-deps {luminus/ring-undertow-adapter {:mvn/version "1.3.1"}
                 ring/ring-core {:mvn/version "1.12.2"}
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}}}
 
   :ring-jetty
-  {:extra-paths ["ring-jetty/src"]
+  {:extra-paths ["ring-jetty/src" "auth" "server/src"]
    :extra-deps {ring/ring-jetty-adapter {:mvn/version "1.15.4"}
                 ring/ring-core {:mvn/version "1.15.4"}
-                hiccup/hiccup {:mvn/version "2.0.0-RC3"}}}
+                hiccup/hiccup {:mvn/version "2.0.0-RC3"}
+                ;; Datastar SSE adapter, built on StreamableResponseBody —
+                ;; which this backend honours (undertow does not, so it gets
+                ;; no transport and its console renders static).
+                dev.data-star.clojure/ring {:mvn/version "1.0.0-RC11"}}}
 
   ;; =========================================================================
   ;; Development & Testing
@@ -130,6 +194,7 @@
   :dev
   {:extra-paths ["dev" "test" "test/resources"]
    :extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}
+                dev.synthigy/console {:local/root "console"}
                 clj-http/clj-http {:mvn/version "3.13.0"}
                 ;; Dev-only profiling. NOT on production classpath —
                 ;; only loaded under the :dev alias. See dev/synthigy/profiling.clj.
@@ -144,11 +209,33 @@
    :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
                 org.clojure/tools.logging {:mvn/version "1.3.0"}
                 nubank/matcher-combinators {:mvn/version "3.9.1"}
-                clj-http/clj-http {:mvn/version "3.13.0"}}
+                clj-http/clj-http {:mvn/version "3.13.0"}
+                dev.synthigy/console {:local/root "console"}}
    :main-opts ["-m" "kaocha.runner"]}
 
   :repl
   {:main-opts ["-m" "nrepl.cmdline" "--interactive" "--color"]}
+
+  ;; XSQL → generated embedded source. Needs ONE database backend and nothing
+  ;; else — `describe` compiles against the DEPLOYED model, which lives in the
+  ;; DB:
+  ;;
+  ;;   clj -X:gen                 (PostgreSQL — the backend baked in below)
+  ;;   clj -X:sqlite:gen          (or :crdb:gen … — leftmost alias wins the
+  ;;                               `synthigy.core` shadow, so it overrides)
+  ;;
+  ;; No endpoint and no credentials, unlike sdk/clj's `:gen`, which must reach
+  ;; a running backend over HTTP because the XSQL compiler lives here;
+  ;; in-process there is nothing to reach. Output is COMMITTED source (it is on
+  ;; console's :paths); regenerate whenever resources/xsql changes.
+  :gen
+  {:extra-paths ["postgres/src"]
+   :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}
+                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}
+   :exec-fn synthigy.embedded.gen/generate!
+   :exec-args {:dir "resources/xsql"
+               :out "console/gen"
+               :ns-prefix "synthigy.xsql"}}
 
   ;; Uberjar builder (see build.clj). Combo via SYNTHIGY_COMBO env.
   :build

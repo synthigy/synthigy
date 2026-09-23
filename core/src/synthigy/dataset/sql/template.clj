@@ -1,147 +1,43 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.sql.template
-  "SQL template resolver for analytics queries.
-
-   Write standard SQL with ERD-aware placeholders. FROM and JOINs are
-   generated automatically from the deployed schema — you never write them.
-
-   ## Placeholders
-
-   ### Entity field: `{Entity.field}`
-   References a scalar field on an entity. The entity becomes a FROM source.
-
-     SELECT {User.name}, {User.active}
-     WHERE {User.active} = ?
-
-   ### Relation field: `{Entity OPERATOR relation.field}`
-   Traverses a relation and references a field on the target entity.
-   The join (including junction table) is auto-generated.
-
-     SELECT {User.name}, {User -> roles.name} as role_name
-     WHERE {User -> roles.active} = ?
-
-   ### Chain joins: `{Entity -> rel1 -> rel2.field}`
-   Multi-hop traversal through relations. Each hop generates the
-   appropriate join pair (junction + target).
-
-     SELECT {User.name},
-            {User -> roles.name} as role,
-            {User -> roles -> scopes.name} as scope
-
-   ### Bare entity: `{Entity}`
-   Resolves to the physical table name with alias. Rarely needed since
-   FROM is auto-generated, but available for edge cases.
-
-   ## Join Operators
-
-   | Operator | Join Type  | Direction                          |
-   |----------|------------|------------------------------------|
-   | `-`      | INNER      | Only matching rows                 |
-   | `->`     | LEFT       | All from source, matching target   |
-   | `<-`     | RIGHT      | Matching source, all from target   |
-   | `=>`     | FULL OUTER | All rows from both sides           |
-
-   The direction reads naturally: `{User -> roles}` means 'from User,
-   left join to roles'. `{User Role <- users}` means 'from Role,
-   right join to users'.
-
-   ## Auto-generated SQL
-
-   - **FROM**: Generated from entity references. Each distinct root entity
-     becomes a FROM source.
-   - **JOINs**: Generated from relation traversals. Each relation produces
-     two joins (junction table + target table). Duplicate relations are
-     deduplicated — using the same relation in multiple placeholders
-     produces only one join pair.
-   - **Placement**: FROM and JOINs are injected before the first
-     WHERE/GROUP BY/HAVING/ORDER BY/LIMIT clause.
-
-   ## Parameters
-
-   Use `?` positional parameters (compatible with all database backends):
-
-     (execute-template
-       \"SELECT {User.name} WHERE {User.active} = ? AND {User.name} LIKE ?\"
-       [true \"A%\"])
-
-   Or named `?name:type` / `?name:type[]` placeholders bound from a map —
-   the inline type is advisory (the console type-checks; the server
-   strips it). See `synthigy.xsql.sql-params`:
-
-     (execute-template
-       \"SELECT {User.name} WHERE {User.active} = ?active:boolean
-         AND {User.name} IN ?names:string[]\"
-       {\"active\" true \"names\" [\"Alice\" \"Bob\"]})
-
-   ## Examples
-
-   Simple field selection:
-
-     (execute-template
-       \"SELECT {User.name}, {User.active} WHERE {User.active} = ?\"
-       [true])
-
-   Join with aggregate:
-
-     (execute-template
-       \"SELECT {User Role.name}, count({User Role <- users.name}) as cnt
-        GROUP BY {User Role.name}
-        ORDER BY cnt DESC\"
-       nil)
-
-   Chain join:
-
-     (execute-template
-       \"SELECT {User.name},
-               {User -> roles.name} as role,
-               {User -> roles -> scopes.name} as scope
-        WHERE {User.name} = ?\"
-       [\"Alice\"])
-
-   Mixed joins in one query:
-
-     (execute-template
-       \"SELECT {User.name},
-               count(DISTINCT {User -> roles.name}) as role_count,
-               count(DISTINCT {User -> groups.name}) as group_count
-        WHERE {User.active} = ?
-        GROUP BY {User.name}
-        ORDER BY role_count DESC
-        LIMIT ?\"
-       [true 10])
-
-   Via the Clojure client:
-
-     (client/query c
-       \"SELECT {User.name}, count({User -> roles._eid}) as cnt
-        WHERE {User.active} = ?
-        GROUP BY {User.name}
-        HAVING cnt > ?\"
-       [true 2])
-
-   ## Constraints
-
-   - SELECT only — INSERT/UPDATE/DELETE are rejected
-   - Templates are cached (TTL 30 min), cleared on model deploy
-   - Cache can be bypassed with `{:cached false}`"
+  "SQL template resolver for analytics queries — standard SQL with ERD-aware {…}
+   placeholders; FROM and JOINs are generated from the deployed schema."
   (:require
    [clojure.string :as str]
    [synthigy.log :as log]
    [synthigy.dataset.rls :as rls]
    [synthigy.dataset.sql.query :as sql-query]
    [synthigy.xsql.sql-params :as sql-params]
-   [synthigy.db :refer [*db*]]
+   [synthigy.db :as db :refer [*db*]]
    [synthigy.db.sql :as sql]))
 
 ;;; ============================================================================
 ;;; Placeholder Parsing
 ;;; ============================================================================
 
-;; Join operators are WHITESPACE-DELIMITED: `{A -> B.f}`, `{A - B.f}` (inner).
-;; The required spaces fence a join `-` from a `-` inside a kebab identifier —
-;; `{identity-document.country}` (tight) is a name, `{a - b}` (spaced) is a join.
-;; Field access (`.`) stays tight; only the inter-entity join op needs spaces.
 (def ^:private join-pattern
-  #"\s+(=>|->|<-|-)\s+")
+  #"\s*(=>|->|<-|-)\s*")
 
 (def ^:private join-type-map
   {"=>" "FULL OUTER"
@@ -149,9 +45,9 @@
    "<-" "RIGHT"
    "-"  "INNER"})
 
-(defn- split-on-joins
-  "Split a placeholder string on join operators.
-   Returns {:root \"entity\" :chain [{:label \"rel\" :join \"INNER\"} ...]}"
+(defn split-on-joins
+  "Split a placeholder string into {:root entity :chain [{:label rel :join type}
+   ...]}."
   [s]
   (let [matcher (re-matcher join-pattern s)]
     (loop [last-end 0
@@ -169,29 +65,78 @@
                         (rest all-segments)
                         join-types)})))))
 
-(defn- parse-placeholder
+(defn outside-parens?
+  "True when position idx in sql sits at paren depth 0 and outside quoted
+   regions."
+  [^String sql idx]
+  (loop [i 0 depth 0 quote nil]
+    (if (>= i idx)
+      (and (zero? depth) (nil? quote))
+      (let [c (.charAt sql i)]
+        (cond
+          quote                  (recur (inc i) depth (when (not= c quote) quote))
+          (= c \()               (recur (inc i) (inc depth) nil)
+          (= c \))               (recur (inc i) (dec depth) nil)
+          (or (= c \') (= c \")) (recur (inc i) depth c)
+          :else                  (recur (inc i) depth nil))))))
+
+(defn top-level-match
+  "Start index of the first match of re at paren depth 0 outside quoted strings,
+   or nil — clause keywords inside parens/quotes are not clause boundaries."
+  [re ^String sql]
+  (let [m (re-matcher re sql)]
+    (loop []
+      (when (.find m)
+        (if (outside-parens? sql (.start m))
+          (.start m)
+          (recur))))))
+
+(def ^:private ident-pattern
+  "Strict snake_case, matching the XSQL surface."
+  #"[a-z_][a-z0-9_]*")
+
+(defn assert-ident!
+  "Throw INVALID_TEMPLATE_IDENTIFIER unless s is strict snake_case."
+  [s placeholder]
+  (when-not (re-matches ident-pattern s)
+    (let [hint (-> s
+                   (str/replace #"([a-z0-9])([A-Z])" "$1_$2")
+                   str/lower-case
+                   (str/replace #"[\s\-.]+" "_"))]
+      (throw (ex-info (str "Invalid identifier \"" s "\" in {" placeholder "}"
+                           " — identifiers are snake_case; use \"" hint "\"")
+                      {:code "INVALID_TEMPLATE_IDENTIFIER"
+                       :identifier s
+                       :placeholder placeholder
+                       :hint hint}))))
+  s)
+
+(defn parse-placeholder
   "Parse a single placeholder string (without braces) into a structured form."
   [s]
   (let [s (str/trim s)
         {:keys [root chain]} (split-on-joins s)]
     (if (empty? chain)
       (let [[entity field] (str/split root #"\." 2)]
+        (assert-ident! entity s)
         (if field
-          {:type :field :entity entity :field field}
+          {:type :field :entity entity :field (assert-ident! field s)}
           {:type :entity :entity entity}))
-      (let [entity root
+      (let [entity (assert-ident! root s)
             last-item (last chain)
             [last-rel field] (str/split (:label last-item) #"\." 2)
             joins (conj (vec (butlast chain))
                         (assoc last-item :label last-rel))]
+        (run! #(assert-ident! (:label %) s) joins)
+        (when field (assert-ident! field s))
         (if field
           {:type :relation-field :entity entity :path (mapv :label joins)
            :field field :joins joins}
           {:type :relation :entity entity :path (mapv :label joins)
            :joins joins})))))
 
-(defn- extract-placeholders
-  "Extract all {placeholder} occurrences from template string."
+(defn extract-placeholders
+  "Extract all {placeholder} occurrences with parsed forms and positions."
   [template]
   (let [matcher (re-matcher #"\{([^}]+)\}" template)]
     (loop [results []]
@@ -199,7 +144,10 @@
         (recur (conj results
                      {:raw (.group matcher 0)
                       :inner (.group matcher 1)
-                      :parsed (parse-placeholder (.group matcher 1))
+                      :parsed (try
+                                (parse-placeholder (.group matcher 1))
+                                (catch clojure.lang.ExceptionInfo e
+                                  {:type :invalid :error (ex-message e)}))
                       :start (.start matcher)
                       :end (.end matcher)}))
         results))))
@@ -208,28 +156,12 @@
 ;;; Entity & Schema Resolution
 ;;; ============================================================================
 
-(defn- resolve-relation
-  "Resolve a relation label to a traversal spec.
-
-   Three flavours of relation exist, all supported here:
-
-   1. :junction — m2m/o2m via a junction table. Two JOINs needed
-      (source ↔ junction ↔ target). Spec comes from schema :relations.
-
-   2. :fk-self — self-referential tree cardinality (e.g. :father, :mother
-      on Human). Single JOIN: target._eid = source.<fk-col>.
-      Source in schema :recursions set; fk column name matches the label.
-
-   3. :fk-ref — field-level entity reference (e.g. :assignee on Project
-      Task, typed \"user\"). Single JOIN: target._eid = source.<fk-col>.
-      Target entity id read from field's :reference/entity."
+(defn resolve-relation
+  "Resolve a relation label to a traversal spec (:junction, :fk-self, or
+   :fk-ref)."
   [entity-id relation-label]
   (let [schema (sql-query/deployed-schema-entity entity-id)
-        label-kw (keyword (-> relation-label
-                              str/trim
-                              (str/replace #"([a-z])([A-Z])" "$1_$2")
-                              str/lower-case
-                              (str/replace #"[\s]+" "_")))
+        label-kw (keyword relation-label)
         junction-rel (get-in schema [:relations label-kw])
         recursion? (contains? (:recursions schema) label-kw)
         attr-id (get-in schema [:field->attribute label-kw])
@@ -262,8 +194,8 @@
 ;;; Alias Resolution (pure — returns updated state)
 ;;; ============================================================================
 
-(defn- get-alias
-  "Get or create an alias for a key. Returns [alias updated-state]."
+(defn get-alias
+  "Get or create an alias for a key, returning [alias updated-state]."
   [state key]
   (if-let [existing (get-in state [:aliases key])]
     [existing state]
@@ -278,13 +210,9 @@
 ;;; Relation Chain Walker (pure — returns updated state)
 ;;; ============================================================================
 
-(defn- walk-relation-chain
-  "Walk a relation chain, collecting JOINs. Returns [final-alias updated-state].
-  Also registers the target alias under [:entity target-id] so that
-  subsequent field references to the same entity reuse the join alias.
-
-  Junction relations emit two JOINs (source ↔ junction ↔ target).
-  FK-style relations (self recursions, field refs) emit one JOIN."
+(defn walk-relation-chain
+  "Walk a relation chain collecting JOINs, returning [final-alias
+   updated-state]."
   [entity-id entity-alias joins-spec state]
   (reduce
     (fn [[current-id current-alias state] {:keys [label join]}]
@@ -294,13 +222,10 @@
             {:keys [table]} (sql-query/deployed-schema-entity target-id)
             [target-alias state] (get-alias state [:relation current-id label])
             join-key [current-id label]
-            ;; Register target alias under [:entity target-id] so bare
-            ;; references like {User Role.name} can reuse the join.
-            ;; BUT don't clobber an existing mapping — the root entity
-            ;; already owns its alias, and self-referencing joins
-            ;; (tree father/mother on same entity) or multiple joins to
-            ;; the same target must not steal the :entity slot from them.
             state (cond-> (update state :entities conj target-id)
+                    (:relation rel)
+                    (update :relations conj (select-keys rel [:relation :from :to]))
+
                     (not (get-in state [:aliases [:entity target-id]]))
                     (assoc-in [:aliases [:entity target-id]] target-alias))]
         (if (contains? (:join-keys-seen state) join-key)
@@ -320,7 +245,6 @@
                                             link-alias (:to/field rel) target-alias)))]
               [target-id target-alias state])
 
-            ;; FK-style (self recursion or field reference): single JOIN
             (:fk-self :fk-ref)
             (let [state (-> state
                             (update :join-keys-seen conj join-key)
@@ -336,16 +260,8 @@
 ;;; Template Resolution (pure reduce)
 ;;; ============================================================================
 
-(defn- enum-aware-column
-  "Render `alias.field`. An enum-typed column gets a `CAST(… AS TEXT)`:
-   a PG enum has no `=` operator against a bound varchar parameter, so a
-   template comparing `{Entity.enumField} = ?` would otherwise fail.
-   Casting to text also keeps projected values as plain strings.
-
-   Uses the standard SQL `CAST(x AS TEXT)` form rather than the PG-specific
-   `::text` shorthand so SQLite (which has no `::` cast operator) accepts
-   the same compiled SQL. SQLite stores enums as TEXT already, so the
-   cast is a no-op there; the cost is negligible."
+(defn enum-aware-column
+  "Render alias.field, casting enum-typed columns to TEXT."
   [entity-id alias field]
   (let [{:keys [fields]} (sql-query/deployed-schema-entity entity-id)
         fkey  (keyword field)
@@ -355,23 +271,61 @@
       (format "CAST(%s.%s AS TEXT)" alias field)
       (format "%s.%s" alias field))))
 
-(defn resolve-template
-  "Resolve a SQL template: parse placeholders, resolve to physical names,
-   auto-generate FROM + JOINs. Pure function — no mutation."
+(def ^:private placeholder-or-literal
+  "`{…}` placeholders and single-quoted literals are never table references."
+  #"\{[^}]*\}|'(?:[^']|'')*'")
+
+(defn unguarded-entity-tables
+  "Deployed entity tables named directly in FROM/JOIN instead of through a
+   {entity} placeholder — a bare table name would silently opt the scope out of
+   RLS."
   [template]
-  (let [;; Process relation/relation-field first so join aliases exist
-        ;; before field references try to resolve them
-        type-order {:relation 0 :relation-field 1 :entity 2 :field 3}
+  ;; ponytail: a CTE aliased to an entity table name false-positives — track
+  ;; WITH-bound names if that ever bites
+  (let [tables (into #{}
+                     (comp (keep :table) (map str/lower-case))
+                     (vals (sql-query/deployed-schema)))
+        ;; substituted, not deleted — blanking {movie} would leave "FROM JOIN"
+        ;; and mis-capture the table name
+        stripped (str/replace template placeholder-or-literal " __ph__ ")]
+    (into #{}
+          (comp (map second)
+                (filter #(contains? tables (str/lower-case %))))
+          (re-seq #"(?i)\b(?:FROM|JOIN)\s+\"?(\w+)\"?" stripped))))
+
+(defn enforce-rbac!
+  "Apply the same entity/relation RBAC checks as search — attribute-level RBAC
+   is unguardable here and NOT enforced; MUST run per execution, never inside
+   the memoized resolve."
+  [{:keys [entities relations]}]
+  (run! #(sql-query/entity-accessible? % #{:read :owns}) entities)
+  (run! (fn [{:keys [relation from to]}]
+          (sql-query/relation-accessible? relation [from to] #{:read}))
+        relations))
+
+(defn resolve-template
+  "Resolve a SQL template to {:sql :entities :aliases :relations},
+   auto-generating FROM and JOINs — pure, no access checks."
+  [template]
+  (let [type-order {:relation 0 :relation-field 1 :entity 2 :field 3}
         placeholders (sort-by #(get type-order (get-in % [:parsed :type]) 9)
                               (extract-placeholders template))
         init-state {:aliases {}
                     :counter 0
                     :entities #{}
+                    :relations #{}
                     :joins []
                     :join-keys-seen #{}
                     :root-entities {}
                     :replacements []
-                    :errors []}
+                    :errors (mapv (fn [t]
+                                    {:raw t
+                                     :position 0
+                                     :error (str "Table \"" t "\" is a deployed entity but is "
+                                                 "referenced directly. Write it as a {entity} "
+                                                 "placeholder — a bare table name bypasses "
+                                                 "row-level security.")})
+                                  (sort (unguarded-entity-tables template)))}
 
         final-state
         (reduce
@@ -385,17 +339,16 @@
                                       (update :entities conj id)
                                       (update :root-entities assoc id alias))]))]
                 (case (:type parsed)
-                  ;; {User} — bare entity
+                  :invalid
+                  (update state :errors conj
+                          {:raw raw :error (:error parsed) :position start})
+
                   :entity
                   (let [[id alias state] (resolve-root state (:entity parsed))
                         {:keys [table]} (sql-query/deployed-schema-entity id)]
                     (update state :replacements conj
                             {:raw raw :replacement (format "\"%s\" %s" table alias)}))
 
-                  ;; {User.name} → e1.name  (enum columns → CAST(e1.col AS TEXT)
-                  ;; so they compare against / project as plain strings rather
-                  ;; than requiring a PG enum-typed parameter; portable across
-                  ;; PG + SQLite — see enum-aware-column)
                   :field
                   (let [[id alias state] (resolve-root state (:entity parsed))]
                     (update state :replacements conj
@@ -403,7 +356,6 @@
                              :replacement (enum-aware-column
                                            id alias (:field parsed))}))
 
-                  ;; {User - roles} → "table" alias (for FROM) or alias (in other positions)
                   :relation
                   (let [[id alias state] (resolve-root state (:entity parsed))
                         joins-spec (or (:joins parsed)
@@ -413,7 +365,6 @@
                     (update state :replacements conj
                             {:raw raw :replacement (format "\"%s\" %s" table target-alias)}))
 
-                  ;; {User - roles.name} → e2.name
                   :relation-field
                   (let [[id alias state] (resolve-root state (:entity parsed))
                         joins-spec (or (:joins parsed)
@@ -432,24 +383,19 @@
     (if (not-empty (:errors final-state))
       {:errors (:errors final-state)}
       (let [{:keys [replacements root-entities joins]} final-state
-            ;; Apply replacements to template
             resolved-sql (reduce
                            (fn [sql {:keys [raw replacement]}]
                              (str/replace-first sql raw replacement))
                            template
                            replacements)
-
-            ;; Build FROM clause from root entities
             from-parts (mapv
                          (fn [[id alias]]
                            (let [{:keys [table]} (sql-query/deployed-schema-entity id)]
                              (format "\"%s\" %s" table alias)))
                          root-entities)
             from-clause (str "FROM " (str/join ", " from-parts))
-            has-from? (re-find #"(?i)\bFROM\b" resolved-sql)
+            has-from? (top-level-match #"(?i)\bFROM\b" resolved-sql)
             join-str (when (not-empty joins) (str/join "\n" joins))
-
-            ;; What needs injecting
             inject-str (if has-from? join-str
                            (str from-clause
                                 (when join-str (str "\n" join-str))))
@@ -457,20 +403,18 @@
             final-sql
             (if-not inject-str
               resolved-sql
-              (let [insert-point (re-find #"(?i)\b(WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|UNION)"
-                                          resolved-sql)]
-                (if insert-point
-                  (let [kw (first insert-point)
-                        idx (str/index-of resolved-sql kw)]
-                    (if (and idx (pos? idx))
-                      (str (str/trimr (subs resolved-sql 0 idx))
-                           "\n" inject-str "\n"
-                           (subs resolved-sql idx))
-                      (str resolved-sql "\n" inject-str)))
+              (let [idx (top-level-match
+                         #"(?i)\b(?:WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|UNION)\b"
+                         resolved-sql)]
+                (if (and idx (pos? idx))
+                  (str (str/trimr (subs resolved-sql 0 idx))
+                       "\n" inject-str "\n"
+                       (subs resolved-sql idx))
                   (str resolved-sql "\n" inject-str))))]
 
         {:sql final-sql
          :entities (:entities final-state)
+         :relations (:relations final-state)
          :aliases (:aliases final-state)}))))
 
 ;;; ============================================================================
@@ -478,11 +422,8 @@
 ;;; ============================================================================
 
 (defn strip-leading-sql-comments
-  "Drop leading whitespace and SQL comments — `-- …` line comments and
-   `/* … */` block comments — from `sql`, returning the remainder
-   starting at the first substantive token. A template may open with a
-   documentation header (e.g. explaining each `?` parameter); without
-   this the SELECT-only guard would see `--` and reject the query."
+  "Drop leading whitespace and SQL comments, returning the remainder from the
+   first substantive token."
   [^String sql]
   (loop [s (str/triml (or sql ""))]
     (cond
@@ -497,16 +438,7 @@
       :else s)))
 
 (defn strip-sql-comments
-  "Remove ALL SQL comments — `-- …` line comments and `/* … */` block
-   comments — from `sql`, leaving string literals intact (a `--` or
-   `/*` inside a single-quoted string is content, not a comment).
-
-   Comments are stripped before resolution because the resolver scans
-   for keywords (`FROM`, `WHERE`, `GROUP BY`, …) with plain regexes; a
-   comment like `-- ?1 from year` would otherwise make `has-from?`
-   match the word `from` and the engine would skip FROM injection,
-   producing `SELECT … LEFT JOIN` with no FROM. Line comments collapse
-   to a newline and block comments to a space so tokens never merge."
+  "Remove all SQL comments, leaving string literals intact."
   [^String sql]
   (let [n  (count sql)
         sb (StringBuilder.)]
@@ -548,9 +480,7 @@
             (do (.append sb c) (recur (inc i)))))))))
 
 (defn validate-select-only!
-  "Ensure the template is a SELECT statement (optionally fronted by a WITH
-   clause). Leading SQL comments are skipped before the check. Throws on
-   violation."
+  "Throw unless the template is a SELECT statement (optionally fronted by WITH)."
   [template]
   (let [trimmed (str/upper-case (strip-leading-sql-comments template))]
     (when-not (or (str/starts-with? trimmed "SELECT")
@@ -562,9 +492,9 @@
 ;;; CTE Scope Parsing
 ;;; ============================================================================
 
-(defn- find-matching-close
-  "Given a string and the index of an open '(', return the index of the
-   matching ')'. Throws on unbalanced parens."
+(defn find-matching-close
+  "Return the index of the ')' matching the '(' at open-idx; throws on
+   unbalanced parens."
   [^String s open-idx]
   (loop [i (inc open-idx) depth 1]
     (cond
@@ -579,15 +509,15 @@
           (= c \)) (if (= 1 depth) i (recur (inc i) (dec depth)))
           :else    (recur (inc i) depth))))))
 
-(defn- skip-ws [^String s i]
+(defn skip-ws [^String s i]
   (loop [i i]
     (if (and (< i (.length s)) (Character/isWhitespace (.charAt s i)))
       (recur (inc i))
       i)))
 
-(defn- read-ident
-  "Read a SQL identifier (optionally double-quoted) starting at i. Returns
-   [identifier-string next-index]."
+(defn read-ident
+  "Read a SQL identifier (optionally double-quoted) starting at i, returning
+   [identifier next-index]."
   [^String s i]
   (if (and (< i (.length s)) (= \" (.charAt s i)))
     (let [end (str/index-of s "\"" (inc i))]
@@ -607,24 +537,16 @@
       [(subs s i end) end])))
 
 (defn parse-cte-scopes
-  "Peel off a leading `WITH name AS (body) [, name AS (body)]*` clause.
-   Returns `[ctes outer-sql]`, where `ctes` is a vector of
-   `{:name string :body string}` in source order, and `outer-sql` is the
-   remaining SELECT statement. If the template does not start with WITH,
-   returns `[[] template]` unchanged."
+  "Peel off a leading WITH clause, returning [ctes outer-sql]; [[] template]
+   when absent."
   [^String template]
-  ;; Strip a leading comment header first — otherwise a template that
-  ;; opens with `-- …` documentation never matches the `WITH` check,
-  ;; CTE detection silently fails, and the whole query collapses into
-  ;; a single mis-resolved scope (the `syntax error at LEFT` bug).
   (let [t       (str/triml (strip-leading-sql-comments template))
         upper-t (str/upper-case t)]
     (if-not (or (str/starts-with? upper-t "WITH ")
                 (str/starts-with? upper-t "WITH\t")
                 (str/starts-with? upper-t "WITH\n"))
       [[] t]
-      (let [;; Skip "WITH" and any "RECURSIVE" qualifier
-            after-with (skip-ws t 4)
+      (let [after-with (skip-ws t 4)
             [after-with]
             (let [tail (subs upper-t (skip-ws upper-t 4))]
               (if (str/starts-with? tail "RECURSIVE")
@@ -635,7 +557,6 @@
           (let [i (skip-ws t i)
                 [cte-name name-end] (read-ident t i)
                 after-name (skip-ws t name-end)
-                ;; expect AS
                 after-as
                 (do
                   (when-not (and (<= (+ after-name 2) (.length t))
@@ -658,10 +579,9 @@
               :else
               [ctes' (subs t after-body)])))))))
 
-(defn- count-question-marks
-  "Count `?` parameter placeholders in s, ignoring `?` characters that
-   appear inside single-quoted SQL string literals. Adequate for the
-   shapes templates actually carry; not a full lexer."
+(defn count-question-marks
+  "Count ? parameter placeholders in s, ignoring ? inside single-quoted
+   literals."
   [^String s]
   (loop [i 0 in-str? false n 0]
     (if (>= i (.length s))
@@ -689,26 +609,20 @@
 ;;; RLS Injection
 ;;; ============================================================================
 
-(defn- split-at-tail-clauses
-  "Split `sql` at the first top-level ORDER BY / GROUP BY / HAVING / LIMIT
-   / OFFSET / FETCH clause, returning `[head tail]`. The injector uses
-   this so an RLS predicate lands INSIDE the WHERE clause rather than
-   after a trailing LIMIT (which would produce `LIMIT 100 AND <rls>` —
-   a syntax error). Returns `[sql \"\"]` when no tail clause is present."
+(defn split-at-tail-clauses
+  "Split sql at the first top-level tail clause so an RLS predicate lands inside
+   WHERE, not after LIMIT."
   [sql]
-  (let [m (re-matcher
-           #"(?i)\b(?:ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET|FETCH\s+FIRST)\b"
-           sql)]
-    (if (.find m)
-      [(subs sql 0 (.start m)) (subs sql (.start m))]
-      [sql ""])))
+  (if-let [idx (top-level-match
+                #"(?i)\b(?:ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET|FETCH\s+FIRST)\b"
+                sql)]
+    [(subs sql 0 idx) (subs sql idx)]
+    [sql ""]))
 
-(defn- inject-rls
-  "Inject RLS WHERE conditions for all entities referenced in the template.
-  Uses the same compiled guards as the regular query pipeline. The
-  predicate is appended to (or used to introduce) the WHERE clause —
-  BEFORE any trailing ORDER BY / LIMIT / OFFSET so the resulting SQL
-  stays valid."
+(defn inject-rls
+  "Inject compiled :read RLS guards into this scope's WHERE clause, before any
+   tail clause — call once per CTE body/outer SELECT, never around a scalar
+   subquery (its alias would be out of scope)."
   [sql params entities aliases]
   (if-not (rls/should-apply-guards?)
     [sql params]
@@ -717,13 +631,16 @@
        (let [alias (get aliases [:entity entity-id])
              {:keys [rls]} (sql-query/deployed-schema-entity entity-id)
              {:keys [enabled guards]} rls]
-         (if (and enabled alias)
+         (if (and enabled alias
+                  ;; per-entity O/B bypass (RWDOB) — owner/browse roles read
+                  ;; unscoped
+                  (rls/should-apply-guards? entity-id :read))
            (let [{rls-sql :sql rls-params :params}
                  (rls/compile-guards-to-sql alias guards :read)
                  effective-sql    (or rls-sql "1=0")
                  effective-params (if rls-sql rls-params [])
                  [head tail] (split-at-tail-clauses sql)
-                 head' (if (re-find #"(?i)\bWHERE\b" head)
+                 head' (if (top-level-match #"(?i)\bWHERE\b" head)
                          (str (str/trimr head) " AND " effective-sql)
                          (str (str/trimr head) " WHERE " effective-sql))]
              [(if (empty? tail) head' (str head' " " tail))
@@ -736,19 +653,22 @@
 ;;; Execution
 ;;; ============================================================================
 
-(defn- resolve-scope-cached
-  "Resolve a single scope's body to SQL+entities+aliases, using the
-   template cache when `cached?` is truthy."
+(defn resolve-scope-cached
+  "Resolve one scope's body (via the template cache when cached?) and run RBAC
+   per call — never behind the memo, which is keyed by text alone."
   [body cached?]
-  (if cached?
-    (or (sql-query/cached-template body)
-        (let [resolved (resolve-template body)]
-          (when-not (:errors resolved)
-            (sql-query/cache-template body resolved))
-          resolved))
-    (resolve-template body)))
+  (let [resolved (if cached?
+                   (or (sql-query/cached-template body)
+                       (let [resolved (resolve-template body)]
+                         (when-not (:errors resolved)
+                           (sql-query/cache-template body resolved))
+                         resolved))
+                   (resolve-template body))]
+    (when-not (:errors resolved)
+      (enforce-rbac! resolved))
+    resolved))
 
-(defn- throw-on-errors! [{:keys [errors]}]
+(defn throw-on-errors! [{:keys [errors]}]
   (when errors
     (throw (ex-info (str "Template resolution failed: "
                          (str/join "; "
@@ -760,53 +680,24 @@
                     {:code "TEMPLATE_ERROR" :errors errors}))))
 
 (defn execute-template
-  "Parse, resolve, validate, and execute a SQL template.
-
-   The template should contain SELECT, WHERE, GROUP BY, etc. — optionally
-   prefixed by a `WITH … AS (…)[, …]*` CTE block. FROM and JOINs are
-   generated automatically from entity references **within each scope**
-   (each CTE body and the outer SELECT are independent scopes).
-
-   Args:
-     template - SQL string with {Entity.field} placeholders (no FROM needed)
-     params   - Either a vector of positional values (for bare `?`
-                placeholders) or a `{name value}` map (for named
-                `?name` / `?name[]` placeholders)
-
-   Returns:
-     Vector of result maps"
+  "Parse, resolve, validate, and execute a SQL template with positional or named
+   params."
   ([template params] (execute-template template params nil))
   ([template params opts]
-   ;; Strip comments up front — every downstream step (validate,
-   ;; CTE-split, resolve) scans for SQL keywords with plain regexes and
-   ;; a keyword inside a comment would mislead them. The console keeps
-   ;; the commented template; only the executed SQL is comment-free.
    (let [template          (strip-sql-comments template)
          _                 (validate-select-only! template)
-         ;; Compile named `?name` placeholders down to positional `?`
-         ;; *before* CTE-splitting — every downstream step (per-scope
-         ;; `?`-counting, JDBC binding) only understands positional `?`.
-         ;; A template with no `?name` passes through unchanged.
          {rw-sql :sql rw-params :params rw-errors :errors}
          (sql-params/rewrite template params)
          _ (when (seq rw-errors)
              (throw (ex-info (str "Parameter error: " (str/join "; " rw-errors))
                              {:code "TEMPLATE_PARAM_ERROR" :errors rw-errors})))
-         ;; SQLite has no `::type` cast operator. The named-param rewriter
-         ;; preserves user-written `?name::type` casts as `?::type` so PG
-         ;; consumers get the cast applied at bind time; on SQLite the
-         ;; surviving `::type` would be a parse error. Strip the cast — SQLite
-         ;; is dynamically typed, the cast is informational only.
-         rw-sql            (if (= "synthigy.db.SQLite" (.getName (class *db*)))
-                             (str/replace rw-sql #"::\w+" "")
-                             rw-sql)
+         rw-sql            (db/template-sql *db* rw-sql)
          template          rw-sql
          cached?           (get opts :cached true)
          [ctes outer-body] (parse-cte-scopes template)
          user-params       (vec rw-params)
          scopes            (-> (mapv #(assoc % :outer? false) ctes)
                                (conj {:outer? true :body outer-body}))
-         ;; Slice user-params across scopes by `?` count, preserving order.
          [scopes _]
          (reduce (fn [[acc remaining] scope]
                    (let [n (count-question-marks (:body scope))
@@ -815,7 +706,6 @@
                       (vec left)]))
                  [[] user-params]
                  scopes)
-         ;; Resolve + inject RLS per scope.
          resolved-scopes
          (mapv (fn [{:keys [body user-params] :as scope}]
                  (let [{:keys [sql entities aliases] :as r}
@@ -828,7 +718,6 @@
                             :params final-params
                             :entities entities))))
                scopes)
-         ;; Reassemble: WITH name1 AS ( sql1 ), name2 AS ( sql2 ) outer-sql
          outer-scope    (last resolved-scopes)
          cte-scopes     (butlast resolved-scopes)
          final-sql      (if (empty? cte-scopes)
@@ -851,7 +740,19 @@
      (log/trace {:id ::resolved-sql-template-params
                  :data {:params final-params}}
                 "Resolved SQL template params")
-     (sql/execute!
-       (:datasource *db*)
-       (into [final-sql] final-params)
-       :edn))))
+     (try
+       (sql/execute!
+         (:datasource *db*)
+         (into [final-sql] final-params)
+         :edn)
+       (catch clojure.lang.ExceptionInfo e (throw e))
+       (catch Exception e
+         ;; never leak a bare driver exception — the caller wrote a TEMPLATE,
+         ;; not this SQL: RLS injection, auto-FROM and alias generation all
+         ;; happened behind their back, so the resolved form IS the context.
+         (throw (ex-info (str "Template execution failed: " (ex-message e))
+                         {:code "TEMPLATE_EXECUTION_ERROR"
+                          :resolved-sql final-sql
+                          :entities all-entities
+                          :param-count (count final-params)}
+                         e)))))))

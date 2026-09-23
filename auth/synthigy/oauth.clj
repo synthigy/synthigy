@@ -1,38 +1,54 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth
   (:require
-    [buddy.core.hash :as hash]
-    clojure.pprint
-    [clojure.string :as str]
-    [synthigy.log :as log]
-    [patcho.lifecycle :as lifecycle]
-    [ring.util.codec :as codec]
-    [synthigy.dataset.id :as id]
-    [synthigy.oauth.authorization-code
-     :as ac
-     :refer [*authorization-codes*
-             gen-authorization-code
-             get-code-session
-             get-code-request
-             validate-client
-             mark-code-issued]]
-    [synthigy.oauth.core :as core]
-    [synthigy.oauth.device-code :as device-code]
-    [synthigy.oauth.page.status :refer [status-page]]
-    [synthigy.oauth.token :as token]
-    [synthigy.util :as util]))
+   [buddy.core.hash :as hash]
+   clojure.pprint
+   [clojure.string :as str]
+   [synthigy.log :as log]
+   [patcho.lifecycle :as lifecycle]
+   [ring.util.codec :as codec]
+   [synthigy.dataset.id :as id]
+   [synthigy.oauth.authorization-code
+    :as ac
+    :refer [gen-authorization-code
+            validate-client
+            mark-code-issued]]
+   [synthigy.oauth.core :as core]
+   [synthigy.oauth.device-code :as device-code]
+   [synthigy.oauth.onboarding :as onboarding]
+   [synthigy.oauth.persistence :as persistence]
+   ;; side effects: grant-token/sign-token/session-kill-hook defmethods
+   [synthigy.oauth.token]
+   [synthigy.util :as util]))
 
 (defn form-post-response
-  "Generate an HTML page that auto-submits a form via POST (response_mode=form_post).
-
-   Per OpenID Connect Core 1.0 Section 3.3.2.5:
-   - Returns HTML document with auto-submitting form
-   - Form POSTs authorization response parameters to redirect_uri
-   - More secure than query/fragment as parameters don't appear in browser history"
+  "Auto-submitting HTML form POST response (response_mode=form_post)."
   [redirect-uri params]
   (let [hidden-inputs (str/join "\n"
-                        (for [[k v] params]
-                          (format "      <input type=\"hidden\" name=\"%s\" value=\"%s\"/>"
-                                  (name k) (str v))))]
+                                (for [[k v] params]
+                                  (format "      <input type=\"hidden\" name=\"%s\" value=\"%s\"/>"
+                                          (name k) (str v))))]
     {:status 200
      :headers {"Content-Type" "text/html;charset=UTF-8"
                "Cache-Control" "no-cache, no-store"
@@ -52,12 +68,7 @@
                 "</html>")}))
 
 (defn authorization-response
-  "Generate authorization response based on response_mode.
-
-   response_mode values:
-   - 'query' (default) - Parameters in query string via redirect
-   - 'fragment' - Parameters in URL fragment via redirect
-   - 'form_post' - Parameters via auto-submitting HTML form POST"
+  "Build the authorization response for the given response_mode."
   [redirect-uri params response-mode]
   (case response-mode
     "form_post"
@@ -68,7 +79,6 @@
      :headers {"Location" (str redirect-uri "#" (codec/form-encode params))
                "Cache-Control" "no-cache"}}
 
-    ;; Default: query
     {:status 302
      :headers {"Location" (str redirect-uri "?" (codec/form-encode params))
                "Cache-Control" "no-cache"}}))
@@ -87,38 +97,21 @@
            (.replace "/" "_")
            (.replace "=" ""))))))
 
-;; =============================================================================
-;; Ring Middleware (Pure Ring, no Pedestal dependencies)
-;; =============================================================================
-
 (defn wrap-pkce-validation
-  "Ring middleware to validate PKCE (Proof Key for Code Exchange).
-
-   Validates code_verifier against stored code_challenge for authorization_code grants.
-   Returns error response if PKCE validation fails.
-
-   Per OAuth 2.1: PKCE is REQUIRED for public clients (clients without a secret).
-   For confidential clients, PKCE is validated if code_challenge was provided."
+  "Ring middleware enforcing PKCE (S256 only) on authorization_code token
+   requests."
   [handler]
   (fn [request]
     (let [{:keys [code code_verifier grant_type]} (:params request)
           code-request (ac/get-code-request code)
           {:keys [code_challenge code_challenge_method]} code-request
-          is-pkce? (and code_challenge code_challenge_method)
-          ;; Check if client is public - PKCE is mandatory per OAuth 2.1 §4.1.1 / RFC 9700.
-          ;; A client is public if declared so (:type :public) or simply has no stored secret.
-          client (ac/get-code-client code)
-          is-public-client? (or (= :public (:type client))
-                                (nil? (:secret client)))]
+          client (ac/get-code-client code)]
       (log/debug {:id ::pkce-request
                   :data {:grant-type grant_type
                          :client-id (:id client)
-                         :public-client? is-public-client?
-                         :pkce? is-pkce?
                          :code-challenge-method code_challenge_method}}
                  "PKCE inputs")
       (cond
-        ;; Not authorization_code grant - skip PKCE validation
         (not= "authorization_code" grant_type)
         (do
           (log/debug {:id ::pkce-skip-grant-type
@@ -126,35 +119,36 @@
                      "Skipping PKCE validation (non-code grant)")
           (handler request))
 
-        ;; Public client without PKCE - reject per OAuth 2.1
-        (and is-public-client? (not is-pkce?))
+        ;; PKCE is required for every client (OAuth 2.1 §4.1.3)
+        (or (nil? code_challenge) (nil? code_challenge_method))
         (do
-          (log/error {:id ::pkce-public-client-missing
+          (log/error {:id ::pkce-missing-challenge
                       :data {:client-id (:id client)}}
-                     "Public client must use PKCE (RFC 7636 / OAuth 2.1)")
+                     "PKCE is required (OAuth 2.1) — no code_challenge on file")
           (core/json-error
-            "invalid_request"
-            "Public clients must use PKCE. Provide code_challenge and code_challenge_method in authorization request."))
+           "invalid_request"
+           "PKCE is required. Provide code_challenge and code_challenge_method in the authorization request."))
 
-        ;; No PKCE provided for confidential client - allow (backward compatible)
-        (not is-pkce?)
+        ;; 'plain' removed by OAuth 2.1 — the stored challenge would BE the
+        ;; verifier
+        (= "plain" code_challenge_method)
         (do
-          (log/debug {:id ::pkce-skip-confidential
+          (log/error {:id ::pkce-plain-rejected
                       :data {:client-id (:id client)}}
-                     "Skipping PKCE validation (confidential client, no challenge)")
-          (handler request))
+                     "code_challenge_method=plain rejected (removed by OAuth 2.1 / RFC 9700)")
+          (core/json-error
+           "invalid_request"
+           "code_challenge_method \"plain\" is not supported. Use S256."))
 
-        ;; PKCE is required - verify code_verifier is present
         (nil? code_verifier)
         (do
           (log/error {:id ::pkce-missing-verifier
                       :data {:client-id (:id client)}}
                      "Missing code_verifier when PKCE is required")
           (core/json-error
-            "invalid_request"
-            "code_verifier is required when code_challenge was provided"))
+           "invalid_request"
+           "code_verifier is required when code_challenge was provided"))
 
-        ;; Validate PKCE
         :else
         (let [current-challenge (generate-code-challenge code_verifier code_challenge_method)
               match? (= current-challenge code_challenge)]
@@ -173,21 +167,11 @@
                                  :code-challenge-method code_challenge_method}}
                          "PKCE validation failed")
               (core/json-error
-                "invalid_request"
-                "Proof Key for Code Exchange failed"))))))))
-
-;; =============================================================================
-;; Ring Handlers (Pure Ring, no Pedestal dependencies)
-;; =============================================================================
+               "invalid_request"
+               "Proof Key for Code Exchange failed"))))))))
 
 (defn authorization-handler
-  "OAuth 2.0 authorization endpoint handler.
-
-   Initiates authorization code flow. Either:
-   1. Returns authorization code immediately (silent flow with prompt=none)
-   2. Redirects to login page to collect user credentials
-
-   Supports PKCE (code_challenge/code_challenge_method)."
+  "OAuth 2.0 authorization endpoint handler."
   [request]
   (let [{:keys [remote-addr params]} request
         {user-agent "user-agent"} (:headers request)]
@@ -212,28 +196,21 @@
         (cond
           (empty? redirect_uri)
           (core/handle-request-error
-            {:type "missing_redirect"
-             :request req-params})
+           {:type "missing_redirect"
+            :request req-params})
 
           (empty? response_type)
           (core/handle-request-error
-            {:type "missing_response_type"
-             :request req-params})
+           {:type "missing_response_type"
+            :request req-params})
 
           (contains? response_type "code")
           (let [{cookie-session :idsrv/session
                  :keys [prompt state max_age response_mode]} req-params
-                ;; OIDC prompt parameter handling (RFC OpenID Connect Core 1.0 Section 3.1.2.1)
-                ;; prompt=none: Silent auth, return immediately or error
-                ;; prompt=login: Force re-authentication, ignore existing session
-                ;; prompt=consent: Force consent screen (TODO: implement consent flow)
-                ;; prompt=select_account: Account selection (treated as login for now)
                 prompt-none? (= prompt "none")
                 prompt-login? (= prompt "login")
                 prompt-consent? (= prompt "consent")
                 prompt-select-account? (= prompt "select_account")
-                ;; OIDC max_age parameter (Section 3.1.2.1)
-                ;; If max_age is provided, check if authentication is still fresh
                 max-age-seconds (when max_age
                                   (try (Long/parseLong (str max_age))
                                        (catch Exception _ nil)))
@@ -246,91 +223,75 @@
                 session-too-old? (when (and max-age-seconds auth-time-ms)
                                    (> (- (System/currentTimeMillis) auth-time-ms)
                                       (* max-age-seconds 1000)))
-                ;; For silent flow, need existing session that's not too old
                 silent? (and (some? cookie-session) prompt-none? (not session-too-old?))
-                ;; Force login if session exists but is too old per max_age
                 force-login? (or prompt-login? prompt-select-account? session-too-old?)]
             (cond
-              ;; prompt=none but no session - return login_required error
               (and prompt-none? (nil? cookie-session))
               (core/handle-request-error
-                {:request req-params
-                 :type "login_required"
-                 :description "User is not authenticated and prompt=none was requested"})
+               {:request req-params
+                :type "login_required"
+                :description "User is not authenticated and prompt=none was requested"})
 
-              ;; prompt=none but session too old per max_age - return login_required
               (and prompt-none? session-too-old?)
               (core/handle-request-error
-                {:request req-params
-                 :type "login_required"
-                 :description (str "Authentication is older than max_age (" max_age " seconds)")})
+               {:request req-params
+                :type "login_required"
+                :description (str "Authentication is older than max_age (" max_age " seconds)")})
 
-              ;; Check that there isn't some other code active (for silent flow)
               (and silent? (contains? (core/get-session cookie-session) :code))
               (core/handle-request-error
-                {:request req-params
-                 :type "invalid_request"
-                 :description "Your session has unused access code active"})
+               {:request req-params
+                :type "invalid_request"
+                :description "Your session has unused access code active"})
 
-              ;; Silent flow - return code immediately (prompt=none with valid session)
               silent?
               (try
                 (let [client (validate-client req-params)
                       client-id (id/extract client)
                       code (gen-authorization-code)
                       response-params (cond->
-                                        {:code code
-                                         :iss (core/domain+)}  ; RFC 9207 - Issuer Identification
+                                       {:code code
+                                        :iss (core/domain+)}  ; RFC 9207
                                         (not-empty state) (assoc :state state))]
-                  (swap! *authorization-codes*
-                         (fn [codes]
-                           (assoc codes code {:issued? true
-                                              :client client-id
-                                              :created-on (System/currentTimeMillis)
-                                              :user/agent user-agent
-                                              :user/ip remote-addr
-                                              :request req-params})))
+                  (ac/create-code! code {:issued? true
+                                         :client client-id
+                                         :agent user-agent
+                                         :ip remote-addr
+                                         :request req-params})
                   (mark-code-issued cookie-session code)
-                  ;; Support response_mode: query (default), fragment, or form_post
+                  ;; the SPA's heartbeat — without this an actively renewing
+                  ;; session reads as idle
+                  (core/touch-session! cookie-session)
                   (authorization-response redirect_uri response-params response_mode))
                 (catch clojure.lang.ExceptionInfo ex
                   (core/handle-request-error (ex-data ex))))
 
-              ;; prompt=login or prompt=select_account - force re-authentication
-              ;; Even if session exists, redirect to login
               force-login?
               (try
                 (let [code (gen-authorization-code)
                       client (validate-client req-params)
                       client-id (id/extract client)
                       login-url (core/get-client-login-url client)
-                      ;; Include prompt in state so login handler knows to force re-auth
                       location (str login-url "?"
                                     (codec/form-encode
-                                      {:state (core/encrypt
-                                                {:authorization-code code
-                                                 :flow "authorization_code"
-                                                 :prompt prompt})}))]
-                  (swap! *authorization-codes*
-                         (fn [codes]
-                           (assoc codes code {:client client-id
-                                              :created-on (System/currentTimeMillis)
-                                              :user/agent user-agent
-                                              :user/ip remote-addr
-                                              :request req-params})))
+                                     {:state (core/encrypt
+                                              {:authorization-code code
+                                               :flow "authorization_code"
+                                               :prompt prompt})}))]
+                  (ac/create-code! code {:client client-id
+                                         :agent user-agent
+                                         :ip remote-addr
+                                         :request req-params})
                   {:status 302
                    :headers {"Location" location
                              "Cache-Control" "no-cache"}
-                   ;; Clear the session cookie to force fresh login
                    :cookies {"idsrv.session" {:value ""
                                               :max-age 0
                                               :path "/"}}})
                 (catch clojure.lang.ExceptionInfo ex
                   (core/handle-request-error (ex-data ex))))
 
-              ;; prompt=consent - force consent screen
-              ;; TODO: Implement full consent flow. For now, treat like normal login
-              ;; which will show consent if scope requires it
+              ;; TODO: full consent flow — for now treated like normal login
               prompt-consent?
               (try
                 (let [code (gen-authorization-code)
@@ -339,25 +300,21 @@
                       login-url (core/get-client-login-url client)
                       location (str login-url "?"
                                     (codec/form-encode
-                                      {:state (core/encrypt
-                                                {:authorization-code code
-                                                 :flow "authorization_code"
-                                                 :prompt prompt
-                                                 :force-consent true})}))]
-                  (swap! *authorization-codes*
-                         (fn [codes]
-                           (assoc codes code {:client client-id
-                                              :created-on (System/currentTimeMillis)
-                                              :user/agent user-agent
-                                              :user/ip remote-addr
-                                              :request req-params})))
+                                     {:state (core/encrypt
+                                              {:authorization-code code
+                                               :flow "authorization_code"
+                                               :prompt prompt
+                                               :force-consent true})}))]
+                  (ac/create-code! code {:client client-id
+                                         :agent user-agent
+                                         :ip remote-addr
+                                         :request req-params})
                   {:status 302
                    :headers {"Location" location
                              "Cache-Control" "no-cache"}})
                 (catch clojure.lang.ExceptionInfo ex
                   (core/handle-request-error (ex-data ex))))
 
-              ;; Interactive flow - redirect to login (default case)
               :else
               (try
                 (let [code (gen-authorization-code)
@@ -366,16 +323,13 @@
                       login-url (core/get-client-login-url client)
                       location (str login-url "?"
                                     (codec/form-encode
-                                      {:state (core/encrypt
-                                                {:authorization-code code
-                                                 :flow "authorization_code"})}))]
-                  (swap! *authorization-codes*
-                         (fn [codes]
-                           (assoc codes code {:client client-id
-                                              :created-on (System/currentTimeMillis)
-                                              :user/agent user-agent
-                                              :user/ip remote-addr
-                                              :request req-params})))
+                                     {:state (core/encrypt
+                                              {:authorization-code code
+                                               :flow "authorization_code"})}))]
+                  (ac/create-code! code {:client client-id
+                                         :agent user-agent
+                                         :ip remote-addr
+                                         :request req-params})
                   {:status 302
                    :headers {"Location" location
                              "Cache-Control" "no-cache"}})
@@ -384,15 +338,26 @@
 
           :else
           (core/handle-request-error
-            {:type "server_error"
-             :request req-params}))))))
-
-;; =============================================================================
-;; Legacy Pedestal Interceptors (will be removed after full conversion)
-;; =============================================================================
+           {:type "server_error"
+            :request req-params}))))))
 
 (defonce maintenance-agent (agent {:running true
                                    :period (util/seconds 30)}))
+
+(defonce ^:private last-janitor-run (atom 0))
+
+(defn run-janitor!
+  "Hourly row janitor on the 30s maintenance cadence."
+  []
+  (when (> (- (System/currentTimeMillis) @last-janitor-run) (util/hours 1))
+    (reset! last-janitor-run (System/currentTimeMillis))
+    (try
+      (persistence/clean-expired-rows!)
+      (catch Throwable e
+        (log/error! {:id ::janitor-failed
+                     :msg "OAuth store janitor failed"
+                     :data {:action :cleanup :subject :oauth-store}}
+                    e)))))
 
 (comment
   (agent-error maintenance-agent)
@@ -409,7 +374,9 @@
     (core/clean-sessions)
     (ac/clean-codes)
     (device-code/clean-expired-codes)
+    (run-janitor!)
     (core/monitor-client-change)
+    (onboarding/start-deactivation-watcher!)
     (log/debug {:id ::maintenance-finish} "OAuth maintenance finish")
     (Thread/sleep period))
   data)
@@ -422,31 +389,20 @@
 (defn stop
   []
   (send-off maintenance-agent assoc :running false)
-  (doseq [x [core/*resource-owners* core/*clients*
-             core/*sessions* token/*tokens*]]
-    (reset! x nil)))
-
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
+  (core/evict-clients!)
+  (onboarding/stop-deactivation-watcher!))
 
 (lifecycle/register-module!
-  :synthigy/oauth
-  ;; substrate edge: monitor-client-change (oauth/core) registers a delta
-  ;; subscription on the App entity so the client cache reloads when a
-  ;; client row changes. That bus is fed by the substrate drainer, so the
-  ;; drainer must be up or client changes only land on the maintenance
-  ;; agent's slow periodic reload.
-  {:depends-on [:synthigy/iam :synthigy.iam/connector :synthigy/substrate]
-   :doc "OAuth 2.1 / OIDC provider — in-memory token & session store"
-   :start (fn []
-            ;; Runtime: Start maintenance agent, initialize caches
-            (log/info {:id ::starting :data {:action :starting :subject :oauth}} "Starting OAuth")
-            (start)
-            (log/info {:id ::started :data {:action :started :subject :oauth}} "OAuth started"))
-   :stop (fn []
-           ;; Runtime: Stop maintenance agent, clear caches
-           (log/info {:id ::stopping :data {:action :stopping :subject :oauth}} "Stopping OAuth")
-           (stop)
-           (log/info {:id ::stopped :data {:action :stopped :subject :oauth}} "OAuth stopped"))})
+ :synthigy/oauth
+ {:depends-on [:synthigy/iam :synthigy.iam/connector :synthigy/plug]
+  :headline true
+  :doc "OAuth 2.1 / OIDC provider — in-memory token & session store"
+  :start (fn []
+           (log/info {:id ::starting :data {:action :starting :subject :oauth}} "Starting OAuth")
+           (start)
+           (log/info {:id ::started :data {:action :started :subject :oauth}} "OAuth started"))
+  :stop (fn []
+          (log/info {:id ::stopping :data {:action :stopping :subject :oauth}} "Stopping OAuth")
+          (stop)
+          (log/info {:id ::stopped :data {:action :stopped :subject :oauth}} "OAuth stopped"))})
 

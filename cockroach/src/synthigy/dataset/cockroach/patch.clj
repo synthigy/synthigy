@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.cockroach.patch
   "CockroachDB-specific dataset feature patches.
 
@@ -16,7 +38,7 @@
     [synthigy.dataset :as dataset]
     [synthigy.dataset.core :as core]
     [synthigy.dataset.id :as id]
-    [synthigy.substrate.cockroach :as substrate]
+    [synthigy.plug.cockroach :as plug]
     [synthigy.dataset.sql.naming
      :as naming
      :refer [normalize-name
@@ -33,7 +55,7 @@
 ;;; ID Immutability Triggers
 ;;; ============================================================================
 
-(defn postgres-id-trigger-function
+(defn id-trigger-function
   "Returns SQL to create the CockroachDB trigger function for ID immutability.
 
   CRDB differences vs PG:
@@ -56,14 +78,14 @@ END;
 $$ LANGUAGE plpgsql;"
     (id/field) (id/field) (id/field) (id/field) (id/field)))
 
-(defn postgres-id-trigger
+(defn id-trigger
   "Returns SQL to create the ID immutability trigger on a table.
 
   CRDB v25.2 doesn't support `CREATE OR REPLACE TRIGGER` (issue 128422)
   so we emit plain `CREATE TRIGGER`. The trigger name INCLUDES the
   normalized table name so each table gets its own trigger (without the
   suffix the same name would collide across tables once OR REPLACE is
-  unavailable). Callers MUST run `(drop-postgres-id-trigger table)`
+  unavailable). Callers MUST run `(drop-id-trigger table)`
   first if idempotency is needed."
   [table-name]
   (let [safe-table (clojure.string/replace table-name #"[^a-zA-Z0-9_]" "_")]
@@ -74,9 +96,9 @@ $$ LANGUAGE plpgsql;"
     EXECUTE FUNCTION prevent_%s_update();"
       (id/field) safe-table table-name (id/field))))
 
-(defn drop-postgres-id-trigger
+(defn drop-id-trigger
   "Returns SQL to drop the ID immutability trigger for a table.
-   Name must match `postgres-id-trigger`'s output (includes the
+   Name must match `id-trigger`'s output (includes the
    normalized table suffix for CRDB collision-avoidance)."
   [table-name]
   (let [safe-table (clojure.string/replace table-name #"[^a-zA-Z0-9_]" "_")]
@@ -84,7 +106,7 @@ $$ LANGUAGE plpgsql;"
       "DROP TRIGGER IF EXISTS prevent_%s_update_trigger_%s ON \"%s\";"
       (id/field) safe-table table-name)))
 
-(defn drop-postgres-id-trigger-function
+(defn drop-id-trigger-function
   "Returns SQL to drop the PostgreSQL trigger function for ID immutability."
   []
   (format "DROP FUNCTION IF EXISTS prevent_%s_update() CASCADE;" (id/field)))
@@ -113,9 +135,6 @@ BEGIN
   SELECT RAISE(ABORT, 'Cannot modify %s value');
 END;"
     (id/field) table-name (id/field) (id/field) (id/field)))
-
-;; Backwards-compatible alias
-(def sqlite-euuid-trigger sqlite-id-trigger)
 
 (defn drop-sqlite-id-trigger
   "Returns SQL to drop a SQLite ID immutability trigger.
@@ -167,7 +186,7 @@ END;"
        (if exists?
          (log/debug {:id ::trigger-function-already-exists}
                     "prevent_<id>_update() already present; skipping CREATE")
-         (do (sql/execute! [(postgres-id-trigger-function)])
+         (do (sql/execute! [(id-trigger-function)])
              (log/debug {:id ::trigger-function-created} "Created trigger function"))))
 
      ;; CRDB has no `CREATE OR REPLACE TRIGGER` (issue 128422). Drop-then-create
@@ -175,8 +194,8 @@ END;"
      (let [created (atom 0)]
        (doseq [table tables]
          (try
-           (sql/execute! [(drop-postgres-id-trigger table)])
-           (sql/execute! [(postgres-id-trigger table)])
+           (sql/execute! [(drop-id-trigger table)])
+           (sql/execute! [(id-trigger table)])
            (swap! created inc)
            (log/debug {:id ::trigger-created :data {:table table}} "Created trigger on table")
            (catch Throwable ex
@@ -184,9 +203,6 @@ END;"
        {:created @created
         :tables tables
         :type :postgres}))))
-
-;; Backward compatibility alias
-(def create-euuid-immutability-triggers! create-id-immutability-triggers!)
 
 (defn remove-id-immutability-triggers!
   "Removes ID immutability triggers from all entity tables.
@@ -205,19 +221,16 @@ END;"
                :data {:table-count (count tables) :column (id/field)}}
               "Removing ID immutability triggers")
     (doseq [table tables]
-      (sql/execute! *db* [(drop-postgres-id-trigger table)])
+      (sql/execute! *db* [(drop-id-trigger table)])
       (log/debug {:id ::trigger-dropped :data {:table table}} "Dropped trigger from table"))
 
         ;; Drop the trigger function
-    (sql/execute! *db* [(drop-postgres-id-trigger-function)])
+    (sql/execute! *db* [(drop-id-trigger-function)])
     (log/debug {:id ::trigger-function-dropped} "Dropped PostgreSQL/CockroachDB trigger function")
 
     {:removed (count tables)
      :tables tables
      :type :postgres}))
-
-;; Backward compatibility alias
-(def remove-euuid-immutability-triggers! remove-id-immutability-triggers!)
 
 ;;; ============================================================================
 ;;; Patch Helper Functions
@@ -511,6 +524,16 @@ END;"
                           :data {:action :upgraded :subject :dataset-model :version "1.0.5"}}
                          "Meta-model v1.0.5 deployed; audit fields now resolvable in selections"))
 
+(patch/upgrade :synthigy.dataset/model
+               "1.0.6"
+               (log/info {:id ::model-v106-deploying
+                          :data {:action :deploying :subject :dataset-model :version "1.0.6"}}
+                         "Deploying meta-model v1.0.6 — RBAC opt-in on meta-entities")
+               (dataset/deploy! (dataset/current-dataset-version))
+               (log/info {:id ::model-v106-complete
+                          :data {:action :upgraded :subject :dataset-model :version "1.0.6"}}
+                         "Meta-model v1.0.6 deployed"))
+
 ;;; ============================================================================
 ;;; PostgreSQL Dataset Feature Patches
 ;;; ============================================================================
@@ -543,15 +566,15 @@ END;"
                ;; Guard: only run on PostgreSQL (skip for SQLite, etc.)
                (when (instance? synthigy.db.Cockroach *db*)
                  (log/info {:id ::v101-installing-id-triggers :data {:action :installing :subject :id-triggers :version "1.0.1"}}
-                           "Installing EUUID immutability triggers")
+                           "Installing ID immutability triggers")
                  (log/info {:id ::v101-rationale}
                            "Enables order-independent mapping for CockroachDB/SQLite compatibility")
                  (try
-                   (let [result (create-euuid-immutability-triggers!)]
+                   (let [result (create-id-immutability-triggers!)]
                      (log/info {:id ::v101-triggers-created
                                 :data {:count (:created result)
                                        :type (name (:type result))}}
-                               "Created EUUID immutability triggers")
+                               "Created ID immutability triggers")
                      (log/info {:id ::v101-protected-tables
                                 :data {:tables (:tables result)}}
                                "Protected tables"))
@@ -580,7 +603,7 @@ END;"
                          schema (sql-query/model->schema model)
                          relations (mapcat (fn [[_eid ent]] (vals (:relations ent))) schema)
                          unique-tables (set (keep :table relations))]
-                     (substrate/reconcile-relations! *db* (:datasource *db*) relations)
+                     (plug/reconcile-relations! *db* (:datasource *db*) relations)
                      (log/info {:id ::v120-installed
                                 :data {:action :installed :subject :dataset-features :version "1.2.0"
                                        :relation-count (count unique-tables)}}
@@ -611,7 +634,7 @@ END;"
                          schema (sql-query/model->schema model)
                          relations (mapcat (fn [[_eid ent]] (vals (:relations ent))) schema)
                          unique-tables (set (keep :table relations))]
-                     (substrate/reconcile-relations! *db* (:datasource *db*) relations)
+                     (plug/reconcile-relations! *db* (:datasource *db*) relations)
                      (log/info {:id ::v130-installed
                                 :data {:action :upgraded :subject :dataset-features :version "1.3.0"
                                        :relation-count (count unique-tables)}}
@@ -621,3 +644,73 @@ END;"
                                   :data {:action :upgrading :subject :dataset-features :version "1.3.0"}} e)
                      (throw e)))))
 
+;; Patch 1.4.0 - Enum columns to TEXT (CockroachDB only)
+;; Enum values are model metadata, not database types. Native enum types made
+;; every value change a type-rotation DDL dance, behaved differently on each
+;; backend (SQLite already stores TEXT), and could destroy row data on value
+;; removal. Convert every enum-typed column to TEXT and drop all enum types —
+;; including orphaned `x__N` rotation leftovers. Catalog-driven and idempotent:
+;; a second run finds no enum columns/types and no-ops.
+;;
+;; CRDB notes vs the postgres patch:
+;;   - ALTER COLUMN TYPE ... USING runs out-of-tx here (execute-one! per
+;;     statement), which is the path CRDB supports (issue 49351 blocks it
+;;     inside explicit transactions).
+;;   - `DROP TYPE ... CASCADE` is unimplemented in CRDB (issue 51480), so we
+;;     emit plain `drop type if exists` and treat each drop as best-effort:
+;;     a leaked orphan type is functionally inert once no column uses it.
+(patch/upgrade :synthigy/dataset
+               "1.4.0"
+               (when (instance? synthigy.db.Cockroach *db*)
+                 (log/info {:id ::v140-enum-to-text
+                            :data {:action :upgrading :subject :dataset-features :version "1.4.0"}}
+                           "Migrating enum columns to TEXT")
+                 (try
+                   (let [enum-columns (sql/execute!
+                                       ["select c.table_name, c.column_name
+                                         from information_schema.columns c
+                                         join pg_type t on t.typname = c.udt_name
+                                         join pg_namespace n on n.oid = t.typnamespace
+                                         where t.typtype = 'e' and n.nspname = 'public'
+                                           and c.table_schema = 'public'"])
+                         enum-types (sql/execute!
+                                     ["select t.typname
+                                       from pg_type t
+                                       join pg_namespace n on n.oid = t.typnamespace
+                                       where t.typtype = 'e' and n.nspname = 'public'"])]
+                     (doseq [row enum-columns
+                             ;; CRDB's JDBC metadata doesn't reliably qualify
+                             ;; result keys the way PG does - accept both forms.
+                             :let [table (or (:columns/table_name row) (:table_name row))
+                                   column (or (:columns/column_name row) (:column_name row))]]
+                       (execute-one!
+                        [(format "alter table \"%s\" alter column \"%s\" type text using \"%s\"::text"
+                                 table column column)]))
+                     (doseq [row enum-types
+                             :let [type-name (or (:pg_type/typname row) (:typname row))]]
+                       (try
+                         (execute-one!
+                          [(format "drop type if exists \"%s\"" type-name)])
+                         (catch Throwable e
+                           (log/warn {:id ::v140-drop-type-best-effort
+                                      :data {:type type-name}}
+                                     (.getMessage e)))))
+                     (log/info {:id ::v140-complete
+                                :data {:action :upgraded :subject :dataset-features :version "1.4.0"
+                                       :columns (count enum-columns)
+                                       :types (count enum-types)}}
+                               "Enum columns migrated to TEXT, enum types dropped"))
+                   (catch Throwable e
+                     (log/error! {:id ::v140-failed
+                                  :data {:action :upgrading :subject :dataset-features :version "1.4.0"}} e)
+                     (throw e)))))
+
+
+;; Patch 1.5.0 - Unique groups as indexes (no-op on CockroachDB)
+;; SQLite-only migration; CockroachDB has real constraint DDL. Marker keeps the
+;; feature version aligned across backends.
+(patch/upgrade :synthigy/dataset
+               "1.5.0"
+               (log/info {:id ::v150-unique-index
+                          :data {:action :upgraded :subject :dataset-features :version "1.5.0"}}
+                         "Unique-groups-as-indexes: no-op on CockroachDB (constraint DDL is supported)"))

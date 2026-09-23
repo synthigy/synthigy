@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.cockroach.xid
   "CockroachDB XID migration utilities.
 
@@ -386,7 +408,7 @@
 ;;; XID Immutability Triggers
 ;;; ============================================================================
 
-(defn postgres-xid-trigger-function
+(defn xid-trigger-function
   "Returns SQL to create the CockroachDB trigger function for XID immutability.
 
   CRDB differences vs the PG version:
@@ -414,7 +436,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;")
 
-(defn postgres-xid-trigger-name
+(defn xid-trigger-name
   "Deterministic trigger name for the per-table xid immutability trigger.
    Kept as a public helper so the drop / create pair can target the same
    identifier without duplication."
@@ -422,28 +444,28 @@ $$ LANGUAGE plpgsql;")
   (format "prevent_xid_update_trigger_%s"
           (str/replace table-name #"[^a-zA-Z0-9_]" "_")))
 
-(defn postgres-xid-trigger-drop
+(defn xid-trigger-drop
   "DROP TRIGGER IF EXISTS for the per-table xid immutability trigger.
    Idempotent. CRDB v25.2 doesn't support `CREATE OR REPLACE TRIGGER`
    (issue 128422), so we drop-then-create."
   [table-name]
   (format "DROP TRIGGER IF EXISTS %s ON \"%s\";"
-          (postgres-xid-trigger-name table-name)
+          (xid-trigger-name table-name)
           table-name))
 
-(defn postgres-xid-trigger
+(defn xid-trigger
   "Returns SQL to create the XID immutability trigger on a table.
 
   CRDB v25.2 doesn't support `CREATE OR REPLACE TRIGGER` (issue 128422)
   so we emit plain `CREATE TRIGGER`. Callers MUST run
-  `(postgres-xid-trigger-drop table)` first for idempotency."
+  `(xid-trigger-drop table)` first for idempotency."
   [table-name]
   (format
     "CREATE TRIGGER %s
   BEFORE UPDATE ON \"%s\"
   FOR EACH ROW
   EXECUTE FUNCTION prevent_xid_update();"
-    (postgres-xid-trigger-name table-name)
+    (xid-trigger-name table-name)
     table-name))
 
 (defn create-xid-immutability-triggers!
@@ -465,15 +487,15 @@ $$ LANGUAGE plpgsql;")
       (if exists?
         (log/debug {:id ::trigger-function-already-exists}
                    "prevent_xid_update() already present; skipping CREATE")
-        (do (sql/execute! [(postgres-xid-trigger-function)])
+        (do (sql/execute! [(xid-trigger-function)])
             (log/debug {:id ::trigger-function-created}
                        "Created PostgreSQL/CRDB trigger function for xid"))))
 
     ;; Drop-then-create (CRDB has no CREATE OR REPLACE TRIGGER).
     (doseq [table tables]
       (try
-        (sql/execute! [(postgres-xid-trigger-drop table)])
-        (sql/execute! [(postgres-xid-trigger table)])
+        (sql/execute! [(xid-trigger-drop table)])
+        (sql/execute! [(xid-trigger table)])
         (log/debug {:id ::xid-trigger-created :data {:table table}}
                    "Created xid trigger on table")
         (catch Exception e
@@ -751,6 +773,8 @@ $$ LANGUAGE plpgsql;")
   1. Revert stored models to euuid format
   2. Revert relation table names (XID-based → EUUID-based)
   3. Drop xid columns from all tables
+  4. Clear the stored format stamp
+  5. Restore the euuid provider (full inverse of the import's step 6)
 
   Returns:
     Map with results"
@@ -759,17 +783,17 @@ $$ LANGUAGE plpgsql;")
             "RESETTING XID MIGRATION")
 
   ;; Step 1: Revert models to euuid format first (before dropping columns)
-  (log/info {:id ::reset-step :data {:step 1 :of 3 :name "revert-stored-models"}}
+  (log/info {:id ::reset-step :data {:step 1 :of 5 :name "revert-stored-models"}}
             "Reverting stored models to euuid format")
   (let [model-result (model/transform-stored-models! :euuid)]
 
     ;; Step 2: Revert relation table names (BEFORE dropping xid columns!)
-    (log/info {:id ::reset-step :data {:step 2 :of 3 :name "revert-relation-tables"}}
+    (log/info {:id ::reset-step :data {:step 2 :of 5 :name "revert-relation-tables"}}
               "Reverting relation table names")
     (let [revert-result (revert-relation-tables!)]
 
       ;; Step 3: Find all tables with xid column and drop it
-      (log/info {:id ::reset-step :data {:step 3 :of 3 :name "drop-xid-columns"}}
+      (log/info {:id ::reset-step :data {:step 3 :of 5 :name "drop-xid-columns"}}
                 "Dropping xid columns")
       (let [tables-with-xid (get-all-tables-with-xid)
             _ (log/info {:id ::reset-tables-found
@@ -781,6 +805,21 @@ $$ LANGUAGE plpgsql;")
                                    :result (drop-xid-column! table)})
                                 tables-with-xid))
             dropped-count (count (filter #(= :dropped (:result %)) drop-results))]
+
+        ;; Step 4: Clear the format stamp — a stale "xid" stamp would boot the
+        ;; reverted DB as migrated.
+        (log/info {:id ::reset-step :data {:step 4 :of 5 :name "clear-format-stamp"}}
+                  "Clearing stored format stamp")
+        (dataset/clear-format!)
+
+        ;; Step 5: Flip the provider back — the import gate reads the AMBIENT
+        ;; provider, so without this a same-process rerun skips as
+        ;; :already-synthigy.
+        (log/info {:id ::reset-step :data {:step 5 :of 5 :name "restore-euuid-provider"}}
+                  "Restoring euuid provider")
+        (id/set-provider! (id/->UUIDProvider))
+        (dataset/save-model! nil)
+        (dataset/reload)
 
         (log/info {:id ::reset-complete
                    :data {:models-reverted (:total model-result 0)

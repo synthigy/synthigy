@@ -1,20 +1,29 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.runtime
-  "Composes the runtime model — the augmented view of the deployed
-   model that surfaces identity, audit, and reference-typed attrs as
-   first-class entries.
-
-   See memory: project_runtime_model_plan.md
-
-   Three ModelEnhancement implementations live here:
-     - UUIDProvider / NanoIDProvider — extended to add xid/euuid attrs.
-     - AuditEnhancer (private record)  — adds audit attrs based on
-       entity audit configuration.
-     - ReferenceEnhancer (private record) — walks attrs and emits
-       relations for any whose :type is a reference type.
-
-   Order matters: identity first, then audit (audit attrs land in
-   :attributes with :type \"user\"), then reference (sees both authored
-   ref-typed attrs and audit's user-typed attrs uniformly)."
+  "Composes the runtime model — deployed model augmented with identity, audit, and
+   reference-typed attrs as first-class entries. Composition order matters in
+   `build`: identity, then audit, then reference. See memory: project_runtime_model_plan.md"
   (:require
    [synthigy.dataset.core :as core]
    [synthigy.dataset.enhance :as enhance]
@@ -22,43 +31,30 @@
   (:import
    [synthigy.dataset.id UUIDProvider NanoIDProvider]))
 
-;; ============================================================================
-;; Helpers
-;; ============================================================================
-
-(defn- find-entity
-  "Look up an entity by either form of its id (UUID or xid string).
-   Necessary because `core/reference-entity-uuid` returns whichever form
-   the registry holds — that's a UUID under EUUID provider but an xid
-   string under XID provider — and entities carry both."
+(defn find-entity
+  "Looks up an entity by either id form (UUID or xid string) — entities carry
+   both."
   [model id]
   (or (get (:entities model) id)
       (some #(when (or (= id (:euuid %)) (= id (:xid %))) %)
             (vals (:entities model)))))
 
-(defn- append-attrs
-  "Append attrs to entity.attributes, skipping ones whose name is
-   already present. Idempotent."
+(defn append-attrs
+  "Appends attrs to entity.attributes, skipping ones whose name is already
+   present."
   [entity new-attrs]
   (let [existing (into #{} (map :name) (:attributes entity))
         addins   (remove #(contains? existing (:name %)) new-attrs)]
     (cond-> entity
       (seq addins) (update :attributes (fnil into []) addins))))
 
-(defn- enhance-each-entity [model f]
+(defn enhance-each-entity [model f]
   (update model :entities
           (fn [es] (into {} (map (fn [[k v]] [k (f v)])) es))))
 
-;; ============================================================================
-;; ID Provider — emit xid/euuid attrs on every entity
-;; ============================================================================
-
-(defn- system-attrs-for
-  "Emit ONLY the active provider's id attr — `xid` under NanoID, `euuid`
-   under UUID. A deploy is mono-format (euuid OR xid is first-class per
-   deploy); the other id is an internal dual-storage detail. Emitting both
-   leaked the non-active id onto `/schema` and `/data` — so project just the
-   active `(id/key*)` field here."
+(defn system-attrs-for
+  "Emits only the active provider's id attr (xid under NanoID, euuid under UUID) — emitting
+   both leaked the non-active id onto /schema and /data."
   [provider entity]
   (let [eid   (id/extract* provider entity)
         field (name (id/key* provider))]
@@ -78,40 +74,29 @@
      model
      #(append-attrs % (system-attrs-for provider %)))))
 
-;; ============================================================================
-;; Audit — emit audit attrs based on entity audit configuration
-;; ============================================================================
+(defn audit-attrs-for [entity]
+  (let [eid (id/extract entity)]
+    ;; who-columns come from core/audit-ref-attrs — same derived ids RLS
+    ;; resolves against, never inline this again
+    (into
+     (cond-> []
+       (core/audit-modified? entity)
+       (conj (merge (id/derive-id eid "modified_on")
+                    {:name "modified_on" :type "timestamp" :active true}))
 
-(defn- audit-attrs-for [entity]
-  (let [eid       (id/extract entity)
-        modified? (core/audit-modified? entity)
-        created?  (core/audit-created? entity)]
-    (cond-> []
-      modified?
-      (into [(merge (id/derive-id eid "modified_on")
-                    {:name "modified_on" :type "timestamp" :active true})
-             (merge (id/derive-id eid "modified_by")
-                    {:name "modified_by" :type "user" :active true})])
+       (core/audit-created? entity)
+       (conj (merge (id/derive-id eid "created_on")
+                    {:name "created_on" :type "timestamp" :active true})))
+     (core/audit-ref-attrs entity))))
 
-      created?
-      (into [(merge (id/derive-id eid "created_on")
-                    {:name "created_on" :type "timestamp" :active true})
-             (merge (id/derive-id eid "created_by")
-                    {:name "created_by" :type "user" :active true})]))))
-
-(defrecord ^:private AuditEnhancer []
+(defrecord AuditEnhancer []
   enhance/ModelEnhancement
   (enhance-model [_ model]
     (enhance-each-entity model #(append-attrs % (audit-attrs-for %)))))
 
-;; ============================================================================
-;; Reference — emit relations for ref-typed attrs
-;; ============================================================================
-
-(defn- attr->relation
-  "Build an ERDRelation from a ref-typed attr. The relation's identity
-   is the attr's identity (per plan): :euuid/:xid lifted directly. From
-   and To are stored as ids (matching how authored relations store)."
+(defn attr->relation
+  "Builds an ERDRelation from a ref-typed attr; the relation's identity is the
+   attr's identity."
   [from-entity attr to-entity]
   (core/map->ERDRelation
    {:euuid         (:euuid attr)
@@ -126,42 +111,33 @@
     :active        true
     :claimed-by    nil}))
 
-(defn- entity-reference-relations
-  "All synthetic relations contributed by `entity` — one per ref-typed
-   attr whose target entity exists in the model."
+(defn entity-reference-relations
+  "All synthetic relations contributed by entity — one per ref-typed attr with a
+   resolvable target."
   [model entity]
   (keep
    (fn [attr]
-     (when-let [target-id (core/reference-entity-uuid (:type attr))]
+     (when-let [target-id (core/reference-entity-id (:type attr))]
        (when-let [to-entity (find-entity model target-id)]
          (attr->relation entity attr to-entity))))
    (:attributes entity)))
 
-(defrecord ^:private ReferenceEnhancer []
+(defrecord ReferenceEnhancer []
   enhance/ModelEnhancement
   (enhance-model [_ model]
     (let [new-rels (mapcat (partial entity-reference-relations model)
                            (vals (:entities model)))]
       (reduce (fn [m rel]
                 (let [k (id/extract rel)]
-                  ;; Don't overwrite existing relations (idempotent).
                   (if (get-in m [:relations k])
                     m
                     (assoc-in m [:relations k] rel))))
               model
               new-rels))))
 
-;; ============================================================================
-;; Composer
-;; ============================================================================
-
 (defn build
-  "Compose the runtime view of the deployed model: identity attrs +
-   audit attrs + reference-typed-attrs-as-relations.
-
-   Idempotent — re-running over an already-runtime model adds nothing
-   new (existing names/relations are preserved). Returns nil for nil
-   input."
+  "Composes the runtime view: identity attrs + audit attrs + reference-typed-attrs-as-relations.
+   Idempotent; nil-safe."
   [model]
   (when model
     (->> model

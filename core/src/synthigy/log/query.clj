@@ -1,47 +1,27 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.log.query
-  "Filter-map spec + dispatch into the bound observability store.
-
-  The CONTRACT (filter-map shape, operator vocabularies, validation rules)
-  lives here and is shared by every store impl. Execution dispatches into
-  whatever `synthigy.log.store/*log-store*` is bound — the store's `search`
-  method consumes the validated filter-map and returns wire-schema-v1 rows
-  (or a scalar count, or a vector of group buckets).
-
-  `*log-store*` is defonce'd at protocol-ns load to a fresh
-  `synthigy.log.store/RingLogStore` — so query works from JVM start, no
-  `install!` step required. Starting `:synthigy/observability` swaps the
-  dynvar to a durable backend (DuckDB, ClickHouse) and drains the ring;
-  reads transparently follow. Stop rebinds a fresh ring.
-
-  ## Quick reference
-
-      (query/recent {:where {:level :error} :since \"1h\"})
-      (query/lifecycle \"r-42\")
-      (query/errors-since \"1h\")
-
-  ## Filter-map shape
-
-      {:where    {field val-or-set-or-tuple, …}   ; implicit AND
-       :since    \"10m\" | \"2026-05-13T11:00:00Z\"
-       :until    \"1h\"  | \"2026-05-13T12:00:00Z\"
-       :limit    50                               ; default 100, any positive int
-       :order-by [:inst :desc]                    ; default
-       :group-by :error-class                     ; store-dependent
-       :count?   false}                           ; store-dependent
-
-  ## Field references
-
-  - Bare keyword: built-in column (`:level :ns :id :msg :request-id
-    :user-xid :tenant :host :error-class :error-msg :error-trace :inst :v`)
-  - Vector path: `[:data k …]` or `[:ctx k …]` — arbitrary nesting
-
-  ## Tuple operators
-
-  Comparison: `:= :!= :> :< :>= :<=`
-  Membership: `:in` (set value is also accepted bare)
-  Text:       `:contains :icontains :starts-with :ends-with`
-  Pattern:    `:matches` (Java regex)
-  Presence:   `:exists? :absent?` (no second arg)"
+  "Filter-map spec + dispatch into the bound observability store."
   (:require
    [clojure.set]
    [synthigy.log.store :as store]))
@@ -51,9 +31,8 @@
 ;;; ============================================================================
 
 (def allowed-top-level-keys
-  "The seven keys the filter map accepts. Other top-level keys are user
-   errors and `validate-filter-map` rejects them."
-  #{:where :since :until :limit :order-by :group-by :count?})
+  "The keys the filter map accepts."
+  #{:where :since :until :limit :order-by :group-by :count? :bucket-ms})
 
 (def comparison-ops
   #{:= :!= :> :< :>= :<=})
@@ -74,10 +53,7 @@
   #{:exists? :absent?})
 
 (def array-ops
-  "Membership against an ARRAY-valued field (currently only `:topics`):
-   `[:has :system]` ⇒ the field's set contains the given value. The mirror of
-   `:in` — `:in` asks 'is the field-value in this set', `:has` asks 'is this
-   value in the field's set'."
+  "Membership against an array-valued field: `[:has :system]`."
   #{:has})
 
 (def all-ops
@@ -85,8 +61,7 @@
                      presence-ops array-ops))
 
 (def built-in-columns
-  "Top-level wire-schema fields addressable as bare keywords in `:where`.
-   `:topics` is array-valued (use the `:has` op); the rest are scalars."
+  "Top-level wire-schema fields addressable as bare keywords in `:where`."
   #{:level :ns :id :msg :request-id :user-xid :tenant
     :host :error-class :error-msg :error-trace :inst :v :topics})
 
@@ -96,17 +71,17 @@
 ;;; Validation
 ;;; ============================================================================
 
-(defn- field-ref? [x]
+(defn field-ref? [x]
   (or (and (keyword? x) (contains? built-in-columns x))
       (and (vector? x)
            (>= (count x) 2)
            (contains? #{:data :ctx} (first x))
            (every? keyword? x))))
 
-(defn- tuple? [v]
+(defn tuple? [v]
   (and (vector? v) (keyword? (first v)) (contains? all-ops (first v))))
 
-(defn- validate-tuple [field tuple]
+(defn validate-tuple [field tuple]
   (let [[op arg :as t] tuple
         n-args (dec (count t))]
     (cond
@@ -140,7 +115,7 @@
         (throw (ex-info (str "Operator " op " requires a non-nil argument: " field " " tuple)
                         {:field field :tuple tuple :op op}))))))
 
-(defn- validate-where [where]
+(defn validate-where [where]
   (when (some? where)
     (when-not (map? where)
       (throw (ex-info ":where must be a map" {:where where})))
@@ -156,13 +131,13 @@
         (set? v)    nil          ; bare set = [:in …]
         :else       nil))))      ; bare value = equality
 
-(defn- validate-since-until [k v]
+(defn validate-since-until [k v]
   (when (some? v)
     (when-not (string? v)
       (throw (ex-info (str k " must be a duration string (e.g. \"10m\") or ISO instant")
                       {k v})))))
 
-(defn- validate-order-by [order-by]
+(defn validate-order-by [order-by]
   (when (some? order-by)
     (when-not (and (vector? order-by) (= 2 (count order-by))
                    (#{:asc :desc} (second order-by)))
@@ -176,14 +151,14 @@
                            "a [:data …] / [:ctx …] path")
                       {:order-by order-by})))))
 
-(defn- validate-limit [limit]
+(defn validate-limit [limit]
   (when (some? limit)
     (when-not (and (integer? limit) (pos? limit))
       (throw (ex-info ":limit must be a positive integer"
                       {:limit limit})))))
 
 (defn validate-filter-map
-  "Throw `ex-info` if `filter-map` violates the spec. Returns nil on success."
+  "Throw `ex-info` if `filter-map` violates the spec."
   [filter-map]
   (when-not (map? filter-map)
     (throw (ex-info "Filter must be a map" {:got filter-map})))
@@ -199,31 +174,30 @@
   (validate-order-by (:order-by filter-map))
   (when (and (:count? filter-map) (not (boolean? (:count? filter-map))))
     (throw (ex-info ":count? must be boolean" {:count? (:count? filter-map)})))
+  (when-let [b (:bucket-ms filter-map)]
+    (when-not (and (integer? b) (pos? b))
+      (throw (ex-info ":bucket-ms must be a positive integer (milliseconds)"
+                      {:bucket-ms b}))))
   nil)
 
 ;;; ============================================================================
 ;;; Public API — query via *log-store*
 ;;; ============================================================================
 
-(defn- require-store []
+(defn require-store []
   (or @#'store/*log-store*
       (throw (ex-info "No log store bound — call synthigy.log/install! first"
                       {:cause :no-log-store}))))
 
 (defn query
-  "Execute a filter-map against the currently bound `*log-store*`. Validates
-   first, then delegates to the store's `search`. Returns:
-   - a vector of wire-schema-v1 rows for regular queries
-   - a Long when `:count?` is set
-   - a vector of group buckets when `:group-by` is set"
+  "Validate `filter-map` and execute it against the currently bound
+   `*log-store*`."
   [filter-map]
   (validate-filter-map filter-map)
   (store/search (require-store) filter-map))
 
 (defn current-store-backend
-  "Return a keyword identifying the bound store's backend, or nil if none
-   bound. Useful for diagnostics — cockpit, admin endpoints. Reads
-   `:backend` off the store's `health` snapshot."
+  "Keyword identifying the bound store's backend, or nil."
   []
   (when-let [s @#'store/*log-store*]
     (try (:backend (store/health s)) (catch Throwable _ nil))))
@@ -233,16 +207,15 @@
 ;;; ============================================================================
 
 (defn lifecycle
-  "All signals for one request, oldest-first. Sugar for
-   `{:where {:request-id rid} :order-by [:inst :asc]}`."
+  "All signals for one request, oldest-first."
   [request-id]
   (query {:where {:request-id request-id} :order-by [:inst :asc]}))
 
 (defn errors-since
-  "Error+fatal signals from `since` until now. `since` is a duration string
-   (e.g. `\"10m\"`, `\"1h\"`) or ISO instant."
+  "Error+fatal signals from `since` (duration string or ISO instant) until now."
   ([since] (errors-since since default-limit))
   ([since limit]
    (query {:where {:level #{:error :fatal}}
            :since since
            :limit limit})))
+

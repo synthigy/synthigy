@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth.device-code
   (:require
    [synthigy.json :as json]
@@ -7,6 +29,7 @@
    [synthigy.log :as log]
    [nano-id.core :as nano-id]
    [ring.util.codec :as codec]
+   [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
    [synthigy.iam
     :refer [validate-password]]
@@ -19,24 +42,97 @@
     :refer [grant-token
             token-error
             client-id-missmatch]]
+   [synthigy.oauth.page.custom :as login-page]
    [synthigy.util :as util]))
 
-(defonce ^:dynamic *device-codes* (atom nil))
-
-(defn delete [code]
-  (swap! *device-codes* dissoc code))
-
 (def gen-device-code (nano-id/custom "ACDEFGHIJKLMNOPQRSTUVWXYZ" 40))
-; (def gen-user-code (nano-id/custom "0123456789" 6))
 (let [gen-par (nano-id/custom "ACDEFGHIJKLMNOPQRSTUVWXYZ" 4)]
   (defn gen-user-code []
     (str (gen-par) \- (gen-par))))
 
+(defn delete [code]
+  (when code
+    (dataset/delete-entity (id/entity :oauth/device-code) {:device_code code})
+    nil))
+
+(defn device-row [device-code]
+  (when device-code
+    (dataset/get-entity (id/entity :oauth/device-code)
+                        {:device_code device-code}
+                        {:device_code nil :user_code nil :data nil :expires_at nil
+                         :session [{:selections {:id nil} :args {:_join :left}}]})))
+
+(defn row->entry [row]
+  (when row
+    (let [{:strs [client agent ip interval request challenges confirmed denied]} (:data row)]
+      (cond-> {:user-code (:user_code row)
+               :client client
+               :device/agent agent
+               :device/ip ip
+               :interval interval}
+        (:expires_at row) (assoc :expires-at (.getTime ^java.util.Date (:expires_at row)))
+        request (assoc :request (core/decode-stored-request request))
+        challenges (assoc :challenges
+                          (into {}
+                                (map (fn [[c state]]
+                                       [c (into {} (map (fn [[k v]] [(keyword k) v])) state)]))
+                                challenges))
+        (some? confirmed) (assoc :confirmed confirmed)
+        denied (assoc :denied true)
+        (get-in row [:session :id]) (assoc :session (get-in row [:session :id]))))))
+
 (defn get-device-code-data [device-code]
-  (get @*device-codes* device-code))
+  (row->entry (device-row device-code)))
+
+(defn find-device-code
+  "Device code bound to a user code."
+  [user_code]
+  (when user_code
+    (:device_code (dataset/get-entity (id/entity :oauth/device-code)
+                                      {:user_code user_code}
+                                      {:device_code nil}))))
+
+(defn add-challenge!
+  "Record a login-handoff challenge under the device code's data json."
+  [device-code challenge state]
+  (let [{:keys [data] :as row} (device-row device-code)]
+    (when row
+      (dataset/stack-entity (id/entity :oauth/device-code)
+                            {:device_code device-code
+                             :data (assoc-in data ["challenges" challenge] state)}))
+    nil))
+
+(defn deny!
+  "RFC 8628 §3.5 — record that the person refused, so the device stops polling."
+  [device-code]
+  (let [{:keys [data] :as row} (device-row device-code)]
+    (when row
+      (dataset/stack-entity (id/entity :oauth/device-code)
+                            {:device_code device-code
+                             :data (-> data
+                                       (dissoc "challenges")
+                                       (assoc "denied" true))})
+      (log/info {:id ::device-code-denied
+                 :data {:action :revoked :subject :device-code
+                        :code (core/short-id device-code)}}
+                "Device authorization denied by the resource owner")
+      true)))
+
+(defn bind-session!
+  "Login completed: attach the session and drop challenges."
+  [device-code session]
+  (let [{:keys [data] :as row} (device-row device-code)]
+    (when row
+      (dataset/stack-entity (id/entity :oauth/device-code)
+                            {:device_code device-code
+                             :session {:id session}
+                             :data (-> data
+                                       (dissoc "challenges")
+                                       (assoc "confirmed" false))}))
+    nil))
 
 (defn get-code-client [device-code]
-  (get-client (get-in @*device-codes* [device-code :request :client_id])))
+  (get-client (get-in (get-device-code-data device-code) [:request :client_id])))
 
 (def grant "urn:ietf:params:oauth:grant-type:device_code")
 
@@ -90,21 +186,15 @@
                    :type "server_error"}))))))
 
 (defn code-expired? [code]
-  (when-some [{:keys [expires-at]} (get-in @*device-codes* code)]
+  (when-some [{:keys [expires-at]} (get-device-code-data code)]
     (< expires-at (System/currentTimeMillis))))
 
 (defn clean-expired-codes
+  "Janitor: delete device-code rows past expires_at."
   []
-  (let [now (System/currentTimeMillis)
-        expired (keep
-                 (fn [[device-code {:keys [expires-at]}]]
-                   (when (< expires-at now) device-code))
-                 @*device-codes*)]
-    (when-not (empty? expired)
-      (log/info {:id ::revoke-expired-codes
-                 :data {:codes (vec expired)}}
-                "Revoking expired device codes"))
-    (swap! *device-codes* (fn [codes] (apply dissoc codes expired)))))
+  (dataset/purge-entity (id/entity :oauth/device-code)
+                        {:_where {:expires_at {:_le (java.util.Date.)}}}
+                        {:device_code nil}))
 
 (defmethod grant-token "urn:ietf:params:oauth:grant-type:device_code"
   [request]
@@ -112,20 +202,18 @@
         {{:keys [client_id]
           :as original-request
           id :client_id} :request
-         :keys [session]} (get @*device-codes* device_code)
+         :keys [session denied]
+         :as entry} (get-device-code-data device_code)
         client (core/get-client client_id)]
     (log/debug {:id ::token-grant-request
                 :data {:client-id id}}
                "Processing device-code token grant")
-    ; (def request request)
-    ; (def device_code (:device_code request))
-    ; (def client_id (:client_id request))
     (let [{_secret :secret
            {:strs [allowed-grants]} :settings} (core/get-client client_id)
           grants (set allowed-grants)]
       (cond
         ;;
-        (not (contains? @*device-codes* device_code))
+        (nil? entry)
         (token-error
          "invalid_request"
          "Provided device code is illegal!"
@@ -139,6 +227,11 @@
          "for grant type that is outside"
          "of client configured privileges")
         ;;
+        denied
+        (token-error
+         "access_denied"
+         "The resource owner denied the authorization request")
+        ;;
         (nil? session)
         (token-error
          403
@@ -150,7 +243,6 @@
         (token-error
          "invalid_client"
          "Client secret wasn't provided")
-        ;; If client has secret, than
         (and (some? _secret) (not (validate-password client_secret _secret)))
         (token-error
          "invalid_client"
@@ -165,7 +257,6 @@
          :body (json/write-str
                 {:error "authorization_pending"
                  :error_description "The authorization request is still pending as the end user hasn't yet completed the user-interaction steps"})}
-        ;; Issue that token
         :else
         (let [response (json/write-str (token/generate client session original-request))
               resource-owner (core/get-session-resource-owner session)]
@@ -178,8 +269,7 @@
                             :client client_id
                             :flow "device_code"}}
                     "Device code exchanged for access token")
-          (swap! *device-codes* dissoc device_code)
-          ; (core/set-session-audience-scope session audience scope)
+          (delete device_code)
           {:status 200
            :headers {"Content-Type" "application/json;charset=UTF-8"
                      "Pragma" "no-cache"
@@ -212,15 +302,16 @@
           (let [client (validate-client params)
                 client-id (id/extract client)
                 expires-at (+ (util/now) (util/minutes 5))]
-            (swap! core/*clients* assoc client-id client)
-            (swap! *device-codes* assoc device-code
-                   {:user-code user-code
-                    :expires-at expires-at
-                    :request params
-                    :device/agent user-agent
-                    :device/ip remote-addr
-                    :interval 5
-                    :client client-id})
+            (dataset/stack-entity
+             (id/entity :oauth/device-code)
+             {:device_code device-code
+              :user_code user-code
+              :expires_at (java.util.Date. ^long expires-at)
+              :data {"request" params
+                     "agent" user-agent
+                     "ip" remote-addr
+                     "interval" 5
+                     "client" client-id}})
             (log/info {:id ::device-code-issued
                        :data {:action :issued
                               :subject :device-code
@@ -253,6 +344,38 @@
                       (cond-> {:error error-code}
                         description (assoc :error_description description)))})))))))
 
+;; -----------------------------------------------------------------------------
+;; Device-confirmation token — a short-lived, SameSite=Lax cookie.
+;;
+;; Replaces the old hidden `challenge` form field so the confirm page can be a
+;; plain static file: the server mints this cookie on the confirm-page GET (its
+;; one server touchpoint), the browser POSTs only `action`, and the cookie
+;; carries device-code + user-code + freshness. SameSite=Lax is the CSRF defense
+;; — the browser withholds the cookie on any cross-site POST, so a malicious
+;; page
+;; can't forge a confirm. Anti-phishing (RFC 8628 §3.3/§5.4) stays the explicit
+;; Confirm button. IP/User-Agent binding is intentionally dropped here (it was
+;; beyond-spec and caused false rejects on IP shifts); the device→login handoff
+;; still binds ip/ua via redirect-to-login's separate login challenge.
+;; -----------------------------------------------------------------------------
+
+(def ^:private confirm-cookie-name "device_confirm")
+(def ^:private confirm-ttl-ms 300000) ; 5 minutes
+
+(defn- confirm-cookie [device-code user-code]
+  {confirm-cookie-name
+   {:value (encrypt {:device-code device-code
+                     :user-code user-code
+                     :exp (+ (System/currentTimeMillis) confirm-ttl-ms)})
+    :path "/oauth/device"
+    :http-only true
+    :secure true
+    :same-site :lax
+    :max-age (quot confirm-ttl-ms 1000)}})
+
+(def ^:private clear-confirm-cookie
+  {confirm-cookie-name {:value "" :path "/oauth/device" :max-age 0}})
+
 (defn device-activation-handler
   "OAuth 2.0 Device Activation handler.
 
@@ -266,19 +389,11 @@
    - User agent verification
    - Expiration check"
   [request]
-  (letfn [(find-device-code [user_code]
-            (some
-             (fn [[device-code {:keys [user-code]}]]
-               (when (= user_code user-code)
-                 device-code))
-             @*device-codes*))
-          (redirect-to-login [{:keys [device-code] :as state}]
+  (letfn [(redirect-to-login [{:keys [device-code] :as state}]
             (let [challenge (nano-id/nano-id 20)
                   client (get-code-client device-code)
                   login-url (core/get-client-login-url client)]
-              (swap! *device-codes* update device-code
-                     (fn [data]
-                       (assoc-in data [:challenges challenge] (dissoc state :device-code))))
+              (add-challenge! device-code challenge (dissoc state :device-code))
               {:status 302
                :headers {"Location" (str login-url "?"
                                          (codec/form-encode
@@ -288,15 +403,14 @@
                                                           :challenge challenge))}))
                          "Cache-Control" "no-cache"}}))
           (redirect-to-canceled [{:keys [user-code device-code]}]
-            (swap! *device-codes* dissoc device-code)
+            (deny! device-code)
             {:status 302
              :headers {"Location" (str "/oauth/device/status?value=canceled&user_code=" user-code)
                        "Cache-Control" "no-cache"}})]
     (let [{:keys [remote-addr query-params params]} request
-          {:keys [challenge action user_code]} params
+          {:keys [action user_code]} params
           {user-agent "user-agent"} (:headers request)
           method (:request-method request)
-          complete? (boolean (:user_code query-params))
           ;; For GET requests, user_code comes from query-params
           ;; For POST requests, user_code comes from params
           user_code (or (:user_code query-params) user_code)]
@@ -304,92 +418,94 @@
         ;; GET: Display activation form
         :get
         (if (some? user_code)
-          ;; verification_uri_complete - user_code provided
+          ;; verification_uri_complete — code pre-filled → confirm step.
+          ;; Mint the SameSite confirm cookie here (the server's one
+          ;; touchpoint),
+          ;; then hand off to a branded device.html if the folder has one, else
+          ;; render the built-in confirm page. Both carry the same cookie.
           (if-let [device-code (find-device-code user_code)]
-            {:status (if device-code 200 400)
-             :headers {"Content-Type" "text/html"}
-             :body (str (device/authorize
-                         {::complete? complete?
-                          ::device-code device-code
-                          ::user-code user_code
-                          ::challenge (encrypt {:user-code user_code
-                                                :device-code device-code
-                                                :ip remote-addr
-                                                :user-agent user-agent})}))}
+            (let [cookie (confirm-cookie device-code user_code)]
+              (if-let [redirect (login-page/custom-page-redirect
+                                 "device.html" {:user_code user_code})]
+                (assoc redirect :cookies cookie)
+                {:status 200
+                 :headers {"Content-Type" "text/html"}
+                 :cookies cookie
+                 :body (str (device/authorize {::complete? true
+                                               ::device-code device-code
+                                               ::user-code user_code}))}))
             {:status 400
              :headers {"Content-Type" "text/html"}
              :body (str (device/authorize {::error :device-code/not-available}))})
-          ;; verification_uri - manual entry
-          {:status 200
-           :headers {"Content-Type" "text/html"}
-           :body (str (device/authorize {::complete? complete?}))})
+          ;; verification_uri — manual entry (no code yet, no cookie needed)
+          (or (login-page/custom-page-redirect "device.html" {})
+              {:status 200
+               :headers {"Content-Type" "text/html"}
+               :body (str (device/authorize {::complete? false}))}))
 
         ;; POST: Process activation
         :post
-        (cond
-          ;; Missing challenge for verification_uri_complete
-          (and complete? (nil? challenge))
-          {:status 400
-           :headers {"Content-Type" "text/html"}
-           :body (str (device/authorize {::error :no-challenge}))}
-
-          ;; verification_uri_complete flow
-          complete?
-          (let [{:keys [device-code user-code ip]
-                 :as decrypted-challenge} (decrypt challenge)
-                {real-code :user-code
-                 :keys [expires-at]} (get @*device-codes* device-code)
-                now (System/currentTimeMillis)]
-            (cond
-              ;; Expired
-              (< expires-at now)
+        (let [confirm (get-in request [:cookies confirm-cookie-name :value])]
+          (cond
+            ;; Confirm / cancel step — driven by the SameSite confirm cookie.
+            ;; `action` present ⟺ a Confirm/Cancel button was clicked.
+            (some? action)
+            (if (nil? confirm)
               {:status 400
                :headers {"Content-Type" "text/html"}
-               :body (str (device/authorize {::error :expired}))}
+               :body (str (device/authorize {::error :no-confirm-session}))}
+              (let [{:keys [device-code user-code exp]} (decrypt confirm)
+                    {real-code :user-code :keys [expires-at]} (get-device-code-data device-code)
+                    now (System/currentTimeMillis)]
+                (cond
+                  ;; Confirm cookie expired
+                  (or (nil? exp) (< exp now))
+                  {:status 400
+                   :headers {"Content-Type" "text/html"}
+                   :cookies clear-confirm-cookie
+                   :body (str (device/authorize {::error :expired}))}
 
-              ;; Invalid user code
-              (not= real-code user-code user_code)
-              {:status 400
-               :headers {"Content-Type" "text/html"}
-               :body (str (device/authorize {::error :malicous-code}))}
+                  ;; Device code itself expired / gone
+                  (or (nil? expires-at) (< expires-at now))
+                  {:status 400
+                   :headers {"Content-Type" "text/html"}
+                   :cookies clear-confirm-cookie
+                   :body (str (device/authorize {::error :expired}))}
 
-              ;; IP mismatch
-              (not= remote-addr ip)
-              {:status 400
-               :headers {"Content-Type" "text/html"}
-               :body (str (device/authorize {::error :malicious-ip}))}
+                  ;; Cookie's user-code no longer matches the device code's
+                  (not= real-code user-code)
+                  {:status 400
+                   :headers {"Content-Type" "text/html"}
+                   :cookies clear-confirm-cookie
+                   :body (str (device/authorize {::error :malicous-code}))}
 
-              ;; User agent mismatch
-              (not= user-agent (:user-agent decrypted-challenge))
-              {:status 400
-               :headers {"Content-Type" "text/html"}
-               :body (str (device/authorize {::error :malicous-user-agent}))}
+                  ;; Confirm — bind ip/ua into the separate login handoff
+                  ;; challenge
+                  (= action "confirm")
+                  (assoc (redirect-to-login {:device-code device-code
+                                             :ip remote-addr
+                                             :user-agent user-agent})
+                         :cookies clear-confirm-cookie)
 
-              ;; Confirm action
-              (= action "confirm")
+                  ;; Cancel
+                  (= action "cancel")
+                  (assoc (redirect-to-canceled {:user-code user-code
+                                                :device-code device-code})
+                         :cookies clear-confirm-cookie)
+
+                  :else
+                  {:status 400
+                   :headers {"Content-Type" "text/html"}
+                   :body (str (device/authorize {::user-code user-code
+                                                 ::error :unknown-action}))})))
+
+            ;; Manual entry — user typed the code (no confirm cookie yet)
+            :else
+            (if-let [device-code (find-device-code user_code)]
               (redirect-to-login {:device-code device-code
-                                  :ip ip
+                                  :ip remote-addr
                                   :user-agent user-agent})
-
-              ;; Cancel action
-              (= action "cancel")
-              (redirect-to-canceled {:user-code user-code
-                                     :device-code device-code})
-
-              ;; Unknown action
-              :else
               {:status 400
                :headers {"Content-Type" "text/html"}
-               :body (str (device/authorize {::user-code user-code
-                                             ::error :unknown-action}))}))
-
-          ;; verification_uri flow - manual entry
-          :else
-          (if-let [device-code (find-device-code user_code)]
-            (redirect-to-login {:device-code device-code
-                                :ip remote-addr
-                                :user-agent user-agent})
-            {:status 400
-             :headers {"Content-Type" "text/html"}
-             :body (str (device/authorize {::user-code user_code
-                                           ::error :not-available}))}))))))
+               :body (str (device/authorize {::user-code user_code
+                                             ::error :not-available}))})))))))

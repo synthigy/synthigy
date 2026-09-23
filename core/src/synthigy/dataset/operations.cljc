@@ -1,22 +1,33 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.dataset.operations
-  "ERDModel operations - implementations of ERDModelActions protocol.
-
-  These implement CRUD operations for manipulating ERDModel records:
-  - Entity operations: add/get/set/update/remove/replace
-  - Relation operations: add/get/set/update/remove/create
-  - Query operations: get-entities, get-relations, get-entity-relations
-
-  ID access uses the current ID provider (id/key returns :euuid or :xid)."
+  "ERDModelActions protocol implementation: CRUD over ERDModel
+   entities/relations."
   (:require
     [clojure.data]
     [clojure.set]
     [synthigy.dataset.core :as dataset]
     [synthigy.dataset.id :as id]))
-
-;;; ============================================================================
-;;; ID Helpers
-;;; ============================================================================
-
 
 (extend-protocol synthigy.dataset.core/ERDModelActions
   #?(:clj synthigy.dataset.core.ERDModel
@@ -35,8 +46,8 @@
             :original (id/extract entity))))))
 
   (add-entity [this entity]
-    ;; Model node: euuid-first dual id when one isn't already present (NOT
-    ;; native id/generate) so the entity stays portable / transform-safe.
+    ;; euuid-first dual id (not native id/generate) keeps the entity
+    ;; portable/transform-safe
     (let [entity (if (id/extract entity) entity (merge entity (id/new-model-node-id)))
           id (id/extract entity)]
       (assert (not-any? #{id} (map id/extract (dataset/get-entities this)))
@@ -79,7 +90,6 @@
         (reduce
           (fn [model {:keys [from to]
                       :as relation}]
-            ;; Add relation by checking which direction to change
             (dataset/add-relation
               model
               (cond-> relation
@@ -90,11 +100,8 @@
                 (-> (assoc :to id') (update :from (id/key))))))
           (->
             this
-            ;; Remove entity removes all old connections
             (dataset/remove-entity entity)
-            ;; Add new entity as replacement at the same position
             (dataset/add-entity (assoc replacement :position position)))
-          ;; reduce all old connections and reconnect
           old-relations))))
 
   (get-entities [{:keys [entities]}]
@@ -126,8 +133,7 @@
 
   (create-relation
     ([this from to cardinality path]
-     ;; Model nodes are euuid-first + dual (portable); map-keyed by the active
-     ;; form. :from/:to carry the active form of the endpoint entities.
+     ;; model node: euuid-first dual id, map-keyed by the active form
      (let [node-id (id/new-model-node-id)
            id (id/extract node-id)]
        (assoc-in this [:relations id]

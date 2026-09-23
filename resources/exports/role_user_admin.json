@@ -1,0 +1,56 @@
+{
+  "active" : true,
+  "browse_entities" : [ {
+    "xid" : "9ptmMENqHWqLFbyidsyF9Y"
+  } ],
+  "description" : "Day-to-day identity administration: users, groups, memberships, profiles. Cannot escalate — role assignment, grant editing and federation are out of reach.",
+  "from_delete_relations" : [ {
+    "xid" : "NWwVJG6ympZP99zoS2E7F8"
+  }, {
+    "xid" : "Xn8sL9Hh4BpeGMxDBmfsPD"
+  } ],
+  "from_read_relations" : [ {
+    "xid" : "9hMX1U9GJWbrZLgarrfnaG"
+  }, {
+    "xid" : "NWwVJG6ympZP99zoS2E7F8"
+  }, {
+    "xid" : "XBanVgVrTD9QcuYKf58J34"
+  }, {
+    "xid" : "Xn8sL9Hh4BpeGMxDBmfsPD"
+  } ],
+  "from_write_relations" : [ {
+    "xid" : "NWwVJG6ympZP99zoS2E7F8"
+  }, {
+    "xid" : "Xn8sL9Hh4BpeGMxDBmfsPD"
+  } ],
+  "name" : "User Admin",
+  "owned_entities" : [ {
+    "xid" : "8Fcd8LFoWmqPXk4BRGN9dQ"
+  }, {
+    "xid" : "KV4seQm27gTAUHCxWERS12"
+  }, {
+    "xid" : "P5apo8kss7HEgtjdxXozwz"
+  }, {
+    "xid" : "WN5xU8Do5pcdhTkxXvEYwt"
+  } ],
+  "to_delete_relations" : [ {
+    "xid" : "NWwVJG6ympZP99zoS2E7F8"
+  }, {
+    "xid" : "Xn8sL9Hh4BpeGMxDBmfsPD"
+  } ],
+  "to_read_relations" : [ {
+    "xid" : "9hMX1U9GJWbrZLgarrfnaG"
+  }, {
+    "xid" : "NWwVJG6ympZP99zoS2E7F8"
+  }, {
+    "xid" : "XBanVgVrTD9QcuYKf58J34"
+  }, {
+    "xid" : "Xn8sL9Hh4BpeGMxDBmfsPD"
+  } ],
+  "to_write_relations" : [ {
+    "xid" : "NWwVJG6ympZP99zoS2E7F8"
+  }, {
+    "xid" : "Xn8sL9Hh4BpeGMxDBmfsPD"
+  } ],
+  "xid" : "QeqRcR96r9MQ5wPRzJLZsP"
+}

@@ -1,0 +1,42 @@
+{
+  "audience" : "https://synthigy.com",
+  "avatar" : {
+    "options" : {
+      "backgroundColor" : [ "545352" ],
+      "icon" : [ "boombox" ]
+    },
+    "type" : "icons"
+  },
+  "description" : "This API is used to store and read data on EYWA hosted database. Usually this includes sync, stack, slice, search, get, delete, purge operations on modeled and deployed Datasets.",
+  "name" : "Synthigy",
+  "scopes" : [ {
+    "description" : "Allows user to view saved datasets",
+    "name" : "dataset:load",
+    "xid" : "1SuTjA1tfZi5Z6kqrb3LMc"
+  }, {
+    "description" : "Subscribe to model-deploy notifications (deployed-model / runtime-model tracks on /data/subscription)",
+    "name" : "dataset:subscription",
+    "xid" : "5znQGbRxjnu3n9gNckyW3e"
+  }, {
+    "description" : "Allows a client to introspect the deployed model and compile XSQL to typed codegen IR (the `describe` operation behind `gen --pull`). Read-only: no row data.",
+    "name" : "schema:read",
+    "xid" : "7ipbiNugGoy2y2DTNZWgEo"
+  }, {
+    "description" : "Allows user to delete dataset, and all tables that are specific only to that dataset",
+    "name" : "dataset:delete",
+    "xid" : "Dbr3yWGb9wAcQvutHy6pfM"
+  }, {
+    "description" : "Allows user to deploy dataset models",
+    "name" : "dataset:deploy",
+    "xid" : "EUJBCPVFsqMnfDiEnEAQr5"
+  }, {
+    "description" : "Change logging configuration at runtime (levels, destinations, taps)",
+    "name" : "log:configure",
+    "xid" : "pHvVWmnXFNyPuVpqsPfxwH"
+  }, {
+    "description" : "Read observability data — log queries, histograms and traffic statistics",
+    "name" : "log:read",
+    "xid" : "rnLS64HXoVe3dYaEehGh82"
+  } ],
+  "xid" : "RtCFQ86BSUfiC5YTTBt2eQ"
+}

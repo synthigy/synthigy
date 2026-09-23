@@ -1,3 +1,25 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.oauth.client
   "This namespace is used to integrate with other OIDC providers."
   (:require
@@ -37,10 +59,7 @@
                  (HttpClient.))]
     (.start client)
     (try
-      (let [;; url (if-not form-params url
-            ;;       (str url "?" (codec/form-encode form-params)))
-            ;; _ (println "SENDING TO URL: " url)
-            response (as-> (.newRequest client url) request
+      (let [response (as-> (.newRequest client url) request
                        (reduce-kv
                         (fn [r k v]
                           (.header r k v)
@@ -66,7 +85,7 @@
       (finally
         (.stop client)))))
 
-(defn- encode-basic-authorization
+(defn encode-basic-authorization
   [username password]
   (let [ba (str username (when password (str ":" password)))
         encoded (.encode (Base64/getEncoder) (.getBytes ba "UTF-8"))]
@@ -93,7 +112,6 @@
                          {:grant_type "password"
                           :username username
                           :password password}
-                            ; (some? client-password) (assoc :client_password client-password)
                           (some? state) (assoc :state state)
                           (some? scope) (assoc :scope (str/join " " scope)))}))
         body (try

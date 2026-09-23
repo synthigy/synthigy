@@ -1,84 +1,27 @@
+;   Synthigy — model-driven IAM and data platform
+;   Copyright (C) 2026 Robert Geršak
+;
+;   This program is free software: you can redistribute it and/or modify
+;   it under the terms of the GNU Affero General Public License as
+;   published by the Free Software Foundation, either version 3 of the
+;   License, or (at your option) any later version.
+;
+;   This program is distributed in the hope that it will be useful,
+;   but WITHOUT ANY WARRANTY; without even the implied warranty of
+;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;   GNU Affero General Public License for more details.
+;
+;   You should have received a copy of the GNU Affero General Public
+;   License along with this program.  If not, see
+;   <https://www.gnu.org/licenses/>.
+;
+;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
+;   in a proprietary product, or offering it as a service without
+;   releasing your source under section 13 — a commercial license is
+;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+
 (ns synthigy.log
-  "Central logging API for Synthigy. Telemere is an implementation detail.
-
-  ## Callsite API
-
-  Level macros — pass a string, or an opts map + string:
-
-      (log/info \"User logged in\")
-      (log/debug {:id ::pkce-verify
-                  :data {:client-id client-id, :grant-type grant-type}}
-                 \"PKCE verification\")
-
-  Throwables — use `error!`:
-
-      (log/error! e \"OAuth client reload failed\")
-      (log/error! {:id ::client-reload-failed} e)
-
-  Spans — wrap a body to emit start/end signals with elapsed time:
-
-      (log/spy! {:id ::deploy-dataset, :data {:version v}}
-        (deploy! v))
-
-  Request-scoped context — every signal in the body inherits :ctx:
-
-      (log/with-ctx {:request-id rid, :user-xid (:xid u), :tenant t}
-        (handle-request))
-
-  Escape hatches: `event!`, `log!`, `signal!` re-export Telemere's full
-  surface; `add-sink!` / `remove-sink!` install raw Telemere handlers for
-  ad-hoc routing.
-
-  ## Convention
-
-  - Always pass an `:id` (namespace-qualified keyword) when the signal will
-    drive an alert, dashboard, or test assertion. The id is the contract.
-  - Pass structured fields under `:data` rather than format-stringing into
-    the message. The store's JSON columns lift `:data` into queryable shape.
-  - Don't add `(println ...)` for debugging. Add a `(log/trace ...)` and
-    capture via `tap!` (see below).
-
-  ## Sinks model (post-observability-substrate refactor)
-
-  Two Telemere handlers run alongside each other; both optional:
-
-  - **Console** (`:synthigy/console`) — humans-readable pretty output to
-    stdout. Installed by default but FILTERED TO `:warn` and above so it
-    stays quiet during normal operation. Operators opt into verbose
-    console via `SYNTHIGY_LOG_CONSOLE_LEVEL=info` (or `debug`, `trace`).
-    `SYNTHIGY_LOG_CONSOLE=false` disables the handler entirely.
-
-  - **Store bridge** (`:synthigy/store-bridge`) — durable + queryable, by
-    forwarding every signal to whatever `synthigy.log.store/*log-store*`
-    is currently bound. The dynvar is defonce'd to a fresh
-    `RingLogStore` at the protocol-ns site, so logs are queryable from
-    JVM start — no `install!` step required to seed the store. When
-    `:synthigy/observability` starts (DuckDB, ClickHouse, …), it
-    `alter-var-root`'s the dynvar to its durable backend FIRST, then
-    snapshots the now-orphaned ring and drains its buffered signals into
-    that backend. On observability `stop`, a fresh ring is rebound.
-    `install!` itself never touches
-    `*log-store*` — it only owns the Telemere pipeline + handlers.
-
-  Custom routing (ad-hoc fn handlers like ringing alerts to a webhook) goes
-  through `add-sink!` — a raw Telemere handler escape hatch.
-
-  ## Env
-
-      SYNTHIGY_LOG_LEVEL   Root min-level (trace|debug|info|warn|error|fatal).
-                           Default: info.
-      SYNTHIGY_LOG_NS      Per-ns overrides, comma-separated.
-                           Example: 'synthigy.dataset.postgres=debug,com.zaxxer.hikari=error'
-      SYNTHIGY_LOG_HOST           Override the `:host` column. Defaults to
-                                  JVM hostname.
-      SYNTHIGY_LOG_CONSOLE        Set to 'false' to skip installing the
-                                  console handler at startup. Default 'true'.
-      SYNTHIGY_LOG_CONSOLE_LEVEL  Min level for the console handler. Default
-                                  'warn' — info/debug stay out of the
-                                  terminal unless you opt in here. The
-                                  durable store (`:synthigy/observability`)
-                                  always sees the full root-level stream
-                                  regardless."
+  "Central logging API for Synthigy. Telemere is an implementation detail."
   (:require
     [clojure.string :as str]
     [environ.core :refer [env]]
@@ -87,6 +30,7 @@
     [synthigy.log.pipeline :as pipeline]
     [synthigy.log.store :as store]
     [synthigy.log.topics :as topics]
+    [synthigy.node :as node]
     [taoensso.telemere :as t]))
 
 ;;; ============================================================================
@@ -96,16 +40,23 @@
 (def ^:private valid-levels
   #{:trace :debug :info :warn :error :fatal})
 
-(defn- parse-level [s]
+(defn parse-level [s]
   (let [k (some-> s str/lower-case keyword)]
     (when (valid-levels k) k)))
 
-(defn- env-root-level []
+(defn env-root-level []
   (or (parse-level (env :synthigy-log-level)) :info))
 
-(defn- env-ns-overrides
-  "Parse SYNTHIGY_LOG_NS into a sequence of [ns-pattern level] pairs.
-   Format: 'a.b=debug,c.d.*=warn'"
+(defn supervised?
+  "True when SYNTHIGY_SUPERVISED=1 — the parent process owns this process's
+   stdout as an exclusive JSON-RPC channel (see synthigy.supervisor and
+   docs/plans/PLAN-PORTAL-SUPERVISOR.md, the framing rule), so any log
+   output must go to stderr instead."
+  []
+  (= "1" (env :synthigy-supervised)))
+
+(defn env-ns-overrides
+  "Parse SYNTHIGY_LOG_NS into a sequence of [ns-pattern level] pairs."
   []
   (when-let [s (env :synthigy-log-ns)]
     (->> (str/split s #",")
@@ -117,50 +68,16 @@
                        lvl (parse-level lvl)]
                    (when (and ns lvl) [ns lvl])))))))
 
-(defn- env-console-enabled?
-  "SYNTHIGY_LOG_CONSOLE=false disables the console handler; default true."
-  []
-  (let [v (env :synthigy-log-console)]
-    (or (str/blank? (str v))
-        (not (contains? #{"false" "0" "no"}
-                        (some-> v str/lower-case str/trim))))))
-
-(defn- env-console-level
-  "Min-level for the console handler. Defaults to :warn — the terminal
-   stays quiet unless an operator opts into more via
-   SYNTHIGY_LOG_CONSOLE_LEVEL=info|debug|trace. The bound store still
-   sees the full stream — this only filters what reaches stdout."
-  []
-  (or (parse-level (env :synthigy-log-console-level)) :warn))
-
 ;;; ============================================================================
 ;;; JSON wire formatter — locked schema v2
-;;;
-;;; v, inst, level, ns, id, msg,
-;;; request_id, user_xid, tenant, host, topics,
-;;; data, ctx,
-;;; error_class, error_msg, error_trace
-;;;
-;;; v2 added `topics` (a JSON array of topic name strings) — the classified
-;;; audience/subject of the signal, orthogonal to level. See synthigy.log.topics.
 ;;; ============================================================================
 
 (def wire-schema-version
-  "Version of the JSON wire schema. Bumped on incompatible field changes.
-   v2: added the `topics` array."
+  "Version of the JSON wire schema. Bumped on incompatible field changes."
   2)
 
-(def ^:private hostname
-  (delay
-    (or (env :synthigy-log-host)
-        (env :hostname)
-        (try (.getHostName (java.net.InetAddress/getLocalHost))
-             (catch Throwable _ nil)))))
-
 (def default-redactions
-  "Keys whose values must never appear in log :data or :ctx. The `redact`
-   helper replaces matching values with \"<redacted>\". Apply at call sites
-   that may carry credentials before passing maps into a log call."
+  "Keys whose values must never appear in log :data or :ctx."
   #{:password :token :access-token :refresh-token :id-token
     :secret :client-secret :authorization :api-key :cookie})
 
@@ -174,6 +91,14 @@
 (def ^:private promoted-ctx-keys
   [:request-id :user-xid :tenant])
 
+(defn current-principal-xid
+  "xid of the principal bound in the current scope, or nil."
+  []
+  (try
+    (when-let [v (resolve 'synthigy.iam.access/*principal*)]
+      (some-> @v :xid))
+    (catch Throwable _ nil)))
+
 (def ^:private json-mapper
   (json/object-mapper
     {:encode-key-fn
@@ -184,14 +109,14 @@
                  :else (str k))]
          (str/replace s \- \_)))}))
 
-(defn- keyword->wire-id
+(defn keyword->wire-id
   [id]
   (cond
     (qualified-keyword? id) (str (namespace id) "/" (name id))
     (keyword? id)           (name id)
     (some? id)              (str id)))
 
-(defn- throwable->wire
+(defn throwable->wire
   [x]
   (cond
     (instance? Throwable x)
@@ -206,8 +131,8 @@
     :else     [nil nil nil]))
 
 (defn signal->json-line
-  "Serialize a Telemere signal to a single-line JSON string in the locked
-   wire schema (v=1)."
+  "Serialize a Telemere signal to a single-line JSON string in the locked wire
+   schema."
   [{:keys [inst level ns id msg_ data ctx error] :as signal}]
   (let [[err-class err-msg err-trace] (throwable->wire error)
         ctx-map      (or ctx {})
@@ -225,10 +150,12 @@
             (.put "host"        (let [h (:host signal)]
                                   (cond
                                     (string? h) h
-                                    (map? h)    (or (:name h) @hostname)
-                                    :else       @hostname)))
+                                    (map? h)    (or (:name h) @node/hostname)
+                                    :else       @node/hostname)))
+            ;; (subs (str kw) 1), NOT `name` — :traffic/sse must stay
+            ;; "traffic/sse"
             (.put "topics"      (->> (:topics signal)
-                                     (map (fn [t] (if (keyword? t) (name t) (str t))))
+                                     (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t))))
                                      sort vec))
             (.put "data"        (or data {}))
             (.put "ctx"         residual-ctx)
@@ -239,24 +166,14 @@
 
 ;;; ============================================================================
 ;;; Raw handler escape hatch — `add-sink!` / `remove-sink!` / `list-sinks`
-;;;
-;;; A raw handler is a 1-arg function that consumes a single JSON-line String.
-;;; Use this for quick ad-hoc routing (alert webhook, debug ring, etc.). The
-;;; pipeline already serializes the wire line once per signal; this wrapper
-;;; reads the cached line.
 ;;; ============================================================================
 
 (defonce ^:private raw-handlers  (atom #{}))
 (defonce ^:private raw-resources (atom {}))
 
 (defn add-sink!
-  "Install a raw handler fn as a log sink. `sink-id` is a unique keyword;
-   re-installing with the same id replaces the previous handler.
-
-   Options:
-     :ns-filter — Telemere ns-filter (glob string or {:allow :disallow} map).
-     :min-level — minimum level for this handler.
-     :close-fn  — 0-arg fn invoked on `remove-sink!` / `shutdown!`."
+  "Install a raw handler fn (taking one JSON-line String per signal) as a log
+   sink."
   [sink-id write-fn & {:keys [ns-filter min-level close-fn]}]
   (try (t/remove-handler! sink-id) (catch Throwable _))
   (let [handler-opts (cond-> {}
@@ -278,7 +195,7 @@
     sink-id))
 
 (defn remove-sink!
-  "Remove a raw handler. If a `:close-fn` was provided, it runs. Idempotent."
+  "Remove a raw handler, running its :close-fn if provided."
   [sink-id]
   (try (t/remove-handler! sink-id) (catch Throwable _))
   (when-let [cf (get @raw-resources sink-id)]
@@ -287,69 +204,26 @@
   (swap! raw-handlers disj sink-id)
   nil)
 
-(defn list-sinks
-  "Set of currently-installed raw handler ids (escape-hatch sinks only)."
-  []
+(defn list-sinks []
   (set @raw-handlers))
 
 ;;; ============================================================================
-;;; Console + store-bridge handler ids + routing state
+;;; Store-bridge handler id + routing state
 ;;; ============================================================================
 
-(def console-handler-id :synthigy/console)
 (def store-handler-id   :synthigy/store-bridge)
 
-(defonce ^:private console-routing (atom nil))
 (defonce ^:private store-routing   (atom nil))
 (defonce ^:private current-routing (atom nil))
 (defonce ^:private env-routing     (atom nil))
 
-;; ----------------------------------------------------------------------------
-;; Provider pattern.
-;;
-;; `synthigy.log.store/*log-store*` is defonce'd to a fresh `RingLogStore`
-;; at the protocol-ns site (mirrors `synthigy.dataset.access/*access-control*`
-;; defaulting to `AllowAllAccess`). The dynvar is never nil and `install!`
-;; never mutates it — only the backend module (`:synthigy/observability`)
-;; touches it on `:start`/`:stop`.
-;;
-;; That means the bridge handler has one code path: it can write to
-;; `@#'store/*log-store*` unconditionally. Pre-observability signals land
-;; in the ring; observability `:start` swaps the dynvar to the durable
-;; backend first, then snapshots the orphaned ring and drains it. Observability
-;; `:stop` rebinds a fresh ring.
-;; ----------------------------------------------------------------------------
-
 ;;; ============================================================================
-;;; Console + store-bridge handler install/replace
+;;; Store-bridge handler install/replace
 ;;; ============================================================================
 
-(defn- install-console-handler!
-  "(Re)install the pretty console handler with given routing opts."
-  [{:keys [min-level ns-filter] :as routing}]
-  (try (t/remove-handler! console-handler-id) (catch Throwable _))
-  (let [handler (t/handler:console)
-        opts    (cond-> {}
-                  ns-filter (assoc :ns-filter ns-filter)
-                  min-level (assoc :min-level min-level))]
-    (t/add-handler! console-handler-id handler opts)
-    (reset! console-routing routing)
-    nil))
-
-(defn- uninstall-console-handler! []
-  (try (t/remove-handler! console-handler-id) (catch Throwable _))
-  (reset! console-routing nil))
-
-(defn- install-store-bridge!
-  "(Re)install the bridge handler that forwards every signal to whatever
-   `synthigy.log.store/*log-store*` is currently bound. The dynvar is
-   defonce'd to a `RingLogStore` so this never needs a nil-check; when
-   `:synthigy/observability` starts, it snapshots the ring then
-   `alter-var-root`'s the dynvar to the durable backend, and subsequent
-   signals stream there transparently.
-
-   Routing options (min-level, ns-filter) apply at the Telemere handler
-   boundary before the bridge fires."
+(defn install-store-bridge!
+  "(Re)install the bridge handler forwarding every signal to the bound
+   `*log-store*`."
   [{:keys [min-level ns-filter] :as routing}]
   (try (t/remove-handler! store-handler-id) (catch Throwable _))
   (let [opts    (cond-> {}
@@ -367,7 +241,7 @@
     (reset! store-routing routing)
     nil))
 
-(defn- uninstall-store-bridge! []
+(defn uninstall-store-bridge! []
   (try (t/remove-handler! store-handler-id) (catch Throwable _))
   (reset! store-routing nil))
 
@@ -376,48 +250,41 @@
 ;;; ============================================================================
 
 (defn store-health
-  "Health snapshot of the currently-bound `*log-store*`. Resolves to the
-   in-memory ring (`:backend :ring`) by default, unless
-   `:synthigy/observability` is up — at which point the durable backend
-   (DuckDB, ClickHouse) reports its own shape."
+  "Health snapshot of the currently-bound `*log-store*`."
   []
   (try (store/health @#'store/*log-store*) (catch Throwable _ {:up? false})))
 
 (defn sink-health
-  "Compat wrapper: takes the handler id and returns its health snapshot.
-   `:synthigy/store-bridge` resolves to the bound store's health.
-   `:synthigy/console` returns `{:up? <handler-installed?>}`.
-   Other ids return nil — raw escape-hatch sinks have no health surface."
+  "Health snapshot for a handler id; only the store bridge resolves."
   [id]
-  (cond
-    (= id store-handler-id)
-    (store-health)
+  (when (= id store-handler-id)
+    (store-health)))
 
-    (= id console-handler-id)
-    {:up? (some? @console-routing)}
+(defn expand-ns-pattern
+  "Expand a logical-ns override pattern to also install its real code-namespace
+   equivalents."
+  [pattern]
+  (into [pattern]
+        (keep (fn [[real canonical]]
+                (when (and (not= real canonical)
+                           (str/starts-with? (str pattern) canonical))
+                  (let [remainder (subs (str pattern) (count canonical))]
+                    (str real (if (str/blank? remainder) "*" remainder))))))
+        pipeline/default-ns-aliases))
 
-    :else nil))
+(defn set-ns-min-level!
+  [ns-pat lvl]
+  (doseq [p (expand-ns-pattern ns-pat)]
+    (t/set-min-level! nil p lvl)))
 
 (defn apply-routing!
-  "Apply a new routing config to the live handler graph without restart.
-
-   `config` shape (NEW — replaces the pre-observability per-sink map):
-
-     :root-level    keyword level — sets the global minimum
-     :ns-overrides  seq of [ns-pattern level] pairs
-     :console       {:min-level kw-or-nil, :ns-filter str-or-nil}  ; optional
-     :store         {:min-level kw-or-nil, :ns-filter str-or-nil}  ; optional
-
-   Either component may be omitted (it then keeps its existing routing).
-   Set its `:min-level` to nil to clear an override. Called by
-   `synthigy.log.config` after loading from the database."
-  [{:keys [root-level ns-overrides console store]}]
+  "Apply a new routing config to the live handler graph without restart."
+  [{:keys [root-level ns-overrides store]}]
   (when (and root-level (valid-levels root-level))
     (t/set-min-level! root-level))
   (doseq [[pattern level] ns-overrides
           :when (and pattern (valid-levels level))]
-    (t/set-min-level! nil pattern level))
-  (when (some? console) (install-console-handler! console))
+    (set-ns-min-level! pattern level))
   (when (some? store)   (install-store-bridge! store))
   (swap! current-routing
          (fn [r] (merge (or r {})
@@ -427,20 +294,15 @@
   nil)
 
 (defn routing-snapshot
-  "Return the current routing state: root-level, ns-overrides, per-component
-   (console + store) routing, source (:env on startup, :db after DB overlay).
-   Returns nil before `install!` has been called."
+  "Current routing state, or nil before `install!` has run."
   []
   (when-let [base @current-routing]
-    (assoc base
-           :console @console-routing
-           :store   @store-routing)))
+    (assoc base :store @store-routing)))
 
 (defn revert-to-env-routing!
-  "Re-apply the env-var bootstrap routing, undoing any DB overlay. Called
-   by `synthigy.log.config/clear-config!`."
+  "Re-apply the env-var bootstrap routing, undoing any DB overlay."
   []
-  (when-let [{:keys [root-level ns-overrides console store]} @env-routing]
+  (when-let [{:keys [root-level ns-overrides store]} @env-routing]
     (let [env-patterns (set (map first (or ns-overrides [])))
           db-patterns  (map first (:ns-overrides @current-routing))]
       (doseq [pattern (remove env-patterns db-patterns)]
@@ -449,7 +311,6 @@
     (doseq [[pattern level] (or ns-overrides [])
             :when (and pattern (valid-levels level))]
       (t/set-min-level! nil pattern level))
-    (when console (install-console-handler! console))
     (when store   (install-store-bridge! store))
     (reset! current-routing @env-routing)
     nil))
@@ -459,21 +320,21 @@
 ;;; ============================================================================
 
 (defn set-ns-levels!
-  "Apply per-namespace min-level overrides programmatically. Each entry is
-   [ns-pattern level], e.g. [\"synthigy.iam.access\" :warn]."
+  "Apply per-namespace [ns-pattern level] min-level overrides."
   [pairs]
   (doseq [[ns-pat lvl] pairs]
     (when (and ns-pat (valid-levels lvl))
-      (t/set-min-level! nil ns-pat lvl))))
+      (set-ns-min-level! ns-pat lvl))))
 
 ;;; ============================================================================
 ;;; Pipeline install
 ;;; ============================================================================
 
-(defn- install-pipeline! []
+(defn install-pipeline! []
   (t/set-xfn!
     (pipeline/compose-stages
-      [(pipeline/enrich-host-stage #(deref hostname))
+      [(pipeline/normalize-ns-stage)
+       (pipeline/enrich-host-stage #(deref node/hostname))
        (pipeline/enrich-ctx-stage promoted-ctx-keys)
        (pipeline/enrich-topics-stage topics/classify)
        (pipeline/redact-stage default-redactions)
@@ -484,17 +345,11 @@
 ;;; ============================================================================
 
 (defn shutdown!
-  "Tear down handlers + pipeline. Idempotent. Also evicts Telemere's
-   bundled `:default/console` handler so a re-install doesn't
-   double-print.
-
-   Note: `*log-store*` is intentionally NOT mutated — the dynvar belongs
-   to the `:synthigy/observability` lifecycle, not to log's own. After
-   shutdown the ring (or whichever backend was bound) remains usable for
-   reads."
+  "Tear down handlers + pipeline. Idempotent."
   []
+  ;; Evicting :default/console is load-bearing — Telemere installs it on ns
+  ;; load.
   (try (t/remove-handler! :default/console) (catch Throwable _))
-  (uninstall-console-handler!)
   (uninstall-store-bridge!)
   (doseq [sink-id (vec @raw-handlers)]
     (try (remove-sink! sink-id) (catch Throwable _)))
@@ -502,35 +357,24 @@
   nil)
 
 (defn install!
-  "Configure Telemere: pipeline + console handler (when enabled) +
-   store-bridge handler. Does NOT touch `synthigy.log.store/*log-store*`
-   — that dynvar is defonce'd to a fresh `RingLogStore` at the
-   protocol-ns site and is owned by the `:synthigy/observability`
-   lifecycle from then on.
-
-   Returns `{:console? :store-bridged? :root-level :ns-overrides}`."
+  "Configure Telemere: pipeline + store-bridge handler."
   []
   (shutdown!)
   (install-pipeline!)
   (let [root-level   (env-root-level)
         ns-overrides (env-ns-overrides)
-        console?     (env-console-enabled?)
-        console-r    (when console? {:min-level (env-console-level)})
         store-r      {}]                        ; always on
-    (when console? (install-console-handler! console-r))
     (install-store-bridge! store-r)
     (t/set-min-level! root-level)
     (doseq [[ns-pat lvl] ns-overrides]
-      (t/set-min-level! nil ns-pat lvl))
+      (set-ns-min-level! ns-pat lvl))
     (let [routing {:root-level   root-level
                    :ns-overrides (vec ns-overrides)
-                   :console      console-r
                    :store        store-r
                    :source       :env}]
       (reset! current-routing routing)
       (reset! env-routing     routing))
-    {:console?       console?
-     :store-bridged? true
+    {:store-bridged? true
      :root-level     root-level
      :ns-overrides   (vec ns-overrides)}))
 
@@ -541,14 +385,8 @@
 (defonce ^:private taps (atom {}))
 
 (defn tap!
-  "Capture signals matching `ns-pattern` into an in-memory ring buffer keyed
-   by `tap-id`. Use `(recent tap-id)` to read them back, `(untap! tap-id)` to stop.
-
-   Options: :n — buffer capacity (default 200).
-
-   Example:
-     (synthigy.log/tap! :sql \"synthigy.dataset.sql*\")
-     (synthigy.log/recent :sql)"
+  "Capture signals matching `ns-pattern` into an in-memory ring buffer keyed by
+   `tap-id`."
   [tap-id ns-pattern & {:keys [n] :or {n 200}}]
   (when (contains? @taps tap-id)
     (try (t/remove-handler! tap-id) (catch Throwable _)))
@@ -567,7 +405,7 @@
   (some-> @taps (get tap-id) deref vec))
 
 (defn recent-lines
-  "Convenience: captured signals as `[ts level ns msg]` tuples."
+  "Captured signals as `[ts level ns msg]` tuples."
   [tap-id]
   (mapv (fn [{:keys [inst level ns msg_]}]
           [(str inst) level ns (some-> msg_ force)])
@@ -580,16 +418,14 @@
   (swap! taps dissoc tap-id)
   nil)
 
-(defn list-taps
-  "Currently active tap-ids."
-  []
+(defn list-taps []
   (vec (keys @taps)))
 
 ;;; ============================================================================
 ;;; Callsite API — level macros
 ;;; ============================================================================
 
-(defn- expand-level
+(defn expand-level
   [lvl args]
   (case (count args)
     1 (let [a (first args)]
@@ -606,7 +442,7 @@
 (defmacro info  [& args] (expand-level :info  args))
 (defmacro warn  [& args] (expand-level :warn  args))
 (defmacro error
-  "Emit an :error-level signal. For attaching a throwable, use `error!`."
+  "Emit an :error-level signal; for attaching a throwable use `error!`."
   [& args] (expand-level :error args))
 (defmacro fatal [& args] (expand-level :fatal args))
 
@@ -632,6 +468,45 @@
   "Run body with extra context merged into Telemere's *ctx*."
   [ctx-map & body] `(t/with-ctx+ ~ctx-map ~@body))
 
+(defn request-id
+  "The current request's correlation id from Telemere's *ctx*, or nil outside a
+   request."
+  []
+  (:request-id t/*ctx*))
+
+;;; ============================================================================
+;;; Patcho lifecycle bridge
+;;; ============================================================================
+
+(defn install-lifecycle-hook!
+  "Route every patcho module transition into the log, suppressing patcho's
+   stdout default."
+  []
+  (alter-var-root
+    #'lifecycle/*on-lifecycle-event*
+    (constantly
+      (fn [{:keys [phase topic error]}]
+        (case phase
+          :started (info {:id ::module-started
+                          :data {:action :started :subject :module :module topic}}
+                         (str "Module " topic " started"))
+          :stopped (info {:id ::module-stopped
+                          :data {:action :stopped :subject :module :module topic}}
+                         (str "Module " topic " stopped"))
+          ;; t/error! takes (opts error) — the message rides in :msg, not a
+          ;; third arg
+          :start-failed (error! {:id   ::module-start-failed
+                                 :msg  (str "Module " topic " failed to start")
+                                 :data {:action :starting :subject :module :module topic}}
+                                error)
+          nil)))))
+
+(defn restore-default-lifecycle-hook!
+  "Hand the lifecycle hook back to patcho's stdout printer."
+  []
+  (alter-var-root #'lifecycle/*on-lifecycle-event*
+                  (constantly lifecycle/default-on-lifecycle-event)))
+
 ;;; ============================================================================
 ;;; Lifecycle module
 ;;; ============================================================================
@@ -640,5 +515,47 @@
   :synthigy/log
   {:depends-on []
    :doc "pure logging, zero deps"
-   :start (fn [] (install!))
-   :stop  (fn [] (shutdown!))})
+   ;; Ordering is load-bearing: the started-log must come AFTER install!,
+   ;; the stopping-log BEFORE shutdown!.
+   :start (fn []
+            (let [{:keys [root-level]} (install!)]
+              (install-lifecycle-hook!)
+              ;; Supervised: stdout is the JSON-RPC control channel
+              ;; exclusively (see synthigy.supervisor), so console output goes
+              ;; to stderr. Re-uses :default/console — same id the load-time
+              ;; branch below installs, so `shutdown!` keeps evicting it in one
+              ;; place — but WARN+ from here on: the store bridge is up now and
+              ;; holds every signal, so INFO on stderr is pure duplication.
+              (when (supervised?)
+                (t/add-handler! :default/console
+                                (let [fmt (t/format-signal-fn)]
+                                  (fn [signal]
+                                    (binding [*out* *err*] (println (fmt signal)))))
+                                {:min-level :warn}))
+              (info {:id ::lifecycle-started
+                     :data {:action :started :subject :logging
+                            :root-level root-level
+                            :backend (:backend (store-health))}}
+                    "Logging started")))
+   :stop  (fn []
+            (info {:id ::lifecycle-stopping
+                   :data {:action :stopping :subject :logging}}
+                  "Stopping logging")
+            ;; Hand the hook back BEFORE tearing the bridge down, else patcho's
+            ;; own :stopped notify logs into a dead sink.
+            (restore-default-lifecycle-hook!)
+            (shutdown!))})
+
+;; Load-time, not start-time — merely requiring synthigy.log must silence
+;; patcho's stdout default.
+(install-lifecycle-hook!)
+
+;; Load-time too: supervised stdout is exclusively the JSON-RPC channel, and
+;; Telemere's :default/console (installed on ITS ns load) prints to *out* —
+;; under the warm-idle boot every namespace loads before :synthigy/log
+;; starts, so load-time signals would leak onto the control channel.
+(when (supervised?)
+  (try (t/remove-handler! :default/console) (catch Throwable _))
+  (t/add-handler! :default/console
+                  (let [fmt (t/format-signal-fn)]
+                    (fn [signal] (binding [*out* *err*] (println (fmt signal)))))))

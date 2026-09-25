@@ -31,9 +31,9 @@
 // client. Three shapes, in order:
 //
 //   1. loaded in an IFRAME carrying ?code&state — a silent renewal. Answer the
-//      parent and stop. The bundle is never loaded here: oidc-client-ts only
-//      wants a postMessage of this URL, and 2.2MB does not fit inside the
-//      renewal timeout.
+//      parent and stop. The bundle is never loaded here: the login only wants
+//      a postMessage of this URL, and 2.2MB does not fit inside the renewal
+//      timeout.
 //   2. loaded as the TOP window on the callback path — a login coming back.
 //      Bounce the query to the console page the operator left, which is where
 //      the component lives and can settle it. Anything else here returns to
@@ -105,20 +105,18 @@
     });
   }
 
-  // {source:"oidc-client", url, keepOpen} from the page's own origin is exactly
-  // what the library's signinSilentCallback() posts; the parent is waiting for
-  // nothing else.
+  // must match synthigy.client.login/silent-callback! — any other source is ignored and the renewal times out
   function answerSilentRenew() {
     if (window.self === window.top || !looksLikeOAuthReturn()) return false;
     window.parent.postMessage(
-      { source: "oidc-client", url: window.location.href, keepOpen: false },
+      { source: "synthigy-login", url: window.location.href },
       window.location.origin);
     return true;
   }
 
   // The code was delivered HERE because this path is what the client has
   // registered, but the component that must consume it lives on the console
-  // page. oidc-client-ts reads code+state off the URL and does not require the
+  // page. The login reads code+state off the URL and does not require the
   // page to be the registered address, so carrying the query across is enough.
   function bounceBack() {
     var to = read(RETURN_KEY) || "/console/sessions";

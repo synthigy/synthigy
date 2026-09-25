@@ -598,7 +598,7 @@
          (ui/detail request spec (data/detail-row spec (:xid row-or-msg))
                     (after spec row-or-msg)))
         {:status 303
-         :headers {"Location" (str "/console/iam/" (:slug spec) "/" (:xid row-or-msg))}})
+         :headers {"Location" (str "/console/iam/" (:slug spec) "?created=1")}})
       (html-response
        (ui/create-page request spec
                        (if (= :denied status)
@@ -783,8 +783,9 @@
                    (nil? tail)
                    (html-response
                     (ui/browse request spec nil
-                               (when (get (query-params request) "saved")
-                                 [:ok "Saved."])))
+                               (let [qp (query-params request)]
+                                 (cond (get qp "saved")   [:ok "Saved."]
+                                       (get qp "created") [:ok "Created."]))))
 
                    (= tail "rows")
                    (let [{:strs [offset q] sort-k "sort" dir "dir" :as qp} (query-params request)]

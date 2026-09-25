@@ -58,6 +58,13 @@ synthigy iam add-client "My BFF" --id my-bff --type confidential \
   version upgrades
 - Bundled observability store — logs and metrics land in DuckDB or ClickHouse
 
+## Putting it on the internet
+
+The engine serves plain HTTP and terminates no TLS, so a public instance sits
+behind nginx, Caddy or Traefik. [docs/PROXY.md](docs/PROXY.md) has the copy-paste configs
+and the three things the proxy has to get right — TLS (the session cookies are
+`Secure`), the client address in `X-Forwarded-For`, and unbuffered SSE.
+
 ## Bundles
 
 One fused jar per backend pair; `--db` selects it and the observability store

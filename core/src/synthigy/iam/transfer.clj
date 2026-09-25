@@ -36,6 +36,7 @@
    [synthigy.dataset.sql.query :as sql.query]
    [synthigy.iam.access :as access]
    [synthigy.iam.gen :as gen]
+   [synthigy.iam.service-user :as service-user]
    synthigy.iam.keys
    [synthigy.json :refer [read-str]]
    [synthigy.log :as log]))
@@ -80,7 +81,9 @@
            :prefix  "app_"
            ;; NO :secret (hashed)
            :scalars #{:name :description :id :active :type :settings}
-           :refs    {:apis :ref}}
+           :refs    {:apis :ref}
+           ;; roles/groups are the app's, stored on its SERVICE user
+           :via     {:service_user {:roles :ref :groups :ref}}}
 
    :api   {:entity  :iam/api
            :prefix  "api_"
@@ -145,7 +148,29 @@
                             (into {(id/key) nil}
                                   (map (fn [k] [k nil]))
                                   (filter target-attrs (:scalars rel-spec)))))}]]))
-                 refs)))))
+                 refs)
+           (keep (fn [[via-key via-refs]]
+                   (when-let [rel (get rels via-key)]
+                     (let [target-rels (entity-relations (:to rel))]
+                       [via-key
+                        [{:args {:_join :left}
+                          :selections
+                          (into {(id/key) nil}
+                                (keep (fn [[k _]]
+                                        (when (get target-rels k)
+                                          [k [{:args {:_join :left}
+                                               :selections {(id/key) nil}}]])))
+                                via-refs)}]])))
+                 (:via (spec type)))))))
+
+(defn lift-via
+  "Move a record's via-relation refs up to the record itself."
+  [type record]
+  (reduce (fn [r [via-key via-refs]]
+            (merge (dissoc r via-key)
+                   (select-keys (get r via-key) (keys via-refs))))
+          record
+          (:via (spec type))))
 
 ;; ============================================================================
 ;; Export
@@ -178,7 +203,8 @@
    (let [{:keys [entity]} (spec type)
          sel (selection type)]
      (access/with-principal nil
-       (let [records (mapv portable (dataset/search-entity entity args sel))]
+       (let [records (mapv (comp portable #(lift-via type %))
+                           (dataset/search-entity entity args sel))]
          (log/info {:id ::exported
                     :data {:action :exported :subject :iam-transfer
                            :transfer-type type :entity entity :records (count records)}}
@@ -225,13 +251,24 @@
   "Every id a record points AT, as `relation-key -> #{id}`; these must already
    exist."
   [type record]
-  (let [{:keys [refs]} (spec type)]
+  (let [{:keys [refs via]} (spec type)]
     (into {}
           (keep (fn [[rel-key rel-spec]]
                   (when (= :ref rel-spec)
                     (when-let [ids (seq (keep (id/key) (get record rel-key)))]
                       [rel-key (set ids)]))))
-          refs)))
+          (apply merge refs (vals via)))))
+
+(defn ref-relations
+  "Relation-key -> relation for every ref a `type` record may carry, via-refs
+   resolved on the via target entity."
+  [type]
+  (let [{:keys [entity via]} (spec type)
+        rels (entity-relations (id/entity entity))]
+    (apply merge rels
+           (for [[via-key via-refs] via
+                 :let [target-rels (entity-relations (get-in rels [via-key :to]))]]
+             (select-keys target-rels (keys via-refs))))))
 
 (defn validate-records
   "Dry run over already-parsed records; catches a payload granting access to an
@@ -239,7 +276,7 @@
    row). Writes nothing."
   [type payload]
   (let [records (records-of payload)
-        rels    (entity-relations (id/entity (:entity (spec type))))
+        rels    (ref-relations type)
         missing (access/with-principal nil
                   (reduce
                    (fn [acc record]
@@ -266,6 +303,27 @@
   "`validate-records` for a file path or classpath resource."
   [type path]
   (validate-records type (read-payload path)))
+
+(defn import-via!
+  "Write each record's via-refs onto its via target (an app's roles/groups onto
+   its SERVICE user), creating the link first."
+  [type records write!]
+  (access/with-principal nil
+    (doseq [record records
+            :let [refs (into {}
+                             (keep (fn [k] (when-let [v (or (get record k) (get record (name k)))]
+                                             [k (mapv #(hash-map (id/key) (or (get % (id/key)) (get % (name (id/key))))) v)])))
+                             (mapcat keys (vals (:via (spec type)))))]
+            :when (seq refs)]
+      (let [app-key (or (get record (id/key)) (get record (name (id/key)))
+                        (id/extract (dataset/get-entity :iam/app {:id (or (:id record) (get record "id"))} {(id/key) nil})))
+            user (service-user/sync-service-user app-key)]
+        (if user
+          (write! :iam/user (assoc refs (id/key) (id/extract user)))
+          (log/warn {:id ::via-target-missing
+                     :data {:action :importing :subject :iam-transfer :transfer-type type
+                            :record (or (:id record) (get record "id"))}}
+                    "No service user to carry roles/groups (public client?) — skipped"))))))
 
 (defn import-records!
   "Write already-parsed records; `:mode :sync` (default) matches each relation
@@ -295,11 +353,16 @@
                       :source (some-> source str)
                       :records (count (records-of payload))}}
               "Importing IAM configuration")
-    (case mode
-      :sync  (dataset/sync-entity entity payload)
-      :stack (dataset/stack-entity entity payload)
+    (when-not (#{:sync :stack} mode)
       (throw (ex-info (str "Unknown import mode: " mode)
-                      {:mode mode :known [:sync :stack]})))))
+                      {:mode mode :known [:sync :stack]})))
+    (let [write! (if (= mode :sync) dataset/sync-entity dataset/stack-entity)
+          via-keys (mapcat keys (vals (:via (spec type))))
+          strip #(apply dissoc % (concat via-keys (map name via-keys)))
+          result (write! entity (if (sequential? payload) (mapv strip payload) (strip payload)))]
+      (when (seq via-keys)
+        (import-via! type (records-of payload) write!))
+      result)))
 
 (defn import!
   "`import-records!` for a file path or classpath resource."

@@ -24,7 +24,7 @@
   (:require
    [synthigy.iam.access :as access]
    [synthigy.iam.gen :as iam.gen]
-   [synthigy.embedded :as embedded]
+   [synthigy.iam.service-user :as service-user]
    [synthigy.server.console.data :as data]
    [synthigy.server.console.widgets :as widgets]
    [synthigy.xsql.console :as cx]))
@@ -41,6 +41,17 @@
 (def apis-link
   [:apis "APIs" :oauth_api :layers
    "Audiences this app may request a token for."])
+
+(def role-link
+  [:roles "Roles" :user_role :shield
+   (str "What this app may do with its own credentials (client_credentials). "
+        "A token carries only the scopes these roles grant on the requested API.")
+   {:via [:service-user :user] :sub :description}])
+
+(def group-link
+  [:groups "Groups" :user_group :users
+   "Groups this app belongs to — their roles apply too, and row rules scoped to a group scope the app."
+   {:via [:service-user :user]}])
 
 (def settings
   {:fields
@@ -123,23 +134,43 @@
        :denied [:warn "You don't have permission to change this."]
        [:warn (str secret-or-msg)])})))
 
+(defn prepare-create
+  [data]
+  (cond-> (assoc data :id (iam.gen/client-id))
+    (and (service-user/confidential? data)
+         (empty? (get-in data [:settings "allowed-grants"])))
+    (assoc-in [:settings "allowed-grants"] ["client_credentials"])))
+
 (defn stack-service-user
-  "A confidential client authenticates as a SERVICE user named after its
-   client_id — `token.clj` resolves it with `{:name (:id client)}` — so
-   client_credentials 401s without one. Runs SYSTEM: creating an app must not
-   also require a grant to write users (Robert's call, 2026-08-17)."
-  [_spec {:keys [id type]}]
-  (if-not (#{:confidential "confidential"} type)
+  "Runs SYSTEM: creating an app must not also require a grant to write users."
+  [spec {:keys [xid type]}]
+  (if-not (service-user/confidential? {:type type})
     [:ok "App created."]
     (try
       (access/with-principal nil
-        (embedded/sync :user {:name id :type "SERVICE" :active true}))
-      [:ok (str "App created. Generate a client secret below before this app "
-                "can authenticate.")]
+        (service-user/sync-service-user xid))
+      (let [[status secret] (data/regenerate-secret! spec xid)]
+        (if (= :ok status)
+          [:ok [:span.console-secret-reveal
+                "App created. Client secret — copy it now, it will not be shown again: "
+                [:code secret]
+                (widgets/copy-button secret)]]
+          [:warn "App created, but no secret could be generated. Regenerate one below."]))
       (catch clojure.lang.ExceptionInfo e
         [:warn (str "App created, but its service user could not be: "
                     (ex-message e)
                     " client_credentials will fail until that is fixed.")]))))
+
+(defn prepare-save
+  [data current]
+  (when (service-user/confidential? data)
+    (access/with-principal nil
+      (service-user/assert-name-free!
+       (service-user/service-user-name {:id (:id current) :name (:name data)})
+       (get-in current [:service-user :xid]))))
+  ;; never keep a secret on a public client — the token path branches on its existence
+  (cond-> data
+    (#{:public "public"} (:type data)) (assoc :secret nil)))
 
 (def spec
   {:slug "apps" :entity :oauth_client :key :iam/app :label "Apps" :icon :box
@@ -152,7 +183,7 @@
              [:apis "APIs" :agg :layers]]
    :selection-extra [:id]
    :actions {"secret/regenerate" {:reauth? true :run regenerate!}}
-   :create {:prepare #(assoc % :id (iam.gen/client-id))
+   :create {:prepare prepare-create
             :after stack-service-user
             :fields [[:name "Name" :text {:required true}]
                      [:type "Type" :choices
@@ -163,14 +194,7 @@
    :delete {:warning (str "Any live session or token issued to this app stops "
                           "working the next time it's used — nothing revokes it "
                           "outright, it just can no longer be looked up.")}
-   :detail {:prepare (fn [data _current]
-                       ;; Public clients must carry NO secret: every check in
-                       ;; the token path branches on a secret EXISTING, not on
-                       ;; type, so a leftover one breaks device_code and the
-                       ;; authorization_code exchange. Cleared on the way in,
-                       ;; not merely hidden in the form.
-                       (cond-> data
-                         (#{:public "public"} (:type data)) (assoc :secret nil)))
+   :detail {:prepare prepare-save
             :signals (fn [row] (str "{appType: '" (some-> (:type row) name) "'}"))
             :fields [[:name   "Name"   :text]
                      [:active "Active" :switch]
@@ -178,5 +202,5 @@
             :head client-id-chip
             :sections [secret-section]
             :confirm (fn [row] (str "/console/iam/apps/" (:xid row) "/secret/regenerate"))
-            :links  [apis-link]
+            :links  [apis-link role-link group-link]
             :settings settings}})

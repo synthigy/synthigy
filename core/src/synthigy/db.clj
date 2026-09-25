@@ -79,9 +79,9 @@
     "Translate a native SQL exception into an ex-info with canonical :code and optional :details, or nil if unrecognized; must be pure."))
 
 (extend-protocol Translator
-  Postgres
-  (translate-db-exception [_ _] nil)
   SQLite
+  (translate-db-exception [_ _] nil)
+  Cockroach
   (translate-db-exception [_ _] nil))
 
 ;;; ============================================================================

@@ -110,15 +110,27 @@
   [rows]
   (mapv #(update % :active (fnil identity true)) rows))
 
+(defn link-via
+  [[_ _ _ _ _ show]]
+  (:via show))
+
 (defn detail-selection
   [{{:keys [fields links settings config]} :detail extra :selection-extra}]
-  (into (into (cond-> [:xid]
-                settings (conj :settings)
-                config (into [(:attr config) (:by config)])
-                extra (into extra))
-              (map first) fields)
-        (map (fn [[k _ entity _ _ show]] {k (link-selection entity show)}))
-        links))
+  (let [link-sel (fn [[k _ entity _ _ show]] {k (link-selection entity show)})]
+    (-> (cond-> [:xid]
+          settings (conj :settings)
+          config (into [(:attr config) (:by config)])
+          extra (into extra))
+        (into (map first) fields)
+        (into (map link-sel) (remove link-via links))
+        (into (map (fn [[rel ls]]
+                       {rel [{:args {:_join :left}
+                              :selections (into [:xid]
+                                                (map (fn [[k _ entity _ _ show]]
+                                                       {k [{:args {:_join :left}
+                                                            :selections (link-selection entity show)}]}))
+                                                ls)}]}))
+              (group-by (comp first link-via) (filter link-via links))))))
 
 (defn relative-path?
   [s]
@@ -195,7 +207,11 @@
              #(first (embedded/search (:entity spec) {:_where {:xid {:_eq xid}}}
                                       (detail-selection spec))))
             (as-> row
-                  (reduce (fn [r [k]] (update r k normalize-active))
+                  (reduce (fn [r [k :as l]]
+                            (let [r (if-let [[rel] (link-via l)]
+                                      (assoc r k (get-in r [rel k]))
+                                      r)]
+                              (update r k normalize-active)))
                           row (get-in spec [:detail :links]))))))
 
 (def option-limit
@@ -290,16 +306,16 @@
       (get-in entity [:attributes (name attr) :enum]))))
 
 (defn all-grants
-  [spec xid link-key]
+  [entity xid link-key]
   (access/with-principal nil
-    (-> (embedded/search (:entity spec) {:_where {:xid {:_eq xid}}}
+    (-> (embedded/search entity {:_where {:xid {:_eq xid}}}
                          [:xid {link-key [:xid]}])
         first
         (get link-key))))
 
 (defn link-payload
-  [spec xid link-key link-entity submitted]
-  (let [current   (mapv :xid (all-grants spec xid link-key))
+  [entity xid link-key link-entity submitted]
+  (let [current   (mapv :xid (all-grants entity xid link-key))
         seen-cur  (set (map :xid (link-selected link-entity current)))
         grantable (set (map :xid (link-selected link-entity submitted)))]
     (into (mapv (fn [x] {:xid x}) (remove seen-cur current))
@@ -395,16 +411,18 @@
 (defn save!
   "`[:ok row]`, or `[:denied typed]` / `[:error msg typed]` where `typed` is
    what was posted, for the caller to re-render."
-  [{{:keys [fields links settings config prepare]} :detail :as spec} xid params]
-  (if-let [current (detail-row spec xid)]
+  [{{:keys [fields links settings config prepare locked]} :detail :as spec} xid params]
+  (if-let [current (when-let [row (detail-row spec xid)]
+                     (when-not (and locked (locked row)) row))]
     (let [typed (scalar-params fields params)]
       (try
         (let [data (assoc typed :xid xid)
               data (into data
                          (comp
                           (remove (fn [l] (get-in (last l) [:create :parent])))
+                          (remove link-via)
                           (map (fn [[k _ link-entity]]
-                                 [k (link-payload spec xid k link-entity
+                                 [k (link-payload (:entity spec) xid k link-entity
                                                   (get params k))])))
                          links)
               data (merge data (owned-data links params))
@@ -415,6 +433,15 @@
                           (some (fn [[k]] (str/starts-with? (name k) "config__")) params))
                      (assoc (:attr config) (config-write config current params)))]
           (embedded/sync (:entity spec) (cond-> data prepare (prepare current)))
+          (doseq [[[rel via-entity] ls] (group-by link-via (filter link-via links))
+                  :let [target (get-in current [rel :xid])]
+                  :when target]
+            (embedded/sync via-entity
+                           (into {:xid target}
+                                 (map (fn [[k _ link-entity]]
+                                        [k (link-payload via-entity target k link-entity
+                                                         (get params k))]))
+                                 ls)))
           (purge-deleted! links params)
           [:ok (detail-row spec xid)])
         (catch clojure.lang.ExceptionInfo e
@@ -425,8 +452,9 @@
 
 (defn delete-row!
   "Delete a record and the children it OWNS, children first."
-  [{:keys [entity] {:keys [links]} :detail :as spec} xid]
-  (if-let [row (detail-row spec xid)]
+  [{:keys [entity] {:keys [links locked]} :detail :as spec} xid]
+  (if-let [row (when-let [row (detail-row spec xid)]
+                 (when-not (and locked (locked row)) row))]
     (try
       (doseq [[k _ link-entity] (owned-links links)
               :let [xids (mapv :xid (get row k))]

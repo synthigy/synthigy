@@ -23,24 +23,22 @@
 (ns synthigy.db.postgres
   "PostgreSQL connection management and lifecycle"
   (:require
-    [camel-snake-kebab.core :as csk]
-    ;; NOTE: Cheshire removed - using synthigy.json (jsonista) instead
-    ;; buddy-core brings Cheshire as transitive dep but we don't use it directly
-    [clojure.string :as str]
-    [environ.core :refer [env]]
-    [next.jdbc :as jdbc]
-    [next.jdbc.quoted :refer [postgres]]
-    [next.jdbc.result-set :as rs]
-    [patcho.lifecycle :as lifecycle]
-    [patcho.patch :as patch]
-    [synthigy.db :as db]
-    [synthigy.db.sql :as sql :refer [execute-one!]]
-    [synthigy.log :as log])
+   [camel-snake-kebab.core :as csk]
+   [clojure.string :as str]
+   [environ.core :refer [env]]
+   [next.jdbc :as jdbc]
+   [next.jdbc.quoted :refer [postgres]]
+   [next.jdbc.result-set :as rs]
+   [patcho.lifecycle :as lifecycle]
+   [patcho.patch :as patch]
+   [synthigy.db :as db]
+   [synthigy.db.sql :as sql :refer [execute-one!]]
+   [synthigy.log :as log])
   (:import
-    [com.zaxxer.hikari HikariDataSource]
-    [java.sql Connection DriverManager ResultSet ResultSetMetaData]
-    [org.postgresql.util PGobject]
-    [synthigy.db Postgres])
+   [com.zaxxer.hikari HikariDataSource]
+   [java.sql Connection DriverManager ResultSet ResultSetMetaData]
+   [org.postgresql.util PGobject PSQLException ServerErrorMessage]
+   [synthigy.db Postgres])
   (:gen-class))
 
 (defn postgres-connected? [datasource] (when datasource (not (.isClosed datasource))))
@@ -103,7 +101,7 @@
     :as data}]
   (let [url (str "jdbc:postgresql://" host \: port \/ db)
         datasource (doto
-                     (HikariDataSource.)
+                    (HikariDataSource.)
                      (.setDriverClassName "org.postgresql.Driver")
                      (.setJdbcUrl url)
                      (.setUsername user)
@@ -162,8 +160,8 @@
    Called during setup and automatically by read-version and write-version."
   [{:keys [datasource]}]
   (jdbc/execute-one!
-    datasource
-    ["CREATE TABLE IF NOT EXISTS __component_versions__ (
+   datasource
+   ["CREATE TABLE IF NOT EXISTS __component_versions__ (
        id BIGSERIAL PRIMARY KEY,
        component TEXT NOT NULL UNIQUE,
        version TEXT NOT NULL,
@@ -175,21 +173,21 @@
 
   (read-version [db topic]
     (if-let [row (jdbc/execute-one!
-                   (:datasource db)
-                   ["SELECT version FROM __component_versions__ WHERE component = ? ORDER BY updated_at desc"
-                    (str topic)])]
+                  (:datasource db)
+                  ["SELECT version FROM __component_versions__ WHERE component = ? ORDER BY updated_at desc"
+                   (str topic)])]
       (:__component_versions__/version row)
       "0"))
 
   (write-version [db topic version]
     (jdbc/execute-one!
-      (:datasource db)
-      ["INSERT INTO __component_versions__ (component, version, updated_at)
+     (:datasource db)
+     ["INSERT INTO __component_versions__ (component, version, updated_at)
        VALUES (?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT (component)
        DO UPDATE SET version = EXCLUDED.version, updated_at = CURRENT_TIMESTAMP"
-       (str topic)
-       version])))
+      (str topic)
+      version])))
 
 ;;; ============================================================================
 ;;; Patcho LifecycleStore Implementation
@@ -200,14 +198,13 @@
    Called during setup and automatically by read-lifecycle-state and write-lifecycle-state."
   [{:keys [datasource]}]
   (jdbc/execute-one!
-    datasource
-    ["CREATE TABLE IF NOT EXISTS __lifecycle_state__ (
+   datasource
+   ["CREATE TABLE IF NOT EXISTS __lifecycle_state__ (
       topic TEXT PRIMARY KEY,
       setup_complete BOOLEAN DEFAULT FALSE,
       cleanup_complete BOOLEAN DEFAULT FALSE,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )"]))
-
 
 (defonce connection-agent (agent {:running? true}))
 
@@ -222,9 +219,9 @@
               (try
                 (when (nil? database)
                   (throw
-                    (ex-info
-                      "Database not specified"
-                      data)))
+                   (ex-info
+                    "Database not specified"
+                    data)))
                 (when-let [db (connect database)]
                   (alter-var-root #'db/*db* (constantly db))
                   nil)
@@ -278,11 +275,11 @@
 
   (read-lifecycle-state [db topic]
     (if-let [row (jdbc/execute-one!
-                   (:datasource db)
-                   ["SELECT setup_complete, cleanup_complete
+                  (:datasource db)
+                  ["SELECT setup_complete, cleanup_complete
                     FROM __lifecycle_state__
                     WHERE topic = ?"
-                    (name topic)])]
+                   (name topic)])]
       ;; Return only persistent state - never include :started?
       {:setup-complete? (:__lifecycle_state__/setup_complete row)
        :cleanup-complete? (:__lifecycle_state__/cleanup_complete row)}
@@ -292,58 +289,58 @@
   (write-lifecycle-state [db topic state]
     ;; Only persist setup/cleanup state - :started? is ignored (runtime-only)
     (jdbc/execute-one!
-      (:datasource db)
-      ["INSERT INTO __lifecycle_state__ (topic, setup_complete, cleanup_complete, updated_at)
+     (:datasource db)
+     ["INSERT INTO __lifecycle_state__ (topic, setup_complete, cleanup_complete, updated_at)
        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT (topic)
        DO UPDATE SET
          setup_complete = EXCLUDED.setup_complete,
          cleanup_complete = EXCLUDED.cleanup_complete,
          updated_at = CURRENT_TIMESTAMP"
-       (name topic)
-       (:setup-complete? state)
-       (:cleanup-complete? state)])))
+      (name topic)
+      (:setup-complete? state)
+      (:cleanup-complete? state)])))
 
 ;;; ============================================================================
 ;;; Module Lifecycle Registration
 ;;; ============================================================================
 
 (lifecycle/register-module!
-  :synthigy/database
-  {:depends-on [:synthigy/transit]
-   :doc "JDBC pool + DB provisioning (PostgreSQL)"
-   :setup (fn []
+ :synthigy/database
+ {:depends-on [:synthigy/transit]
+  :doc "JDBC pool + DB provisioning (PostgreSQL)"
+  :setup (fn []
             ;; One-time: connect (the operator provisions the database
             ;; itself — see check-connection-params), create patcho tables,
             ;; set stores
-            (let [config (from-env)
-                  db-name (:db config)
-                  db (connect config)]
-              (log/info {:id ::backend-starting :data {:action :starting :subject :db-backend :database db-name}}
-                        "Setting up database")
-              (ensure-lifecycle-table! db)
-              (ensure-version-table! db)
-              (alter-var-root #'db/*db* (constantly db))
-              (patch/set-store! db)
-              (lifecycle/set-store! db)
-              (log/info {:id ::backend-started :data {:action :started :subject :db-backend :database db-name}}
-                        "Setup complete")))
+           (let [config (from-env)
+                 db-name (:db config)
+                 db (connect config)]
+             (log/info {:id ::backend-starting :data {:action :starting :subject :db-backend :database db-name}}
+                       "Setting up database")
+             (ensure-lifecycle-table! db)
+             (ensure-version-table! db)
+             (alter-var-root #'db/*db* (constantly db))
+             (patch/set-store! db)
+             (lifecycle/set-store! db)
+             (log/info {:id ::backend-started :data {:action :started :subject :db-backend :database db-name}}
+                       "Setup complete")))
 
-   :start (fn []
+  :start (fn []
             ;; Runtime: Ensure connection pool and stores are set
-            (log/info {:id ::lifecycle-starting :data {:action :starting}}
-                      "Starting database connection")
-            (when-not (postgres-connected? (:datasource db/*db*))
-              (start))
-            (patch/set-store! db/*db*)
-            (lifecycle/set-store! db/*db*)
-            (log/info {:id ::lifecycle-started :data {:action :started}}
-                      "Database connection started"))
+           (log/info {:id ::lifecycle-starting :data {:action :starting}}
+                     "Starting database connection")
+           (when-not (postgres-connected? (:datasource db/*db*))
+             (start))
+           (patch/set-store! db/*db*)
+           (lifecycle/set-store! db/*db*)
+           (log/info {:id ::lifecycle-started :data {:action :started}}
+                     "Database connection started"))
 
-   :stop (fn []
+  :stop (fn []
            ;; Runtime: Close connections
-           (log/info {:id ::lifecycle-stopping :data {:action :stopping}}
-                     "Stopping database connection")
+          (log/info {:id ::lifecycle-stopping :data {:action :stopping}}
+                    "Stopping database connection")
            ;; Release the patcho stores BEFORE closing the pool — they hold
            ;; THIS datasource. Leaving them pointed at a closed pool wedges the
            ;; next `start!` beyond recovery: patcho reads the lifecycle store in
@@ -354,11 +351,11 @@
            ;; reports `setup-complete?` false and would RE-RUN setup (schema
            ;; creation). nil makes `start!` skip setup entirely, and `:start`
            ;; re-points both stores at the new pool.
-           (patch/set-store! nil)
-           (lifecycle/set-store! nil)
-           (stop)
-           (log/info {:id ::lifecycle-stopped :data {:action :stopped}}
-                     "Database connection stopped"))})
+          (patch/set-store! nil)
+          (lifecycle/set-store! nil)
+          (stop)
+          (log/info {:id ::lifecycle-stopped :data {:action :stopped}}
+                    "Database connection stopped"))})
 
 ;;; ============================================================================
 ;;; JDBCBackend Protocol Implementation
@@ -378,10 +375,10 @@
     next.jdbc builder-fn that processes ResultSet rows"
   [_return-type]
   (rs/as-maps-adapter
-    rs/as-unqualified-modified-maps
-    (fn [^ResultSet rs ^ResultSetMetaData _rsmeta ^Integer i]
+   rs/as-unqualified-modified-maps
+   (fn [^ResultSet rs ^ResultSetMetaData _rsmeta ^Integer i]
       ;; Return raw values - JSON decoding handled by decoders in sql/query.clj
-      (.getObject rs i))))
+     (.getObject rs i))))
 
 (def ^:private defaults
   "PostgreSQL-specific next.jdbc options for each return type.
@@ -435,6 +432,91 @@
   (cast-placeholder [_ type] (str "?::" type))
   (template-sql [_ raw-sql] raw-sql))
 
+;;; ============================================================================
+;;; Error Translation
+;;; ============================================================================
+
+(def sqlstate-codes
+  {"23505" "UNIQUE_VIOLATION"
+   "23502" "NOT_NULL_VIOLATION"
+   "23503" "FK_VIOLATION"
+   "23514" "CHECK_VIOLATION"
+   "42804" "TYPE_MISMATCH"
+   "42846" "TYPE_MISMATCH"
+   "42P06" "SCHEMA_CONFLICT"
+   "42P07" "SCHEMA_CONFLICT"
+   "42701" "SCHEMA_CONFLICT"
+   "42710" "SCHEMA_CONFLICT"
+   "42P01" "SCHEMA_DRIFT"
+   "42703" "SCHEMA_DRIFT"
+   "42704" "SCHEMA_DRIFT"
+   "2BP01" "DEPENDENT_OBJECTS"
+   "55P03" "LOCKED"
+   "40P01" "LOCKED"
+   "40001" "LOCKED"
+   "57014" "TIMEOUT"
+   "P0001" "GUARD_VIOLATION"})
+
+(def retryable-codes #{"LOCKED" "TIMEOUT" "DB_UNAVAILABLE"})
+
+(defn sqlstate->code
+  [state]
+  (or (sqlstate-codes state)
+      (when (and state (<= 2 (count state)))
+        (case (subs state 0 2)
+          "22" "INVALID_VALUE"
+          "23" "CONSTRAINT_VIOLATION"
+          ("08" "53" "57") "DB_UNAVAILABLE"
+          nil))
+      "DB_ERROR"))
+
+(defn parse-key-detail
+  "Parse a `Key (a, b)=(x, y) ...` detail into {:columns [...] :values [...]}."
+  [detail]
+  (when-let [[_ cols vals] (and detail (re-find #"^Key \((.+?)\)=\((.*)\)" detail))]
+    (let [columns (mapv str/trim (str/split cols #","))
+          values  (mapv str/trim (str/split vals #","))]
+      {:columns columns
+       :values  (if (= (count columns) (count values)) values [vals])})))
+
+(defn translate-psql-exception
+  [^PSQLException e]
+  (let [state      (.getSQLState e)
+        code       (sqlstate->code state)
+        ^ServerErrorMessage m (.getServerErrorMessage e)
+        primary    (or (some-> m .getMessage) (.getMessage e))
+        table      (some-> m .getTable)
+        constraint (some-> m .getConstraint)
+        {:keys [columns values]} (parse-key-detail (some-> m .getDetail))
+        columns    (or (not-empty columns) (some-> m .getColumn vector))
+        target     (str table (when (= 1 (count columns)) (str "." (first columns))))
+        message    (case code
+                     "UNIQUE_VIOLATION"
+                     (str target " must be unique"
+                          (when (seq values) (str "; duplicate value " (str/join ", " values))))
+                     "NOT_NULL_VIOLATION" (str target " is required")
+                     "FK_VIOLATION"
+                     (str "Referenced record does not exist"
+                          (when (seq values) (str " (" target " = " (str/join ", " values) ")")))
+                     "TIMEOUT"        "Database statement timed out"
+                     "DB_UNAVAILABLE" "Database unavailable"
+                     primary)]
+    (ex-info message
+             (cond-> {:code    code
+                      :details (cond-> {:sqlstate state}
+                                 table         (assoc :entity table)
+                                 (seq columns) (assoc :attributes columns)
+                                 (seq values)  (assoc :values values)
+                                 constraint    (assoc :constraint constraint))}
+               (some-> m .getHint) (assoc :hint (.getHint m))
+               (retryable-codes code) (assoc :retryable true)))))
+
+(extend-type Postgres
+  db/Translator
+
+  (translate-db-exception [_ e]
+    (when (instance? PSQLException e)
+      (translate-psql-exception e))))
 
 (comment
   (lifecycle/setup! :synthigy/database)

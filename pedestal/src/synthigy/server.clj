@@ -59,6 +59,7 @@
     [io.pedestal.http :as http]
     [io.pedestal.http.content-negotiation :as conneg]
     [io.pedestal.http.cors :as cors]
+    [synthigy.cors :as origin-policy]
     [io.pedestal.interceptor :as interceptor]
     [io.pedestal.interceptor.chain :as chain]
     [io.pedestal.http.ring-middlewares :as middlewares]
@@ -545,12 +546,10 @@
                        (interceptor/interceptor
                         {:name ::vary-origin
                          :leave (fn [ctx]
-                                  (if (get-in ctx [:response :headers "Access-Control-Allow-Origin"])
-                                    (update-in ctx [:response :headers "Vary"]
-                                               #(if % (str % ", Origin") "Origin"))
+                                  (if (get-in ctx [:request :headers "origin"])
+                                    (update-in ctx [:response :headers] origin-policy/vary-origin)
                                     ctx))})
-                       ;; CORS - allow all origins (configure per-route if needed)
-                       (cors/allow-origin {:allowed-origins (constantly true)})
+                       (cors/allow-origin {:allowed-origins origin-policy/allowed?})
                        (middlewares/content-type {:mime-types {}})
                        route/query-params
                        (route/method-param)

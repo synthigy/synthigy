@@ -39,7 +39,7 @@
   (:import
     [com.zaxxer.hikari HikariDataSource]
     [java.sql ResultSet]
-    [org.sqlite SQLiteException]
+    [org.sqlite SQLiteErrorCode SQLiteException]
     [synthigy.db SQLite])
   (:gen-class))
 
@@ -411,48 +411,59 @@
 ;;; ============================================================================
 ;;; DB Error Translation
 ;;; ============================================================================
-;;
-;; SQLite's JDBC driver formats constraint failures as
-;;   "[SQLITE_CONSTRAINT_*]  ... (KIND constraint failed: T.col[, T.col ...])"
-;; The parens-suffix is stable enough to drive translation. We dispatch on
-;; substring rather than result-code to also cover wrapped/rewrapped exception
-;; layers; unrecognized exceptions return nil and fall through to the
-;; INTERNAL_ERROR path in the request handler.
-;;
-;; SQLite exposes column names for UNIQUE and NOT NULL failures. FK and CHECK
-;; messages don't carry per-attribute info; PG when added will populate
-;; :details more broadly via PSQLException server fields.
 
-(defn- parse-constraint-targets
+(defn parse-constraint-targets
   "Parse the trailing 'KIND constraint failed: T.col[, T.col2 ...]' segment
    into {:entity name :attrs [name ...]}. Returns nil if not parseable."
   [^String msg]
   (when-let [tail (second (re-find #"constraint failed:\s*(.+?)\s*\)?$" msg))]
-    (let [refs   (clojure.string/split tail #",\s*")
-          parts  (mapv (fn [r] (clojure.string/split (clojure.string/trim r) #"\.")) refs)
+    (let [refs   (str/split tail #",\s*")
+          parts  (mapv (fn [r] (str/split (str/trim r) #"\.")) refs)
           entity (first (first parts))
           attrs  (mapv second parts)]
       (when (and entity (every? some? attrs))
         {:entity entity :attrs attrs}))))
 
-(defn- translate-sqlite-exception
+(defn sqlite-detail
+  "The driver's `(...)` explanation after the result-code description, or the whole message."
   [^SQLiteException e]
-  (let [msg (or (.getMessage e) "")]
+  (let [msg  (str/replace (or (.getMessage e) "") #"^\[[A-Z_]+\]\s*" "")
+        desc (some-> ^SQLiteErrorCode (.getResultCode e) .message)
+        i    (when (seq desc) (str/index-of msg desc))
+        tail (str/trim (if i (subs msg (+ i (count desc))) msg))]
+    (if (and (str/starts-with? tail "(") (str/ends-with? tail ")"))
+      (subs tail 1 (dec (count tail)))
+      tail)))
+
+(defn sqlite-schema-code
+  [detail]
+  (condp re-find detail
+    #"already exists|^duplicate column name"       "SCHEMA_CONFLICT"
+    #"^no such (table|column|index|view|trigger)"  "SCHEMA_DRIFT"
+    #"^error in (index|view|trigger) .* after (drop|rename)" "DEPENDENT_OBJECTS"
+    #"^Cannot add a NOT NULL column"               "NOT_NULL_VIOLATION"
+    nil))
+
+(defn translate-sqlite-exception
+  [^SQLiteException e]
+  (let [msg    (or (.getMessage e) "")
+        code   (some-> ^SQLiteErrorCode (.getResultCode e) .name)
+        detail (sqlite-detail e)]
     (cond
-      (clojure.string/includes? msg "UNIQUE constraint failed")
+      (str/includes? msg "UNIQUE constraint failed")
       (let [{:keys [entity attrs]} (parse-constraint-targets msg)]
         (ex-info (cond
                    (and entity (= 1 (count attrs)))
                    (str entity "." (first attrs) " must be unique")
                    (and entity (seq attrs))
-                   (str entity " must be unique on (" (clojure.string/join ", " attrs) ")")
+                   (str entity " must be unique on (" (str/join ", " attrs) ")")
                    :else "Field must be unique")
                  {:code "UNIQUE_VIOLATION"
                   :details (cond-> {:rule "unique"}
                              entity      (assoc :entity entity)
                              (seq attrs) (assoc :attributes attrs))}))
 
-      (clojure.string/includes? msg "NOT NULL constraint failed")
+      (str/includes? msg "NOT NULL constraint failed")
       (let [{:keys [entity attrs]} (parse-constraint-targets msg)
             attr (first attrs)]
         (ex-info (if (and entity attr)
@@ -463,22 +474,33 @@
                              entity (assoc :entity entity)
                              attr   (assoc :attributes [attr]))}))
 
-      (clojure.string/includes? msg "FOREIGN KEY constraint failed")
+      (str/includes? msg "FOREIGN KEY constraint failed")
       (ex-info "Referenced record does not exist"
                {:code "FK_VIOLATION"
                 :details {:rule "reference"}})
 
-      (clojure.string/includes? msg "CHECK constraint failed")
+      (str/includes? msg "CHECK constraint failed")
       (ex-info "Field violates a check constraint"
                {:code "CHECK_VIOLATION"
                 :details {:rule "check"}})
 
-      (or (clojure.string/includes? msg "SQLITE_BUSY")
-          (clojure.string/includes? msg "SQLITE_INTERRUPT"))
-      (ex-info "Database statement timed out"
-               {:code "TIMEOUT"})
+      (= "SQLITE_CONSTRAINT_TRIGGER" code)
+      (ex-info detail {:code "GUARD_VIOLATION"})
 
-      :else nil)))
+      (or (#{"SQLITE_BUSY" "SQLITE_LOCKED" "SQLITE_INTERRUPT"} code)
+          (str/includes? msg "SQLITE_BUSY")
+          (str/includes? msg "SQLITE_INTERRUPT"))
+      (ex-info "Database statement timed out"
+               {:code "TIMEOUT" :retryable true})
+
+      (some #(some-> code (str/starts-with? %))
+            ["SQLITE_FULL" "SQLITE_IOERR" "SQLITE_CANTOPEN"])
+      (ex-info "Database unavailable" {:code "DB_UNAVAILABLE" :retryable true})
+
+      :else
+      (if-let [schema-code (sqlite-schema-code detail)]
+        (ex-info detail {:code schema-code})
+        (ex-info detail {:code "DB_ERROR"})))))
 
 (extend-type SQLite
   db/Translator

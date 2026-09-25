@@ -36,6 +36,7 @@
    [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
    [synthigy.iam :as iam]
+   [synthigy.iam.service-user :as service-user]
    [synthigy.iam.access :as access]
    [synthigy.iam.context :as iam.context]
    [synthigy.iam.encryption :as encryption]
@@ -396,7 +397,7 @@
    device_code, BEFORE user interaction), not built yet; this is the
    stopgap until then. See docs/plans/PLAN-AUDIENCE-BINDING.md steps 1/3."
   [{{allowed-grants "allowed-grants"} :settings
-    :as client} session {:keys [audience scope client_id sub]}]
+    :as client} session {:keys [audience scope client_id sub nonce]}]
   (let [audience (or (resolve-audience client_id audience)
                      (throw (ex-info "invalid_target: client not authorized for requested audience"
                                       {:client_id client_id :requested-audience audience})))
@@ -459,6 +460,8 @@
                        :refresh_token refresh-token}
                       {:access_token access-token})
                     scope)
+            tokens (cond-> tokens
+                     (and nonce (:id_token tokens)) (assoc-in [:id_token :nonce] nonce))
             granted (get-in tokens [:access_token :scope])
             granted-str (str/join " " granted)
             tokens (assoc-in tokens [:access_token :scope] granted-str)
@@ -486,6 +489,8 @@
                       (process-scope ctx tokens scope))
                     {:access_token access-token}
                     scope)
+            tokens (cond-> tokens
+                     (and nonce (:id_token tokens)) (assoc-in [:id_token :nonce] nonce))
             granted (get-in tokens [:access_token :scope])
             granted-str (str/join " " granted)
             tokens (assoc-in tokens [:access_token :scope] granted-str)
@@ -502,6 +507,25 @@
                :expires_in (access-token-expiry client)
                :scope granted-str
                :token_type "Bearer")))))
+
+(def ^:dynamic *refresh-reuse-grace-ms* 10000)
+
+(defn reused-refresh-session
+  "Session of a revoked refresh token when its rotation is older than the grace window, or nil."
+  [token]
+  (when token
+    (let [row (dataset/get-entity (token-entity :refresh_token) {:value token}
+                                  {:revoked nil :audience nil
+                                   :session [{:selections {:id nil} :args {:_join :left}}]})
+          session (get-in row [:session :id])]
+      (when (and (:revoked row) session)
+        (let [current (get-session-refresh-token session (:audience row))
+              rotated-at (when current
+                           (- (inst-ms (core/expires-at current))
+                              (* 1000 (refresh-token-expiry (core/get-session-client session)))))]
+          (when (or (nil? rotated-at)
+                    (> (- (System/currentTimeMillis) rotated-at) *refresh-reuse-grace-ms*))
+            session))))))
 
 (defmethod grant-token "refresh_token"
   [{:keys [refresh_token scope audience]
@@ -573,12 +597,21 @@
              :headers {"Content-Type" "application/json;charset=UTF-8"
                        "Pragma" "no-cache"
                        "Cache-Control" "no-store"}
-             :body (json/write-str (generate client session (assoc request :scope scope)))})))
-      (token-error
-       400
-       "invalid_grant"
-       "There is no valid session for refresh token that"
-       "was provided"))))
+             :body (json/write-str (generate client session (-> request (dissoc :nonce) (assoc :scope scope))))})))
+      (do
+        (when-let [session (reused-refresh-session refresh_token)]
+          (log/warn {:id ::refresh-token-reused
+                     :data {:action :rejected
+                            :subject :refresh-token
+                            :reason :reuse-detected
+                            :session (core/short-id session)}}
+                    "Rotated refresh token presented again — session killed")
+          (core/kill-session session))
+        (token-error
+         400
+         "invalid_grant"
+         "There is no valid session for refresh token that"
+         "was provided")))))
 
 (defn validate-client-credentials
   "Validate client credentials for client_credentials grant; public clients are
@@ -656,7 +689,9 @@
                      :audience audience}}
              "Processing client credentials grant request")
   (if-let [client (validate-client-credentials request)]
-    (let [service-user (some-> (iam.context/get-user-details {:name (:id client)})
+    (let [service-user (some-> (service-user/get-service-user (id/extract client))
+                               id/extract
+                               (as-> x (iam.context/get-user-details {(id/key) x}))
                                (update :roles #(set (keys %)))
                                (update :groups #(set (keys %))))
           ;; Resolved ONCE — defaults an omitted audience to the client's
@@ -677,6 +712,20 @@
            401
            "invalid_client"
            "Service user not configured for this client"))
+
+        (not (:active service-user))
+        (do
+          (log/warn {:id ::cc-service-user-inactive
+                     :data {:action :rejected
+                            :subject :access-token
+                            :flow "client_credentials"
+                            :reason :service-user-inactive
+                            :client client_id}}
+                    "Service user inactive for client")
+          (token-error
+           401
+           "invalid_client"
+           "Service user for this client is inactive"))
 
         (nil? resolved-audience)
         (do

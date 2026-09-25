@@ -25,8 +25,10 @@
    [buddy.core.hash :as hash]
    clojure.pprint
    [clojure.string :as str]
+   [synthigy.cors :as cors]
    [synthigy.log :as log]
    [patcho.lifecycle :as lifecycle]
+   [patcho.patch :as patch]
    [ring.util.codec :as codec]
    [synthigy.dataset.id :as id]
    [synthigy.oauth.authorization-code
@@ -37,6 +39,7 @@
    [synthigy.oauth.core :as core]
    [synthigy.oauth.device-code :as device-code]
    [synthigy.oauth.onboarding :as onboarding]
+   synthigy.oauth.patch
    [synthigy.oauth.persistence :as persistence]
    ;; side effects: grant-token/sign-token/session-kill-hook defmethods
    [synthigy.oauth.token]
@@ -383,12 +386,15 @@
 
 (defn start
   []
+  (patch/level! :synthigy.iam.oauth/model)
+  (alter-var-root #'cors/*origin-allowed?* (constantly #'core/origin-allowed?))
   (send-off maintenance-agent assoc :running true :period (util/seconds 30))
   (send-off maintenance-agent maintenance))
 
 (defn stop
   []
   (send-off maintenance-agent assoc :running false)
+  (alter-var-root #'cors/*origin-allowed?* (constantly cors/allow-all))
   (core/evict-clients!)
   (onboarding/stop-deactivation-watcher!))
 

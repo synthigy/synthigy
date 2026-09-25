@@ -25,12 +25,14 @@
    topic. See docs/core/synthigy/oauth/patch.md."
   (:require
     [buddy.hashers :as hashers]
+    [clojure.string :as str]
     [synthigy.log :as log]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
     [synthigy.dataset :as dataset]
     [synthigy.dataset.id :as id]
-    [synthigy.db :refer [*db*]]))
+    [synthigy.iam.service-user :as service-user]
+    [synthigy.iam.access :refer [with-principal]]))
 
 ;;; ============================================================================
 ;;; Helper Functions
@@ -93,7 +95,7 @@
      :hashed plaintext-count
      :skipped (- total-count plaintext-count)}))
 
-(patch/current-version :synthigy.iam.oauth/model "1.0.4")
+(patch/current-version :synthigy.iam.oauth/model "1.0.5")
 
 ;; Patch 1.0.4 - Hash client secrets
 (patch/upgrade :synthigy.iam.oauth/model
@@ -116,3 +118,76 @@
                  (throw (ex-info "Downgrade from v1.0.4 not supported - hashed secrets cannot be reverted"
                                  {:version "1.0.4"
                                   :reason "bcrypt is one-way hash"})))
+
+(defn unique-names
+  "Rows whose name is blank or shared, renamed to `(fallback row)` / `name (fallback)`."
+  [rows fallback]
+  (let [blank? #(str/blank? (:name %))
+        dups (->> (remove blank? rows)
+                  (group-by :name)
+                  vals
+                  (mapcat rest))]
+    (concat (map #(assoc % :name (fallback %)) (filter blank? rows))
+            (map #(assoc % :name (str (:name %) " (" (fallback %) ")")) dups))))
+
+(defn normalize-names!
+  "Make OAuth Client and OAuth API names unique and non-blank before their
+   unique constraints are deployed."
+  []
+  (with-principal nil
+    (into {}
+          (for [[entity fallback] [[:iam/app :id] [:iam/api :audience]]
+                :let [rows (sort-by :_eid (dataset/search-entity entity nil {:_eid nil (id/key) nil :name nil fallback nil}))
+                      renamed (unique-names rows fallback)]]
+            (do (doseq [row renamed]
+                  (dataset/stack-entity entity {(id/key) (id/extract row) :name (:name row)}))
+                [entity (mapv :name renamed)])))))
+
+(defn adopt-service-users!
+  "Link every client to the SERVICE user named after its client id, where one exists."
+  []
+  (with-principal nil
+    (->> (dataset/search-entity :iam/app nil {(id/key) nil})
+         (keep #(service-user/adopt-service-user (id/extract %)))
+         count)))
+
+(defn sync-service-users!
+  "Name, activate and (for confidential clients) create every client's service
+   user; a taken name is logged and leaves the old name."
+  []
+  (with-principal nil
+    (let [clients (dataset/search-entity :iam/app nil {(id/key) nil :id nil})
+          synced (doall
+                  (keep (fn [client]
+                          (try
+                            (service-user/sync-service-user (id/extract client))
+                            (catch Throwable e
+                              (log/error! {:id ::sync-service-user-failed
+                                           :msg "Failed to sync service user"
+                                           :data (merge {:action :migrating :subject :service-user
+                                                         :client-id (:id client)}
+                                                        (ex-data e))}
+                                          e)
+                              (service-user/get-service-user (id/extract client)))))
+                        clients))
+          linked-xids (conj (set (map id/extract synced)) (id/data :data/synthigy-user))
+          orphans (->> (dataset/search-entity :iam/user {:type {:_eq :SERVICE}} {(id/key) nil :name nil})
+                       (remove #(linked-xids (id/extract %)))
+                       (map :name))]
+      (when (seq orphans)
+        (log/warn {:id ::orphan-service-users
+                   :data {:action :migrating :subject :service-user :names (vec orphans)}}
+                  "SERVICE users with no client left untouched"))
+      {:clients (count clients) :linked (count synced) :orphans (vec orphans)})))
+
+;; Patch 1.0.5 - Service user relation, unique names
+(patch/upgrade :synthigy.iam.oauth/model
+               "1.0.5"
+               (let [adopted (adopt-service-users!)
+                     renamed (normalize-names!)
+                     summary (sync-service-users!)]
+                 (log/info {:id ::upgrade-1-0-5-done
+                            :data (merge {:action :upgraded :subject :oauth-store :version "1.0.5"
+                                          :adopted adopted :renamed renamed}
+                                         summary)}
+                           "OAuth model v1.0.5 upgrade complete")))

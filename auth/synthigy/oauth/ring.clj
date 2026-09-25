@@ -103,49 +103,6 @@
   (and (map? response)
        (contains? response :status)))
 
-;; =============================================================================
-;; CORS Support (Replaces Pedestal allow-origin)
-;; =============================================================================
-
-(defn wrap-cors
-  "Add CORS headers to responses; :allowed-origins may be :all, a set, or a
-   coll."
-  [handler {:keys [allowed-origins
-                   allowed-methods
-                   allowed-headers
-                   max-age
-                   allow-credentials]
-            :or {allowed-methods #{:get :post :put :delete :options}
-                 allowed-headers #{"*"}
-                 max-age 3600
-                 allow-credentials true}}]
-  (fn [request]
-    (let [origin (get-in request [:headers "origin"])
-          origin-allowed? (cond
-                            (= :all allowed-origins) true
-                            (set? allowed-origins) (contains? allowed-origins origin)
-                            (coll? allowed-origins) (some #(= % origin) allowed-origins)
-                            :else false)]
-      (if-not origin-allowed?
-        ;; Origin not allowed - proceed without CORS headers
-        (handler request)
-        ;; Origin allowed - add CORS headers
-        (if (= :options (:request-method request))
-          ;; Handle preflight request
-          {:status 200
-           :headers {"Access-Control-Allow-Origin" origin
-                     "Access-Control-Allow-Methods" (clojure.string/join ", " (map name allowed-methods))
-                     "Access-Control-Allow-Headers" (if (set? allowed-headers)
-                                                      (clojure.string/join ", " allowed-headers)
-                                                      (first allowed-headers))
-                     "Access-Control-Max-Age" (str max-age)
-                     "Access-Control-Allow-Credentials" (str allow-credentials)}}
-          ;; Normal request - add CORS headers to response
-          (let [response (handler request)]
-            (update response :headers merge
-                    {"Access-Control-Allow-Origin" origin
-                     "Access-Control-Allow-Credentials" (str allow-credentials)})))))))
-
 (comment
   ;; Example usage
 

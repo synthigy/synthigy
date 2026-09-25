@@ -36,6 +36,7 @@
    [synthigy.dataset.core :as core]
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
+   [synthigy.dataset.sql.errors :as errors]
    [synthigy.dataset.sql.naming
     :as naming
     :refer [normalize-name
@@ -119,6 +120,8 @@
                 new-type
                 (:error validation))
         {:type (or (:type validation) :dataset/forbidden-conversion)
+         :code "TYPE_CONVERSION_FORBIDDEN"
+         :hint (:suggestion validation)
          :entity (:name entity)
          :attribute (:name attribute)
          :from-type old-type
@@ -355,12 +358,35 @@
      :changed/relations cr
      :changed/recursive-relations crr}))
 
+(def boolean-literals
+  #{"t" "true" "y" "yes" "on" "1" "f" "false" "n" "no" "off" "0"})
+
+(defn convertible?
+  [to-type ^String v]
+  (let [v (clojure.string/trim v)]
+    (try
+      (case to-type
+        "int"     (do (Long/parseLong v) true)
+        "float"   (do (Double/parseDouble v) true)
+        "boolean" (contains? boolean-literals (clojure.string/lower-case v))
+        true)
+      (catch NumberFormatException _ false))))
+
+(defn check-stored-values!
+  "Throw INVALID_VALUE when stored text values won't convert to the new type; SQLite has no cast to fail on its own."
+  [conn entity attribute table column to-type]
+  (when (#{"int" "float" "boolean"} to-type)
+    (let [q    [(format "select %s as v from \"%s\" where %s is not null and typeof(%s) = 'text'"
+                        column table column column)]
+          bad  (remove #(convertible? to-type (:v %))
+                       (if conn (execute! conn q) (execute! q)))]
+      (when (seq bad)
+        (throw (errors/invalid-conversion-error entity attribute to-type
+                                                (count bad) (:v (first bad))))))))
+
 ;;
 (defn attribute-delta->ddl
-  "DDL for one changed attribute. `conn` is the deploy's OWN transaction — the
-   enum-removal guard runs a COUNT here, and on SQLite the pool is size 1, so
-   asking `*db*` for a second connection while the deploy transaction holds the
-   only one deadlocks until the pool times out."
+  "DDL for one changed attribute; `conn` is the deploy's own transaction."
   ([entity attribute] (attribute-delta->ddl entity attribute nil))
   ([entity
     {:keys [name type]
@@ -406,6 +432,7 @@
             dt
             (as-> statements
                   (do
+                    (check-stored-values! conn entity attribute old-table column type)
                     (log/debug {:id ::column-type-change-no-ddl
                                 :data {:table old-table :column column
                                        :from-type dt :to-type type}}
@@ -467,6 +494,8 @@
                                   (format "Cannot remove enum value(s) %s from attribute '%s' - %d row(s) still reference them; deactivate the value instead"
                                           (clojure.string/join ", " removed) name cnt)
                                   {:type ::enum-value-removal-forbidden
+                                   :code "GUARD_VIOLATION"
+                                   :hint "Deactivate the value instead of removing it."
                                    :entity-name name
                                    :table-name old-table
                                    :column column
@@ -589,7 +618,7 @@
           (try
             (execute-one! tx [sql])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/relation-ddl-error relation
                       (format "Failed to rename relation table from '%s' to '%s' (relation: %s → %s)"
                               old-name new-name (:name from) (:name to))
                       {:type ::relation-rename-error
@@ -620,7 +649,7 @@
           (try
             (execute-one! tx [sql])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/relation-ddl-error relation
                       (format "Failed to rename 'to' column in relation table '%s' from '%s' to '%s' (relation: %s → %s)"
                               new-name o n (:name from) (:name to))
                       {:type ::relation-column-rename-error
@@ -652,7 +681,7 @@
           (try
             (execute-one! tx [sql])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/relation-ddl-error relation
                       (format "Failed to rename 'from' column in relation table '%s' from '%s' to '%s' (relation: %s → %s)"
                               new-name o n (:name from) (:name to))
                       {:type ::relation-column-rename-error
@@ -748,7 +777,7 @@
               (doseq [index-sql (generate-entity-index-ddl entity)]
                 (execute-one! tx [index-sql]))
               (catch Throwable e
-                (throw (ex-info
+                (throw (errors/deploy-ddl-error
                         (format "Failed to create table for entity '%s'" n)
                         {:type ::entity-table-creation-error
                          :phase :ddl-execution
@@ -757,7 +786,7 @@
                          :entity-id (id/extract entity)
                          :table-name table
                          :sql table-sql}
-                        e))))
+                        entity nil e tx))))
             (catch clojure.lang.ExceptionInfo e
               ;; Re-throw ex-info with preserved context
               (throw e))
@@ -782,14 +811,13 @@
               :let [sql (entity-delta->ddl entity tx)]]
         (log/debug {:id ::entity-changing :data {:entity n}} "Changing entity")
         (doseq [statement sql]
-          (def statement statement)
           (log/debug {:id ::entity-statement-executing
                       :data {:entity n :sql statement}}
                      "Executing statement")
           (try
             (execute-one! tx [statement])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/deploy-ddl-error
                       (format "Failed to execute DDL statement for entity '%s'" n)
                       {:type ::entity-change-error
                        :phase :ddl-execution
@@ -798,7 +826,7 @@
                        :entity-id (id/extract entity)
                        :table-name (entity->table-name entity)
                        :sql statement}
-                      e))))))
+                      entity statement e tx))))))
       ;; Change relations
       (when (not-empty cr)
         (log/info {:id ::checking-changed-relations}
@@ -842,7 +870,7 @@
                   (try
                     (execute-one! tx [sql])
                     (catch Throwable ex
-                      (throw (ex-info
+                      (throw (errors/relation-ddl-error r
                               (format "Failed to create recursive relation column for entity '%s'" tname)
                               {:type ::recursive-relation-creation-error
                                :phase :ddl-execution
@@ -865,7 +893,7 @@
               (try
                 (execute-one! tx [sql])
                 (catch Throwable ex
-                  (throw (ex-info
+                  (throw (errors/relation-ddl-error r
                           (format "Failed to rename recursive relation column for entity '%s'" tname)
                           {:type ::recursive-relation-rename-error
                            :phase :ddl-execution
@@ -894,7 +922,7 @@
           (try
             (execute-one! tx [sql])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/relation-ddl-error relation
                       (format "Failed to create relation table between '%s' and '%s'" fname tname)
                       {:type ::relation-creation-error
                        :phase :ddl-execution
@@ -914,7 +942,7 @@
             (try
               (execute-one! tx [from-idx])
               (catch Throwable e
-                (throw (ex-info
+                (throw (errors/relation-ddl-error relation
                         (format "Failed to create 'from' index for relation between '%s' and '%s'" fname tname)
                         {:type ::relation-index-creation-error
                          :phase :ddl-execution
@@ -934,7 +962,7 @@
             (try
               (execute-one! tx [to-idx])
               (catch Throwable e
-                (throw (ex-info
+                (throw (errors/relation-ddl-error relation
                         (format "Failed to create 'to' index for relation between '%s' and '%s'" fname tname)
                         {:type ::relation-index-creation-error
                          :phase :ddl-execution
@@ -982,7 +1010,7 @@
         (try
           (execute-one! tx [sql])
           (catch Throwable ex
-            (throw (ex-info
+            (throw (errors/relation-ddl-error r
                     (format "Failed to add new recursive relation column for entity '%s'" tname)
                     {:type ::recursive-relation-creation-error
                      :phase :ddl-execution

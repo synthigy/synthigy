@@ -48,6 +48,7 @@
             entity->relation-field
             entity->table-name
             SQLNameResolution]]
+   [synthigy.dataset.sql.errors :as errors]
    [synthigy.dataset.sql.protocol :as proto]
    [synthigy.dataset.sql.query :as query]
    [synthigy.dataset.sql.rls :as rls]
@@ -113,6 +114,8 @@
                 new-type
                 (:error validation))
         {:type (or (:type validation) :dataset/forbidden-conversion)
+         :code "TYPE_CONVERSION_FORBIDDEN"
+         :hint (:suggestion validation)
          :entity (:name entity)
          :attribute (:name attribute)
          :from-type old-type
@@ -413,8 +416,10 @@
                              "alter table \"%s\" alter column %s type %s"
                              old-table column
                              (type->ddl type))
-                             (= "int" type) (str " using(trim(" column ")::integer)")
-                             (= "float" type) (str " using(trim(" column ")::float)")
+                             (= "int" type) (str (if (= "float" dt)
+                                                  (str " using(round(" column ")::bigint)")
+                                                  (str " using(trim(" column "::text)::bigint)")))
+                             (= "float" type) (str " using(trim(" column "::text)::double precision)")
                              (= "string" type) (str " using(" column "::text)")
                           ;; String to JSON conversion:
                           ;; - JSON objects/arrays: cast directly
@@ -429,7 +434,7 @@
                              (= "avatar" type) (str " using(" column "::text)")
                              (= "encrypted" type) (str " using(" column "::text)")
                              (= "hashed" type) (str " using(" column "::text)")
-                             (= "boolean" type) (str " using(trim(" column ")::boolean)")
+                             (= "boolean" type) (str " using(trim(" column "::text)::boolean)")
                          ;; enum is stored as TEXT - any type converts via text cast
                              (= "enum" type) (str " using(" column "::text)"))]
                    ;; never run the json USING guard on an already-jsonb column
@@ -639,7 +644,7 @@
           (try
             (execute-one! tx [sql])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/relation-ddl-error relation
                       (format "Failed to rename relation table from '%s' to '%s' (relation: %s → %s)"
                               old-name new-name (:name from) (:name to))
                       {:type ::relation-rename-error
@@ -667,7 +672,7 @@
             (try
               (execute-one! tx [sql])
               (catch Throwable e
-                (throw (ex-info
+                (throw (errors/relation-ddl-error relation
                         (format "Failed to rename relation from-index from '%s' to '%s'" old-fidx new-fidx)
                         {:type ::relation-index-rename-error
                          :phase :ddl-execution
@@ -685,7 +690,7 @@
             (try
               (execute-one! tx [sql])
               (catch Throwable e
-                (throw (ex-info
+                (throw (errors/relation-ddl-error relation
                         (format "Failed to rename relation to-index from '%s' to '%s'" old-tidx new-tidx)
                         {:type ::relation-index-rename-error
                          :phase :ddl-execution
@@ -708,7 +713,7 @@
           (try
             (execute-one! tx [sql])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/relation-ddl-error relation
                       (format "Failed to rename 'to' column in relation table '%s' from '%s' to '%s' (relation: %s → %s)"
                               new-name o n (:name from) (:name to))
                       {:type ::relation-column-rename-error
@@ -737,7 +742,7 @@
           (try
             (execute-one! tx [sql])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/relation-ddl-error relation
                       (format "Failed to rename 'from' column in relation table '%s' from '%s' to '%s' (relation: %s → %s)"
                               new-name o n (:name from) (:name to))
                       {:type ::relation-column-rename-error
@@ -853,7 +858,7 @@
                           :data {:table table :id-key (id/key)}}
                          "Created ID immutability trigger")
               (catch Throwable e
-                (throw (ex-info
+                (throw (errors/deploy-ddl-error
                         (format "Failed to create table for entity '%s'" n)
                         {:type ::entity-table-creation-error
                          :phase :ddl-execution
@@ -862,7 +867,7 @@
                          :entity-id (id/extract entity)
                          :table-name table
                          :sql table-sql}
-                        e))))
+                        entity nil e))))
             (catch clojure.lang.ExceptionInfo e
               ;; Re-throw ex-info with preserved context
               (throw e))
@@ -898,7 +903,7 @@
           (try
             (execute-one! tx [statement])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/deploy-ddl-error
                       (format "Failed to execute DDL statement for entity '%s'" n)
                       {:type ::entity-change-error
                        :phase :ddl-execution
@@ -907,7 +912,7 @@
                        :entity-id (id/extract entity)
                        :table-name (entity->table-name entity)
                        :sql statement}
-                      e))))))
+                      entity statement e))))))
       ;; Change relations
       (when (not-empty cr)
         (log/info {:id ::changed-relations-checking :data {:count (count cr)}}
@@ -951,7 +956,7 @@
                   (try
                     (execute-one! tx [sql])
                     (catch Throwable ex
-                      (throw (ex-info
+                      (throw (errors/relation-ddl-error r
                               (format "Failed to create recursive relation column for entity '%s'" tname)
                               {:type ::recursive-relation-creation-error
                                :phase :ddl-execution
@@ -974,7 +979,7 @@
               (try
                 (execute-one! tx [sql])
                 (catch Throwable ex
-                  (throw (ex-info
+                  (throw (errors/relation-ddl-error r
                           (format "Failed to rename recursive relation column for entity '%s'" tname)
                           {:type ::recursive-relation-rename-error
                            :phase :ddl-execution
@@ -1005,7 +1010,7 @@
           (try
             (execute-one! tx [sql])
             (catch Throwable e
-              (throw (ex-info
+              (throw (errors/relation-ddl-error relation
                       (format "Failed to create relation table between '%s' and '%s'" fname tname)
                       {:type ::relation-creation-error
                        :phase :ddl-execution
@@ -1025,7 +1030,7 @@
             (try
               (execute-one! tx [from-idx])
               (catch Throwable e
-                (throw (ex-info
+                (throw (errors/relation-ddl-error relation
                         (format "Failed to create 'from' index for relation between '%s' and '%s'" fname tname)
                         {:type ::relation-index-creation-error
                          :phase :ddl-execution
@@ -1045,7 +1050,7 @@
             (try
               (execute-one! tx [to-idx])
               (catch Throwable e
-                (throw (ex-info
+                (throw (errors/relation-ddl-error relation
                         (format "Failed to create 'to' index for relation between '%s' and '%s'" fname tname)
                         {:type ::relation-index-creation-error
                          :phase :ddl-execution
@@ -1093,7 +1098,7 @@
         (try
           (execute-one! tx [sql])
           (catch Throwable ex
-            (throw (ex-info
+            (throw (errors/relation-ddl-error r
                     (format "Failed to add new recursive relation column for entity '%s'" tname)
                     {:type ::recursive-relation-creation-error
                      :phase :ddl-execution

@@ -24,8 +24,6 @@
   "Pre-built OAuth/OIDC Ring handlers with full middleware stacks, zero Pedestal
    dependencies. See docs/core/synthigy/oauth/handlers.md."
   (:require
-   [clojure.string :as str]
-   [environ.core :refer [env]]
    [ring.middleware.cookies :refer [wrap-cookies]]
    [ring.middleware.keyword-params :refer [wrap-keyword-params]]
    [ring.middleware.params :refer [wrap-params]]
@@ -38,26 +36,8 @@
    [synthigy.oauth.credentials :as credentials]
    [synthigy.oauth.onboarding :as onboarding]
    [synthigy.oauth.page.status :as page.status]
-   [synthigy.oauth.ring :as ring]
    [synthigy.oauth.token :as token-ns]
    [synthigy.oidc :as oidc]))
-
-;; =============================================================================
-;; CORS Configuration
-;; =============================================================================
-
-(defn allowed-origins
-  "Allowed CORS origins: SYNTHIGY_SERVER_ALLOWED_ORIGINS (comma-separated)
-   plus SYNTHIGY_IAM_ROOT_URL as fallback."
-  []
-  (let [origins-str (env :synthigy-server-allowed-origins "")
-        origins (remove empty? (str/split origins-str #"\s*,\s*"))
-        iam-root (env :synthigy-iam-root-url "http://localhost:7887")]
-    (set (conj origins iam-root))))
-
-(defn wrap-identity-provider-cors
-  [handler]
-  (ring/wrap-cors handler {:allowed-origins (allowed-origins)}))
 
 ;; =============================================================================
 ;; OAuth 2.0 Core Endpoints
@@ -108,8 +88,7 @@
   (-> #'login/login-handler
       wrap-keyword-params
       wrap-params
-      wrap-cookies
-      wrap-identity-provider-cors))
+      wrap-cookies))
 
 (def logout
   "OAuth logout handler; terminates the session and optionally redirects to post_logout_redirect_uri."
@@ -118,8 +97,7 @@
       core/wrap-basic-authorization
       wrap-keyword-params
       wrap-params
-      wrap-cookies
-      wrap-identity-provider-cors))
+      wrap-cookies))
 
 (def oauth-status
   "User-facing terminal status page (/oauth/status, /oauth/device/status) for flows with no client redirect."

@@ -23,6 +23,7 @@
 (ns synthigy.env
   (:require
    [babashka.fs :as fs]
+   [clojure.string]
    [environ.core :refer [env]]))
 
 (def home (str (fs/expand-home (env :synthigy-home "~/.synthigy"))))
@@ -45,3 +46,7 @@
   "Trust X-Forwarded-For for the client IP; set only when a reverse proxy fronts
    this server, since a client can forge the header."
   (boolean (env :synthigy-server-trust-proxy)))
+
+(def allowed-origins
+  "Extra browser origins allowed on top of the registered clients' redirect origins."
+  (into #{} (remove empty?) (clojure.string/split (env :synthigy-server-allowed-origins "") #"\s*,\s*")))

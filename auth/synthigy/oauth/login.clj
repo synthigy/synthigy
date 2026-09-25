@@ -412,6 +412,13 @@
               {:status 302
                :headers {"Location" "/oauth/status?value=error&error=broken_flow"}})))))))  ; Extra paren for binding
 
+(defn post-logout-location
+  "`uri` with `state` appended, keeping any query the registered URI already has."
+  [uri state]
+  (str uri (when (not-empty state)
+             (str (if (str/includes? uri "?") "&" "?")
+                  (codec/form-encode {:state state})))))
+
 (defn logout-handler
   "OAuth logout handler; terminates the session and optionally redirects to
    post_logout_redirect_uri."
@@ -460,9 +467,7 @@
                   "User logged out")
         (core/kill-session session)
         {:status 302
-         :headers {"Location" (str post_logout_redirect_uri
-                                   (when (not-empty state)
-                                     (str "?" (codec/form-encode {:state state}))))
+         :headers {"Location" (post-logout-location post_logout_redirect_uri state)
                    "Cache-Control" "no-cache"}
          :cookies {"idsrv.session" {:value ""
                                     :max-age 0

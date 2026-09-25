@@ -33,6 +33,7 @@
    [patcho.patch :as patch]
    [synthigy.data
     :refer [*SYNTHIGY*
+            synthigy-user-name
             *ROOT*
             *PUBLIC_ROLE*
             *PUBLIC_USER*]]
@@ -52,6 +53,7 @@
    [synthigy.iam.gen :as gen]
    [synthigy.iam.patch]
    [synthigy.iam.patch.model]
+   [synthigy.iam.service-user :as service-user]
    [synthigy.iam.transfer :as transfer]
    [clojure.core.async :as async]
    [synthigy.dataset.delta :as delta]
@@ -97,10 +99,9 @@
 (defn add-client [{:keys [id name secret settings type apis]
                    :or {id (gen/client-id)
                         type :public}}]
-  (let [confidential? (#{:confidential "confidential"} type)
-        created? (nil? (get-client id))
+  (let [created? (nil? (get-client id))
         raw-secret (or secret
-                       (when (and confidential? created?)
+                       (when (and (service-user/confidential? {:type type}) created?)
                          (gen/client-secret)))
         client (dataset/stack-entity
                 :iam/app
@@ -110,18 +111,20 @@
                          :settings settings
                          :active true}
                   raw-secret (assoc :secret raw-secret)
-                  (seq apis) (assoc :apis apis)))]
-    (when confidential?
-      (dataset/stack-entity
-       :iam/user
-       {:name id
-        :type :SERVICE
-        :active true}))
+                  (seq apis) (assoc :apis apis)))
+        service-user (service-user/sync-service-user (id/extract client))]
     (cond-> (assoc client :created? created?)
+      service-user (assoc :service-user service-user)
       raw-secret (assoc :secret raw-secret))))
 
-(defn remove-client [client]
-  (dataset/delete-entity :iam/app {(id/key) (id/extract client)}))
+(defn remove-client
+  "Delete a client and its SERVICE user; returns the deleted service user."
+  [client]
+  (let [service-user (service-user/get-service-user (id/extract client))]
+    (dataset/delete-entity :iam/app {(id/key) (id/extract client)})
+    (when service-user
+      (dataset/delete-entity :iam/user {(id/key) (id/extract service-user)}))
+    service-user))
 
 (defn set-user
   [user-data]
@@ -163,6 +166,17 @@
 
 (patch/current-version :synthigy.iam/model (:name (current-version)))
 
+(defn ensure-system-user-name
+  "EYWA-migrated databases carry the system user under its old name."
+  []
+  (let [k {(id/key) (id/data :data/synthigy-user)}
+        {stored :name} (dataset/get-entity :iam/user k {:name nil})]
+    (when (and stored (not= stored synthigy-user-name))
+      (dataset/stack-entity :iam/user (assoc k :name synthigy-user-name))
+      (log/info {:id ::system-user-renamed
+                 :data {:action :modified :subject :system-user :from stored :to synthigy-user-name}}
+                "System user renamed"))))
+
 (defn bind-service-user
   "Load a service user from the database and rebind the var to it."
   [variable]
@@ -178,9 +192,42 @@
     (log/debug {:id ::bind-service-user
                 :data {:var (str variable) :user data}}
                "Initializing service user")
-    (alter-var-root variable (constantly data))))
+    ;; never bind nil — setup-system-users syncs this var right after start
+    (when data (alter-var-root variable (constantly data)))))
 
 (def ^:private profile-cleanup-sub-key ::orphan-profile-cleanup)
+
+(def ^:private service-user-sub-key ::service-user-sync)
+
+(def ^:private service-user-unlink-sub-key ::service-user-unlink)
+
+(defn delete-unlinked-service-user
+  [user-xid]
+  (when-let [user (dataset/get-entity :iam/user {:xid user-xid}
+                                      {(id/key) nil :type nil
+                                       :authorized_client [{:selections {(id/key) nil}}]})]
+    (when (and (#{:SERVICE "SERVICE"} (:type user))
+               (nil? (:authorized_client user))
+               (not= user-xid (id/data :data/synthigy-user :xid)))
+      (dataset/delete-entity :iam/user {(id/key) (id/extract user)})
+      (log/info {:id ::service-user-deleted
+                 :data {:action :deleted :subject :service-user :user user-xid}}
+                "Service user lost its client; deleted"))))
+
+(defn on-service-user-unlink [env]
+  (let [{:keys [from-xid to-xid]} (some-> env :delta :data)]
+    (doseq [x [from-xid to-xid] :when x]
+      (try
+        (with-principal nil (delete-unlinked-service-user (str x)))
+        (catch Throwable e
+          (log/error! {:id ::service-user-unlink-failed :data {:user (str x)}} e))))))
+
+(defn on-client-change [env]
+  (when-let [client-xid (some-> env :delta :data :record-xid)]
+    (try
+      (with-principal nil (service-user/sync-service-user client-xid))
+      (catch Throwable e
+        (log/error! {:id ::service-user-sync-failed :data {:client client-xid}} e)))))
 
 (defn cleanup-orphaned-profiles!
   "Delete profile satellite rows that no longer link to any user; returns {label
@@ -243,10 +290,9 @@
     ;; dataset/start already compiled the schema before reference types existed — recompile now, or any ref-typed field (e.g. Owner Group) resolves :reference/entity nil until the reload below.
     (dataset/reload)
 
-    (supervisor/progress-update!
-     {:detail (str "patching :synthigy.iam/model "
-                   (patch/deployed-version :synthigy.iam/model) " \u2192 "
-                   (patch/version :synthigy.iam/model))})
+    (supervisor/progress-patching! :synthigy.iam/model
+                                   (patch/deployed-version :synthigy.iam/model)
+                                   (patch/version :synthigy.iam/model))
     (patch/level! :synthigy.iam/model
                   :synthigy/iam
                   :synthigy.iam/audit)
@@ -254,6 +300,7 @@
     (context/start)
 
     (ensure-public)
+    (ensure-system-user-name)
 
     (binding [core/*return-type* :edn]
       (bind-service-user #'*PUBLIC_USER*)
@@ -269,6 +316,18 @@
       :ops #{:delete}}
      (debounced 10000 cleanup-orphaned-profiles!))
 
+    (delta/subscribe!
+     service-user-sub-key
+     {:entity-xids #{(str (id/entity :iam/app))}
+      :ops #{:insert :update}}
+     on-client-change)
+
+    (delta/subscribe!
+     service-user-unlink-sub-key
+     {:relation-xids #{(str (id/relation :iam/app->service-user))}
+      :ops #{:unlink}}
+     on-service-user-unlink)
+
     (log/info {:id ::initialized} "IAM initialized")
     (catch Throwable e
       (log/error! {:id ::initialize-failed
@@ -278,6 +337,8 @@
 (defn stop
   []
   (delta/unsubscribe! profile-cleanup-sub-key)
+  (delta/unsubscribe! service-user-sub-key)
+  (delta/unsubscribe! service-user-unlink-sub-key)
   (when context/*user-context-provider*
     (context.protocols/stop! context/*user-context-provider*)
     (alter-var-root #'context/*user-context-provider* (constantly nil))))
@@ -362,7 +423,7 @@
              (log/info {:id ::purged-entities} "IAM entities purged"))
   :start (fn []
            (log/info {:id ::lifecycle-start :data {:action :starting}} "Starting IAM")
-           (supervisor/progress-update! {:phase "starting :synthigy/iam" :detail nil})
+           (supervisor/progress-phase! "starting :synthigy/iam")
            (start)
            ;; Keep access/start out of `start` — the :setup path would run it
            ;; before setup-default-data has imported the roles.

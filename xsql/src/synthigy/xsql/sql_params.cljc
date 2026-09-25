@@ -28,6 +28,7 @@
    safe on JVM and CLJS. Mixing named and bare `?` in one template is an
    error."
   (:require [clojure.string :as str]
+            [synthigy.timestamp :as ts]
             [clojure.edn :as edn]))
 
 ;;; ============================================================================
@@ -447,7 +448,8 @@
                 :float     (when-not (number? v) "expects a number")
                 :boolean   (when-not (boolean? v) "expects true or false")
                 :string    (when-not (string? v) "expects a string")
-                :timestamp (when-not (string? v) "expects a timestamp string")
+                :timestamp (cond (not (string? v)) "expects a timestamp string"
+                                   (not (ts/valid? v)) (ex-message (ts/invalid v)))
                 :uuid      (when-not (string? v) "expects a UUID string")
                 nil)))]
     (if array?

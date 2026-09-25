@@ -379,30 +379,59 @@
      :ns-overrides   (vec ns-overrides)}))
 
 ;;; ============================================================================
-;;; REPL taps — ring-buffer signal capture, filtered by namespace
+;;; Taps — runtime-attached ring-buffer handlers (REPL + operator console)
 ;;; ============================================================================
 
 (defonce ^:private taps (atom {}))
 
+(defonce ^:private tap-seq (java.util.concurrent.atomic.AtomicLong.))
+
 (defn tap!
-  "Capture signals matching `ns-pattern` into an in-memory ring buffer keyed by
-   `tap-id`."
-  [tap-id ns-pattern & {:keys [n] :or {n 200}}]
+  "Capture signals matching `ns-pattern` into a ring buffer keyed by `tap-id`,
+   numbered from one JVM-wide sequence; re-tapping an id replaces it."
+  [tap-id ns-pattern & {:keys [n min-level xform] :or {n 200 xform identity}}]
   (when (contains? @taps tap-id)
     (try (t/remove-handler! tap-id) (catch Throwable _)))
-  (let [buf (atom clojure.lang.PersistentQueue/EMPTY)]
-    (swap! taps assoc tap-id buf)
+  (let [base (.get ^java.util.concurrent.atomic.AtomicLong tap-seq)
+        buf  (atom {:base base :seq base :q clojure.lang.PersistentQueue/EMPTY})]
+    (swap! taps assoc tap-id {:buf buf :min-level min-level :ns-pattern ns-pattern})
     (t/add-handler! tap-id
       (fn [signal]
-        (swap! buf #(let [q (conj % signal)]
-                      (if (> (count q) n) (pop q) q))))
-      {:ns-filter ns-pattern})
+        (let [item (xform signal)]
+          (locking buf
+            (let [s (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong tap-seq)]
+              (swap! buf (fn [{:keys [q] :as b}]
+                           (let [q (conj q [s item])]
+                             (assoc b :seq s :q (if (> (count q) n) (pop q) q)))))))))
+      (cond-> {}
+        ns-pattern (assoc :ns-filter ns-pattern)
+        min-level  (assoc :min-level min-level)))
     tap-id))
 
-(defn recent
-  "Captured signals for `tap-id` as a vector (oldest first)."
+(defn tap-info
+  "The options a tap was installed with, or nil when `tap-id` is not tapped."
   [tap-id]
-  (some-> @taps (get tap-id) deref vec))
+  (some-> @taps (get tap-id) (dissoc :buf)))
+
+(defn recent
+  "Captured items for `tap-id` as a vector (oldest first)."
+  [tap-id]
+  (some->> (get @taps tap-id) :buf deref :q (mapv second)))
+
+(defn tail
+  "Items captured after sequence number `after`, at most `limit`, each assoc'd
+   with its `:seq`."
+  [tap-id after limit]
+  (when-let [{:keys [base seq q]} (some-> (get @taps tap-id) :buf deref)]
+    (let [oldest (or (ffirst q) (inc seq))
+          items  (into []
+                       (comp (filter (fn [[s _]] (> s after)))
+                             (take limit)
+                             (map (fn [[s item]] (assoc item :seq s))))
+                       q)]
+      {:entries items
+       :next    (or (:seq (peek items)) (max after seq))
+       :dropped (> oldest (inc (max after base)))})))
 
 (defn recent-lines
   "Captured signals as `[ts level ns msg]` tuples."
@@ -410,6 +439,21 @@
   (mapv (fn [{:keys [inst level ns msg_]}]
           [(str inst) level ns (some-> msg_ force)])
         (recent tap-id)))
+
+(defn signal->entry
+  "Flatten a signal into the operator console's log entry; never carries `:data`."
+  [{:keys [inst level ns id msg_ error] :as signal}]
+  (cond-> {:ts     (some-> inst str)
+           :level  (some-> level name)
+           :ns     (some-> ns str)
+           :id     (keyword->wire-id id)
+           :msg    (some-> msg_ force str)
+           :topics (->> (or (:topics signal) (topics/classify signal))
+                        (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t))))
+                        sort vec)}
+    error (assoc :error {:class   (.getName (class error))
+                         :message (ex-message error)
+                         :trace   (mapv str (take 15 (.getStackTrace ^Throwable error)))})))
 
 (defn untap!
   "Stop capturing for `tap-id` and discard its buffer."

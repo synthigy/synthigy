@@ -60,10 +60,13 @@
 (defonce ^:private client-cache
   (atom (cache/ttl-cache-factory {} :ttl client-cache-ttl-ms)))
 
+(defonce browser-origins (atom nil))
+
 (defn evict-clients!
   "Drop every cached client — delta invalidation and lifecycle stop."
   []
   (reset! client-cache (cache/ttl-cache-factory {} :ttl client-cache-ttl-ms))
+  (reset! browser-origins nil)
   nil)
 
 (defn domain+
@@ -368,6 +371,37 @@
   (when (localhost-redirect? redirect-uri)
     (when-let [target (strip-port redirect-uri)]
       (boolean (some #(= target (strip-port %)) redirections)))))
+
+(defn uri-origin
+  "scheme://host[:port] of a URI, or nil."
+  [uri]
+  (when (not-empty uri)
+    (try
+      (let [u (java.net.URI. uri)]
+        (when (and (.getScheme u) (.getHost u))
+          (str (.getScheme u) "://" (.getHost u) (when (pos? (.getPort u)) (str ":" (.getPort u))))))
+      (catch Exception _ nil))))
+
+(defn load-browser-origins
+  []
+  (let [redirects (->> (dataset/search-entity :iam/app {} {:active nil :settings nil})
+                       (filter :active)
+                       (mapcat #(get-in % [:settings "redirections"])))]
+    {:exact (into #{} (keep uri-origin) (concat redirects env/allowed-origins [env/iam-root-url (domain+)]))
+     :loopback (into #{} (comp (filter localhost-redirect?) (keep strip-port) (keep uri-origin)) redirects)
+     :loaded-at (System/currentTimeMillis)}))
+
+(defn origin-allowed?
+  "True for an origin of an active client's redirect URI (any port on loopback, RFC 8252) or SYNTHIGY_SERVER_ALLOWED_ORIGINS."
+  [origin]
+  (let [{:keys [exact loopback loaded-at]} @browser-origins
+        {:keys [exact loopback]} (if (and loaded-at (< (- (System/currentTimeMillis) loaded-at) client-cache-ttl-ms))
+                                   {:exact exact :loopback loopback}
+                                   (reset! browser-origins (load-browser-origins)))]
+    (boolean
+     (or (contains? exact origin)
+         (and (localhost-redirect? origin)
+              (contains? loopback (some-> (strip-port origin) uri-origin)))))))
 
 (defn validate-resource-owner
   "Verify resource-owner credentials via the connector chain; user map on

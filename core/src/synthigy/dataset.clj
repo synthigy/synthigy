@@ -50,9 +50,6 @@
 (defdata :dataset/id
   :euuid #uuid "4ab2fe4f-9b74-4a23-8441-60b58be08e7e" :xid "AE18CKqkpn1txrdJxhU9v5")
 
-(defdata :dataset.model/version-1.0.3
-  :euuid #uuid "d908a70f-a1fb-46bd-ac76-801bebe6ceed" :xid "ToR56Krq2zEUmkKmtrfmNU")
-
 (defdata :dataset.model/version-1.0.5
   :euuid #uuid "5e9704b0-cc4a-4763-96a7-5c11da57c05e" :xid "CgTka9ViKjvcSz1hmuaC53")
 
@@ -300,17 +297,13 @@
          (->
           (latest-deployed-version (id/data :dataset/id))
           (assoc-in [:dataset :euuid] (id/data :dataset/id :euuid))
-          (assoc-in [:dataset :xid] (id/data :dataset/id :xid))
-          (assoc :euuid (id/data :dataset.model/version-1.0.3 :euuid))
-          (assoc :xid (id/data :dataset.model/version-1.0.3 :xid)))))
+          (assoc-in [:dataset :xid] (id/data :dataset/id :xid)))))
   (spit "resources/dataset/iam.json"
         (synthigy.transit/->transit
          (->
           (latest-deployed-version (id/data :iam/id))
           (assoc-in [:dataset :euuid] (id/data :iam/id :euuid))
-          (assoc-in [:dataset :xid] (id/data :iam/id :xid))
-          (assoc :euuid (id/data :iam.model/version-0.80.0 :euuid))
-          (assoc :xid (id/data :iam.model/version-0.80.0 :xid))))))
+          (assoc-in [:dataset :xid] (id/data :iam/id :xid))))))
 
 (defn adapt-model-to-provider
   "Transform model to match current ID provider format.
@@ -574,7 +567,7 @@
 
   entity-id can be a keyword (auto-resolved), UUID, or string."
   [entity-id data]
-  (db/delete-entity *db* (id/entity entity-id) data))
+  (db/delete-entity *db* (id/entity entity-id) (cond-> data (map? data) dk/normalize-keys)))
 
 ;;; ============================================================================
 ;;; Dataset Lifecycle (deploy / recall / destroy)
@@ -961,17 +954,15 @@
    (core/reload *db*)
 
 ;; Apply dataset feature patches (database transforms)
-   (supervisor/progress-update!
-    {:detail (str "patching :synthigy/dataset "
-                  (patch/deployed-version :synthigy/dataset) " \u2192 "
-                  (patch/version :synthigy/dataset))})
+   (supervisor/progress-patching! :synthigy/dataset
+                                  (patch/deployed-version :synthigy/dataset)
+                                  (patch/version :synthigy/dataset))
    (patch/level! :synthigy/dataset)
 
 ;; Apply dataset model patches (meta-model deployment)
-   (supervisor/progress-update!
-    {:detail (str "patching :synthigy.dataset/model "
-                  (patch/deployed-version :synthigy.dataset/model) " \u2192 "
-                  (patch/version :synthigy.dataset/model))})
+   (supervisor/progress-patching! :synthigy.dataset/model
+                                  (patch/deployed-version :synthigy.dataset/model)
+                                  (patch/version :synthigy.dataset/model))
    (patch/level! :synthigy.dataset/model)
    nil))
 

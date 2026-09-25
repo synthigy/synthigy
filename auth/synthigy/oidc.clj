@@ -33,7 +33,6 @@
    [synthigy.iam.context :as iam.context]
    [synthigy.iam.encryption :as encryption]
    [synthigy.oauth :as oauth]
-   [synthigy.oauth.authorization-code :as ac]
    [synthigy.oauth.core :as core
     :refer [process-scope
             defscope
@@ -208,8 +207,7 @@
   :description "Your identity"
   :resolve (fn [session]
              (let [{:keys [name] :as owner} (get-session-resource-owner session)
-                   {:keys [authorized-at code]} (get-session session)
-                   {:keys [nonce]} (ac/get-code-request code)
+                   {:keys [authorized-at]} (get-session session)
                    client (get-session-client session)
                    amr (core/get-session-amr session)
                    acr (core/get-session-acr session)]
@@ -222,7 +220,6 @@
                       (java.util.Date. (+ (util/now) (* 1000 (id-token-expiry client)))))
                 :sid session
                 :auth_time authorized-at
-                :nonce nonce
                 :acr acr
                 :amr amr})))
 

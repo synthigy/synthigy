@@ -27,6 +27,7 @@
 # Installs the `synthigy` command to ~/.synthigy/bin (override:
 # SYNTHIGY_INSTALL_DIR) and adds it to PATH in your shell profile — both
 # idempotent: re-running updates the binary and never duplicates PATH lines.
+# The binary is sha256-checked against the release's sha256sums-portal.txt.
 # Corporate networks: curl honors https_proxy/HTTPS_PROXY env; behind a
 # TLS-intercepting firewall set CURL_CA_BUNDLE=/path/corp-ca.pem (and later
 # SYNTHIGY_CA_BUNDLE for the synthigy command itself).
@@ -69,6 +70,10 @@ echo "Downloading ${asset} (${url##*/download/})..."
 mkdir -p "$DIR"
 tmp="$(mktemp)"
 curl -fSL -o "$tmp" "$url" || { echo "download failed: $url"; rm -f "$tmp"; exit 1; }
+want=$(curl -fsSL "${url%/*}/sha256sums-portal.txt" | awk -v a="$asset" '$2 == a { print $1 }')
+if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp" | awk '{ print $1 }')
+else got=$(shasum -a 256 "$tmp" | awk '{ print $1 }'); fi
+[ -n "$want" ] && [ "$got" = "$want" ] || { echo "checksum mismatch for ${asset} (want ${want:-none}, got ${got}) — not installed"; rm -f "$tmp"; exit 1; }
 install -m 0755 "$tmp" "$DIR/synthigy"
 rm -f "$tmp"
 echo "Installed: $DIR/synthigy"

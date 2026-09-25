@@ -1426,6 +1426,14 @@
                                rtype :type
                                :as relation} k} relations
                              constraints (get-constraints to)]
+                         (when (if (= :many rtype) (map? data) (sequential? data))
+                           (throw (ex-info (str "Relation " (name k) " is "
+                                                (if (= :many rtype)
+                                                  "to-many — pass an array of records"
+                                                  "to-one — pass one record, not an array"))
+                                           {:code "BAD_DATA_SHAPE"
+                                            :rule "relation_data"
+                                            :relation (name k)})))
                          (case rtype
                            :many
                            (if (or (empty? data) (nil? data))

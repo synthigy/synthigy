@@ -497,7 +497,11 @@
 
         :else
         (let [row     (data/detail-row spec xid)
-              blocked (when (and row guard) (guard row (:console/principal request)))]
+              locked  (get-in spec [:detail :locked])
+              blocked (when row
+                        (cond
+                          (and locked (locked row)) "This record is managed elsewhere and can't be deleted here."
+                          guard (guard row (:console/principal request))))]
           (if blocked
             (html-response (ui/detail request spec row [:warn blocked]))
             (let [[status msg] (data/delete-row! spec xid)]
@@ -894,12 +898,15 @@
 (def wrapped-handler (wrap-cookies #'handler))
 
 (defn sync-tools-redirect
-  "Allow-list with `uri` as the only console tools callback, keeping every other entry."
+  "Allow-list with `uri` as the only console tools entry, keeping every other entry."
   [urls uri]
-  (conj (vec (remove #(str/ends-with? % "/console/tools/callback") urls)) uri))
+  (conj (vec (remove #(or (str/ends-with? % "/console/tools/callback")
+                          (str/includes? % "/console/login"))
+                     urls))
+        uri))
 
 (defn register-tools-redirect!
-  "Registers this deployment's tools callback with the Synthigy Tools client."
+  "Registers this deployment's tools callback and logout landing with the Synthigy Tools client."
   []
   (when-let [uri (and (ui/tools-available?) (ui/tools-redirect-uri))]
     (try
@@ -907,7 +914,7 @@
         (let [settings (or (:settings client) {})
               updated (-> settings
                           (update "redirections" sync-tools-redirect uri)
-                          (update "logout-redirections" sync-tools-redirect uri))]
+                          (update "logout-redirections" sync-tools-redirect (ui/tools-logout-uri)))]
           (when (not= settings updated)
             (dataset/stack-entity :iam/app {:id info/modeler-public-client-id :settings updated})
             (log/info {:id ::tools-redirect-registered :data {:uri uri}}

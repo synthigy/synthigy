@@ -128,24 +128,18 @@
                                           :secret secret :settings settings :apis apis}
                                    (not (str/blank? id)) (assoc :id id)))]
       (when (seq roles)
-        (iam/set-user {:name (:id client) :type :SERVICE :active true :roles roles}))
+        (iam/set-user {(id/key) (id/extract (:service-user client)) :roles roles}))
       {:id (:id client) :secret (:secret client) :created (:created? client) :type type
        :roles (mapv :name roles) :apis (mapv :name apis)})))
 
 (defn remove-client!
-  "Delete an OAuth client and the SERVICE user `add-client!` created with it.
-   Reports what was actually removed, so a teardown can be run twice."
+  "Delete an OAuth client and its SERVICE user; safe to run twice."
   [{:keys [id]}]
   (require-started! :synthigy/iam)
   (when (str/blank? id)
     (throw (ex-info "Missing 'id'" {:code -32602})))
   (let [client (iam/get-client id)
-        ;; The SERVICE user is named after the client id (add-client!'s own
-        ;; companion write) — it has no relation back, so nothing cascades
-        ;; and leaving it behind would block re-creating the same client.
-        service (dataset/get-entity :iam/user {:name id :type :SERVICE} {(id/key) nil})]
-    (when client (iam/remove-client client))
-    (when service (dataset/delete-entity :iam/user service))
+        service (when client (iam/remove-client client))]
     {:id id :removed (boolean client) :service_user_removed (boolean service)}))
 
 (defn public-active? []
@@ -550,3 +544,34 @@
 
 (supervisor/register-method! "progress"
   (fn [_] (supervisor/progress)))
+
+(defonce engine-id (str (random-uuid)))
+
+(defn console-log-state []
+  (let [info (log/tap-info :console)]
+    {:engine    engine-id
+     :active    (some? info)
+     :min_level (some-> info :min-level name)}))
+
+(defn console-tap!
+  [{:keys [min_level n]}]
+  (let [lvl (or (log/parse-level min_level) :info)]
+    (log/tap! :console nil
+              :n (or n 5000)
+              :min-level lvl
+              :xform log/signal->entry)
+    (console-log-state)))
+
+(defn console-tail
+  [{:keys [after limit]}]
+  (merge (console-log-state)
+         (log/tail :console (or after 0) (min (or limit 500) 2000))))
+
+(supervisor/register-method! "log.tap"
+  (fn [params] (console-tap! params)))
+
+(supervisor/register-method! "log.untap"
+  (fn [_] (log/untap! :console) (console-log-state)))
+
+(supervisor/register-method! "log.tail"
+  (fn [params] (console-tail params)))

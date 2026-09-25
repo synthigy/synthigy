@@ -30,6 +30,7 @@
             [synthigy.xsql.lint :as lint-impl]
             [synthigy.xsql.complete :as complete-impl]
             [synthigy.xsql.parser :as xparser]
+            [synthigy.xsql.sql-lint :as sql-lint]
             [synthigy.xsql.sql-params :as sql-params]))
 
 (def doc-verbs
@@ -227,7 +228,7 @@
        ;; Root entity (first body token) — the namespace an op falls under when
        ;; it
        ;; declares no @namespace. nil for raw @sql bodies (they need
-       ;; @namespace).
+       ;; @namespace — `missing-namespace-errors`).
        :root (when (and (not sql?) (seq (str/trim (or body ""))))
                (some-> (re-find #"^\s*([\w.-]+)" body) (nth 1)))
        :body body :body-offset body-off :decl-offset decl-off
@@ -403,6 +404,20 @@
                       "' — (namespace, name) must be unique")
        :from decl-offset
        :to   (+ decl-offset 1 (count name))})))
+
+(defn missing-namespace-ops
+  "Ops codegen can't place: a raw `@sql-template` has no root entity, so it needs a `@namespace`."
+  [decls]
+  (filter #(and (= "sql-template" (:op %)) (not (seq (:namespace %)))) decls))
+
+(defn missing-namespace-errors
+  [decls]
+  (for [{:keys [name decl-offset]} (missing-namespace-ops decls)]
+    {:severity :warning
+     :message  (str "@sql-template '" name "' has no root entity — add @namespace "
+                    "(e.g. @namespace dashboard) so generated SDKs know where it goes")
+     :from decl-offset
+     :to   (+ decl-offset (count "@sql-template ") (count name))}))
 
 (defn batch-member-errors
   "A `@batch` member must resolve to exactly one op in the buffer."
@@ -592,6 +607,7 @@
     (vec
      (concat
       (duplicate-alias-errors decls)
+      (missing-namespace-errors decls)
       (batch-member-errors decls)
       (directive-errors source decls)
       (mapcat
@@ -600,7 +616,8 @@
           errors
           (when (and sql? (seq (str/trim (or body ""))))
             (for [d (concat (sql-placeholder-errors body schema)
-                            (sql-param-errors body))]
+                            (sql-param-errors body)
+                            (sql-lint/lint body))]
               (-> d
                   (update :from + body-offset)
                   (update :to + body-offset))))
@@ -745,6 +762,18 @@
         (let [typed (or typed "")]
           {:from (- offset (count typed)) :to offset
            :options returns-type-options})))))
+
+(defn mutate-type-completion
+  "Entity names after `?var:` in a mutation body, inserted as `entity[]`."
+  [^String source offset cur schema]
+  (when (and (:mutate cur) schema (:body-offset cur) (>= offset (:body-offset cur)))
+    (let [ls (loop [i offset]
+               (if (and (pos? i) (not= \newline (.charAt source (dec i))))
+                 (recur (dec i)) i))]
+      (when-let [[_ typed] (re-find #"^\s*\?\w+:([A-Za-z0-9_]*)$" (subs source ls offset))]
+        {:from (- offset (count typed)) :to offset
+         :options (mapv (fn [e] {:label e :type "type" :detail "records" :insert (str e "[]")})
+                        (sort (keys (:entities schema))))}))))
 
 (defn decl-verb-completion
   "Verb/directive vocabulary when the cursor sits inside the leading
@@ -991,6 +1020,7 @@
     (or (decl-verb-completion source offset)
         (returns-type-completion source offset)
         (returns-name-completion source offset cur)
+        (mutate-type-completion source offset cur schema)
         (when (and cur (:sql? cur) schema
                    (:body-offset cur) (>= offset (:body-offset cur)))
           (let [body    (:body cur)

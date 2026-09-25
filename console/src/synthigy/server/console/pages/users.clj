@@ -50,6 +50,13 @@
      (widgets/profile-fields "Public profile" :user data/public-profile-fields profile)
      (widgets/profile-fields "Personal info" :lock data/person-info-fields profile)]))
 
+(defn managed-by-app
+  [row]
+  (when-let [{:keys [xid name]} (:authorized-client row)]
+    [:span "Managed by app "
+     [:a {:href (str "/console/iam/apps/" xid)} name]
+     " — edit its roles and groups there."]))
+
 (def spec
   {:slug "users" :entity :user :key :iam/user :label "Users" :icon :user
    :watch [:oauth_session]
@@ -76,7 +83,9 @@
    :columns [[:name "Name" :name] [:active "Status" :status] [:type "Type" :type]
              [:roles "Roles" :agg :shield] [:groups "Groups" :agg :users]
              [:sessions "Sessions" :agg :monitor]]
-   :detail {:fields [[:name   "Name"   :text]
+   :selection-extra [{:authorized-client [{:args {:_join :left} :selections [:xid :name]}]}]
+   :detail {:locked managed-by-app
+            :fields [[:name   "Name"   :text]
                      [:active "Active" :switch]
                      [:type   "Type"   :enum]]
             :links  [role-link group-link]

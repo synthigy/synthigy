@@ -49,6 +49,7 @@
    (server/stop)
    ```"
   (:require
+    [synthigy.cors :as cors]
     [clojure.core.async :as async]
     [synthigy.json :as json]
     [clojure.string :as str]
@@ -189,40 +190,6 @@
 ;;; Middleware Stack
 ;;; ============================================================================
 
-(defn vary-origin
-  "A response that echoes the request Origin is per-origin — say so, or a cache serves one origin's CORS header to the next."
-  [headers]
-  (assoc headers "Vary" (if-let [v (get headers "Vary")] (str v ", Origin") "Origin")))
-
-(defn wrap-cors
-  "Simple CORS middleware allowing all origins."
-  [handler]
-  (fn [request]
-    (let [response (handler request)
-          origin (get-in request [:headers "origin"])]
-      (if response
-        (update response :headers
-                #(vary-origin
-                  (merge %
-                         {"Access-Control-Allow-Origin" (or origin "*")
-                          "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-                          "Access-Control-Allow-Headers" "Content-Type, Authorization"
-                          "Access-Control-Allow-Credentials" "true"})))
-        response))))
-
-(defn wrap-options
-  "Handle OPTIONS preflight requests."
-  [handler]
-  (fn [request]
-    (if (= :options (:request-method request))
-      {:status 204
-       :headers (vary-origin
-                 {"Access-Control-Allow-Origin" (get-in request [:headers "origin"] "*")
-                  "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-                  "Access-Control-Allow-Headers" "Content-Type, Authorization"
-                  "Access-Control-Allow-Credentials" "true"})}
-      (handler request))))
-
 ;;; ============================================================================
 ;;; Static Resource Serving
 ;;; ============================================================================
@@ -306,8 +273,8 @@
         router (routes/wrap-not-found (make-router routes))]
     (-> router
         wrap-static-resources
-        wrap-cors
-        wrap-options
+        cors/wrap-cors
+        cors/wrap-options
         wrap-keyword-params
         wrap-params
         ;; LAST in this -> means OUTERMOST, i.e. runs before wrap-params,

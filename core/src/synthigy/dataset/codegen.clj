@@ -130,18 +130,65 @@
                       :else (recur (inc i) false)))))]
     (if start (str/trim (str/join "\n" (drop start lines))) "")))
 
+(defn file-ops
+  [{:keys [path source]}]
+  (mapv #(assoc %1 :path path :segment %2)
+        (filterv #(or (:op %) (:batch %)) (prog/compile source nil))
+        (op-segments source)))
+
+(defn where
+  [paths]
+  (let [ps (map #(or % "the program") paths)]
+    (if (apply = ps)
+      (str (count ps) " times in " (first ps))
+      (str "in " (str/join " and " (distinct ps))))))
+
+(defn identity-of
+  [op]
+  (if (:batch op) (str "@batch " (:name op)) (prog/op-identity op)))
+
+(defn check-program!
+  "Refuse what codegen can't emit: unplaceable templates, duplicate identities, unresolvable @batch members."
+  [ops]
+  (when-let [orphans (seq (map :name (prog/missing-namespace-ops ops)))]
+    (throw (ex-info (str "@sql-template with no root entity needs @namespace: "
+                         (str/join ", " orphans))
+                    {:code "NAMESPACE_REQUIRED" :ops (vec orphans)})))
+  (when-let [dups (seq (filter #(> (count (val %)) 1) (group-by identity-of ops)))]
+    (throw (ex-info (str/join "; " (for [[id os] dups]
+                                     (str "duplicate operation '" id "' — declared "
+                                          (where (map :path os)))))
+                    {:code "DUPLICATE_OPERATION"
+                     :duplicates (vec (for [[id os] dups] {:identity id :paths (mapv :path os)}))})))
+  (doseq [[_ file] (group-by :path ops)
+          b (filter :batch file)
+          m (:members b)
+          :let [{:keys [missing ambiguous]} (prog/resolve-batch-member file m)]
+          :when (or missing ambiguous)]
+    (throw (ex-info (str "@batch '" (:name b) "' in " (or (:path b) "the program") ": '" m "' "
+                         (if missing
+                           "is not declared in the same file — a @batch only runs ops from its own file"
+                           (str "is ambiguous (" (str/join ", " (map prog/op-identity ambiguous)) ") — qualify it")))
+                    {:code "BATCH_MEMBER_UNRESOLVED" :batch (:name b) :member m :path (:path b)}))))
+
 (defn describe
-  "XSQL program source → codegen IR `{:operations [...]}`."
-  [schema source _params]
-  (let [ops  (filterv #(or (:op %) (:batch %)) (prog/compile source nil))
-        segs (op-segments source)]
+  "XSQL program → codegen IR `{:operations [...]}`. `sources` is one program
+   string or `[{:path :source}]`, one per file — each file is parsed on its own,
+   so its buffer-level @namespace stays in it."
+  [schema sources _params]
+  (let [files (if (string? sources) [{:source sources}] sources)
+        ops   (into [] (mapcat file-ops) files)]
+    (check-program! ops)
     {:operations
-     (mapv (fn [op seg]
+     (mapv (fn [op]
              (if (:batch op)
-               {:name (:name op) :batch true :members (vec (:members op))}
+               (let [file (filter #(= (:path op) (:path %)) ops)]
+                 {:name (:name op) :batch true
+                  :members (mapv (fn [m] (prog/op-identity (:op (prog/resolve-batch-member file m))))
+                                 (:members op))})
                ;; scan params from the body only — @returns' `?` (nullable)
                ;; in the header would alias the ?param sigil
-               (let [body (op-body seg)]
+               (let [body (op-body (:segment op))]
                 (cond-> {:name   (:name op)
                         :op     (:op op)
                         :entity (:entity op)
@@ -154,4 +201,4 @@
                  (assoc :result (derive-result schema (:entity op) (:selections op)))
                  (and (= "sql-template" (:op op)) (:returns op))
                  (assoc :result (returns->result (:returns op)))))))
-           ops segs)}))
+           ops)}))

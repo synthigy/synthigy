@@ -48,44 +48,68 @@
 ;; The atom carries a map {:conn ^Connection :pg-conn ^PGConnection
 ;; :stopped? bool}. nil before start, nil after stop.
 
+(defn open-listen!
+  "Open a dedicated connection and LISTEN on `channel`; `{:conn :pg-conn}`."
+  [datasource channel]
+  (let [^Connection conn (db.postgres/listen-connection datasource)]
+    (try
+      (jdbc/execute! conn [(str "LISTEN " channel)])
+      {:conn conn :pg-conn (.unwrap conn PGConnection)}
+      (catch Throwable e
+        (try (.close conn) (catch Throwable _))
+        (throw e)))))
+
+(defn reconnect!
+  "Swap the broken LISTEN connection in `state` for a fresh one, sleeping `timeout-ms` when that fails."
+  [datasource channel state timeout-ms broken]
+  (try (.close ^Connection (:conn broken)) (catch Throwable _))
+  (try
+    (let [fresh (open-listen! datasource channel)]
+      ;; never swap onto a state stop-source! already changed — close ours instead
+      (if (compare-and-set! state broken (assoc fresh :stopped? false))
+        (do (log/info {:id ::listen-reconnected
+                       :data {:action :reconnected :subject :wake-source :channel channel}}
+                      "PostgresNotify listening again")
+            :poll)
+        (do (.close ^Connection (:conn fresh))
+            :stop)))
+    (catch Throwable e
+      (log/warn {:id ::reconnect-failed
+                 :data {:channel channel :retry-ms timeout-ms}}
+                (.getMessage e))
+      (try (Thread/sleep (long timeout-ms)) :poll
+           (catch InterruptedException _ :stop)))))
+
 (defrecord PostgresNotify [datasource channel state]
   wake/WakeSource
 
   (start-source! [_]
     (when-not @state
-      (let [conn (db.postgres/listen-connection datasource)
-            pg-conn (.unwrap conn PGConnection)]
-        (try
-          (jdbc/execute! conn [(str "LISTEN " channel)])
-          (reset! state {:conn conn :pg-conn pg-conn :stopped? false})
-          (log/info {:id ::listen-started
-                     :data {:action :started :subject :wake-source
-                            :channel channel}}
-                    "PostgresNotify listening")
-          (catch Throwable e
-            (.close conn)
-            (throw e)))))
+      (reset! state (assoc (open-listen! datasource channel) :stopped? false))
+      (log/info {:id ::listen-started
+                 :data {:action :started :subject :wake-source
+                        :channel channel}}
+                "PostgresNotify listening"))
     nil)
 
   (wait! [_ timeout-ms]
-    (if-let [{:keys [^PGConnection pg-conn stopped?]} @state]
+    (let [{:keys [^PGConnection pg-conn stopped?] :as s} @state]
       (cond
-        stopped? :stop
-        :else    (try
-                   (let [notifs (.getNotifications pg-conn (int timeout-ms))]
-                     (if (and notifs (pos? (alength notifs)))
-                       :wakeup
-                       :poll))
-                   (catch InterruptedException _
-                     :stop)
-                   (catch Throwable e
-                     (log/warn {:id ::listen-error
-                                :data {:channel channel}}
-                               (.getMessage e))
-                     ;; Treat transport hiccups as a safety poll —
-                     ;; drainer ticks once, then retries the listen.
-                     :poll)))
-      :stop))
+        (or (nil? s) stopped?) :stop
+        :else (try
+                (let [notifs (.getNotifications pg-conn (int timeout-ms))]
+                  (if (and notifs (pos? (alength notifs)))
+                    :wakeup
+                    :poll))
+                (catch InterruptedException _
+                  :stop)
+                (catch Throwable e
+                  (if (not (identical? s @state))
+                    :stop
+                    (do (log/warn {:id ::listen-error
+                                   :data {:channel channel}}
+                                  (.getMessage e))
+                        (reconnect! datasource channel state timeout-ms s))))))))
 
   (signal! [_]
     ;; No-op: the trigger emits pg_notify when a queue row is inserted.

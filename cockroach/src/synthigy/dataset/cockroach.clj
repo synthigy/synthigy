@@ -114,6 +114,8 @@
                 new-type
                 (:error validation))
         {:type (or (:type validation) :dataset/forbidden-conversion)
+         :code "TYPE_CONVERSION_FORBIDDEN"
+         :hint (:suggestion validation)
          :entity (:name entity)
          :attribute (:name attribute)
          :from-type old-type
@@ -412,8 +414,10 @@
                    "alter table \"%s\" alter column %s type %s"
                    old-table column
                    (type->ddl type))
-                   (= "int" type) (str " using(trim(" column ")::integer)")
-                   (= "float" type) (str " using(trim(" column ")::float)")
+                   (= "int" type) (str (if (= "float" dt)
+                                        (str " using(round(" column ")::bigint)")
+                                        (str " using(trim(" column "::text)::bigint)")))
+                   (= "float" type) (str " using(trim(" column "::text)::double precision)")
                    (= "string" type) (str " using(" column "::text)")
                     ; (= "json" type) (str " using(" column "::jsonb)")
                     ;; String to JSON conversion:
@@ -429,7 +433,7 @@
                    (= "avatar" type) (str " using(" column "::text)")
                    (= "encrypted" type) (str " using(" column "::text)")
                    (= "hashed" type) (str " using(" column "::text)")
-                   (= "boolean" type) (str " using(trim(" column ")::boolean)")
+                   (= "boolean" type) (str " using(trim(" column "::text)::boolean)")
                    ;; enum is stored as TEXT - any type converts via text cast
                    (= "enum" type) (str " using(" column "::text)")))))
             ;; Enum is TEXT with model-enforced values (dataset 1.4.0) - value

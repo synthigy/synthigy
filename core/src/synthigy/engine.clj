@@ -237,7 +237,8 @@
    ;; (UNKNOWN_ATTRIBUTE, BAD_ARGS_SHAPE, MISSING_ENTITY, BAD_OP) surface
    ;; their context to the client instead of being stripped by the envelope.
    :rule :attribute :modifier :supported :argument :op
-   :args :limit :matched :xids])
+   :args :limit :matched :xids
+   :details :retryable])
 
 (defn error-passthrough
   "Lift error-passthrough-keys off an ex-data map, skipping nil/false and empty
@@ -250,6 +251,20 @@
                 m)))
           {}
           error-passthrough-keys))
+
+(defn sql-cause
+  [^Throwable e]
+  (loop [c (ex-cause e)]
+    (cond
+      (nil? c) nil
+      (instance? java.sql.SQLException c) c
+      :else (recur (ex-cause c)))))
+
+(defn translate-sql-cause
+  "Translate the first SQLException under an ex-info; nil when absent or unrecognized."
+  [e]
+  (when-let [c (sql-cause e)]
+    (some-> db/*db* (db/translate-db-exception c))))
 
 (def ^:private java-leak-patterns
   "Regexes that match Java/Clojure internal exception messages we don't
@@ -800,15 +815,28 @@
     (assoc ctx :result (daccess/schema model entities))))
 
 ;; Codegen IR — XSQL program source → typed, language-neutral operation IR.
+(defn describe-files
+  "`describe`'s input as `[{:path :source}]`: `sources` (one per .xsql file) or a single `source`."
+  [{:keys [source sources]}]
+  (cond
+    (and (sequential? sources) (seq sources)
+         (every? #(string? (or (:source %) (get % "source"))) sources))
+    (mapv (fn [f] {:path (or (:path f) (get f "path")) :source (or (:source f) (get f "source"))})
+          sources)
+
+    (string? source) [{:source source}]
+
+    :else
+    (throw (ex-info "`describe` requires :sources [{path, source}] (one per .xsql file) or a single :source string"
+                    {:code "BAD_OP" :rule "operation_shape"}))))
+
 (defmethod execute-operation "describe"
-  [{:keys [source params] :as ctx}]
+  [{:keys [params] :as ctx}]
   (assert-scope! "schema:read" "dataset:load")
-  (when-not (string? source)
-    (throw (ex-info "`describe` requires an :source XSQL program string"
-                    {:code "BAD_OP" :rule "operation_shape"})))
-  (let [model  (-> (dataset/deployed-model) daccess/protect-model runtime/build)
+  (let [files  (describe-files ctx)
+        model  (-> (dataset/deployed-model) daccess/protect-model runtime/build)
         schema (daccess/schema model)]
-    (assoc ctx :result (codegen/describe schema source params))))
+    (assoc ctx :result (codegen/describe schema files params))))
 
 (defn deploy-payload
   "Normalize what a client sent into a dataset VERSION map. The export file a
@@ -1070,11 +1098,16 @@
                  :ok true
                  ::op-shape (select-keys ctx [:entity :entity-id :selections])})
               (catch clojure.lang.ExceptionInfo e
-                (let [raw (ex-data e)
-                      data (enrich-position-error raw op)
-                      err  (merge {:message (ex-message e)
-                                   :code    (or (:code data) "OPERATION_ERROR")}
-                                  (error-passthrough data))]
+                (let [raw        (ex-data e)
+                      translated (when-not (:code raw) (translate-sql-cause e))
+                      data       (enrich-position-error
+                                  (merge raw (ex-data translated))
+                                  op)
+                      err        (merge {:message (if translated
+                                                    (str (ex-message e) ": " (ex-message translated))
+                                                    (ex-message e))
+                                         :code    (or (:code data) "OPERATION_ERROR")}
+                                        (error-passthrough data))]
                   {:error err :ok false}))
               (catch java.sql.SQLException e
                 (if-let [translated (some-> db/*db* (db/translate-db-exception e))]
@@ -1083,12 +1116,20 @@
                         details (enrich-error-details translated op)
                         err     (cond-> {:message (ex-message translated)
                                          :code    code}
-                                  (seq details) (assoc :details details))]
+                                  (seq details)     (assoc :details details)
+                                  (:hint data)      (assoc :hint (:hint data))
+                                  (:retryable data) (assoc :retryable true))]
                     ;; TIMEOUT is a server-health signal -> warn; constraint
                     ;; codes are routine -> debug.
-                    (if (= "TIMEOUT" code)
+                    (case code
+                      "TIMEOUT"
                       (log/warn {:id ::db-statement-timeout :error e}
                                 "DB statement timed out")
+                      ("DB_ERROR" "DB_UNAVAILABLE")
+                      (log/error! {:id ::operation-failed-sql
+                                   :msg "Operation failed (database error)"
+                                   :data {:op (:op op) :entity (:entity op) :code code}}
+                                  e)
                       (log/debug {:id ::db-error-translated
                                   :data {:code code}}
                                  "Translated DB error to wire code"))

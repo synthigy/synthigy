@@ -62,7 +62,19 @@
 
 (defn progress-step!
   [step of phase]
-  (progress-update! {:step step :of of :phase phase :detail nil :done nil :total nil}))
+  (progress-update! {:step step :of of :phase phase :detail nil :patch nil :done nil :total nil}))
+
+(defn progress-phase!
+  "Enter a new phase, dropping the previous phase's detail and counters."
+  [phase]
+  (progress-update! {:phase phase :detail nil :patch nil :done nil :total nil}))
+
+(defn progress-patching!
+  "Announce a patcho topic about to level; a topic already current clears the line."
+  [topic from to]
+  (progress-update! {:detail nil :done nil :total nil
+                     :patch (when (not= (str from) (str to))
+                              {:topic (str topic) :from (str from) :to (str to)})}))
 
 (defn progress-finish! []
   (reset! activity nil)
@@ -187,9 +199,9 @@
           {:success false :legacy true
            :message (str "Legacy euuid-keyed database detected — Synthigy is "
                          "xid-native. Run the migration before starting the server.")}
-          (do (progress-update! {:phase "starting :synthigy/server"})
+          (do (progress-phase! "starting :synthigy/server")
               (apply lifecycle/start! modules)
-              (progress-update! {:phase "starting observability" :detail nil})
+              (progress-phase! "starting observability")
               (start-observability!)
               {:success true :message "Server started"}))
         (catch Throwable t

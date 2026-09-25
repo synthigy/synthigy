@@ -62,7 +62,16 @@ if ($ver -eq "latest") {
 Write-Host "Downloading $asset ($ver)..."
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $exe = Join-Path $dir "synthigy.exe"
-Invoke-WebRequest -Uri $url -OutFile $exe
+$tmp = "$exe.part"
+Invoke-WebRequest -Uri $url -OutFile $tmp
+$sums = (Invoke-WebRequest -Uri ($url.Substring(0, $url.LastIndexOf("/")) + "/sha256sums-portal.txt")).Content
+$want = ($sums -split "`n" | ForEach-Object { $f = $_.Trim() -split "\s+"; if ($f.Count -eq 2 -and $f[1] -eq $asset) { $f[0] } } | Select-Object -First 1)
+$got = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+if (-not $want -or $got -ne $want.ToLower()) {
+  Remove-Item $tmp -Force
+  throw "checksum mismatch for $asset (want $want, got $got) — not installed"
+}
+Move-Item -Force $tmp $exe
 Write-Host "Installed: $exe"
 & $exe version
 

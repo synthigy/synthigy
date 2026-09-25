@@ -36,10 +36,12 @@
 (defdata :data/public-user
   :euuid #uuid "762d9076-4b78-4918-9eec-262a56a94e95" :xid "FbQG7q3EYXeR7N3oBhd2Gk")
 
+(def synthigy-user-name "Synthigy")
+
 (def ^:dynamic *SYNTHIGY*
   {:euuid (id/data :data/synthigy-user :euuid)
    :xid (id/data :data/synthigy-user :xid)
-   :name "Synthigy"
+   :name synthigy-user-name
    :type :SERVICE
    :active true
    :modified_by {:euuid #uuid "c5a67922-351e-4ca3-95c2-fa52a7a3e2b5" :xid "RQb935cnLog5tiFsXgfMhv"}})

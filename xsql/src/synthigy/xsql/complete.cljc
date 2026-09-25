@@ -521,6 +521,39 @@
                              (= c ")") (if (seq stack) (pop stack) stack)
                              :else stack))))))
 
+(def ^:private order-kw-re #"^\s*(?:_order_by|order\s+by)(?=\s|$)")
+(def ^:private order-spec-re #"^\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:asc|desc))?\s*$")
+
+(defn order-by-slot
+  "Which slot of an `order by` / `_order_by` spec list `offset` sits in:
+   `:attr` while the sort column is being typed, `:dir` once it is
+   complete, nil anywhere else."
+  [^String source offset]
+  (let [source (or source "")
+        start (if-let [p (innermost-open-paren source offset)] (inc p) 0)
+        segs (vec (str/split (subs source start offset) #"," -1))
+        cur (peek segs)
+        head (re-find order-kw-re cur)
+        in-list? (or (some? head)
+                     (loop [i (- (count segs) 2)]
+                       (cond
+                         (neg? i) false
+                         (re-find order-kw-re (nth segs i)) true
+                         (re-matches order-spec-re (nth segs i)) (recur (dec i))
+                         :else false)))]
+    (when in-list?
+      (let [body (if head (subs cur (count head)) cur)
+            words (into [] (remove str/blank?) (str/split body #"\s+"))
+            trailing-ws? (boolean (re-find #"\s$" body))]
+        (cond
+          ;; `?sort:order(…)` replaces the whole spec list — not a column slot.
+          (str/starts-with? (str (first words)) "?") nil
+          (and (empty? words) head (not trailing-ws?)) nil
+          (empty? words) :attr
+          (= 1 (count words)) (if trailing-ws? :dir :attr)
+          (and (= 2 (count words)) (not trailing-ws?)) :dir
+          :else nil)))))
+
 (defn complete-predicate-stmt?
   "True when an :arg-stmt ends in a literal value or a null test — a
    meta-key stmt (`_limit 100`) or a half-typed predicate is not."
@@ -553,8 +586,18 @@
                                   (= offset (second (:span resolved)))
                                   (let [t (:text resolved)]
                                     (and (> (count t) 1)
-                                         (= "\"" (subs t (dec (count t)))))))]
+                                         (= "\"" (subs t (dec (count t)))))))
+        order-slot (order-by-slot source offset)]
     (cond
+      ;; `order by` has its own two-slot grammar (Identifier asc|desc) —
+      ;; it must win over the generic predicate branches below, which
+      ;; would otherwise offer comparison operators after the column.
+      (= :attr order-slot)
+      {:kind :order-attr :entity-stack entity-stack}
+
+      (= :dir order-slot)
+      {:kind :order-dir :entity-stack entity-stack}
+
       (and value-attr (not after-closed-string?))
       {:kind :value-suggestion
        :entity-stack entity-stack
@@ -975,8 +1018,13 @@
       (mapv (fn [f] {:label f :type "function"})
             (remove (:used-fns ctx #{}) agg-fns))
 
+      :order-attr
+      (mapv (fn [a] {:label a :type "attribute" :section "Attributes"})
+            (sorted-attr-keys entity-def))
+
       :order-dir
-      [{:label "asc" :type "constant"} {:label "desc" :type "constant"}]
+      [{:label "asc"  :type "constant" :detail "ascending"}
+       {:label "desc" :type "constant" :detail "descending"}]
 
       ;; Only self-relations of the root entity can be recursed.
       :on-relation
@@ -1081,7 +1129,7 @@
 (def ^:private args-kinds
   #{:value-suggestion :after-is :after-is-not :after-not :after-like
     :after-in :arg-list-start :after-attr-in-pred :after-predicate-value
-    :path-continuation :agg-fn :order-dir})
+    :path-continuation :agg-fn :order-attr :order-dir})
 
 (defn scope-path-by-indent
   "Breadcrumb of relation names enclosing the cursor, rooted at the

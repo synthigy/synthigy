@@ -1507,6 +1507,9 @@ a { color: inherit; text-decoration: none; }
 }
 .console-notice.ok { color: var(--sy-ok); background: color-mix(in srgb, var(--sy-ok) 10%, transparent); }
 .console-notice.warn { color: var(--sy-warn); background: var(--sy-warn-tint); }
+.console-notice.info { color: var(--sy-text-p); background: color-mix(in srgb, var(--sy-accent) 10%, transparent); }
+.console-notice.info a { color: var(--sy-accent); font-weight: 600; }
+.console-readonly-value { font-size: 13px; color: var(--sy-text-p); padding: 4px 0; }
 .console-secret-reveal {
   display: flex;
   align-items: center;

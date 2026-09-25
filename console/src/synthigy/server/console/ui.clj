@@ -170,13 +170,18 @@
    {:key "data" :label "Data console" :icon :database}
    {:key "logs" :label "Log cockpit" :icon :microscope}])
 
+(defn root-url []
+  (some-> (not-empty (str env/iam-root-url)) (str/replace #"/+$" "")))
+
 (defn tools-redirect-uri
-  "The ONE address the Synthigy Tools client has registered for this
-   deployment, derived from the configured root URL — the portal registers
-   exactly this string when that URL is set."
+  "The Synthigy Tools client's login and silent-renew address for this deployment."
   []
-  (when-let [root (not-empty (str env/iam-root-url))]
-    (str (str/replace root #"/+$" "") "/console/tools/callback")))
+  (some-> (root-url) (str "/console/tools/callback")))
+
+(defn tools-logout-uri
+  "Where a tool logout lands: the console login page."
+  []
+  (some-> (root-url) (str "/console/login?logged_out=1")))
 
 (defn tools-available?
   "The web components ship only in the product bundles, and their login can
@@ -340,6 +345,8 @@
           (list
            [:script (raw (str "window.SYNTHIGY_REDIRECT_URI="
                               (json/write-str (tools-redirect-uri)) ";"
+                              "window.SYNTHIGY_POST_LOGOUT_REDIRECT_URI="
+                              (json/write-str (tools-logout-uri)) ";"
                               "window.SYNTHIGY_TOOLING_BUNDLE="
                               (json/write-str (asset "js/tooling.js")) ";"))]
            [:script {:src (asset "js/tools.js") :defer true}]))]])))
@@ -867,11 +874,47 @@
      (for [[panel-label body] rendered]
        [:ty-tab {:id (str id-prefix (tab-id panel-label)) :label panel-label} body])]))
 
+(defn readonly-value
+  [[k _ kind] row]
+  (let [v (get row k)]
+    [:div.console-readonly-value
+     (case kind
+       (:switch :flag) (if v "Yes" "No")
+       :enum (or (second (get widgets/type-glyphs (some-> v name))) (some-> v name) "—")
+       (if (str/blank? (str v)) "—" (str v)))]))
+
+(defn locked-form
+  "A `:detail :locked` row — values and chips only, nothing to submit."
+  [{{:keys [fields links]} :detail} row locked notice]
+  [:div.console-panel.console-detail
+   [:div.console-form
+    (widgets/notice notice)
+    (widgets/notice [:info locked])
+    [:ty-scroll-container {:custom-scrollbar true :shadow true}
+     [:div.console-form-body
+      [:div.console-fields.console-fields-wrap
+       (for [[_ label kind :as f] fields]
+         (field-shell label kind nil (readonly-value f row)))]
+      [:div.console-link-grid
+       (for [[k label _ icon] links]
+         [:div.console-links
+          [:div.console-field-label (icon/icon icon {:size "13"}) label]
+          [:div.console-chips
+           (if-let [rs (seq (get row k))]
+             (for [r rs]
+               [:ty-tag {:pill true :size "sm" :flavor "neutral"}
+                (icon/icon icon {:size "11" :slot "start"})
+                (:name r)])
+             [:p.console-field-hint "None."])]])]]]]])
+
 (defn detail
   [request {:keys [slug label detail] :as spec} row & [notice panel-notice]]
-  (let [{:keys [fields links head sections panels confirm]} detail
+  (let [{:keys [fields links head sections panels confirm locked]} detail
+        locked (when locked (locked row))
         title (or (:name row) "Edit")
-        form  (form-page
+        form  (if locked
+               (locked-form spec row locked notice)
+               (form-page
                {:spec spec
                 :row row
                 :action (str "/console/iam/" slug "/" (:xid row))
@@ -885,19 +928,21 @@
                            (field-control f row (when (= :enum (nth f 2))
                                                   (data/enum-values spec (first f))))))
                 :sections (for [section sections] (section row))
-                :links (for [l links] (link-control slug l row (link-options-for l)))
+                :links (for [l links
+                             :when (if-let [[rel] (data/link-via l)] (get row rel) true)]
+                         (link-control slug l row (link-options-for l)))
                 :actions
                 (list
                  [:ty-button {:type "button" :size "sm" :appearance "ghost"
                               :onclick (str "location.href='/console/iam/" slug "'")}
                   "Cancel"]
-                 [:ty-button {:type "submit" :size "sm" :flavor "primary"} "Save"])})]
+                 [:ty-button {:type "submit" :size "sm" :flavor "primary"} "Save"])}))]
     (admin-shell
      {:title title
       :user (:console/principal request)
       :uri (str "/console/iam/" slug)
       :confirm (cond
-                 (:delete spec) (str "/console/iam/" slug "/" (:xid row) "/delete")
+                 (and (:delete spec) (not locked)) (str "/console/iam/" slug "/" (:xid row) "/delete")
                  confirm (confirm row))
       :session (:console/session request)
       :body
@@ -923,7 +968,7 @@
                                 (name (:type tt)) (:xid row))}
               (icon/icon :inbox {:size "13" :slot "start"})
               "Export"]))
-         (when-let [{:keys [warning]} (:delete spec)]
+         (when-let [{:keys [warning]} (when-not locked (:delete spec))]
            [:ty-button
             {:type "button" :size "sm" :appearance "outlined"
              :flavor "danger" :muted true

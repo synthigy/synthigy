@@ -77,6 +77,9 @@
 (defrelation :iam/group->roles
   :euuid #uuid "ef549d07-5ba5-4c75-857e-bc1c673e3815" :xid "WZ79r1tzJEVKSzqmATEZFa")
 
+(defrelation :iam/app->service-user
+  :euuid #uuid "d6f368d2-f8d4-4aff-a061-a40f6aa711e2" :xid "TYVoHhUnDf3KN2LmSp9yfP")
+
 ;; ----------------------------------------------------------------------------
 ;; RBAC grant relations on User Role — CRUDOB on entities, :read/:write/:delete
 ;; on relations. `create entities` is the pre-CRUDOB `write entities` renamed,
@@ -129,9 +132,6 @@
 ;; The column /oauth/login authenticates against — see iam/access.md
 (defdata :iam.user/password
   :euuid #uuid "2c5684ac-d8e1-40a9-8a4b-db602052907f" :xid "6UZ37fazSUWp4XwqA2CiFg")
-
-(defdata :iam.model/version-0.80.0
-  :euuid #uuid "7c9981ed-8494-47b0-9580-adc2951819f9" :xid "GPPpgwJqAuSEbRRuoMYLLg")
 
 (defrelation :oauth/user->person-info
   :xid "BfRjYxqSLbdbGXJNRAnyfH")

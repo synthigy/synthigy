@@ -50,6 +50,7 @@
 
   See individual handler functions for details."
   (:require
+   [synthigy.cors :as cors]
    [clojure.core.async :as async]
    [clojure.string :as str]
    [environ.core :refer [env]]
@@ -160,13 +161,11 @@
                                  (let [origin (get-in request [:headers "origin"])]
                                    (httpkit/send! ch
                                                   {:status 200
-                                                   :headers (cond-> {"Content-Type" "text/event-stream"
-                                                                     "Cache-Control" "no-cache"
-                                                                     "Connection" "keep-alive"}
-                                                              origin
-                                                              (merge {"Access-Control-Allow-Origin" origin
-                                                                      "Access-Control-Allow-Credentials" "true"
-                                                                      "Vary" "Origin"}))}
+                                                   :headers (cors/response-headers
+                                                             {"Content-Type" "text/event-stream"
+                                                              "Cache-Control" "no-cache"
+                                                              "Connection" "keep-alive"}
+                                                             origin)}
                                                   false))
                                  (async/go-loop []
                                    (when (httpkit/open? ch)
@@ -229,42 +228,6 @@
 ;;; ============================================================================
 ;;; Middleware Stack
 ;;; ============================================================================
-
-(defn vary-origin
-  "A response that echoes the request Origin is per-origin — say so, or a cache serves one origin's CORS header to the next."
-  [headers]
-  (assoc headers "Vary" (if-let [v (get headers "Vary")] (str v ", Origin") "Origin")))
-
-(defn wrap-cors
-  "Simple CORS middleware allowing all origins.
-
-  For production, configure specific origins."
-  [handler]
-  (fn [request]
-    (let [response (handler request)
-          origin (get-in request [:headers "origin"])]
-      (if response
-        (update response :headers
-                #(vary-origin
-                  (merge %
-                         {"Access-Control-Allow-Origin" (or origin "*")
-                          "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-                          "Access-Control-Allow-Headers" "Content-Type, Authorization"
-                          "Access-Control-Allow-Credentials" "true"})))
-        response))))
-
-(defn wrap-options
-  "Handle OPTIONS preflight requests."
-  [handler]
-  (fn [request]
-    (if (= :options (:request-method request))
-      {:status 204
-       :headers (vary-origin
-                 {"Access-Control-Allow-Origin" (get-in request [:headers "origin"] "*")
-                  "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-                  "Access-Control-Allow-Headers" "Content-Type, Authorization"
-                  "Access-Control-Allow-Credentials" "true"})}
-      (handler request))))
 
 ;;; ============================================================================
 ;;; Static Resource Serving
@@ -390,8 +353,8 @@
      (routes/wrap-errors
       (-> router
           wrap-static-resources
-          wrap-cors
-          wrap-options
+          cors/wrap-cors
+          cors/wrap-options
           wrap-keyword-params
           wrap-params
           data/wrap-preserve-body)))))

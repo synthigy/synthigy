@@ -36,8 +36,7 @@
 //      renewal timeout.
 //   2. loaded as the TOP window on the callback path — a login coming back.
 //      Bounce the query to the console page the operator left, which is where
-//      the component lives and can settle it. Anything else here is a logout
-//      coming back (post_logout_redirect_uri is this same address): return to
+//      the component lives and can settle it. Anything else here returns to
 //      that page without the query.
 //   3. any console page — wire the nav buttons, and remount the last-opened
 //      tool so a returning login (case 2) lands on something that can finish.

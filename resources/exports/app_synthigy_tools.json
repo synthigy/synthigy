@@ -1,17 +1,11 @@
 {
-  "description": "Public OAuth client for Synthigy's own first-party tooling — the modeler, data console and log cockpit, served both from synthigy.com and from a local dev origin. Supersedes the former \"Synthigy\" and \"Synthigy Components\" clients, which were merged into this one: they pointed at the same API audience and differed only by origin, so two client registrations bought nothing but a second thing to keep in sync. Auth flow: redirect (or popup) to login, redirect back to the hosting page.",
+  "description": "Public OAuth client for Synthigy's own first-party tooling — the modeler, data console and log cockpit. Supersedes the former \"Synthigy\" and \"Synthigy Components\" clients, which were merged into this one: they pointed at the same API audience and differed only by origin, so two client registrations bought nothing but a second thing to keep in sync. Auth flow: redirect (or popup) to login, redirect back to the hosting page.",
   "name": "Synthigy Tools",
   "settings": {
     "logo-url": null,
     "login-page": null,
     "allow-signup": false,
-    "redirections": [
-      "http://localhost:8000",
-      "http://localhost:8080",
-      "http://localhost:3000",
-      "https://synthigy.com/synthigy/callback",
-      "https://synthigy.com/synthigy/silent-callback"
-    ],
+    "redirections": [],
     "token-expiry": {
       "id": 600,
       "access": 3600,
@@ -22,13 +16,7 @@
       "authorization_code",
       "refresh_token"
     ],
-    "logout-redirections": [
-      "http://localhost:8000",
-      "http://localhost:8080",
-      "http://localhost:3000",
-      "https://synthigy.com/synthigy",
-      "https://synthigy.com/synthigy/"
-    ]
+    "logout-redirections": []
   },
   "apis": [
     {

@@ -29,6 +29,7 @@
    [clojure.java.io :as io]
    [clojure.set :as set]
    [clojure.string :as str]
+   [clojure.walk :as walk]
    [jsonista.core :as j]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
@@ -381,7 +382,22 @@
 ;; validated, unlike the others — an unknown :datasets id would mint a stub Dataset row
 (defn import-group [path] (import! :group path :mode :stack))
 (defn import-api  [path] (import! :api  path :mode :stack :validate? false))
-(defn import-app  [path] (import! :app  path :mode :stack :validate? false))
+(defn keep-live-settings
+  "An existing client's settings win over the file's, key by key."
+  [record]
+  (let [live (some-> (:id record)
+                     (#(dataset/get-entity :iam/app {:id %} {:settings nil}))
+                     :settings
+                     walk/stringify-keys)]
+    (cond-> record
+      live (assoc :settings (merge (walk/stringify-keys (:settings record)) live)))))
+
+(defn import-app [path]
+  (let [payload (read-payload path)]
+    (import-records! :app (if (sequential? payload)
+                            (mapv keep-live-settings payload)
+                            (keep-live-settings payload))
+                     :mode :stack :validate? false :source (str path))))
 
 (defn export-role  ([] (export :role))  ([args] (export :role args)))
 (defn export-group ([] (export :group)) ([args] (export :group args)))

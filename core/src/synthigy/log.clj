@@ -28,7 +28,8 @@
     [jsonista.core :as json]
     [patcho.lifecycle :as lifecycle]
     [synthigy.log.pipeline :as pipeline]
-    [synthigy.log.store :as store]
+    [synthigy.log.store.protocol :as store]
+    [synthigy.log.store.ring :as ring]
     [synthigy.log.topics :as topics]
     [synthigy.node :as node]
     [taoensso.telemere :as t]))
@@ -226,6 +227,7 @@
    `*log-store*`."
   [{:keys [min-level ns-filter] :as routing}]
   (try (t/remove-handler! store-handler-id) (catch Throwable _))
+  (alter-var-root #'store/*log-store* #(or % (ring/create-ring)))
   (let [opts    (cond-> {}
                   ns-filter (assoc :ns-filter ns-filter)
                   min-level (assoc :min-level min-level))

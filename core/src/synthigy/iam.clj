@@ -27,6 +27,7 @@
    [buddy.hashers :as hashers]
    clojure.pprint
    clojure.set
+   [clojure.walk :as walk]
    [synthigy.log :as log]
    [synthigy.supervisor :as supervisor]
    [patcho.lifecycle :as lifecycle]
@@ -96,10 +97,26 @@
   [k]
   (dataset/get-entity :iam/app {(id/key) k} client-selections))
 
+(defn merge-settings
+  "Current settings with `changes` applied key by key; keys not in `changes` are kept."
+  [current changes]
+  (not-empty (merge (walk/stringify-keys current) (walk/stringify-keys changes))))
+
+(defn update-client-settings!
+  "Apply `f` to the client's full current settings and store the result; true when it changed."
+  [id f & args]
+  (when-let [client (get-client id)]
+    (let [current (walk/stringify-keys (or (:settings client) {}))
+          updated (apply f current args)]
+      (when (not= current updated)
+        (dataset/stack-entity :iam/app {:id id :settings updated})
+        true))))
+
 (defn add-client [{:keys [id name secret settings type apis]
                    :or {id (gen/client-id)
                         type :public}}]
-  (let [created? (nil? (get-client id))
+  (let [existing (get-client id)
+        created? (nil? existing)
         raw-secret (or secret
                        (when (and (service-user/confidential? {:type type}) created?)
                          (gen/client-secret)))
@@ -108,7 +125,7 @@
                 (cond-> {:id id
                          :name name
                          :type type
-                         :settings settings
+                         :settings (merge-settings (:settings existing) settings)
                          :active true}
                   raw-secret (assoc :secret raw-secret)
                   (seq apis) (assoc :apis apis)))
@@ -356,7 +373,7 @@
       (core/reload *db* model))
     (log/info {:id ::schema-mounted} "Mounted IAM schema")
 
-    (core/deploy! *db* iam-schema)
+    (dataset/deploy! iam-schema)
     (log/info {:id ::schema-deployed :data {:action :deployed :subject :iam-schema}} "Deployed IAM schema to history"))
 
   ;; OAuth store must deploy before setup-default-data imports apps/APIs into

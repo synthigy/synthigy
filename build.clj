@@ -22,11 +22,12 @@
 
 (ns build
   "Uberjar for a chosen backend combo. Combo via SYNTHIGY_COMBO env,
-   e.g. SYNTHIGY_COMBO=postgres:httpkit (default). Default build bundles
+   e.g. SYNTHIGY_COMBO=engine-sqlite:audit-sqlite:log-sqlite:server-httpkit:server-console. Default build bundles
    sources (no AOT). SYNTHIGY_AOT=true compiles every local namespace and
    strips local .clj/.cljc/.cljs from the jar — bytecode-only service
    artifact for GitHub releases; source publishing is Clojars, not this."
-  (:require [clojure.tools.build.api :as b]
+  (:require [clojure.edn]
+            [clojure.tools.build.api :as b]
             [clojure.tools.namespace.find :as find]
             [clojure.string :as str]))
 
@@ -40,7 +41,7 @@
 ;; matched against the file NAME, so a directory pattern silently misses.
 (def never-ship "public/js/.*")
 
-(def combo (or (System/getenv "SYNTHIGY_COMBO") "postgres:httpkit"))
+(def combo (or (System/getenv "SYNTHIGY_COMBO") "engine-postgres:audit-postgres:log-sqlite:server-httpkit:server-console"))
 (def aot? (= "true" (System/getenv "SYNTHIGY_AOT")))
 (def aliases (mapv keyword (str/split combo #":")))
 (def class-dir "target/classes")
@@ -74,30 +75,101 @@
 ;; core (base :paths — the engine, see deps.edn) has NOTHING baked in beyond
 ;; itself. Everything else composes on top, one strict layer at a time:
 ;;
-;;   core -> oauth -> server -> {httpkit, console}
+;;   core -> server-oauth -> server-core -> {server-httpkit, server-console}
 ;;
 ;; Each module is compiled with the PREVIOUS layer's class dir staged in, and
-;; ships only what it added (`purge-foreign!`). oauth depends on core alone —
-;; deliberately, so the OAuth/OIDC implementation can be taken and mounted on
-;; someone else's HTTP server. httpkit and console both sit on server but not
-;; on each other.
-(def oauth-aliases [:oauth])
-(def server-aliases [:oauth :server])
-(def leaf-aliases [:httpkit :console])
-(def core-aliases [])
-(def db-aliases [:postgres :sqlite])
-(def obs-aliases [:duckdb :clickhouse])
+;; ships only what it added (`purge-foreign!`). server-oauth depends on core
+;; alone — deliberately, so the OAuth/OIDC implementation can be taken and
+;; mounted on someone else's HTTP server.
+;;
+;; Modules are folders: <dimension>/<impl>/src is alias :<dimension>-<impl>
+;; and jar synthigy-<dimension>-<impl>.jar. `check-layout!` refuses a folder
+;; without its alias and an alias without its folder.
 
-;; postgres/sqlite/cockroach each provide synthigy.core AND synthigy.iam.audit;
-;; duckdb/clickhouse each provide synthigy.observability. Core requires the db
-;; pair (iam.clj) so something must supply them on core's COMPILE
-;; classpath — that is exactly what dummy/src (:stub) exists for. Their
-;; classes belong to the driver module, never to core. Observability needs no
-;; witness: supervisor's require is guarded and topics.clj only names it as a
-;; string. A module ships only ITS OWN shadowed namespaces.
+(defn impls [dim]
+  (->> (.listFiles (java.io.File. ^String dim))
+       (filter #(.isDirectory (java.io.File. ^java.io.File % "src")))
+       (map #(.getName ^java.io.File %))
+       sort))
+
+(defn module-alias [dim impl] (keyword (str dim "-" impl)))
+
+(defn aliases-of [dim] (mapv #(module-alias dim %) (impls dim)))
+
+(defn adapter? [impl]
+  (.isFile (java.io.File. (str "server/" impl "/src/synthigy/server.clj"))))
+
+;; folders that exist but ship no jar: the compile witness, broken CockroachDB,
+;; the adapters no bundle uses, and DuckDB (source only — its native driver
+;; would otherwise count as shared and land in core.jar)
+(def unshipped #{:engine-stub :engine-cockroach :server-pedestal :server-undertow :server-ring-jetty
+                 :audit-duckdb :log-duckdb :lib-duckdb})
+
+(defn shipped [dim] (vec (remove unshipped (aliases-of dim))))
+
+(def db-aliases (shipped "engine"))
+(def audit-aliases (shipped "audit"))
+(def log-aliases (shipped "log"))
+;; plain libraries a module may need on its classpath but never ships
+(def lib-aliases (shipped "lib"))
+(def oauth-aliases [:server-oauth])
+(def server-aliases [:server-oauth :server-core])
+(def leaf-aliases (into [:server-console]
+                        (remove unshipped (map #(module-alias "server" %) (filter adapter? (impls "server"))))))
+(def core-aliases [])
+(def module-libs {:audit-clickhouse [:lib-clickhouse] :log-clickhouse [:lib-clickhouse]
+                  :audit-duckdb [:lib-duckdb] :log-duckdb [:lib-duckdb]})
+
+(defn check-layout!
+  "Every module folder has its deps.edn alias pointing at it, and every dimension alias has its folder."
+  []
+  (let [declared (:aliases (clojure.edn/read-string (slurp "deps.edn")))
+        folders  (into {} (for [dim ["engine" "audit" "log" "lib" "server"]
+                                impl (impls dim)]
+                            [(module-alias dim impl) (str dim "/" impl "/src")]))
+        dim-alias? #(re-matches #"(engine|audit|log|lib|server)-.+" (name %))
+        names? (fn [a path]
+                 (or (some #{path} (get-in declared [a :extra-paths]))
+                     (some #(= (str/replace path #"/src$" "") (:local/root %))
+                           (vals (get-in declared [a :extra-deps])))))
+        errors (concat
+                (for [[a path] folders :when (not (names? a path))]
+                  (str path " has no alias " a " naming it"))
+                (for [a (keys declared)
+                      :when (and (dim-alias? a) (not (folders a)))]
+                  (str a " names no <dimension>/<impl>/src folder")))]
+    (when (seq errors)
+      (throw (ex-info (str "module layout: " (str/join "; " errors)) {:errors (vec errors)})))))
+
+(defn check-layout [_]
+  (check-layout!)
+  (println "module layout ok:" (pr-str {:engine db-aliases :audit audit-aliases :log log-aliases
+                                        :lib lib-aliases :server (into server-aliases leaf-aliases)})))
+
+;; Each dimension's modules ship one shadowed namespace set: the engine
+;; modules synthigy.core + synthigy.iam.audit, the audit modules synthigy.audit,
+;; the log-store modules synthigy.log.store. Core requires all three, so its
+;; COMPILE classpath carries a witness for each (engine/stub and the memory
+;; modules); their classes belong to the module, never to core.
 (def db-shadowed ["synthigy/core" "synthigy/iam/audit"])
-(def obs-shadowed ["synthigy/observability"])
-(def shadowed (into db-shadowed obs-shadowed))
+(def audit-shadowed ["synthigy/audit"])
+(def log-shadowed ["synthigy/log/store"])
+(def shadowed (vec (concat db-shadowed audit-shadowed log-shadowed)))
+(def witness-aliases [:engine-stub :audit-memory :log-memory])
+
+(defn dimension-of [alias']
+  (cond (some #{alias'} db-aliases)    :db
+        (some #{alias'} audit-aliases) :audit
+        (some #{alias'} log-aliases)   :log))
+
+(defn witnesses-for
+  "The compile witnesses for `alias'`: every dimension's except its own."
+  [alias']
+  (case (dimension-of alias')
+    :db    [:audit-memory :log-memory]
+    :audit [:engine-stub :log-memory]
+    :log   [:engine-stub :audit-memory]
+    witness-aliases))
 
 (defn shadowed-excludes [ps]
   (mapv #(str % "(?:__init\\.class|\\$.*\\.class|\\.clj)") ps))
@@ -113,23 +185,18 @@
 
 (defn class-owned?
   "Does this .class file belong to one of `owned-paths` (munged ns paths)?
-   Clojure emits two shapes and BOTH must be kept: namespace classes at the
-   ns path itself (synthigy/iam__init.class, synthigy/iam$fn__123.class), and
-   the type classes a defprotocol/defrecord/deftype emits one segment INSIDE
-   the namespace directory (synthigy/observability/TransportOps.class belongs
-   to synthigy.observability). Missing the second shape drops the protocol
-   interface and the module dies at load with ClassNotFoundException — only
-   an actual composed-classpath boot catches it, not jar listings."
+   Namespace classes (`…__init`, `…$fn__1`) belong to their own ns path; type
+   classes a defprotocol/defrecord/deftype emits (no `$`, no `__init`) to the
+   ns directory they sit in — so synthigy/audit/protocol__init.class is
+   synthigy.audit.protocol's, never synthigy.audit's."
   [owned-paths rel]
-  (let [base (-> rel
-                 (str/replace #"\.class$" "")
-                 (str/split #"\$")
-                 first
-                 (str/replace #"__init$" ""))
-        cut (.lastIndexOf ^String base "/")
-        parent (when (pos? cut) (subs base 0 cut))]
-    (boolean (or (owned-paths base)
-                 (and parent (owned-paths parent))))))
+  (let [stem   (str/replace rel #"\.class$" "")
+        base   (-> stem (str/split #"\$") first (str/replace #"__init$" ""))
+        cut    (.lastIndexOf ^String base "/")
+        owner  (if (or (str/includes? stem "$") (str/ends-with? stem "__init") (neg? cut))
+                 base
+                 (subs base 0 cut))]
+    (boolean (owned-paths owner))))
 
 (defn purge-foreign!
   "Keep only .class files this module's OWN namespaces compiled — including
@@ -187,7 +254,7 @@
    namespace this module needs (synthigy.iam -> synthigy.iam.audit, say)
    resolves during compilation without ending up shipped in this jar.
    `compile-basis` resolves requires during THIS compile step (it may carry
-   :stub for a module with no db/obs of its own — see `modules`); `basis`
+   :engine-stub for a module with no db/obs of its own — see `modules`); `basis`
    is what the shipped jar's own deps are selected from, kept stub-free so
    a compile-time witness never becomes a runtime dependency.
    `purge-foreign!` (not a staged-path diff, see its docstring) is what
@@ -195,12 +262,13 @@
   [alias' dirs libs compile-basis basis staged-classes]
   (let [cd (format "target/classes-%s" (name alias'))
         jar (format "target/synthigy-%s.jar" (name alias'))
-        ;; a db module must never ship synthigy.observability, an obs module
-        ;; never synthigy.core, and anything else (oauth, server, httpkit,
-        ;; console) ships neither — one shadowed copy per classpath
-        foreign (cond (some #{alias'} db-aliases) obs-shadowed
-                      (some #{alias'} obs-aliases) db-shadowed
-                      :else shadowed)
+        ;; a module ships only its own dimension's shadowed namespaces; oauth,
+        ;; server, httpkit, console and the libs ship none
+        foreign (case (dimension-of alias')
+                  :db    (into audit-shadowed log-shadowed)
+                  :audit (into db-shadowed log-shadowed)
+                  :log   (into db-shadowed audit-shadowed)
+                  shadowed)
         owned (nses-in dirs)]
     (b/delete {:path cd})
     (doseq [sc (if (string? staged-classes) [staged-classes] staged-classes)]
@@ -232,32 +300,46 @@
     (println "Built" jar)
     jar))
 
+(defn assert-ownership! [_]
+  (let [audit #{"synthigy/audit"}]
+    (assert (class-owned? audit "synthigy/audit__init.class"))
+    (assert (class-owned? audit "synthigy/audit$fn__12.class"))
+    (assert (class-owned? audit "synthigy/audit/Thing.class"))
+    (assert (not (class-owned? audit "synthigy/audit/protocol__init.class")))
+    (assert (not (class-owned? audit "synthigy/audit/protocol$fn__7.class")))
+    (assert (not (class-owned? audit "synthigy/audit/protocol/AuditProvider.class")))
+    (assert (class-owned? #{"synthigy/audit/protocol"} "synthigy/audit/protocol/AuditProvider.class"))))
+
 (defn modules [_]
+  (check-layout!)
+  (assert-ownership! nil)
   (let [core-basis (b/create-basis {:aliases core-aliases})
         core-dirs  (dirs-of core-basis)
         core-libs  (set (keys (:libs core-basis)))
-        entry (fn [a extra-aliases]
-                (let [bs  (b/create-basis {:aliases (into core-aliases (conj extra-aliases a))})
-                      cbs (b/create-basis {:aliases (into core-aliases (conj extra-aliases a :stub))})]
+        lib-dirs (set (mapcat #(dirs-of (b/create-basis {:aliases [%]})) lib-aliases))
+        entry (fn [a]
+                (let [extra (get module-libs a [])
+                      bs  (b/create-basis {:aliases (into core-aliases (conj extra a))})
+                      cbs (b/create-basis {:aliases (into core-aliases (concat extra [a] (witnesses-for a)))})]
                   {:basis bs :compile-basis cbs
-                   :dirs (remove (set core-dirs) (dirs-of bs))
+                   :dirs (remove (into (set core-dirs) (if (some #{a} lib-aliases) #{} lib-dirs)) (dirs-of bs))
                    :libs (remove core-libs (keys (:libs bs)))}))
-        db+obs (into {} (for [a (concat db-aliases obs-aliases)] [a (entry a [])]))
+        db+obs (into {} (for [a (concat db-aliases audit-aliases log-aliases lib-aliases)] [a (entry a)]))
         ;; each layer subtracts every layer below it, so a module ships only
         ;; what it added and nothing is compiled into two jars
         oauth-basis (b/create-basis {:aliases (into core-aliases oauth-aliases)})
-        oauth-compile-basis (b/create-basis {:aliases (into core-aliases (conj oauth-aliases :stub))})
+        oauth-compile-basis (b/create-basis {:aliases (into core-aliases (concat oauth-aliases witness-aliases))})
         oauth-dirs (remove (set core-dirs) (dirs-of oauth-basis))
         oauth-libs (remove core-libs (keys (:libs oauth-basis)))
         below-server (set (concat core-dirs oauth-dirs))
         server-basis (b/create-basis {:aliases (into core-aliases server-aliases)})
-        server-compile-basis (b/create-basis {:aliases (into core-aliases (conj server-aliases :stub))})
+        server-compile-basis (b/create-basis {:aliases (into core-aliases (concat server-aliases witness-aliases))})
         server-dirs (remove below-server (dirs-of server-basis))
         server-libs (remove (set (concat core-libs oauth-libs)) (keys (:libs server-basis)))
         excl (set (concat core-dirs oauth-dirs server-dirs))
         leaf (into {} (for [a leaf-aliases]
                         (let [bs  (b/create-basis {:aliases (into core-aliases (conj server-aliases a))})
-                              cbs (b/create-basis {:aliases (into core-aliases (conj server-aliases a :stub))})]
+                              cbs (b/create-basis {:aliases (into core-aliases (concat server-aliases [a] witness-aliases))})]
                           [a {:basis bs :compile-basis cbs
                               :dirs (remove excl (dirs-of bs))
                               :libs (remove (set (concat core-libs oauth-libs server-libs)) (keys (:libs bs)))}])))
@@ -268,16 +350,15 @@
         ;; (hiccup, say) into core would put a UI-rendering dep back into the
         ;; engine artifact — exactly what this split exists to avoid.
         shared (set (for [[l n] (frequencies (mapcat (comp :libs val) db+obs)) :when (> n 1)] l))
-        ;; :stub (dummy/src) supplies synthigy.core + synthigy.iam.audit with
-        ;; no driver attached — built for exactly this. Compiling against a
-        ;; real backend instead would put that driver's shadowed classes in
-        ;; core's class dir, one exclude away from shipping.
-        witness (b/create-basis {:aliases (conj core-aliases :stub)})
+        ;; the witnesses supply every shadowed namespace with no driver attached;
+        ;; compiling against a real backend instead would put its shadowed
+        ;; classes in core's class dir, one exclude away from shipping
+        witness (b/create-basis {:aliases (into core-aliases witness-aliases)})
         ;; the staging chain: each cd is cumulative, so a module stages only
         ;; the layer directly below it and gets everything under it for free
         core-cd "target/classes-core"
-        oauth-cd "target/classes-oauth"
-        server-cd "target/classes-server"]
+        oauth-cd "target/classes-server-oauth"
+        server-cd "target/classes-server-core"]
     (b/delete {:path core-cd})
     (doseq [d core-dirs] (b/copy-dir {:src-dirs [d] :target-dir core-cd :ignores [#".*\.clj[cs]?$"]}))
     (b/compile-clj {:basis witness :class-dir core-cd :ns-compile (nses-in core-dirs)})
@@ -292,15 +373,15 @@
     (let [core-entries (jar-entries "target/synthigy-core.jar")]
       (doseq [[a {:keys [dirs libs compile-basis basis]}] db+obs]
         (build-module a dirs (remove shared libs) compile-basis basis core-cd))
-      (build-module :oauth oauth-dirs oauth-libs oauth-compile-basis oauth-basis core-cd)
-      (build-module :server server-dirs server-libs server-compile-basis server-basis oauth-cd)
+      (build-module :server-oauth oauth-dirs oauth-libs oauth-compile-basis oauth-basis core-cd)
+      (build-module :server-core server-dirs server-libs server-compile-basis server-basis oauth-cd)
       (doseq [[a {:keys [dirs libs compile-basis basis]}] leaf]
         (build-module a dirs libs compile-basis basis server-cd))
       (println "\nshared->core:" (pr-str (vec shared)))
       (doseq [[a {:keys [libs]}] db+obs]
-        (println (format "  %-12s libs: %s" (name a) (pr-str (vec (remove shared libs))))))
-      (println (format "  %-12s libs: %s" "oauth" (pr-str (vec oauth-libs))))
-      (println (format "  %-12s libs: %s" "server" (pr-str (vec server-libs))))
+        (println (format "  %-16s libs: %s" (name a) (pr-str (vec (remove shared libs))))))
+      (println (format "  %-16s libs: %s" "server-oauth" (pr-str (vec oauth-libs))))
+      (println (format "  %-16s libs: %s" "server-core" (pr-str (vec server-libs))))
       (doseq [[a {:keys [libs]}] leaf]
-        (println (format "  %-12s libs: %s" (name a) (pr-str (vec libs)))))
+        (println (format "  %-16s libs: %s" (name a) (pr-str (vec libs)))))
       (println "core entries:" (count core-entries)))))

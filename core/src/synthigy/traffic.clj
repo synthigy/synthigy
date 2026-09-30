@@ -31,7 +31,7 @@
    [patcho.lifecycle :as lifecycle]
    [patcho.patch :as patch]
    [synthigy.log :as log]
-   [synthigy.log.store :as log.store]
+   [synthigy.log.store.signal :as signal]
    [synthigy.node :as node])
   (:import
    [java.time Instant ZoneOffset]
@@ -334,7 +334,7 @@
   [since until]
   (let [to (or (parse-instant until) (Instant/now))
         from (or (parse-instant since)
-                 (some->> (or since "15m") log.store/parse-duration-ms (.minusMillis ^Instant to)))]
+                 (some->> (or since "15m") signal/parse-duration-ms (.minusMillis ^Instant to)))]
     [from to]))
 
 (defn minute->iso [minute-epoch]
@@ -390,8 +390,8 @@
 
 (lifecycle/register-module!
  :synthigy/traffic
- {:depends-on [:synthigy/log]
-  :doc "Traffic metrics provider (in-memory dev default)"
+ {:depends-on [:synthigy.log/store]
+  :doc "Traffic flusher; the log-store module binds where the counts land"
   :start (fn []
            (start-flusher!)
            (log/info {:id ::lifecycle-started

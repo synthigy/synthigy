@@ -57,12 +57,16 @@
         relation (core/get-relation model rel-id)]
     (when (and relation (:active relation))
       (let [{:keys [from to]} relation
-            forward? (= (id/extract from) from-entity-id)]
+            forward? (cond
+                       (= (id/extract from) from-entity-id) true
+                       (= (id/extract to) from-entity-id) false
+                       :else (= (core/entity-origin from)
+                                (core/entity-origin (core/get-entity model from-entity-id))))]
         {:table (relation->table-name relation)
          :from-field (entity->relation-field (if forward? from to))
          :to-field (entity->relation-field (if forward? to from))
          :from-entity (if forward? (id/extract from) (id/extract to))
-         :to-entity (if forward? (id/extract to) (id/extract from))}))))
+         :to-entity (core/entity-origin (if forward? to from))}))))
 
 
 (defn entity-id->match-type

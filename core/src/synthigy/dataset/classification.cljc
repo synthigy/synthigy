@@ -32,8 +32,8 @@
    :internal "Confidential but not personal — commercially sensitive, not subject to personal-data regimes."})
 
 (def redacting-tags
-  "Tags whose values must never reach the audit plug or log sinks."
-  #{:pii :phi :secret})
+  "Tags whose values the audit trail withholds; the change itself is still recorded."
+  #{:secret})
 
 (defn classification
   "Set of classification tags on `attribute`. Empty set when untagged."

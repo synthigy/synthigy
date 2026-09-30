@@ -40,7 +40,7 @@
    synthigy.dataset.projection
    [synthigy.db :as db :refer [*db*]]
    [synthigy.env :as env]
-   [synthigy.transit :refer [<-transit]]
+   [synthigy.transit :refer [<-transit ->transit]]
    [version-clj.core :as version]))
 
 ;; ============================================================================
@@ -590,6 +590,29 @@
       (:name m)       (assoc :version-name (:name m))
       (:version m)    (assoc :version (:version m))
       (:dataset m)    (assoc :dataset-name (:name (:dataset m))))))
+
+(defn persisted-model
+  "The model as `deploy!` stores it, so stored and candidate models compare with `=`."
+  [model]
+  (let [model (if (string? model) (<-transit model) model)]
+    (-> model
+        core/normalize-legacy-types
+        adapt-model-to-provider
+        (assoc :version 1)
+        ->transit
+        <-transit)))
+
+(defn deployed-version-altered?
+  "True when `version` names a deployed row whose stored model differs from it."
+  [version]
+  (let [vid (id/extract version)
+        stored (when vid
+                 (get-entity :dataset/version {(id/key) vid}
+                             {(id/key) nil :deployed nil :model nil}))]
+    (boolean
+     (and (:deployed stored)
+          (not= (persisted-model (:model version))
+                (let [m (:model stored)] (if (string? m) (<-transit m) m)))))))
 
 (defn deploy!
   "Deploy a dataset version. Creates/updates schema, tables, etc.

@@ -86,7 +86,6 @@ Regenerate whenever deps.edn changes.
 - dev.data-star.clojure/sdk 1.0.0-RC11
 - nano-id/nano-id 1.1.0
 - org.checkerframework/checker-qual 3.42.0
-- org.duckdb/duckdb_jdbc 1.1.3
 - org.ring-clojure/ring-core-protocols 1.12.2
 - org.ring-clojure/ring-websocket-protocols 1.12.2
 - org.slf4j/slf4j-api 2.0.16
@@ -98,4 +97,4 @@ Regenerate whenever deps.edn changes.
 
 - org.javassist/javassist 3.18.1-GA
 
-<!-- 65 bundled third-party artifacts -->
+<!-- 64 bundled third-party artifacts -->

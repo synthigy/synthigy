@@ -30,6 +30,7 @@
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
     [synthigy.data :as data]
+    [synthigy.dataline :as dataline]
     [synthigy.dataset :as dataset]
     [synthigy.db :as db]
     [synthigy.dataset.encryption :as dataset-encryption]
@@ -178,8 +179,8 @@
      :logout_redirections (get-in c [:settings "logout-redirections"] [])}))
 
 (defn set-tools-redirections! [{:keys [redirections logout_redirections]}]
-  (let [c (tools-client)
-        clean (fn [urls]
+  (tools-client)
+  (let [clean (fn [urls]
                 (vec (for [u urls
                            :let [u (str/trim (str u))]
                            :when (seq u)]
@@ -187,14 +188,12 @@
                          u
                          (throw (ex-info (str "Invalid URL (must be http(s)://…): " u)
                                          {:code -32602}))))))]
-    (dataset/stack-entity
-     :iam/app
-     {:id info/modeler-public-client-id
-      :settings (cond-> (or (:settings c) {})
-                  (some? redirections)
-                  (assoc "redirections" (clean redirections))
-                  (some? logout_redirections)
-                  (assoc "logout-redirections" (clean logout_redirections)))})
+    (iam/update-client-settings!
+     info/modeler-public-client-id
+     (fn [settings]
+       (cond-> settings
+         (some? redirections) (assoc "redirections" (clean redirections))
+         (some? logout_redirections) (assoc "logout-redirections" (clean logout_redirections)))))
     {:success true}))
 
 (defn doctor-state
@@ -253,11 +252,10 @@
                       :database (or db-connected false)
                       :server server-started?
                       :oauth (lifecycle/started? :synthigy/oauth.persistence)
-                      :observability (when (and (not (supervisor/observability-disabled?))
-                                                (lifecycle/module-info :synthigy/observability))
-                                       (lifecycle/started? :synthigy/observability))
+                      :observability (dataline/healthy?)
                       :console console-started?
                       :root_url (boolean root-url)}
+             :dataline (dataline/health)
              :progress (supervisor/progress)}
       (nil? root-url)
       (assoc :warnings

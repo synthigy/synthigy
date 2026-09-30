@@ -29,8 +29,8 @@
    `serve!` over their inherited stdin/stdout."
   (:require
     [clojure.string :as str]
-    [environ.core :refer [env]]
     [patcho.lifecycle :as lifecycle]
+    [synthigy.dataline :as dataline]
     [synthigy.dataset.id :as id]
     [synthigy.json :as json]
     [synthigy.log :as log]))
@@ -135,36 +135,18 @@
       (throw (ex-info (str "no db probe for backend '" db "' on this classpath")
                       {:code -32602})))))
 
-(defn observability-disabled?
-  "SYNTHIGY_OBSERVABILITY_ENGINE=none — bundled or not, the operator said no."
-  []
-  (= "none" (env :synthigy-observability-engine)))
-
-(defn start-observability! []
-  (try (require 'synthigy.observability) (catch Throwable _))
-  (when (and (not (observability-disabled?))
-             (lifecycle/module-info :synthigy/observability))
-    (try
-      (lifecycle/start! :synthigy/observability)
-      (catch Throwable t
-        (log/error! {:id ::observability-failed
-                     :msg "Observability start failed — continuing server-only"
-                     :data {:action :starting :subject :observability}}
-                    t)))))
-
 (defn root-cause-message [^Throwable t]
   (loop [e t]
     (if-let [c (.getCause e)] (recur c) (or (ex-message e) (str (class e))))))
 
 (def shadowed-resources
-  {"database" "synthigy/core__init.class"
-   "observability" "synthigy/observability__init.class"})
+  {"engine"         "synthigy/core__init.class"
+   "audit"          "synthigy/audit__init.class"
+   "log-store"      "synthigy/log/store__init.class"
+   "server adapter" "synthigy/server__init.class"})
 
 (defn duplicate-backends
-  "Backend kinds appearing more than once on the classpath, as {kind count}.
-   Each database module ships its own `synthigy.core` and each observability
-   module its own `synthigy.observability`, so two of a kind means the JVM
-   silently runs whichever came first."
+  "Backend kinds appearing more than once on the classpath, as {kind count}; two of a kind means the JVM silently runs whichever came first."
   ([] (duplicate-backends (.getContextClassLoader (Thread/currentThread))))
   ([^ClassLoader loader]
    (into {}
@@ -175,12 +157,11 @@
 
 (register-method! "server.start"
   (fn [_]
-    ;; A classpath carrying two database (or two observability) modules boots
-    ;; fine and then answers with the wrong backend — refuse instead.
+    ;; two modules of one dimension boot fine and then answer with the wrong backend — refuse
     (when-let [dupes (not-empty (duplicate-backends))]
       (throw (ex-info (str "Classpath carries more than one backend module: "
                            (str/join ", " (map (fn [[kind n]] (str n " " kind)) dupes))
-                           ". Exactly one database and one observability module belong "
+                           ". Exactly one engine, one audit, one log-store and one server adapter module belong "
                            "on a launch classpath — the JVM would silently run whichever "
                            "comes first.")
                       {:code -32000 :duplicates dupes})))
@@ -201,8 +182,8 @@
                          "xid-native. Run the migration before starting the server.")}
           (do (progress-phase! "starting :synthigy/server")
               (apply lifecycle/start! modules)
-              (progress-phase! "starting observability")
-              (start-observability!)
+              (progress-phase! "starting Dataline")
+              (dataline/start!)
               {:success true :message "Server started"}))
         (catch Throwable t
           (log/error! {:id ::server-start-failed
@@ -223,11 +204,8 @@
   (fn [_]
     (let [running? (boolean (some-> (first @start-modules) lifecycle/started?))]
       {:running running?
-       ;; nil = not on this classpath OR explicitly disabled — either way
-       ;; the operator console renders it as absent, never as pending
-       :observability (when (and (not (observability-disabled?))
-                                 (lifecycle/module-info :synthigy/observability))
-                        (lifecycle/started? :synthigy/observability))
+       :observability (dataline/healthy?)
+       :dataline (dataline/health)
        :console (when (lifecycle/module-info :synthigy/console)
                   (lifecycle/started? :synthigy/console))
        :message (if running? "Server is running" "Server is stopped")})))

@@ -27,6 +27,8 @@
     [patcho.lifecycle :as lifecycle]
     [synthigy.json :as json]
     synthigy.core
+    synthigy.audit
+    synthigy.log.store
     [synthigy.supervisor.verbs :as verbs]))
 
 (defn fail! [msg]

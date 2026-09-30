@@ -24,7 +24,7 @@
   "Filter-map spec + dispatch into the bound observability store."
   (:require
    [clojure.set]
-   [synthigy.log.store :as store]))
+   [synthigy.log.store.protocol :as store]))
 
 ;;; ============================================================================
 ;;; Spec — the filter-map vocabulary

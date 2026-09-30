@@ -232,54 +232,11 @@
 (supervisor/register-db-probe! :postgres probe-postgres)
 (supervisor/register-db-probe! :sqlite probe-sqlite)
 
-(defn writable-file-target?
-  "Missing `path`'s directory is creatable+writable — probed, not assumed."
-  [path]
-  (let [dir (or (.getParentFile (io/file path)) (io/file "."))]
-    (try
-      (.mkdirs dir)
-      (let [probe (io/file dir ".synthigy-write-probe")]
-        (spit probe "")
-        (.delete probe)
-        true)
-      (catch Exception _ false))))
-
-(defn duckdb-file? [f]
-  (with-open [in (io/input-stream f)]
-    (let [buf (byte-array 12)
-          n   (.read in buf)]
-      (and (= n 12) (= "DUCK" (String. buf 8 4 "ISO-8859-1"))))))
-
-(defn probe-duckdb [{:keys [path]}]
-  (try
-    (let [path (not-empty path)
-          f    (some-> path io/file)]
-      (cond
-        (nil? path)
-        {:ok true :kind "default"
-         :message "No path set — the engine default is IN-MEMORY: audit history is lost on restart."}
-
-        (not (.exists f))
-        (if (writable-file-target? path)
-          {:ok true :kind "new" :message "Path is writable — the DuckDB store is created on first boot."}
-          {:ok false :kind "not-writable" :message "Cannot write there — check the directory and permissions."})
-
-        (.isDirectory f)
-        {:ok false :kind "invalid" :message "That path is a directory, not a file."}
-
-        (duckdb-file? f)
-        {:ok true :kind "existing" :message "Existing DuckDB store — observability will attach to it."}
-
-        :else
-        {:ok false :kind "not-duckdb" :message "File exists but is not a DuckDB database."}))
-    (catch Exception e
-      {:ok false :kind "probe-failed" :message (or (ex-message e) (str (class e)))})))
-
 (defn probe-clickhouse [{:keys [url user password]}]
   (let [url (some-> url str/trim (str/replace #"/+$" ""))]
     (if (str/blank? url)
       {:ok false :kind "missing"
-       :message "ClickHouse needs its HTTP URL — the observability module refuses to start without it."}
+       :message "ClickHouse needs its HTTP URL — the audit and log modules refuse to start without it."}
       (try
         (let [client  (java.net.http.HttpClient/newBuilder)
               client  (.build (.connectTimeout client (java.time.Duration/ofSeconds 5)))
@@ -295,7 +252,7 @@
               resp    (.send client (.build builder)
                              (java.net.http.HttpResponse$BodyHandlers/ofString))]
           (if (and (= 200 (.statusCode resp)) (str/starts-with? (str/trim (.body resp)) "Ok"))
-            {:ok true :kind "ok" :message "ClickHouse answered — observability will attach to it."}
+            {:ok true :kind "ok" :message "ClickHouse answered — audit and logs will attach to it."}
             {:ok false :kind "bad-answer"
              :message (str "ClickHouse answered " (.statusCode resp) " \""
                            (str/trim (subs (str (.body resp)) 0 (min 120 (count (str (.body resp))))))
@@ -304,9 +261,4 @@
           {:ok false :kind "unreachable"
            :message (str "Could not reach ClickHouse: " (or (ex-message e) (str (class e))))})))))
 
-(supervisor/register-method! "obs.probe"
-  (fn [{:keys [obs] :as params}]
-    (case obs
-      "none"       {:ok true :kind "none" :message "Observability disabled — nothing to test."}
-      "clickhouse" (probe-clickhouse params)
-      (probe-duckdb params))))
+(supervisor/register-method! "clickhouse.probe" probe-clickhouse)

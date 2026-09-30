@@ -56,7 +56,9 @@ synthigy iam add-client "My BFF" --id my-bff --type confidential \
 **Operations**
 - Operator console: health, database and engine panels, encryption keys,
   version upgrades
-- Bundled observability store — logs and metrics land in DuckDB or ClickHouse
+- Audit history kept in your own database — Postgres tables beside the data,
+  or an `audit.db` next to SQLite — so it is backed up with everything else
+- Local, size-capped log and traffic store (`logs.db`); ClickHouse optional
 
 ## Putting it on the internet
 
@@ -67,13 +69,15 @@ and the three things the proxy has to get right — TLS (the session cookies are
 
 ## Bundles
 
-One fused jar per backend pair; `--db` selects it and the observability store
-follows:
+One fused jar per database; `--db` selects it. No extra service is needed:
 
-| `--db` | observability | asset |
-|---|---|---|
-| `sqlite` | DuckDB | `synthigy-sqlite-duckdb-<tag>.jar` |
-| `postgres` | ClickHouse | `synthigy-postgres-clickhouse-<tag>.jar` |
+| `--db` | audit | logs + traffic | asset |
+|---|---|---|---|
+| `sqlite` | `audit.db` beside the database | local `logs.db` | `synthigy-sqlite-<tag>.jar` |
+| `postgres` | tables in the same Postgres database | local `logs.db` per node | `synthigy-postgres-<tag>.jar` |
+
+`synthigy-postgres-clickhouse-<tag>.jar` (when a release carries it) sends
+audit, logs and traffic to ClickHouse instead — for fleet-wide log search.
 
 ## Client SDKs
 
@@ -91,9 +95,9 @@ registry:
 ## Building from source
 
 ```bash
-SYNTHIGY_COMBO=sqlite:httpkit:duckdb:console SYNTHIGY_AOT=true clojure -T:build uber
-# -> target/synthigy-sqlite-httpkit-duckdb-console.jar
-java -jar target/synthigy-sqlite-httpkit-duckdb-console.jar
+SYNTHIGY_COMBO=engine-sqlite:audit-sqlite:log-sqlite:server-httpkit:server-console SYNTHIGY_AOT=true clojure -T:build uber
+# -> target/synthigy-sqlite-audit-sqlite-log-sqlite-httpkit-console.jar
+java -jar target/synthigy-sqlite-audit-sqlite-log-sqlite-httpkit-console.jar
 ```
 
 The combo string names classpath layers, not the released asset: `httpkit` is

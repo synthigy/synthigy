@@ -1200,41 +1200,55 @@
                :depth 0})))
          vec)))
 
+(def max-guard-depth 10)
+
+(def max-guard-paths 200)
+
+(defn entity-origin
+  "Id of the entity a node stands for — the original for a clone, else its own."
+  [entity]
+  (or (:original entity) (id/extract entity)))
+
 (defn discover-relation-paths*
-  "BFS for :relation paths (ending at an IAM entity) and :hybrid paths
-   (relations then a ref attr)."
+  "BFS for :relation paths (ending at the first IAM entity) and :hybrid paths
+   (relations then a ref attr); no entity repeats on a path, a clone counts as
+   its original."
   [model entity iam-uuids max-depth start-idx]
-  (let [entity-id (id/extract entity)
-        iam-entity-ids (set (vals iam-uuids))]
+  (let [iam-entity-ids (set (vals iam-uuids))]
     (loop [queue [{:entity entity
                    :steps []
-                   :visited #{entity-id}}]
+                   :visited #{(entity-origin entity)}}]
            paths []
            path-idx start-idx]
-      (if (empty? queue)
-        paths
+      (if (or (empty? queue) (>= (count paths) max-guard-paths))
+        (vec (take max-guard-paths paths))
         (let [{:keys [entity steps visited]} (first queue)
               remaining (rest queue)
               current-depth (count steps)]
           (if (>= current-depth max-depth)
             (recur remaining paths path-idx)
-            (let [relations (focus-entity-relations model entity)
+            (let [relations (cond-> (vec (focus-entity-relations model entity))
+                              (:original entity)
+                              (into (focus-entity-relations model (get-entity model (:original entity)))))
                   new-items
                   (reduce
                    (fn [acc relation]
                      (let [target-entity (:to relation)
                            target-id (id/extract target-entity)
+                           origin-id (entity-origin target-entity)
                            relation-label (or (:to-label relation) (:from-label relation) "")]
-                       (if (contains? visited target-id)
+                       (if (or (contains? visited origin-id)
+                               (false? (:active relation))
+                               (false? (:active target-entity)))
                          acc
                          (let [new-step {:relation-id (id/extract relation)
                                          :label relation-label
                                          :entity-id target-id
                                          :entity-name (:name target-entity)}
                                new-steps (conj steps new-step)
-                               new-visited (conj visited target-id)
+                               new-visited (conj visited origin-id)
                                ref-types #{"user" "group" "role"}
-                               is-iam? (contains? iam-entity-ids target-id)
+                               is-iam? (contains? iam-entity-ids origin-id)
                                ;; audit who-columns excluded as hybrid endpoints
                                ;; — nearly every entity is audited
                                target-refs (when-not is-iam?
@@ -1244,9 +1258,9 @@
                                iam-path (when is-iam?
                                           {:id (get-path-label (+ path-idx (count (:paths acc))))
                                            :type :relation
-                                           :target (iam-entity-type target-id iam-uuids)
+                                           :target (iam-entity-type origin-id iam-uuids)
                                            :target-name (:name target-entity)
-                                           :target-id target-id
+                                           :target-id origin-id
                                            :steps new-steps
                                            :depth (count new-steps)})
                                base-offset (+ path-idx (count (:paths acc)) (if iam-path 1 0))
@@ -1267,10 +1281,10 @@
                                new-paths (cond-> (:paths acc)
                                            iam-path (conj iam-path)
                                            (seq hybrid-paths) (into hybrid-paths))
-                               new-queue (conj (:queue acc)
-                                               {:entity target-entity
-                                                :steps new-steps
-                                                :visited new-visited})]
+                               new-queue (cond-> (:queue acc)
+                                           (not is-iam?) (conj {:entity target-entity
+                                                                :steps new-steps
+                                                                :visited new-visited}))]
                            (assoc acc :paths new-paths :queue new-queue)))))
                    {:paths [] :queue []}
                    relations)]
@@ -1282,7 +1296,7 @@
   "Discovers all :ref/:relation/:hybrid paths from entity to IAM entities,
    sorted cheapest-first."
   ([model entity iam-uuids]
-   (discover-paths-to-iam model entity iam-uuids 3))
+   (discover-paths-to-iam model entity iam-uuids max-guard-depth))
   ([model entity iam-uuids max-depth]
    (when (and model entity)
      (let [ref-paths (discover-ref-paths* entity iam-uuids 0)

@@ -27,6 +27,7 @@
   (:require
    [clojure.core.async :as a]
    [clojure.string :as str]
+   synthigy.audit
    [synthigy.dataset :as dataset]
    [synthigy.dataset.access :as daccess]
    [synthigy.dataset.delta :as delta]
@@ -37,7 +38,8 @@
    [synthigy.iam.access :as access]
    [synthigy.iam.context :as iam.context]
    [synthigy.engine :as data]
-   [synthigy.engine.history :as history]))
+   [synthigy.engine.history :as history]
+   synthigy.log.store))
 
 (def ^:dynamic *key-format*
   "Process-wide default response key format; a per-call :key-format wins."

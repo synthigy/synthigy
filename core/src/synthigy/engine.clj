@@ -853,35 +853,10 @@
 (defmethod execute-operation "deploy"
   [ctx]
   (assert-scope! "dataset:deploy")
-  (let [data (deploy-payload (:data ctx))
-        ;; Deployed versions are IMMUTABLE in CONTENT but CAN be redeployed —
-        ;; that's how
-        ;; rollback works (redeploy re-stamps deployed_on; rebuild-global-model
-        ;; orders by it).
-        ;; Only an attempt to ALTER a deployed version (differs from stored) is
-        ;; rejected.
-        vid (id/extract data)
-        existing (when vid
-                   (try
-                     (dataset/get-entity :dataset/version
-                                         {(id/key) vid}
-                                         {:deployed nil (id/key) nil :model nil})
-                     (catch Throwable _ nil)))]
-    (when (:deployed existing)
-      ;; Compare against what deploy! persists — legacy types normalized, ids
-      ;; adapted, :version 1, transit round-trip so `=` is reliable. Never
-      ;; compare a raw candidate: the store rewrites "avatar" to "json".
-      (let [stored    (let [m (:model existing)]
-                        (if (string? m) (transit/<-transit m) m))
-            candidate (-> (:model data)
-                          dataset.core/normalize-legacy-types
-                          dataset/adapt-model-to-provider
-                          (assoc :version 1)
-                          transit/->transit
-                          transit/<-transit)]
-        (when (not= candidate stored)
-          (throw (ex-info "Deployed version is immutable; create a new version to change the model."
-                          {:code "IMMUTABLE_VERSION_ALTERED" :rule "deploy_immutable"})))))
+  (let [data (deploy-payload (:data ctx))]
+    (when (dataset/deployed-version-altered? data)
+      (throw (ex-info "Deployed version is immutable; create a new version to change the model."
+                      {:code "IMMUTABLE_VERSION_ALTERED" :rule "deploy_immutable"})))
     ;; deploy!'s ERDModel return used to hit the response key-transform, whose
     ;; :entities/
     ;; :relations keys collide with Dataset Version's same-named :many relations

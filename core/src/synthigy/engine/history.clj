@@ -26,9 +26,13 @@
    server.auth/OAuth."
   (:require
     [clojure.string :as str]
-    [synthigy.audit :as audit]
+    [synthigy.audit.protocol :as audit]
+    [synthigy.dataset :as dataset]
+    [synthigy.dataset.access :as daccess]
+    [synthigy.dataset.core :as core]
     [synthigy.dataset.id :as id]
-    [synthigy.iam.access :as access]))
+    [synthigy.iam.access :as access]
+    [synthigy.log :as log]))
 
 (defn wire-get
   "Pull wire-key (kebab-case) from a string-keyed opts map, falling back to its
@@ -156,6 +160,24 @@
                            :limit (coerce-limit limit)
                            :track (some-> track keyword)})))
 
+(defmethod execute-op "erase"
+  [provider _ opts]
+  (let [record-xid (wire-get opts "record-xid")]
+    (when-not (daccess/superuser?)
+      (throw (ex-info "Only a superuser can erase history" {:code "FORBIDDEN" :status 403})))
+    (when (str/blank? (str record-xid))
+      (throw (ex-info "record-xid is required" {:code "RECORD_XID_REQUIRED"})))
+    (let [n (try
+              (audit/erase! provider {:record-xid (str record-xid) :tenant (wire-get opts "tenant")})
+              (catch AbstractMethodError _
+                (throw (ex-info "This audit provider cannot erase history"
+                                {:code "ERASE_UNSUPPORTED" :status 501}))))]
+      (log/warn {:id ::erased
+                 :data {:action :deleted :subject :history :record-xid (str record-xid)
+                        :actor (some-> (daccess/current-principal) id/extract str) :rows n}}
+                "Record history erased")
+      n)))
+
 (defn principal-tenant-xid
   "MVP per Q11: the install's primary dataset xid is the (inescapable) tenant
    boundary."
@@ -168,6 +190,52 @@
   [opts]
   (reduce-kv (fn [m k v] (assoc m (if (keyword? k) (name k) (str k)) v))
              {} (or opts {})))
+
+(defn denied
+  "Entity xids and attribute-xid keywords the bound principal may not read; nil for a superuser."
+  []
+  (when-not (daccess/superuser?)
+    (reduce (fn [acc entity]
+              (let [eid   (id/extract entity)
+                    attrs (:attributes entity)
+                    ->key (comp keyword str id/extract)]
+                (if (daccess/entity-allows? eid #{:read})
+                  (update acc :attributes into
+                          (comp (remove #(daccess/attribute-allows? eid (id/extract %) :read)) (map ->key))
+                          attrs)
+                  (-> acc
+                      (update :entities conj (str eid))
+                      (update :attributes into (map ->key) attrs)))))
+            {:entities #{} :attributes #{}}
+            (core/get-entities (dataset/deployed-model)))))
+
+(defn readable-row?
+  [{:keys [entities attributes]} {:keys [entity-xid attribute-xid]}]
+  (not (or (contains? entities entity-xid)
+           (contains? attributes (some-> attribute-xid keyword)))))
+
+(defn strip-attributes
+  [m attributes]
+  (when m
+    (let [kept (apply dissoc m attributes)]
+      (when (or (seq kept) (empty? m)) kept))))
+
+(defn filter-result
+  "Drop what `denied` hides from an op's result."
+  [op result {:keys [attributes] :as denied}]
+  (if (nil? denied)
+    result
+    (let [rows (fn [rs] (filterv #(readable-row? denied %) rs))]
+      (case op
+        "get-at"   (strip-attributes result attributes)
+        "diff"     (when result
+                     (-> result
+                         (update :before strip-attributes attributes)
+                         (update :after strip-attributes attributes)
+                         (update :changed #(filterv (complement attributes) %))))
+        "timeline" (into {} (keep (fn [[k rs]] (when-let [kept (not-empty (rows rs))] [k kept]))) result)
+        ("events" "since") (rows result)
+        result))))
 
 (defn execute
   "Run a /history request body and return {:op op :result …} — the
@@ -186,5 +254,5 @@
             ;; here silently disables tenant pruning.
             full   (cond-> opts
                      tenant (assoc "tenant" tenant))]
-        {:op op :result (execute-op audit/*audit-provider* op full)}))))
+        {:op op :result (filter-result op (execute-op audit/*audit-provider* op full) (denied))}))))
 

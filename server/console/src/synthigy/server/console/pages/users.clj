@@ -55,7 +55,8 @@
   (when-let [{:keys [xid name]} (:authorized-client row)]
     [:span "Managed by app "
      [:a {:href (str "/console/iam/apps/" xid)} name]
-     " — edit its roles and groups there."]))
+     " — edit its roles and groups there. It is active only while the app is "
+     "Confidential and allows Client Credentials."]))
 
 (def spec
   {:slug "users" :entity :user :key :iam/user :label "Users" :icon :user

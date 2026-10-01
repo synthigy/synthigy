@@ -870,11 +870,18 @@ a { color: inherit; text-decoration: none; }
 /* The picker needs to breathe — its popup is positioned against this box. */
 .console-picker ty-select { width: 100%; }
 
-/* A create-capable link gets the WHOLE grid row rather than sharing a
- * ~280px column with its siblings — the two-column layout inside it
- * (picker+selection left, add-new right) needs real width to not feel
- * cramped, and squeezing that into a fraction of the row would defeat it. */
-.console-link-grid:has(.console-links-create) { grid-template-columns: 1fr; }
+/* An owned-child panel (APIs → Scopes) gets the whole grid row: its rows
+ * carry a description and actions, a ~280px column would wrap them. */
+.console-link-grid:has(.console-owned) { grid-template-columns: 1fr; }
+.console-owned-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.console-owned-head .console-field-label { margin-bottom: 0; }
+.console-owned > .console-notice { margin-top: 12px; }
+.console-panel-modal { width: 30rem; max-width: calc(100vw - 32px); }
 
 /* ---- Rich OPTION rows (in the dropdown): name + owning-API badge,
  * description underneath. Opt-in via `option-row`'s `show` — plain pickers
@@ -912,25 +919,6 @@ a { color: inherit; text-decoration: none; }
  * than the template needing a conditional to know they're absent. */
 .console-option-tag:empty,
 .console-selected-desc:empty { display: none; }
-
-/* ---- Two-column create-capable link: manage (picker + selection) on the
- * left, declare-a-new-one on the right. Wraps to one column on a narrow
- * viewport — the create form needs its own room, not a squeeze into
- * whatever's left of the picker's column. ---- */
-.console-link-columns {
-  display: grid;
-  grid-template-columns: 1fr 300px;
-  gap: 24px;
-  align-items: start;
-}
-@media (max-width: 760px) {
-  .console-link-columns { grid-template-columns: 1fr; }
-}
-.console-link-manage { min-width: 0; }
-/* The add/edit card follows the list rather than stranding itself at the top
-   of a long one — `align-items:start` above is what lets it stick instead of
-   stretching to the row's full height. */
-.console-link-add { position: sticky; top: 12px; }
 
 /* ---- Rich link rows: a proper row per entry, not a chip — icon, name +
  * badge, description, its own action button. Shared by BOTH shapes that
@@ -977,14 +965,9 @@ a { color: inherit; text-decoration: none; }
   background: var(--sy-glass-hover);
   color: var(--sy-text);
 }
-.console-selected-row.editing {
-  border-color: var(--sy-accent);
-  background: var(--sy-glass-hover);
-}
 /* Same shadow-DOM [hidden] override .console-toolbar needs — a ty-* element's
    own :host{display:…} beats the UA's bare [hidden] rule. */
-.console-selected-row ty-tag[hidden],
-.console-create [hidden] { display: none !important; }
+.console-selected-row ty-tag[hidden] { display: none !important; }
 .console-selected-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .console-selected-name { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--sy-text-p); }
 .console-selected-desc { font-size: 11.5px; line-height: 1.4; color: var(--sy-text-mm); }
@@ -995,46 +978,11 @@ a { color: inherit; text-decoration: none; }
   gap: 4px;
 }
 
-/* Inline "declare a new row and offer it here" affordance — opt-in per link
- * via :create. A quiet dashed-border tray rather than a second panel: it is
- * a shortcut off the picker, not a peer of it. Fields stack — this only
- * ever lives in the narrow right column, never beside the picker. Doubles
- * as the edit form (see `create-form`) — same box, heading/button text swap
- * via `data-text` rather than a visually distinct second state. */
-.console-create {
-  margin-top: 12px;
-  padding: 14px;
-  border: 1px dashed var(--sy-border-strong);
-  border-radius: 10px;
-  background: var(--sy-glass);
-}
-.console-create-heading {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--sy-text-p);
-}
-.console-create-hint {
-  margin: 0 0 14px;
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: var(--sy-text-mm);
-}
 .console-create-fields {
   display: flex;
   flex-direction: column;
   gap: 10px;
   margin-bottom: 10px;
-}
-.console-create-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 
 /* App settings — a single JSON attribute, so it reads as its own labelled
@@ -1060,6 +1008,48 @@ a { color: inherit; text-decoration: none; }
 /* Access / Refresh / ID side by side — they are one setting, not three. */
 .console-expiry-row { display: flex; gap: 12px; }
 .console-expiry-row ty-input { flex: 1; }
+
+/* Autosave units. Each field, picker, settings block and config block is its
+ * own <form> so a commit posts that unit alone; display:contents keeps the
+ * form out of the layout, so the field is still the flex/grid item. */
+.console-unit { display: contents; }
+
+.console-unit-status { font-size: 11.5px; line-height: 1.5; }
+.console-unit-status:empty { display: none; }
+.console-field > .console-unit-status,
+.console-links > .console-unit-status { margin-top: 7px; }
+.console-settings-head .console-unit-status {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+
+@keyframes sy-unit-saved {
+  0%, 60% { opacity: 1; }
+  100%    { opacity: 0; }
+}
+.console-unit-saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--sy-ok);
+  animation: sy-unit-saved 2.4s ease-out forwards;
+}
+.console-unit-error { color: var(--sy-warn); }
+
+.console-unit-confirm {
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--sy-warn);
+  background: var(--sy-warn-tint);
+}
+.console-unit-confirm p { margin: 0 0 10px; max-width: 52ch; }
+.console-unit-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .console-unit-saved { animation: none; }
+}
 
 /* Pinned footer. flex:none against the form's flex frame, so it never
  * scrolls away; the actions are the one thing that must always be reachable. */
@@ -1491,7 +1481,6 @@ a { color: inherit; text-decoration: none; }
  * :host{display:…} shadow rule (author > UA), so ty-button ignores the bare
  * attribute without this. Harmless on native buttons, load-bearing on ty-*. */
 .console-toolbar [hidden],
-.console-create-actions [hidden],
 .console-nav-filters [hidden] { display: none !important; }
 
 /* The buttons here are ty-buttons; the flow-advancing one carries

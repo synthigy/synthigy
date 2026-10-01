@@ -110,13 +110,12 @@
                              (str "This immediately invalidates the current client secret. "
                                   "Any app using it will fail to authenticate until updated."))}
          "Regenerate secret"]])
-     ;; Saved public, toggled confidential — the button would refuse, since the
-     ;; handler reads the stored row. Say so instead of showing a dead control.
+     ;; Stored public, toggled confidential — the button would refuse until the
+     ;; switch is stored, since the handler reads the stored row.
      (when-not confidential?
        [:p.hint {:hidden true
                  (keyword "data-attr:hidden") "$appType !== 'confidential'"}
-        "Save this app as Confidential first — a secret can only be generated "
-        "once the change is stored."])
+        "A secret can be generated once the switch to Confidential is saved."])
      [:p.hint {:hidden (when confidential? true)
                (keyword "data-attr:hidden") "$appType === 'confidential'"}
       "Public clients don't use a secret — they prove themselves with PKCE."]]))
@@ -166,16 +165,31 @@
                     " client_credentials will fail until that is fixed.")]))))
 
 (defn prepare-save
-  [data current]
-  (when (service-user/confidential? data)
-    (access/with-principal nil
-      (service-user/assert-name-free!
-       (service-user/service-user-name {:id (:id current) :name (:name data)})
-       (get-in current [:service-user :xid]))))
-  ;; never keep a secret on a public client — the token path branches on its existence
-  (cond-> data
-    (#{:public "public"} (:type data)) (assoc :secret nil)
-    (and (#{:public "public"} (:type data)) (:settings data)) (assoc-in [:settings "trusted"] false)))
+  "The app-row consequences of `changes`: a free service-user name, and no secret or trust left on a client switched to public."
+  [changes current]
+  (let [was-confidential? (service-user/confidential? current)
+        confidential?     (service-user/confidential? (merge current (select-keys changes [:type])))]
+    (when (and confidential? (or (contains? changes :name) (not was-confidential?)))
+      (access/with-principal nil
+        (service-user/assert-name-free!
+         (service-user/service-user-name {:id (:id current) :name (get changes :name (:name current))})
+         (get-in current [:service-user :xid]))))
+    ;; never keep a secret on a public client — the token path branches on its existence
+    (cond-> changes
+      (and was-confidential? (not confidential?))
+      (assoc :secret nil)
+
+      (and was-confidential? (not confidential?) (get-in current [:settings "trusted"]))
+      (assoc :settings (assoc (merge (:settings current) (:settings changes)) "trusted" false)))))
+
+(defn confirm-change
+  [changes current]
+  (when (and (contains? changes :type)
+             (service-user/confidential? current)
+             (not (service-user/confidential? changes)))
+    (str "Switching to Public deletes this app's client secret — anything still "
+         "using it stops authenticating, and making the app Confidential again "
+         "needs a new secret.")))
 
 (def spec
   {:slug "apps" :entity :oauth_client :key :iam/app :label "Apps" :icon :box
@@ -200,7 +214,8 @@
                           "working the next time it's used — nothing revokes it "
                           "outright, it just can no longer be looked up.")}
    :detail {:prepare prepare-save
-            :signals (fn [row] (str "{appType: '" (some-> (:type row) name) "'}"))
+            :confirm-change confirm-change
+            :signals (fn [row] {:appType (some-> (:type row) name)})
             :fields [[:name   "Name"   :text]
                      [:active "Active" :switch]
                      [:type   "Type"   :enum {:signal "appType"}]]

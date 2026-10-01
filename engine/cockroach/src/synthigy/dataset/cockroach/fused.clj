@@ -338,6 +338,28 @@
                               ")"))
            :params (vec (concat filter-data ie-data rls-data))})))))
 
+(defn emit-relation-views
+  "Relation slot for `k`, one LATERAL per distinct predicate across its rows pull, `_count` and `_agg`."
+  [k schema row-alias]
+  (let [views (keep (fn [p] (when-let [v (get-in schema [p k])] [p v]))
+                    [:relations :_count :_agg])
+        groups (vals (reduce (fn [acc [_ v :as view]]
+                               (update acc (not-empty (apply dissoc (:args v) meta-keys))
+                                       (fnil conj []) view))
+                             (array-map) views))]
+    (if (<= (count groups) 1)
+      (emit-relation k schema row-alias)
+      (let [bare (reduce (fn [s p] (update s p dissoc k)) schema [:relations :_count :_agg])
+            parts (map (fn [group]
+                         (emit-relation k (reduce (fn [s [p v]] (assoc-in s [p k] v)) bare group)
+                                        row-alias))
+                       groups)]
+        {:lateral    (str/join "\n" (map :lateral parts))
+         :json-pair  (some :json-pair parts)
+         :count-pair (some :count-pair parts)
+         :agg-pair   (some :agg-pair parts)
+         :params     (vec (mapcat :params parts))}))))
+
 (defn- emit-one-relation
   "A :one relation as a LATERAL — kept separate so the :many path stays
    readable. Child json = scalar fields + _eid; LIMIT 1."
@@ -396,7 +418,7 @@
         rels (map (fn [k]
                     (if (= :one (get-in schema [:relations k :type]))
                       (emit-one-relation k schema row-alias)
-                      (emit-relation k schema row-alias)))
+                      (emit-relation-views k schema row-alias)))
                   rel-keys)
         count-pairs (keep :count-pair rels)
         agg-pairs   (keep :agg-pair rels)

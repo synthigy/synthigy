@@ -454,8 +454,14 @@
                                                (println "synthigy.embedded live refetch failed:"
                                                         (ex-message e)))))))
                         (mapcat identity (select-keys opts [:acting-as :principal])))]
-    (alter-meta! value assoc ::close (:close w) ::watch-key (:key w))
+    (alter-meta! value assoc ::close (:close w) ::watch-key (:key w)
+                 ::set-interest (:set-interest w))
     value))
+
+(defn retune-watch!
+  "Point a live atom from `watch-query` at a new interest — e.g. the records its result now spans."
+  [live interest]
+  ((::set-interest (meta live)) interest))
 
 (defn run-xsql
   "Run a compiled XSQL op map `{:op :source :entity}` with a params map — the

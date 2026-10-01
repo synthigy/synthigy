@@ -622,18 +622,20 @@
                      nil
                      (vals fields))
 
-        encoders (reduce
-                  (fn [result field]
-                    (let [t (get field->type field)]
-                      (case t
-                        ("boolean" "string" "int" "float" "json"
-                                   "timestamp" "timeperiod" "currency"
-                                   "uuid" "avatar" "hashed" "transit" nil) result
-                        (assoc result field
-                               (fn [v]
-                                 (proto/encode *db* t v))))))
-                  nil
-                  (keys field->type))
+        encoders (assoc
+                  (reduce
+                   (fn [result field]
+                     (let [t (get field->type field)]
+                       (case t
+                         ("boolean" "string" "int" "float" "json"
+                                    "timeperiod" "currency"
+                                    "uuid" "avatar" "hashed" "transit" nil) result
+                         (assoc result field
+                                (fn [v]
+                                  (proto/encode *db* t v))))))
+                   nil
+                   (keys field->type))
+                  (id/key) id/coerce-arg)
 
         ;; *db* captured as a value — decoders may run in futures where the
         ;; dynamic binding isn't conveyed.

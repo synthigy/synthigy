@@ -32,6 +32,7 @@
     :flag :confidential-only
     :create
     {:parent :api
+     :delete-warning "Every role that grants it loses it."
      :validate (fn [{:keys [name]}]
                  (when-not (iam.gen/valid-scope-name? (str name))
                    iam.gen/scope-name-message))

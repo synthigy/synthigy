@@ -26,27 +26,32 @@
    [synthigy.server.console.icon :as icon]
    [synthigy.server.console.ui :as ui]))
 
-(defn field
-  [entity-key row [_ _ kind :as f]]
-  (ui/field-control f row (when (= :enum kind) (data/enum-values {:key entity-key} (first f)))))
+(defn unit-uri
+  [nm]
+  (str "/console/profile/unit/" nm))
+
+(defn field-unit
+  [row [k _ kind :as f]]
+  (let [nm         (name k)
+        [rel]      (data/profile-field nm)
+        entity-key (if (= :person_info rel) :iam/person-info :iam/user-public-profile)]
+    (ui/unit-form (unit-uri nm) nm
+                  (ui/field-control f row
+                                    (when (= :enum kind) (data/enum-values {:key entity-key} k))
+                                    (ui/unit-status nm)))))
+
+(defn patches
+  "What the page needs after profile field `nm` was posted."
+  [nm [status _ after :as outcome]]
+  (let [[_ f] (data/profile-field nm)]
+    (cond-> []
+      (= :ok status) (conj [(field-unit after f) :morph])
+      :always        (conj [(ui/unit-status nm (ui/unit-notice (unit-uri nm) outcome)) :replace]))))
 
 (defn render
-  [request & [notice]]
+  [request]
   (let [user-xid (get-in request [:console/session :resource-owner])
-        row      (data/get-profile user-xid)
-        form     (ui/form-page
-                  {:spec {}
-                   :row row
-                   :action "/console/profile"
-                   :notice notice
-                   :fields
-                   (list
-                    [:div.console-settings-head (icon/icon :user {:size "13"}) "Public profile"]
-                    (for [f data/public-profile-fields] (field :iam/user-public-profile row f))
-                    [:div.console-settings-head (icon/icon :lock {:size "13"}) "Personal info"]
-                    (for [f data/person-info-fields] (field :iam/person-info row f)))
-                   :actions
-                   [:ty-button {:type "submit" :size "sm" :flavor "primary"} "Save"]})]
+        row      (data/get-profile user-xid)]
     (ui/admin-shell
      {:title "Profile"
       :user (:console/principal request)
@@ -60,4 +65,12 @@
         [:p.console-subtitle
          "Your public profile and personal info. These are yours to change — "
          "nothing here is shared without your say."]]
-       form]})))
+       [:div.console-panel.console-detail
+        [:div.console-form
+         [:ty-scroll-container {:custom-scrollbar true :shadow true}
+          [:div.console-form-body
+           [:div.console-fields.console-fields-wrap
+            [:div.console-settings-head (icon/icon :user {:size "13"}) "Public profile"]
+            (for [f data/public-profile-fields] (field-unit row f))
+            [:div.console-settings-head (icon/icon :lock {:size "13"}) "Personal info"]
+            (for [f data/person-info-fields] (field-unit row f))]]]]]]})))

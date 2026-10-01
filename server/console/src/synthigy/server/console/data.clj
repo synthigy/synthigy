@@ -136,35 +136,77 @@
   [s]
   (and (str/starts-with? s "/") (not (str/includes? s ".."))))
 
+(defn listy
+  [v]
+  (cond (nil? v) [] (sequential? v) (vec v) :else [v]))
+
+(defn setting-posted
+  "One declared setting as the form posted it; `:grants` keeps only the values it offers."
+  [[k _ kind _ opts] params]
+  (let [pk (keyword (str "settings__" (name k)))
+        v  (get params pk)]
+    (case kind
+      :switch        (boolean v)
+      :uri-list      (into [] (comp (map str/trim) (remove str/blank?))
+                           (str/split-lines (str v)))
+      :grants        (let [known (set (map first (:choices opts)))]
+                       (filterv known (listy v)))
+      :expiry        (into {}
+                           (for [sub ["access" "refresh" "id"]
+                                 :let [n (some-> (get params (keyword (str (name pk) "__" sub)))
+                                                 not-empty parse-long)]
+                                 :when n]
+                             [sub n]))
+      :relative-path (not-empty (str/trim (str v)))
+      (not-empty (str v)))))
+
+(defn check-setting!
+  [[_ label kind] v]
+  (when (and (= :relative-path kind) v (not (relative-path? v)))
+    (throw (ex-info (str label " must be a relative path starting with "
+                         "\"/\", with no \"..\" segments.")
+                    {}))))
+
+(defn settings-value
+  "A fresh `:settings` map from the posted form — create only, where nothing is stored yet."
+  [{fields :fields} params]
+  (into {}
+        (map (fn [[k :as f]]
+               (let [v (setting-posted f params)]
+                 (check-setting! f v)
+                 [(name k) v])))
+        fields))
+
+(defn same-setting?
+  [kind old new]
+  (case kind
+    :switch (= (boolean old) new)
+    :grants (= (set (listy old)) (set new))
+    (:uri-list :expiry) (= (or (not-empty old) (empty new)) new)
+    (= (not-empty (str (or old ""))) new)))
+
 (defn settings-patch
-  [{settings-fields :fields} current params]
-  (reduce
-   (fn [settings [k label kind]]
-     (let [pk (keyword (str "settings__" (name k)))
-           v  (get params pk)]
-       (assoc settings (name k)
-              (case kind
-                :switch   (boolean v)
-                :uri-list (into [] (comp (map str/trim) (remove str/blank?))
-                                (str/split-lines (str v)))
-                :grants   (vec (cond (nil? v) [] (sequential? v) v :else [v]))
-                :expiry   (into {}
-                                (for [sub ["access" "refresh" "id"]
-                                      :let [n (some-> (get params (keyword (str (name pk) "__" sub)))
-                                                      not-empty parse-long)]
-                                      :when n]
-                                  [sub n]))
-                :relative-path
-                (let [v (not-empty (str/trim (str v)))]
-                  (when (and v (not (relative-path? v)))
-                    (throw (ex-info
-                            (str label " must be a relative path starting with "
-                                 "\"/\", with no \"..\" segments.")
-                            {})))
-                  v)
-                (not-empty (str v))))))
-   (or current {})
-   settings-fields))
+  "`current` with each declared setting that DIFFERS from what was posted replaced — undeclared keys and grant values the form doesn't offer survive."
+  ([spec current params] (settings-patch spec current params true))
+  ([{fields :fields} current params validate?]
+   (reduce
+    (fn [settings [k _ kind _ opts :as f]]
+      (let [kn    (name k)
+            old   (get settings kn)
+            new   (setting-posted f params)
+            known (set (map first (:choices opts)))]
+        (cond
+          (= :grants kind)
+          (if (= (set (filter known (listy old))) (set new))
+            settings
+            (assoc settings kn (into (filterv (complement known) (listy old)) new)))
+
+          (same-setting? kind old new) settings
+
+          :else (do (when validate? (check-setting! f new))
+                    (assoc settings kn new)))))
+    (or current {})
+    fields)))
 
 (defn config-value
   [{:keys [attr string?]} row]
@@ -177,42 +219,58 @@
           (map (fn [[k v]] [(str/replace (name k) "_" "-") v]))
           (or m {}))))
 
+(defn config-encode
+  [{:keys [string?]} cfg]
+  (if string? (json/->json cfg) cfg))
+
+(defn config-fields
+  [{:keys [by layouts]} row]
+  (get layouts (some-> (get row by) name)))
+
+(defn config-merge
+  "The stored config with the posted `config__*` fields applied — password blank keeps, other blanks drop."
+  [config current params]
+  (reduce
+   (fn [cfg [k _ kind]]
+     (let [v  (get params (keyword (str "config__" (name k))))
+           kn (name k)]
+       (case kind
+         :password (if-let [nv (not-empty (str (or v "")))]
+                     (assoc cfg kn nv)
+                     cfg)
+         :number   (if-let [n (some-> v str not-empty parse-long)]
+                     (assoc cfg kn n)
+                     (dissoc cfg kn))
+         :switch   (assoc cfg kn (boolean v))
+         (if-let [nv (not-empty (str (or v "")))]
+           (assoc cfg kn nv)
+           (dissoc cfg kn)))))
+   (config-value config current)
+   (or (config-fields config current) [])))
+
 (defn config-write
-  [{:keys [by layouts string?] :as config} current params]
-  (let [fields  (get layouts (some-> (get current by) name))
-        patched (reduce
-                 (fn [cfg [k _ kind]]
-                   (let [pk (keyword (str "config__" (name k)))
-                         v  (get params pk)
-                         kn (name k)]
-                     (case kind
-                       :password (if-let [nv (not-empty (str (or v "")))]
-                                   (assoc cfg kn nv)
-                                   cfg)
-                       :number   (if-let [n (some-> v str not-empty parse-long)]
-                                   (assoc cfg kn n)
-                                   (dissoc cfg kn))
-                       :switch   (assoc cfg kn (boolean v))
-                       (if-let [nv (not-empty (str (or v "")))]
-                         (assoc cfg kn nv)
-                         (dissoc cfg kn)))))
-                 (config-value config current)
-                 (or fields []))]
-    (if string? (json/->json patched) patched)))
+  [config current params]
+  (config-encode config (config-merge config current params)))
+
+(defn shape-detail-row
+  "A searched row as the editor reads it — via links flattened onto their own keys, `:active` on every link row."
+  [spec row]
+  (when row
+    (reduce (fn [r [k :as l]]
+              (let [r (if-let [[rel] (link-via l)]
+                        (assoc r k (get-in r [rel k]))
+                        r)]
+                (update r k normalize-active)))
+            row (get-in spec [:detail :links]))))
 
 (defn detail-row
   [spec xid]
   (when-not (str/blank? xid)
-    (some-> (denied->nil
-             #(first (embedded/search (:entity spec) {:_where {:xid {:_eq xid}}}
-                                      (detail-selection spec))))
-            (as-> row
-                  (reduce (fn [r [k :as l]]
-                            (let [r (if-let [[rel] (link-via l)]
-                                      (assoc r k (get-in r [rel k]))
-                                      r)]
-                              (update r k normalize-active)))
-                          row (get-in spec [:detail :links]))))))
+    (shape-detail-row
+     spec
+     (denied->nil
+      #(first (embedded/search (:entity spec) {:_where {:xid {:_eq xid}}}
+                               (detail-selection spec)))))))
 
 (def option-limit
   40)
@@ -276,15 +334,6 @@
       [:error "Name is required."]
       (sync-link! link-entity data))))
 
-(defn update-link!
-  [link-entity create-fields xid params]
-  (if (str/blank? xid)
-    [:error "Nothing selected."]
-    (let [data (assoc (link-field-data create-fields params) :xid xid)]
-      (if (str/blank? (:name data))
-        [:error "Name is required."]
-        (sync-link! link-entity data)))))
-
 (defn delete-link!
   [link-entity xid]
   (if (str/blank? xid)
@@ -314,9 +363,9 @@
         (get link-key))))
 
 (defn link-payload
-  [entity xid link-key link-entity submitted]
-  (let [current   (mapv :xid (all-grants entity xid link-key))
-        seen-cur  (set (map :xid (link-selected link-entity current)))
+  "The grant set to write: current grants the principal cannot see survive, submitted ones are kept only when grantable."
+  [current link-entity submitted]
+  (let [seen-cur  (set (map :xid (link-selected link-entity current)))
         grantable (set (map :xid (link-selected link-entity submitted)))]
     (into (mapv (fn [x] {:xid x}) (remove seen-cur current))
           (comp (filter grantable) (map (fn [x] {:xid x})))
@@ -326,14 +375,10 @@
   [link-entity submitted]
   (mapv (fn [{:keys [xid]}] {:xid xid}) (link-selected link-entity submitted)))
 
-(defn listy
-  [v]
-  (cond (nil? v) [] (sequential? v) (vec v) :else [v]))
-
 (defn panel-rows
-  "An owned-child list as the FORM carries it — parallel `<k>__*` vectors, zipped by index."
+  "An owned-child list as the create FORM carries it — parallel `<k>__*` vectors, zipped by index."
   [link-key create-fields params]
-  (let [cols (into {:xid (listy (get params (keyword (str (name link-key) "__xid"))))}
+  (let [cols (into {}
                    (map (fn [[fk]]
                           [fk (listy (get params (keyword (str (name link-key)
                                                                "__" (name fk)))))]))
@@ -345,17 +390,10 @@
                     (when-not (str/blank? (str (:name row))) row))))
           (range n))))
 
-(defn panel-deleted
-  "xids of saved rows the user removed — `save!` must purge these or they orphan."
-  [link-key params]
-  (into [] (remove str/blank?)
-        (listy (get params (keyword (str (name link-key) "__deleted"))))))
-
 (defn owned-payload
-  "Form rows to nested sync payload; a row with an `:xid` updates, one without is created and linked."
   [create-fields rows]
   (mapv (fn [row]
-          (into (if (str/blank? (str (:xid row))) {} {:xid (:xid row)})
+          (into {}
                 (keep (fn [[fk _ kind]]
                         (let [v (get row fk)]
                           (case kind
@@ -364,15 +402,16 @@
                 create-fields))
         rows))
 
+(defn owned?
+  [link]
+  (some? (get-in (last link) [:create :parent])))
+
 (defn owned-links
   [links]
-  (filterv #(get-in (last %) [:create :parent]) links))
+  (filterv owned? links))
 
 (defn owned-data
-  "Nested owned-child payloads. A link's own `:create :validate` runs here and
-   THROWS — `save!` turns any non-ENTITY_FORBIDDEN exception into an `[:error]`
-   notice, the same path a bad `login-page` takes, so a rejected value keeps
-   the typed form on screen instead of writing."
+  "Nested owned-child payloads for a create; a link's `:create :validate` THROWS on a bad row."
   [links params]
   (into {}
         (map (fn [[k _ _ _ _ show]]
@@ -385,76 +424,149 @@
                  [k (owned-payload cf rows)])))
         (owned-links links)))
 
-(defn purge-deleted!
-  [links params]
-  (doseq [[k _ link-entity] (owned-links links)
-          x (panel-deleted k params)]
-    (try (embedded/purge link-entity {:_where {:xid {:_eq x}}} [:xid])
-         (catch clojure.lang.ExceptionInfo _ nil))))
+(defn field-value
+  [[k label kind] params]
+  (let [v (get params k)]
+    (case kind
+      (:switch :flag) (boolean v)
+      :enum   (some-> v not-empty keyword)
+      :number (when-let [s (not-empty (str/trim (str (or v ""))))]
+                (or (parse-long s)
+                    (throw (ex-info (str label " must be a whole number.") {}))))
+      v)))
 
-(defn scalar-params
-  "The spec's own scalar fields, coerced — the part of a save that CANNOT throw.
-   Hoisted out of `save!` so a rejected write can re-render what the person
-   typed instead of re-reading the stored row and silently reverting it. Raw
-   params won't do: an unchecked `ty-switch` posts nothing, so merging them
-   would leave a switch reading `true` after the user turned it off."
-  [fields params]
+(defn same-value?
+  [kind old new]
+  (case kind
+    (:switch :flag) (= (boolean old) (boolean new))
+    :enum   (= (some-> old name) (some-> new name))
+    :number (if (and (number? old) (number? new)) (== old new) (= old new))
+    (= (not-empty (str (or old ""))) (not-empty (str (or new ""))))))
+
+(defn unit
+  "The detail unit named `nm`: `[:field f]`, `[:link l]`, `[:settings s]` or `[:config c]`, or nil."
+  [{{:keys [fields links settings config]} :detail} nm]
+  (let [named (fn [xs] (some #(when (= nm (name (first %))) %) xs))]
+    (cond
+      (and settings (= "settings" nm)) [:settings settings]
+      (and config (= "config" nm))     [:config config]
+      (named fields)                   [:field (named fields)]
+      (named (remove owned? links))    [:link (named (remove owned? links))])))
+
+(defn link-change
+  [entity xid k link-entity submitted]
+  (let [current (mapv :xid (all-grants entity xid k))
+        payload (link-payload current link-entity (distinct (remove str/blank? submitted)))]
+    (when (not= (set current) (set (map :xid payload)))
+      [entity xid {k payload}])))
+
+(defn unit-changes
+  "`[entity xid changes]` for the write a posted unit needs, or nil when it matches what is stored."
+  [{:keys [entity]} current [kind u] params]
+  (case kind
+    :field    (let [[k _ fkind] u
+                    v (field-value u params)]
+                (when-not (same-value? fkind (get current k) v)
+                  [entity (:xid current) {k v}]))
+    :settings (let [stored (or (:settings current) {})
+                    new    (settings-patch u stored params)]
+                (when (not= stored new)
+                  [entity (:xid current) {:settings new}]))
+    :config   (let [stored (config-value u current)
+                    new    (config-merge u current params)]
+                (when (not= stored new)
+                  [entity (:xid current) {(:attr u) (config-encode u new)}]))
+    :link     (let [[k _ link-entity] u
+                    submitted (listy (get params k))]
+                (if-let [[rel via-entity] (link-via u)]
+                  (when-let [target (get-in current [rel :xid])]
+                    (link-change via-entity target k link-entity submitted))
+                  (link-change entity (:xid current) k link-entity submitted)))))
+
+(def unit-locks
+  (vec (repeatedly 64 #(Object.))))
+
+(defn row-lock
+  [xid]
+  (nth unit-locks (mod (hash (str xid)) (count unit-locks))))
+
+(defn editable-row
+  [{{:keys [locked]} :detail :as spec} xid]
+  (when-let [row (detail-row spec xid)]
+    (when-not (and locked (locked row)) row)))
+
+(defn save-unit!
+  "Write detail unit `nm` only when it differs from the stored row — `[:unchanged row]`, `[:ok before after]`, `[:confirm msg]`, `[:denied]` or `[:error msg]`."
+  [{{:keys [prepare confirm-change]} :detail :keys [entity] :as spec} xid nm params confirmed?]
+  (locking (row-lock xid)
+    (let [current (editable-row spec xid)
+          u       (when current (unit spec nm))]
+      (if-not u
+        [:denied]
+        (try
+          (if-let [[target txid changes] (unit-changes spec current u params)]
+            (let [main? (= target entity)
+                  msg   (when (and main? confirm-change (not confirmed?))
+                          (confirm-change changes current))]
+              (if msg
+                [:confirm msg]
+                (do (embedded/sync target (assoc (cond-> changes
+                                                   (and main? prepare) (prepare current))
+                                                 :xid txid))
+                    [:ok current (detail-row spec xid)])))
+            [:unchanged current])
+          (catch clojure.lang.ExceptionInfo e
+            (if (= "ENTITY_FORBIDDEN" (:code (ex-data e)))
+              [:denied]
+              [:error (ex-message e)])))))))
+
+(defn child-value
+  "An owned child's field whichever casing carried it — rows read back kebab-case, create fields may be declared snake_case."
+  [row fk]
+  (some #(let [v (get row %)] (when (some? v) v))
+        [fk
+         (keyword (str/replace (name fk) "_" "-"))
+         (keyword (str/replace (name fk) "-" "_"))]))
+
+(defn child-changes
+  [fields child card]
   (into {}
-        (map (fn [[k _ kind]]
-               [k (case kind
-                    (:switch :flag) (boolean (get params k))
-                    :enum   (some-> (get params k) not-empty keyword)
-                    :number (some-> (get params k) str not-empty parse-long)
-                    (get params k))]))
+        (keep (fn [[fk _ kind]]
+                (let [v (if (= :switch kind) (boolean (get card fk)) (not-empty (get card fk)))]
+                  (when-not (same-value? kind (child-value child fk) v)
+                    [fk v]))))
         fields))
 
-(defn save!
-  "`[:ok row]`, or `[:denied typed]` / `[:error msg typed]` where `typed` is
-   what was posted, for the caller to re-render."
-  [{{:keys [fields links settings config prepare locked]} :detail :as spec} xid params]
-  (if-let [current (when-let [row (detail-row spec xid)]
-                     (when-not (and locked (locked row)) row))]
-    (let [typed (scalar-params fields params)]
-      (try
-        (let [data (assoc typed :xid xid)
-              data (into data
-                         (comp
-                          (remove (fn [l] (get-in (last l) [:create :parent])))
-                          (remove link-via)
-                          (map (fn [[k _ link-entity]]
-                                 [k (link-payload (:entity spec) xid k link-entity
-                                                  (get params k))])))
-                         links)
-              data (merge data (owned-data links params))
-              data (cond-> data
-                     settings (assoc :settings
-                                     (settings-patch settings (:settings current) params))
-                     (and config
-                          (some (fn [[k]] (str/starts-with? (name k) "config__")) params))
-                     (assoc (:attr config) (config-write config current params)))]
-          (embedded/sync (:entity spec) (cond-> data prepare (prepare current)))
-          (doseq [[[rel via-entity] ls] (group-by link-via (filter link-via links))
-                  :let [target (get-in current [rel :xid])]
-                  :when target]
-            (embedded/sync via-entity
-                           (into {:xid target}
-                                 (map (fn [[k _ link-entity]]
-                                        [k (link-payload via-entity target k link-entity
-                                                         (get params k))]))
-                                 ls)))
-          (purge-deleted! links params)
-          [:ok (detail-row spec xid)])
-        (catch clojure.lang.ExceptionInfo e
-          (if (= "ENTITY_FORBIDDEN" (:code (ex-data e)))
-            [:denied typed]
-            [:error (ex-message e) typed]))))
-    [:denied]))
+(defn panel-write!
+  "Add, edit or delete one owned child of a stored row — `[:ok]`, `[:unchanged]`, `[:denied]` or `[:error msg]`."
+  [row [k _ link-entity _ _ show] op child-xid card]
+  (let [{:keys [fields parent validate]} (:create show)
+        children (get row k)
+        child    (when child-xid (some #(when (= child-xid (:xid %)) %) children))
+        nm       (str/trim (str (:name card)))
+        bad      (when (#{:add :edit} op)
+                   (cond
+                     (str/blank? nm) "Name is required."
+                     (some #(and (not= child-xid (:xid %)) (= nm (str/trim (str (:name %)))))
+                           children)
+                     (str "\"" nm "\" is already in the list.")
+                     validate (validate (assoc card :name nm))))]
+    (cond
+      (and (#{:edit :delete} op) (nil? child)) [:error "That item is no longer here."]
+      bad                                      [:error bad]
+      (= :add op)                              (create-link! link-entity fields (assoc card :name nm)
+                                                             parent (:xid row))
+      (= :delete op)                           (delete-link! link-entity child-xid)
+      :else
+      (let [changes (child-changes fields child (assoc card :name nm))]
+        (if (empty? changes)
+          [:unchanged]
+          (sync-link! link-entity (assoc changes :xid child-xid)))))))
 
 (defn delete-row!
   "Delete a record and the children it OWNS, children first."
-  [{:keys [entity] {:keys [links locked]} :detail :as spec} xid]
-  (if-let [row (when-let [row (detail-row spec xid)]
-                 (when-not (and locked (locked row)) row))]
+  [{:keys [entity] {:keys [links]} :detail :as spec} xid]
+  (if-let [row (editable-row spec xid)]
     (try
       (doseq [[k _ link-entity] (owned-links links)
               :let [xids (mapv :xid (get row k))]
@@ -483,31 +595,31 @@
 
 (defn create-row!
   [{create :create detail :detail :as spec} params]
-  (let [data    (into {}
-                      (map (fn [[k _ kind {:keys [keyword?]}]]
-                             [k (case kind
-                                  :switch  (boolean (get params k))
-                                  :number  (some-> (get params k) str not-empty parse-long)
-                                  :choices (let [v (not-empty (str (or (get params k) "")))]
-                                             (if (and v keyword?) (keyword v) v))
-                                  (not-empty (str (or (get params k) ""))))]))
-                      (:fields create))
-        data    (into data
-                      (map (fn [[k _ link-entity]]
-                             [k (create-link-payload link-entity (get params k))]))
-                      (:links create))
-        data    (merge data (owned-data (:owned create) params))
-        data    (cond-> data
-                  (:settings detail)
-                  (assoc :settings (settings-patch (:settings detail) nil params))
-                  (:config detail)
-                  (assoc (get-in detail [:config :attr]) (config-write (:config detail) data params)))
-        missing (some (fn [[k label _ opts]]
-                        (when (and (:required opts) (nil? (get data k))) label))
-                      (:fields create))]
-    (if missing
-      [:error (str missing " is required.")]
-      (try
+  (try
+    (let [data    (into {}
+                        (map (fn [[k _ kind {:keys [keyword?]}]]
+                               [k (case kind
+                                    :switch  (boolean (get params k))
+                                    :number  (some-> (get params k) str not-empty parse-long)
+                                    :choices (let [v (not-empty (str (or (get params k) "")))]
+                                               (if (and v keyword?) (keyword v) v))
+                                    (not-empty (str (or (get params k) ""))))]))
+                        (:fields create))
+          data    (into data
+                        (map (fn [[k _ link-entity]]
+                               [k (create-link-payload link-entity (get params k))]))
+                        (:links create))
+          data    (merge data (owned-data (:owned create) params))
+          data    (cond-> data
+                    (:settings detail)
+                    (assoc :settings (settings-value (:settings detail) params))
+                    (:config detail)
+                    (assoc (get-in detail [:config :attr]) (config-write (:config detail) data params)))
+          missing (some (fn [[k label _ opts]]
+                          (when (and (:required opts) (nil? (get data k))) label))
+                        (:fields create))]
+      (if missing
+        [:error (str missing " is required.")]
         ;; `:prepare` mints server-owned values (an OAuth client_id) into the
         ;; payload at WRITE time, the way the dataset layer mints xid. Never a
         ;; hidden form field: `oauth_client` has UNIQUE(id), which makes `id`
@@ -517,11 +629,11 @@
         [:ok (embedded/sync (:entity spec)
                             (cond-> data
                               (:prepare create) ((:prepare create)))
-                            :returning true)]
-        (catch clojure.lang.ExceptionInfo e
-          (if (= "ENTITY_FORBIDDEN" (:code (ex-data e)))
-            [:denied]
-            [:error (ex-message e)]))))))
+                            :returning true)]))
+    (catch clojure.lang.ExceptionInfo e
+      (if (= "ENTITY_FORBIDDEN" (:code (ex-data e)))
+        [:denied]
+        [:error (ex-message e)]))))
 
 (defn set-active!
   "Flip one row's `:active`, reporting whether the write landed."
@@ -704,16 +816,22 @@
                                   :key-format "snake")))]
     (merge person_info public_profile)))
 
-(defn save-profile!
-  [user-xid params]
-  (try
-    (access/with-principal nil
-      (embedded/sync :user
-                     {:xid user-xid
-                      :person_info (into {} (map (fn [[k]] [k (get params k)])) person-info-fields)
-                      :public_profile (into {} (map (fn [[k]] [k (get params k)])) public-profile-fields)}))
-    [:ok (get-profile user-xid)]
-    (catch clojure.lang.ExceptionInfo e
-      (if (= "ENTITY_FORBIDDEN" (:code (ex-data e)))
-        [:denied]
+(defn profile-field
+  [nm]
+  (or (some #(when (= nm (name (first %))) [:public_profile %]) public-profile-fields)
+      (some #(when (= nm (name (first %))) [:person_info %]) person-info-fields)))
+
+(defn save-profile-field!
+  "Write one of `user-xid`'s profile fields only when it differs. SYSTEM write — `user-xid` must come from the session, NEVER from a parameter."
+  [user-xid nm params]
+  (when-let [[rel [k _ kind :as f]] (profile-field nm)]
+    (try
+      (let [before (get-profile user-xid)
+            v      (field-value f params)]
+        (if (same-value? kind (get before k) v)
+          [:unchanged before]
+          (do (access/with-principal nil
+                (embedded/sync :user {:xid user-xid rel {k v}}))
+              [:ok before (get-profile user-xid)])))
+      (catch clojure.lang.ExceptionInfo e
         [:error (ex-message e)]))))

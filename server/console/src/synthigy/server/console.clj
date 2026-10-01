@@ -64,6 +64,16 @@
       (when-not (str/blank? body)
         (update-keys (codec/form-decode body) keyword)))))
 
+(defn posted-form
+  "A POST's urlencoded body — never the query string, which can ride in `:params` beside it."
+  [request]
+  (if (contains? request :form-params)
+    (update-keys (:form-params request) keyword)
+    (let [decoded (when (str/includes? (str (get-in request [:headers "content-type"]))
+                                       "form-urlencoded")
+                    (some-> (:body request) slurp not-empty codec/form-decode))]
+      (if (map? decoded) (update-keys decoded keyword) {}))))
+
 (defn signals
   [request]
   (when-let [ct (get-in request [:headers "content-type"])]
@@ -392,10 +402,6 @@
   (when-let [row (data/detail-row spec xid)]
     (html-response (ui/detail request spec row))))
 
-(def ^:private save-notices
-  {:ok     [:ok "Saved."]
-   :denied [:warn "You don't have permission to change this."]})
-
 (defn card-values
   "What the add/edit card currently holds, straight off the posted form."
   [k fields raw]
@@ -405,21 +411,19 @@
         fields))
 
 (defn panel-link
-  "The owned link named by `link-key`, from `:detail :links` or `:create :owned`."
+  "The create page's owned link named `link-key`."
   [spec link-key]
   (some (fn [[k :as l]] (when (= link-key (name k)) l))
-        (concat (data/owned-links (get-in spec [:detail :links]))
-                (get-in spec [:create :owned]))))
+        (get-in spec [:create :owned])))
 
 (defn panel-action!
-  "POST /console/iam/<slug>/panel/<link> — the one pure handler behind Add, Edit, Delete and Cancel."
+  "POST /console/iam/<slug>/panel/<link> — the create page's pure panel handler behind Add, Edit, Delete and Cancel."
   [request spec link-key]
   (when-let [[k _ _ _ _ show :as link] (panel-link spec link-key)]
     (let [fields  (get-in show [:create :fields])
-          raw     (form-params request)
-          {:strs [add target cancel] drop-q "drop"} (query-params request)
+          raw     (posted-form request)
+          {:strs [add target cancel] new-q "new" drop-q "drop"} (query-params request)
           rows    (data/panel-rows k fields raw)
-          deleted (data/panel-deleted k raw)
           idx     (some-> (get raw (keyword (str (name k) "_editing")))
                           str not-empty parse-long)
           card    (card-values k fields raw)
@@ -430,10 +434,7 @@
           (cond
             drop-i
             {:rows (into (subvec rows 0 (min drop-i (count rows)))
-                         (subvec rows (min (inc drop-i) (count rows))))
-             :deleted (into deleted
-                            (remove str/blank?)
-                            [(str (:xid (nth rows drop-i nil)))])}
+                         (subvec rows (min (inc drop-i) (count rows))))}
 
             add
             (let [dup? (some (fn [[i r]]
@@ -453,9 +454,53 @@
             (and targ (not cancel))
             {:rows rows :editing targ :values (nth rows targ nil)}
 
+            new-q {:rows rows :open true}
+
             :else {:rows rows})]
-      (live/link-panel-response request spec link (:rows state)
-                               (update state :deleted #(or % deleted))))))
+      (live/link-panel-response request (ui/panel-base (:slug spec) k) link
+                                (:rows state) (dissoc state :rows)))))
+
+(defn detail-panel!
+  "POST /console/iam/<slug>/<xid>/panel/<link> — a stored row's owned panel: Add, Save and Delete write at once."
+  [request spec xid link-key]
+  (when-let [[k _ _ _ _ show :as link]
+             (some (fn [[lk :as l]] (when (= link-key (name lk)) l))
+                   (data/owned-links (get-in spec [:detail :links])))]
+    (when-let [row (data/editable-row spec xid)]
+      (let [fields  (get-in show [:create :fields])
+            raw     (posted-form request)
+            {:strs [add target drop confirm] new-q "new"} (query-params request)
+            editing (some-> (get raw (keyword (str (name k) "_editing"))) str not-empty)
+            card    (card-values k fields raw)
+            op      (cond (and drop confirm) :delete
+                          add                (if editing :edit :add))
+            [status msg] (when op
+                           (data/panel-write! row link op (if (= :delete op) drop editing) card))
+            row     (if (= :ok status) (or (data/detail-row spec xid) row) row)
+            state   (cond
+                      (and drop (not confirm)) {:confirming drop}
+                      (= :denied status)       {:editing editing :values card
+                                                :notice [:warn "You don't have permission to change this."]}
+                      (= :error status)        {:editing editing :values card :notice [:warn msg]}
+                      (= :ok status)           {:notice [:ok (case op :add "Added." :edit "Saved." "Deleted.")]}
+                      (and target (not add))   {:editing target
+                                                :values (some #(when (= target (:xid %)) %) (get row k))}
+                      new-q                    {:open true}
+                      :else                    {})]
+        (live/link-panel-response request (ui/panel-base (:slug spec) k xid) link
+                                  (get row k) (assoc state :persisted? true))))))
+
+(defn unit-action!
+  "POST /console/iam/<slug>/<xid>/unit/<name> — save one detail unit, writing only a real change."
+  [request spec xid nm]
+  (when (data/unit spec nm)
+    (let [{:strs [confirm cancel]} (query-params request)
+          params  (posted-form request)
+          outcome (if cancel
+                    (if-let [row (data/detail-row spec xid)] [:reverted row] [:denied])
+                    (data/save-unit! spec xid nm params (some? confirm)))
+          {:keys [patches signals]} (ui/unit-patches spec xid nm outcome params)]
+      (live/patch-response request patches signals))))
 
 (defn run-action!
   [request spec xid verb]
@@ -474,7 +519,7 @@
              (ui/detail request spec row notice panel-notice))))))))
 
 (defn owned-params
-  "Forward the owned panels' own form state (`<k>__*`) through untouched — omitting it silently orphans children."
+  "Forward the create page's owned panels (`<k>__*`) through untouched."
   [links raw]
   (let [prefixes (mapv #(str (name (first %)) "__") (data/owned-links links))]
     (into {}
@@ -530,45 +575,12 @@
                         (and (:config detail) (str/starts-with? n "config__"))))))
         raw))
 
-(defn save-detail!
-  [request spec xid]
-  (let [detail (:detail spec)
-        raw    (form-params request)
-        params (merge (field-params detail raw)
-                      (section-params detail raw)
-                      (owned-params (:links detail) raw))
-        [status row-or-msg typed] (data/save! spec xid params)
-        ;; A refusal re-renders what was POSTED over the stored row — re-reading
-        ;; alone would revert every edit while claiming to preserve it. Scalars
-        ;; only: settings/config are rebuilt by a fn that throws on the bad
-        ;; value, so those fields still fall back to what is stored.
-        row    (if (= :ok status)
-                 row-or-msg
-                 (merge (data/detail-row spec xid) typed))]
-    (cond
-      ;; Success leaves nothing to keep on screen, so land where the change is
-      ;; visible — the index. The verdict rides the URL because a 303 cannot
-      ;; carry an inline notice.
-      (= :ok status)
-      {:status 303 :headers {"Location" (str "/console/iam/" (:slug spec) "?saved=1")}}
-
-      ;; A refusal keeps the edited values on screen rather than throwing the
-      ;; work away — the original reason this re-rendered at all.
-      row
-      (html-response
-       (ui/detail request spec row
-                  (or (save-notices status) [:warn (str row-or-msg)])))
-
-      :else
-      {:status 303 :headers {"Location" (str "/console/iam/" (:slug spec))}})))
-
-(defn save-profile!
-  [request]
-  (let [user-xid    (get-in request [:console/session :resource-owner])
-        raw         (form-params request)
-        [status msg] (data/save-profile! user-xid raw)]
-    (html-response
-     (profile-page/render request (or (save-notices status) [:warn (str msg)])))))
+(defn profile-unit!
+  "POST /console/profile/unit/<field> — save one of the session user's own profile fields."
+  [request nm]
+  (let [user-xid (get-in request [:console/session :resource-owner])]
+    (when-let [outcome (data/save-profile-field! user-xid nm (posted-form request))]
+      (live/patch-response request (profile-page/patches nm outcome) nil))))
 
 (defn create-params
   [spec raw]
@@ -737,10 +749,8 @@
                                       (link-identity! request))
          "/console/identities/password" (when (= :post (:request-method request))
                                           (set-password! request))
-         "/console/profile"        (case (:request-method request)
-                                     :get  (html-response (profile-page/render request))
-                                     :post (save-profile! request)
-                                     nil)
+         "/console/profile"        (when (= :get (:request-method request))
+                                     (html-response (profile-page/render request)))
          "/console/live/sessions"  (live/sessions-stream request)
          "/console/live/identities" (live/identities-stream request)
          "/console/system"         (when (data/system-operator?)
@@ -776,15 +786,17 @@
            (rotate-dek! request))
          "/console/transfer/export" (when (= :get (:request-method request))
                                       (transfer-export request))
-         (or (when-let [[slug tail link-key action] (under uri "/console/iam/")]
+         (or (when-let [[_ nm] (and (= :post (:request-method request))
+                                     (re-matches #"/console/profile/unit/([a-z_]+)" uri))]
+               (profile-unit! request nm))
+             (when-let [[slug tail link-key action] (under uri "/console/iam/")]
                (when-let [spec (pages/by-slug slug)]
                  (cond
                    (nil? tail)
                    (html-response
                     (ui/browse request spec nil
                                (let [qp (query-params request)]
-                                 (cond (get qp "saved")   [:ok "Saved."]
-                                       (get qp "created") [:ok "Created."]))))
+                                 (when (get qp "created") [:ok "Created."]))))
 
                    (= tail "rows")
                    (let [{:strs [offset q] sort-k "sort" dir "dir" :as qp} (query-params request)]
@@ -811,6 +823,12 @@
 
                    (and (= tail "panel") link-key (= :post (:request-method request)))
                    (panel-action! request spec link-key)
+
+                   (and (= link-key "unit") action (= :post (:request-method request)))
+                   (when (:detail spec) (unit-action! request spec tail action))
+
+                   (and (= link-key "panel") action (= :post (:request-method request)))
+                   (when (:detail spec) (detail-panel! request spec tail action))
 
                    (and (= tail "new") (nil? link-key))
                    (when (:create spec)
@@ -840,24 +858,21 @@
 
                    ;; `tail` is a row xid ONLY when nothing follows it — an
                    ;; unrecognized sub-path must 404, never fall through to a
-                   ;; WRITE on that row. A form POST here carries no
-                   ;; `<link>__*` params, and `sync` reads a missing owned
-                   ;; relation as "unlink everything", so this branch used to
-                   ;; orphan every owned child of the record (200, silently).
+                   ;; WRITE on that row.
                    (nil? link-key)
-                   (when (:detail spec)
-                     (case (:request-method request)
-                       :get  (detail-page request spec tail)
-                       :post (save-detail! request spec tail)
-                       nil)))))
-             (when-let [[slug tail] (under uri "/console/live/iam/")]
+                   (when (and (:detail spec) (= :get (:request-method request)))
+                     (detail-page request spec tail)))))
+             (when-let [[slug tail more] (under uri "/console/live/iam/")]
                (when-let [spec (pages/by-slug slug)]
                  (cond
                    (= tail "rows")
                    (let [{:strs [limit q] sort-k "sort" dir "dir" :as qp} (query-params request)]
                      (live/browse-range-stream
                       request spec (max 0 (or (parse-long (str limit)) 0)) q
-                      (filter-params spec qp) sort-k dir)))))))))))
+                      (filter-params spec qp) sort-k dir))
+
+                   (and tail (nil? more) (:detail spec))
+                   (live/detail-stream request spec tail))))))))))
 
 (defn route
   [request]

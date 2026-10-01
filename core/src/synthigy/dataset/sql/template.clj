@@ -27,6 +27,7 @@
    [clojure.string :as str]
    [synthigy.log :as log]
    [synthigy.dataset.rls :as rls]
+   [synthigy.dataset.sql.protocol :as proto]
    [synthigy.dataset.sql.query :as sql-query]
    [synthigy.xsql.sql-params :as sql-params]
    [synthigy.db :as db :refer [*db*]]
@@ -260,16 +261,34 @@
 ;;; Template Resolution (pure reduce)
 ;;; ============================================================================
 
-(defn enum-aware-column
-  "Render alias.field, casting enum-typed columns to TEXT."
-  [entity-id alias field]
-  (let [{:keys [fields]} (sql-query/deployed-schema-entity entity-id)
-        fkey  (keyword field)
-        enum? (some (fn [[_ f]] (and (= (:key f) fkey) (:enum/name f)))
-                    fields)]
-    (if enum?
-      (format "CAST(%s.%s AS TEXT)" alias field)
-      (format "%s.%s" alias field))))
+(defn field-type
+  [entity-id field]
+  (let [fkey (keyword field)]
+    (some (fn [[_ f]] (when (= (:key f) fkey) (:type f)))
+          (:fields (sql-query/deployed-schema-entity entity-id)))))
+
+(def ^:private select-end-pattern
+  #"(?i)\b(?:FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|UNION)\b")
+
+(defn select-item-label
+  "The result column a placeholder at [start end) names when it is a whole select item — `{e.f}` or `{e.f} AS x` — else nil."
+  [^String template select-end start end field]
+  (when (and (< start select-end) (outside-parens? template start))
+    (let [before (str/trimr (subs template 0 start))
+          after  (subs template end select-end)]
+      (when (or (str/ends-with? before ",")
+                (re-find #"(?i)\b(?:select|distinct)$" before))
+        (when-let [[_ alias] (re-find #"(?is)\A\s*(?:as\s+([A-Za-z_][A-Za-z0-9_]*)\s*)?(?:,|\z)" after)]
+          (or alias field))))))
+
+(defn record-column
+  [state label type]
+  (if-not (and label type)
+    state
+    (update state :columns
+            (fn [cols]
+              (let [prev (get cols label ::none)]
+                (assoc cols label (if (#{::none type} prev) type ::ambiguous)))))))
 
 (def ^:private placeholder-or-literal
   "`{…}` placeholders and single-quoted literals are never table references."
@@ -315,6 +334,7 @@
                     :entities #{}
                     :relations #{}
                     :joins []
+                    :columns {}
                     :join-keys-seen #{}
                     :root-entities {}
                     :replacements []
@@ -327,9 +347,10 @@
                                                  "row-level security.")})
                                   (sort (unguarded-entity-tables template)))}
 
+        select-end (or (top-level-match select-end-pattern template) (count template))
         final-state
         (reduce
-          (fn [state {:keys [raw parsed start]}]
+          (fn [state {:keys [raw parsed start end]}]
             (try
               (let [resolve-root
                     (fn [state entity-name]
@@ -350,11 +371,13 @@
                             {:raw raw :replacement (format "\"%s\" %s" table alias)}))
 
                   :field
-                  (let [[id alias state] (resolve-root state (:entity parsed))]
-                    (update state :replacements conj
-                            {:raw raw
-                             :replacement (enum-aware-column
-                                           id alias (:field parsed))}))
+                  (let [[id alias state] (resolve-root state (:entity parsed))
+                        field (:field parsed)]
+                    (-> state
+                        (update :replacements conj
+                                {:raw raw :replacement (format "%s.%s" alias field)})
+                        (record-column (select-item-label template select-end start end field)
+                                       (field-type id field))))
 
                   :relation
                   (let [[id alias state] (resolve-root state (:entity parsed))
@@ -369,11 +392,13 @@
                   (let [[id alias state] (resolve-root state (:entity parsed))
                         joins-spec (or (:joins parsed)
                                        (mapv #(hash-map :label % :join "INNER") (:path parsed)))
-                        [target-id target-alias state] (walk-relation-chain id alias joins-spec state)]
-                    (update state :replacements conj
-                            {:raw raw
-                             :replacement (enum-aware-column
-                                           target-id target-alias (:field parsed))}))))
+                        [target-id target-alias state] (walk-relation-chain id alias joins-spec state)
+                        field (:field parsed)]
+                    (-> state
+                        (update :replacements conj
+                                {:raw raw :replacement (format "%s.%s" target-alias field)})
+                        (record-column (select-item-label template select-end start end field)
+                                       (field-type target-id field))))))
               (catch Exception e
                 (update state :errors conj
                         {:raw raw :error (ex-message e) :position start}))))
@@ -415,7 +440,8 @@
         {:sql final-sql
          :entities (:entities final-state)
          :relations (:relations final-state)
-         :aliases (:aliases final-state)}))))
+         :aliases (:aliases final-state)
+         :columns (into {} (remove (comp #{::ambiguous} val)) (:columns final-state))}))))
 
 ;;; ============================================================================
 ;;; Validation
@@ -679,6 +705,24 @@
                                         errors)))
                     {:code "TEMPLATE_ERROR" :errors errors}))))
 
+(def decoded-types
+  #{"boolean" "timestamp" "json"})
+
+(defn decode-rows
+  "Decode result columns that are whole field select items through the dialect's TypeCodec, as every model read is."
+  [rows columns]
+  (let [label  (sql/get-label-fn :edn)
+        codecs (into {}
+                     (keep (fn [[c t]] (when (decoded-types t) [(keyword (label c)) t])))
+                     columns)]
+    (if (empty? codecs)
+      rows
+      (mapv (fn [row]
+              (reduce-kv (fn [r k t]
+                           (if (contains? r k) (update r k #(proto/decode *db* t %)) r))
+                         row codecs))
+            rows))))
+
 (defn execute-template
   "Parse, resolve, validate, and execute a SQL template with positional or named
    params."
@@ -686,7 +730,7 @@
   ([template params opts]
    (let [template          (strip-sql-comments template)
          _                 (validate-select-only! template)
-         {rw-sql :sql rw-params :params rw-errors :errors}
+         {rw-sql :sql rw-params :params rw-types :types rw-errors :errors}
          (sql-params/rewrite template params)
          _ (when (seq rw-errors)
              (throw (ex-info (str "Parameter error: " (str/join "; " rw-errors))
@@ -695,7 +739,13 @@
          template          rw-sql
          cached?           (get opts :cached true)
          [ctes outer-body] (parse-cte-scopes template)
-         user-params       (vec rw-params)
+         user-params       (if rw-types
+                             (mapv (fn [v t]
+                                     (if (and (= :timestamp t) (string? v))
+                                       (proto/encode *db* "timestamp" v)
+                                       v))
+                                   rw-params rw-types)
+                             (vec rw-params))
          scopes            (-> (mapv #(assoc % :outer? false) ctes)
                                (conj {:outer? true :body outer-body}))
          [scopes _]
@@ -708,7 +758,7 @@
                  scopes)
          resolved-scopes
          (mapv (fn [{:keys [body user-params] :as scope}]
-                 (let [{:keys [sql entities aliases] :as r}
+                 (let [{:keys [sql entities aliases columns] :as r}
                        (resolve-scope-cached body cached?)]
                    (throw-on-errors! r)
                    (let [[final-sql final-params]
@@ -716,7 +766,8 @@
                      (assoc scope
                             :sql final-sql
                             :params final-params
-                            :entities entities))))
+                            :entities entities
+                            :columns columns))))
                scopes)
          outer-scope    (last resolved-scopes)
          cte-scopes     (butlast resolved-scopes)
@@ -741,10 +792,12 @@
                  :data {:params final-params}}
                 "Resolved SQL template params")
      (try
-       (sql/execute!
-         (:datasource *db*)
-         (into [final-sql] final-params)
-         :edn)
+       (decode-rows
+        (sql/execute!
+          (:datasource *db*)
+          (into [final-sql] final-params)
+          :edn)
+        (:columns outer-scope))
        (catch clojure.lang.ExceptionInfo e (throw e))
        (catch Exception e
          ;; never leak a bare driver exception — the caller wrote a TEMPLATE,

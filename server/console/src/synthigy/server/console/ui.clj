@@ -470,13 +470,18 @@
 (defn field-shell
   "The wrapper every form control shares — label, optional hint, and the
   full-row `.wide` rule. One place, so create and edit cannot drift apart."
-  [label kind hint control]
+  [label kind hint control & [status]]
   [:div.console-field {:class (when (#{:text :textarea} kind) "wide")}
    [:div.console-field-label label]
    (when hint [:p.console-field-hint hint])
-   control])
+   control
+   status])
 
-(defn field-control [[k label kind opts] row enum-vals]
+(def textarea-commit-only
+  {(keyword "data-on:change")
+   "if (evt.detail?.originalEvent?.type === 'input') { evt.stopPropagation() }"})
+
+(defn field-control [[k label kind opts] row enum-vals & [status]]
   (field-shell
    label kind nil
    (case kind
@@ -503,15 +508,17 @@
             [:span (or (second (get widgets/type-glyphs v)) v)]])]])
 
      :textarea
-     [:ty-textarea {:name (name k) :size "sm" :rows "3"
-                    :value (str (get row k))}]
+     [:ty-textarea (merge {:name (name k) :size "sm" :rows "3"
+                           :value (str (get row k))}
+                          textarea-commit-only)]
 
      :number
      [:ty-input {:name (name k) :size "sm" :type "number"
                  :value (str (or (get row k) "")) :autocomplete "off"}]
 
      [:ty-input {:name (name k) :size "sm"
-                 :value (str (get row k)) :autocomplete "off"}])))
+                 :value (str (get row k)) :autocomplete "off"}])
+   status))
 
 (defn settings-field
   [[k label kind hint opts] settings]
@@ -528,8 +535,9 @@
         [:span (if v "Enabled" "Disabled")]]
 
        :uri-list
-       [:ty-textarea {:name nm :size "sm" :rows "3" :placeholder "One per line"
-                      :value (str/join "\n" v)}]
+       [:ty-textarea (merge {:name nm :size "sm" :rows "3" :placeholder "One per line"
+                             :value (str/join "\n" v)}
+                            textarea-commit-only)]
 
        :grants
        (let [held (set v)]
@@ -551,10 +559,10 @@
                    :value (str (or v ""))}])]))
 
 (defn settings-section
-  [{:keys [detail]} row]
+  [{:keys [detail]} row & [status]]
   (when-let [{:keys [fields]} (:settings detail)]
     [:div.console-settings
-     [:div.console-settings-head (icon/icon :key {:size "13"}) "Client settings"]
+     [:div.console-settings-head (icon/icon :key {:size "13"}) "Client settings" status]
      [:div.console-fields
       (for [f fields] (settings-field f (:settings row)))]]))
 
@@ -587,14 +595,15 @@
                    :value (str (or v ""))}])]))
 
 (defn config-section
-  [{:keys [detail]} row]
+  [{:keys [detail]} row & [status]]
   (when-let [{:keys [layouts heading] :as config} (:config detail)]
     (let [kval   (some-> (get row (:by config)) name)
           fields (get layouts kval)
           cfg    (data/config-value config row)]
       [:div.console-settings
        [:div.console-settings-head (icon/icon :key {:size "13"})
-        (or heading "Configuration")]
+        (or heading "Configuration")
+        status]
        (cond
          (nil? fields)
          [:p.console-field-hint
@@ -741,76 +750,106 @@
                            (link-more slug k nil (count options))))]]
      pick-id]))
 
-(defn link-panel
-  "The owned-child panel — list plus add/edit card, identical whether the parent exists yet or not; writes nothing."
-  [slug label link-key icon show rows {:keys [editing values notice deleted]}]
+(defn panel-signal
+  "The signal that opens an owned panel's modal — lowercase, since HTML lowercases attribute names."
+  [link-key]
+  (str (name link-key) "modal"))
+
+(defn panel-list
+  "An owned panel's rows — its own id, so a live push can swap it without touching an open modal."
+  [ep link-key icon show rows persisted?]
   (let [ns-    (name link-key)
         fields (get-in show [:create :fields])
-        sub    (:sub show)
-        flag   (:flag show)
-        sing   (singular label)
-        ep     (fn [q]
-                 (format "@post('/console/iam/%s/panel/%s?%s',{contentType:'form'})"
-                         slug ns- q))]
-    [:div.console-links.console-links-create {:id (str ns- "-panel")}
-     [:div.console-field-label (icon/icon icon {:size "13"}) label]
-     [:div.console-link-columns
-      [:div.console-link-manage
-       [:div.console-selected-list
-        (if (empty? rows)
-          [:p.console-field-hint "None yet."]
-          (for [[i r] (map-indexed vector rows)]
-            (let [editing? (= i editing)
-                  nm       (or (:name r) "")
-                  desc     (str (or (get r sub) (:description r) ""))]
-              [:div {:class (str "console-selected-row" (when editing? " editing"))}
-               [:div.console-selected-icon (icon/icon icon {:size "15"})]
-               [:div.console-selected-body
-                [:div.console-selected-name
-                 [:span nm]
-                 (when (truthy? (get r flag))
-                   [:ty-tag {:pill true :size "xs" :flavor "neutral-"} "confidential"])
-                 (when editing?
-                   [:ty-tag {:pill true :size "xs" :flavor "primary"} "editing"])]
-                (when (not-empty desc) [:div.console-selected-desc desc])]
-               [:input {:type "hidden" :name (str ns- "__xid")
-                        :value (str (:xid r))}]
-               (for [[fk] fields]
-                 [:input {:type "hidden" :name (str ns- "__" (name fk))
-                          :value (str (get r fk))}])
-               [:div.console-selected-actions
-                [:ty-button
-                 {:type "button" :size "xs" :appearance "outlined"
-                  (keyword "data-on:click") (ep (str "target=" i))}
-                 (icon/icon :pencil {:size "12" :slot "start"})
-                 "Edit"]
-                [:ty-button
-                 {:type "button" :size "xs" :action true :flavor "danger" :muted true
-                  (keyword "data-on:click") (ep (str "drop=" i))}
-                 (icon/icon :trash-2 {:size "12"})]]])))]]
-      [:div.console-link-add
-       [:div.console-create
-        [:div.console-create-heading
-         (str (if editing "Edit " "New ") sing)]
-        (when notice
-          [:div {:class (str "console-notice console-rounded-notice " (name (first notice)))}
-           (second notice)])
-        [:div.console-create-fields
-         (for [[fk :as f] fields]
-           (card-field (str ns- "_new_" (name fk)) f (get values fk)))]
-        (when editing
-          [:input {:type "hidden" :name (str ns- "_editing") :value (str editing)}])
-        [:div.console-create-actions
-         (when editing
-           [:ty-button {:type "button" :size "sm" :appearance "ghost"
-                        (keyword "data-on:click") (ep "cancel=1")}
-            "Cancel"])
-         [:ty-button {:type "button" :size "sm" :appearance "outlined"
-                      (keyword "data-on:click") (ep "add=1")}
-          (icon/icon :plus {:size "12" :slot "start"})
-          (if editing "Save" (str "Add " sing))]]]]]
-     (for [x deleted]
-       [:input {:type "hidden" :name (str ns- "__deleted") :value (str x)}])]))
+        {:keys [sub flag]} show]
+    [:div.console-selected-list {:id (str ns- "-list")}
+     (if (empty? rows)
+       [:p.console-field-hint "None yet."]
+       (for [[i r] (map-indexed vector rows)]
+         (let [id   (if persisted? (:xid r) i)
+               desc (str (or (get r sub) (:description r) ""))]
+           [:div.console-selected-row
+            [:div.console-selected-icon (icon/icon icon {:size "15"})]
+            [:div.console-selected-body
+             [:div.console-selected-name
+              [:span (or (:name r) "")]
+              (when (and flag (truthy? (data/child-value r flag)))
+                [:ty-tag {:pill true :size "xs" :flavor "neutral-"} "confidential"])]
+             (when (not-empty desc) [:div.console-selected-desc desc])]
+            (when-not persisted?
+              (for [[fk] fields]
+                [:input {:type "hidden" :name (str ns- "__" (name fk))
+                         :value (str (get r fk))}]))
+            [:div.console-selected-actions
+             [:ty-button {:type "button" :size "xs" :appearance "ghost" :action true
+                          (keyword "data-on:click") (ep (str "target=" id))}
+              (icon/icon :pencil {:size "12"})
+              [:ty-tooltip {:placement "top"} "Edit"]]
+             [:ty-button {:type "button" :size "xs" :action true :flavor "danger" :muted true
+                          (keyword "data-on:click") (ep (str "drop=" id))}
+              (icon/icon :trash-2 {:size "12"})
+              [:ty-tooltip {:placement "top"} "Delete"]]]])))]))
+
+(defn panel-modal
+  [ep link-key show sing rows {:keys [editing values notice confirming]}]
+  (let [ns-    (name link-key)
+        sig    (panel-signal link-key)
+        close  (str "$" sig " = false")
+        cancel [:ty-button {:type "button" :size "sm" :appearance "ghost"
+                            (keyword "data-on:click") close}
+                "Cancel"]]
+    [:ty-modal {(keyword "data-attr:open") (str "$" sig)
+                :backdrop "true" :close-on-outside-click true :close-on-escape true
+                (keyword "data-on:close") close}
+     [:div.console-confirm.console-panel-modal
+      (if confirming
+        (let [nm (:name (some #(when (= confirming (:xid %)) %) rows))]
+          (list
+           [:h2 (str "Delete " sing "?")]
+           [:p (str "\"" nm "\" is deleted. "
+                    (get-in show [:create :delete-warning]))]
+           [:div.console-confirm-actions
+            cancel
+            [:ty-button {:type "button" :size "sm" :flavor "danger"
+                         (keyword "data-on:click") (ep (str "drop=" confirming "&confirm=1"))}
+             "Delete"]]))
+        (list
+         [:h2 (str (if (some? editing) "Edit " "New ") sing)]
+         (when (= :warn (first notice))
+           [:div.console-notice.console-rounded-notice.warn (second notice)])
+         [:div.console-create-fields
+          (for [[fk :as f] (get-in show [:create :fields])]
+            (card-field (str ns- "_new_" (name fk)) f (data/child-value values fk)))]
+         (when (some? editing)
+           [:input {:type "hidden" :name (str ns- "_editing") :value (str editing)}])
+         [:div.console-confirm-actions
+          cancel
+          [:ty-button {:type "button" :size "sm" :flavor "primary"
+                       (keyword "data-on:click") (ep "add=1")}
+           (if (some? editing) "Save" (str "Add " sing))]]))]]))
+
+(defn link-panel
+  "The owned-child panel — pure form state on a create page, a writer of stored children when `persisted?`."
+  [base label link-key icon show rows {:keys [notice persisted?] :as state}]
+  (let [sing (singular label)
+        ep   (fn [q] (format "@post('%s?%s',{contentType:'form'})" base q))]
+    [:div.console-links.console-owned
+     {:id (str (name link-key) "-panel")
+      (keyword (str "data-signals:" (panel-signal link-key) "__ifmissing")) "false"}
+     [:div.console-owned-head
+      [:div.console-field-label (icon/icon icon {:size "13"}) label]
+      [:ty-button {:type "button" :size "sm" :flavor "primary"
+                   (keyword "data-on:click") (ep "new=1")}
+       (icon/icon :plus {:size "12" :slot "start"})
+       (str "Add " sing)]]
+     (when (= :ok (first notice))
+       [:div.console-notice.console-rounded-notice.ok (second notice)])
+     (panel-list ep link-key icon show rows persisted?)
+     (panel-modal ep link-key show sing rows state)]))
+
+(defn panel-open?
+  "Whether a panel state needs its modal showing."
+  [{:keys [editing confirming notice open]}]
+  (boolean (or open confirming (some? editing) (= :warn (first notice)))))
 
 (defn selected-tags
   [pick-id icon show]
@@ -842,17 +881,37 @@
   (when-not (get-in (last l) [:create :parent])
     (data/link-options (nth l 2) nil 0 (nth l 5 nil))))
 
+(defn panel-base
+  [slug link-key & [xid]]
+  (if xid
+    (str "/console/iam/" slug "/" xid "/panel/" (name link-key))
+    (str "/console/iam/" slug "/panel/" (name link-key))))
+
 (defn link-control
-  [slug [k label _ icon hint show] row options]
+  [slug [k label _ icon hint show] row options & [status]]
   (if (:create show)
-    (link-panel slug label k icon show (get row k) nil)
+    (link-panel (panel-base slug k) label k icon show (get row k) nil)
     (let [[p pick-id] (picker slug k label icon hint show (get row k) options)]
       [:div.console-links
        p
-       (selected-tags pick-id icon show)])))
+       (selected-tags pick-id icon show)
+       status])))
+
+(defn owned-list
+  "A detail page's owned rows alone, for a live push."
+  [{:keys [slug]} row [k _ _ icon _ show]]
+  (panel-list (fn [q] (format "@post('%s?%s',{contentType:'form'})" (panel-base slug k (:xid row)) q))
+              k icon show (get row k) true))
+
+(defn owned-panel
+  "A detail page's owned-child panel, in a form of its own so its card posts alone."
+  [{:keys [slug]} row [k label _ icon _ show] & [state]]
+  [:form.console-unit {:id (str "unit-" (name k)) :novalidate true}
+   (link-panel (panel-base slug k (:xid row)) label k icon show (get row k)
+               (assoc state :persisted? true))])
 
 (defn form-page
-  "The one form chassis both `detail` and `create-page` build on."
+  "The create page's form chassis — one form, one Create."
   [{:keys [spec row action notice fields sections links actions]}]
   [:div.console-panel.console-detail
    [:form.console-form {:method "post" :action action}
@@ -865,6 +924,175 @@
       (settings-section spec row)
       (config-section spec row)]]
     [:div.console-form-actions actions]]])
+
+(defn unit-uri
+  [slug xid nm]
+  (str "/console/iam/" slug "/" xid "/unit/" nm))
+
+(defn unit-post
+  [uri & [q]]
+  (format "@post('%s%s',{contentType:'form'})" uri (if q (str "?" q) "")))
+
+(defn unit-status
+  [nm & [content]]
+  [:div.console-unit-status {:id (str "unit-" nm "-status")} content])
+
+(defn unit-form
+  "One independently saved piece of a page: its own form, posted to `uri` when a control inside it commits."
+  [uri nm body]
+  [:form.console-unit
+   {:id (str "unit-" nm)
+    :novalidate true
+    (keyword "data-on:change__debounce.300ms")
+    (str "if (evt.detail?.originalEvent?.type !== 'input') { " (unit-post uri) " }")
+    (keyword "data-on:keydown")
+    (str "if (evt.key === 'Enter' && evt.target.tagName === 'TY-INPUT') "
+         "{ evt.preventDefault(); evt.composedPath()[0].blur() }")}
+   body])
+
+(defn detail-unit
+  "The unit form named `nm` as the detail page renders it for `row`."
+  [{:keys [slug] :as spec} row nm]
+  (let [[kind u] (data/unit spec nm)
+        status   (unit-status nm)]
+    (when kind
+      (unit-form
+       (unit-uri slug (:xid row) nm) nm
+       (case kind
+         :field    (field-control u row (when (= :enum (nth u 2))
+                                          (data/enum-values spec (first u)))
+                                  status)
+         :settings (settings-section spec row status)
+         :config   (config-section spec row status)
+         :link     (link-control slug u row (link-options-for u) status))))))
+
+(defn link-visible?
+  [row l]
+  (if-let [[rel] (data/link-via l)] (some? (get row rel)) true))
+
+(defn detail-links
+  [spec row]
+  [:div.console-link-grid {:id "detail-links"}
+   (for [l (get-in spec [:detail :links])
+         :when (link-visible? row l)]
+     (if (data/owned? l)
+       (owned-panel spec row l)
+       (detail-unit spec row (name (first l)))))])
+
+(defn detail-sections
+  [spec row]
+  [:div.console-form-sections {:id "detail-sections"}
+   (for [section (get-in spec [:detail :sections])] (section row))])
+
+(defn detail-title
+  [row]
+  [:h1.console-title {:id "detail-title"} (or (:name row) "Edit")])
+
+(defn detail-form
+  "The editor: every field, link, settings and config block saves itself — there is no Save."
+  [{:keys [detail] :as spec} row notice]
+  (let [{:keys [fields links sections settings config]} detail]
+    [:div.console-panel.console-detail
+     [:div.console-form
+      (widgets/notice notice)
+      [:ty-scroll-container {:custom-scrollbar true :shadow true}
+       [:div.console-form-body
+        [:div.console-fields.console-fields-wrap
+         (when-let [{:keys [by badge]} config]
+           [:div.console-field
+            [:div.console-field-label (str/capitalize (clojure.core/name by))]
+            (badge row)])
+         (for [[k] fields] (detail-unit spec row (name k)))]
+        (when (seq sections) (detail-sections spec row))
+        (when (seq links) (detail-links spec row))
+        (when settings (detail-unit spec row "settings"))
+        (when config (detail-unit spec row "config"))]]]]))
+
+(defn unit-notice
+  [uri [status msg]]
+  (case status
+    :ok      [:span.console-unit-saved (icon/icon :check {:size "12"}) "Saved"]
+    :denied  [:span.console-unit-error "You don't have permission to change this."]
+    :error   [:span.console-unit-error msg]
+    :confirm [:div.console-unit-confirm
+              [:p msg]
+              [:div.console-unit-confirm-actions
+               [:ty-button {:type "button" :size "sm" :appearance "ghost"
+                            (keyword "data-on:click") (unit-post uri "cancel=1")}
+                "Cancel"]
+               [:ty-button {:type "button" :size "sm" :flavor "danger"
+                            (keyword "data-on:click") (unit-post uri "confirm=1")}
+                "Confirm"]]]
+    nil))
+
+(defn page-signals
+  [spec row]
+  (when-let [sig (get-in spec [:detail :signals])] (sig row)))
+
+(defn unit-patches
+  "`{:patches [[hiccup mode] ..] :signals m}` answering a post to unit `nm`; a picker whose stored set matches what was posted is left alone, so an open dropdown survives."
+  [{:keys [slug detail] :as spec} xid nm [status a b :as outcome] params]
+  (let [[kind u] (data/unit spec nm)
+        k        (when (= :link kind) (first u))
+        notice   (fn [o] [(unit-status nm (unit-notice (unit-uri slug xid nm) o)) :replace])]
+    (case status
+      :ok
+      (let [after     b
+            rerender? (or (not= :link kind)
+                          (not= (set (remove str/blank? (data/listy (get params k))))
+                                (set (map :xid (get after k)))))]
+        {:patches (cond-> []
+                    rerender?               (conj [(detail-unit spec after nm) :morph])
+                    (seq (:sections detail)) (conj [(detail-sections spec after) :morph])
+                    :always                 (conj [(detail-title after) :morph] (notice outcome)))
+         :signals (page-signals spec after)})
+
+      :reverted
+      {:patches [[(detail-unit spec a nm) :morph]]
+       :signals (page-signals spec a)}
+
+      :unchanged
+      {:patches [(notice nil)]}
+
+      {:patches [(notice outcome)]})))
+
+(defn unit-values
+  "What each re-renderable part of a detail page shows of `row`, keyed by part name."
+  [{:keys [detail] :as spec} row]
+  (let [{:keys [fields links settings config sections signals]} detail]
+    (cond-> (into {"title" (:name row)
+                   "links" (mapv #(link-visible? row %) links)}
+                  (concat
+                   (map (fn [[k]] [(name k) (get row k)]) fields)
+                   (map (fn [[k :as l]]
+                          [(name k) (if (data/owned? l)
+                                      (get row k)
+                                      (set (map :xid (get row k))))])
+                        links)))
+      settings        (assoc "settings" (:settings row))
+      config          (assoc "config" (select-keys row [(:attr config) (:by config)]))
+      (seq sections)  (assoc "sections" (select-keys row (map first fields)))
+      signals         (assoc "signals" (page-signals spec row)))))
+
+(defn watch-patches
+  "`{:patches .. :signals ..}` re-rendering the parts of a detail page named in `changed`."
+  [{:keys [detail] :as spec} row changed]
+  (let [links? (contains? changed "links")
+        owned  (into {} (map (fn [l] [(name (first l)) l])) (data/owned-links (:links detail)))
+        link?  (into #{} (map (comp name first)) (:links detail))]
+    {:patches (cond-> []
+                links?                        (conj [(detail-links spec row) :morph])
+                (contains? changed "title")    (conj [(detail-title row) :morph])
+                (contains? changed "sections") (conj [(detail-sections spec row) :morph])
+                :always
+                (into (keep (fn [p]
+                              (cond
+                                (#{"links" "title" "sections" "signals"} p) nil
+                                (and links? (link? p))                     nil
+                                (owned p)                                  [(owned-list spec row (owned p)) :morph]
+                                :else                                      (some-> (detail-unit spec row p) (vector :morph)))))
+                      changed))
+     :signals (when (contains? changed "signals") (page-signals spec row))}))
 
 (defn tab-id
   [label]
@@ -933,38 +1161,18 @@
 
 (defn detail
   [request {:keys [slug label detail] :as spec} row & [notice panel-notice]]
-  (let [{:keys [fields links head sections panels confirm locked]} detail
+  (let [{:keys [head panels confirm locked]} detail
         locked (when locked (locked row))
         title (or (:name row) "Edit")
         form  (if locked
-               (locked-form spec row locked notice)
-               (form-page
-               {:spec spec
-                :row row
-                :action (str "/console/iam/" slug "/" (:xid row))
-                :notice notice
-                :fields (cons
-                         (when-let [{:keys [by badge]} (:config detail)]
-                           [:div.console-field
-                            [:div.console-field-label (str/capitalize (clojure.core/name by))]
-                            (badge row)])
-                         (for [f fields]
-                           (field-control f row (when (= :enum (nth f 2))
-                                                  (data/enum-values spec (first f))))))
-                :sections (for [section sections] (section row))
-                :links (for [l links
-                             :when (if-let [[rel] (data/link-via l)] (get row rel) true)]
-                         (link-control slug l row (link-options-for l)))
-                :actions
-                (list
-                 [:ty-button {:type "button" :size "sm" :appearance "ghost"
-                              :onclick (str "location.href='/console/iam/" slug "'")}
-                  "Cancel"]
-                 [:ty-button {:type "submit" :size "sm" :flavor "primary"} "Save"])}))]
+                (locked-form spec row locked notice)
+                (detail-form spec row notice))]
     (admin-shell
      {:title title
       :user (:console/principal request)
       :uri (str "/console/iam/" slug)
+      :stream (when (and (not locked) (routes/sse-available?))
+                (str "/console/live/iam/" slug "/" (:xid row)))
       :confirm (cond
                  (and (:delete spec) (not locked)) (str "/console/iam/" slug "/" (:xid row) "/delete")
                  confirm (confirm row))
@@ -976,13 +1184,13 @@
        ;; ancestor, never on a sibling — Datastar applies one element's own
        ;; directives in attribute order and hiccup2 sorts them, so a reader on
        ;; the same element can run first.
-       (when-let [sig (get-in spec [:detail :signals])]
-         {:data-signals (sig row)})
+       (when-let [sig (page-signals spec row)]
+         {:data-signals (json/write-str sig)})
        [:div.console-page-head
         [:div.console-eyebrow
          [:a.console-back {:href (str "/console/iam/" slug)}
           (icon/icon :chevron-right {:size "11"}) label]]
-        [:h1.console-title title]
+        (detail-title row)
         [:div.console-detail-actions
          (when-let [tt (data/transfer-by-slug slug)]
            (when (data/transfer-exportable? (:type tt))

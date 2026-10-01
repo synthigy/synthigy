@@ -711,18 +711,22 @@
     (into {} (remove (comp dups first)) entries)))
 
 (defn build-positional
-  "Splice named placeholders out of `sql`, returning `[new-sql params]`.
+  "Splice named placeholders out of `sql`, returning `[new-sql params types]`.
    A scalar param emits `?`; an array emits `(?,?,…)`, or `(NULL)` when
    empty (the standard empty-IN workaround); portable across PG+SQLite —
    PG callers wanting `ANY` write `ANY(ARRAY[?names[]])` instead."
   [sql named pmap]
-  (let [order-exprs (delay (select-order-exprs sql))]
+  (let [order-exprs (delay (select-order-exprs sql))
+        declared    (reduce (fn [m {:keys [name type]}]
+                              (cond-> m (and type (not (contains? m name))) (assoc name type)))
+                            {} named)]
     (loop [occs   (sort-by :from named)
            cursor 0
            pieces []
-           vals   []]
+           vals   []
+           types  []]
       (if (empty? occs)
-        [(str (str/join pieces) (subs sql cursor)) vals]
+        [(str (str/join pieces) (subs sql cursor)) vals types]
         (let [{:keys [from to name array? type type-args]} (first occs)
               v (get pmap name)
               [placeholder add-vals]
@@ -749,12 +753,14 @@
           (recur (rest occs)
                  to
                  (conj pieces (subs sql cursor from) placeholder)
-                 (into vals add-vals)))))))
+                 (into vals add-vals)
+                 (into types (repeat (count add-vals) (get declared name)))))))))
 
 (defn rewrite
   "Compile named placeholders in **comment-free** `sql` down to positional
    `?`. `params` is a `{name value}` map (named mode) or a vector/seq
-   (positional mode). Returns `{:sql str :params vector}` on success, or
+   (positional mode). Returns `{:sql str :params vector :types vector}` on success
+   (`:types` parallel to `:params`, named mode only), or
    `{:errors [str …]}` on a validation failure.
 
    A template with no `?name` placeholder is passed through unchanged
@@ -803,5 +809,5 @@
           (let [errs (check-consistency named pmap)]
             (if (seq errs)
               {:errors errs}
-              (let [[new-sql vals] (build-positional sql named pmap)]
-                {:sql new-sql :params vals}))))))))
+              (let [[new-sql vals types] (build-positional sql named pmap)]
+                {:sql new-sql :params vals :types types}))))))))

@@ -26,6 +26,7 @@
    [clojure.string :as str]
    [starfederation.datastar.clojure.api :as d*]
    [synthigy.embedded :as embedded]
+   [synthigy.iam.access :as access]
    [synthigy.json :as json]
    [synthigy.log :as log]
    [synthigy.server.console.data :as data]
@@ -109,6 +110,53 @@
   [request]
   (stream request system/live (render-push (fn [_] (system/panel)))))
 
+(defn apply-patches!
+  [sse-gen patches signals]
+  (doseq [[hiccup mode] patches]
+    (d*/patch-elements! sse-gen (fragment hiccup)
+                        (if (= :replace mode) {d*/patch-mode d*/pm-replace} {})))
+  (when signals
+    (d*/patch-signals! sse-gen (json/write-str signals))))
+
+(defn detail-records
+  "Every record a detail row's page shows: the row, its via targets, its owned children."
+  [{:keys [detail]} row]
+  (into (sorted-set (:xid row))
+        (concat
+         (keep (fn [l] (when-let [[rel] (data/link-via l)] (get-in row [rel :xid])))
+               (:links detail))
+         (mapcat (fn [[k]] (keep :xid (get row k)))
+                 (data/owned-links (:links detail))))))
+
+(defn detail-stream
+  "One detail row, watched: push only the parts whose stored value changed since the last push."
+  [request {:keys [entity slug] :as spec} xid]
+  (when-let [row0 (data/editable-row spec xid)]
+    (let [principal (:console/principal request)
+          user-xid  (get-in request [:console/session :resource-owner])
+          baseline  (atom (ui/unit-values spec row0))
+          records   (atom (detail-records spec row0))
+          live      (embedded/watch-query entity {:_where {:xid {:_eq xid}}}
+                                          (data/detail-selection spec)
+                                          :acting-as user-xid :entity-track false
+                                          :records (vec @records))]
+      (stream request live
+              (fn [sse-gen rows]
+                (access/with-principal principal
+                  (if-let [row (data/shape-detail-row spec (first rows))]
+                    (let [now     (ui/unit-values spec row)
+                          changed (into #{} (keep (fn [[p v]] (when (not= v (get @baseline p)) p))) now)
+                          spans   (detail-records spec row)]
+                      (when (not= spans @records)
+                        (reset! records spans)
+                        (embedded/retune-watch! live {:records (vec spans)}))
+                      (when (seq changed)
+                        (reset! baseline now)
+                        (let [{:keys [patches signals]} (ui/watch-patches spec row changed)]
+                          (apply-patches! sse-gen patches signals))))
+                    (d*/execute-script! sse-gen (format "location.href=%s"
+                                                        (json/write-str (str "/console/iam/" slug)))))))))))
+
 (defn browse-rows-response
   [request spec offset q rels sort-k dir]
   (let [rows    (data/browse-rows spec offset q rels sort-k dir)
@@ -133,21 +181,24 @@
           (finally
             (try (d*/close-sse! sse-gen) (catch Exception _ nil)))))})))
 
-(defn link-panel-response
-  "Re-render the whole owned-child panel from server state via `pm-replace`."
-  [request {:keys [slug]} [k label _ icon _ show] rows state]
+(defn patch-response
+  "Apply `patches` — `[hiccup mode]` pairs, matched by the element's own id — and `signals`, then close."
+  [request patches signals]
   (routes/sse-response
    request
    {:d*.sse/on-open
     (fn [sse-gen]
       (try
-        (d*/patch-elements!
-         sse-gen
-         (fragment (ui/link-panel slug label k icon show rows state))
-         {d*/selector (str "#" (name k) "-panel")
-          d*/patch-mode d*/pm-replace})
+        (apply-patches! sse-gen patches signals)
         (finally
           (try (d*/close-sse! sse-gen) (catch Exception _ nil)))))}))
+
+(defn link-panel-response
+  "Re-render the whole owned-child panel from `rows`, and open or close its modal."
+  [request base [k label _ icon _ show] rows state]
+  (patch-response request
+                  [[(ui/link-panel base label k icon show rows state) :replace]]
+                  {(ui/panel-signal k) (ui/panel-open? state)}))
 
 (defn redirect-response
   "Navigate, for an action fired by a Datastar `@post` — a plain 303 would be patched, not followed."

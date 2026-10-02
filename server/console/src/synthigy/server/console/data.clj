@@ -187,26 +187,25 @@
 
 (defn settings-patch
   "`current` with each declared setting that DIFFERS from what was posted replaced — undeclared keys and grant values the form doesn't offer survive."
-  ([spec current params] (settings-patch spec current params true))
-  ([{fields :fields} current params validate?]
-   (reduce
-    (fn [settings [k _ kind _ opts :as f]]
-      (let [kn    (name k)
-            old   (get settings kn)
-            new   (setting-posted f params)
-            known (set (map first (:choices opts)))]
-        (cond
-          (= :grants kind)
-          (if (= (set (filter known (listy old))) (set new))
-            settings
-            (assoc settings kn (into (filterv (complement known) (listy old)) new)))
+  [{fields :fields} current params]
+  (reduce
+   (fn [settings [k _ kind _ opts :as f]]
+     (let [kn    (name k)
+           old   (get settings kn)
+           new   (setting-posted f params)
+           known (set (map first (:choices opts)))]
+       (cond
+         (= :grants kind)
+         (if (= (set (filter known (listy old))) (set new))
+           settings
+           (assoc settings kn (into (filterv (complement known) (listy old)) new)))
 
-          (same-setting? kind old new) settings
+         (same-setting? kind old new) settings
 
-          :else (do (when validate? (check-setting! f new))
-                    (assoc settings kn new)))))
-    (or current {})
-    fields)))
+         :else (do (check-setting! f new)
+                   (assoc settings kn new)))))
+   (or current {})
+   fields))
 
 (defn config-value
   [{:keys [attr string?]} row]
@@ -453,10 +452,55 @@
       (named fields)                   [:field (named fields)]
       (named (remove owned? links))    [:link (named (remove owned? links))])))
 
+(defn controls-under
+  "The names after `prefix` among the committed `controls` — `settings__token-expiry__access` under `settings__` is `token-expiry`."
+  [controls prefix]
+  (into #{}
+        (keep #(when (str/starts-with? % prefix)
+                 (first (str/split (subs % (count prefix)) #"__|~"))))
+        (str/split (str controls) #",")))
+
+(defn only-field
+  "The block `fields` narrowed to those whose controls committed — none when no control is named."
+  [fields prefix controls]
+  (let [ks (controls-under controls (str prefix "__"))]
+    (filterv #(ks (name (first %))) fields)))
+
+(defn control-toggles
+  "`[[op value] …]` committed for control `nm` — `<nm>~+<v>` adds, `<nm>~-<v>` removes, `<nm>~*` clears."
+  [controls nm]
+  (keep #(when-let [[_ c op v] (re-matches #"([^~]+)~([+*-])(.*)" %)]
+           (when (= nm c) [op v]))
+        (str/split (str controls) #",")))
+
+(defn apply-toggles
+  [values toggles]
+  (reduce (fn [cur [op v]]
+            (case op
+              "+" (if (some #{v} cur) cur (conj cur v))
+              "-" (filterv #(not= v %) cur)
+              "*" []))
+          (vec values)
+          toggles))
+
+(defn toggled-params
+  "Checkbox groups rebuilt from what is stored plus the committed toggles — never from the form's own checkbox state."
+  [prefix {:keys [fields]} stored params]
+  (reduce (fn [ps [k]]
+            (let [nm      (str prefix "__" (name k))
+                  toggles (control-toggles (:unit/control params) nm)]
+              (if (seq toggles)
+                (assoc ps (keyword nm) (apply-toggles (listy (get stored (name k))) toggles))
+                ps)))
+          params
+          fields))
+
 (defn link-change
-  [entity xid k link-entity submitted]
-  (let [current (mapv :xid (all-grants entity xid k))
-        payload (link-payload current link-entity (distinct (remove str/blank? submitted)))]
+  "The link write for a picker — from the stored links plus its committed add/remove toggles when it sent any, else from the posted set."
+  [entity xid k link-entity submitted toggles]
+  (let [current   (mapv :xid (all-grants entity xid k))
+        submitted (if (seq toggles) (apply-toggles current toggles) submitted)
+        payload   (link-payload current link-entity (distinct (remove str/blank? submitted)))]
     (when (not= (set current) (set (map :xid payload)))
       [entity xid {k payload}])))
 
@@ -469,19 +513,23 @@
                 (when-not (same-value? fkind (get current k) v)
                   [entity (:xid current) {k v}]))
     :settings (let [stored (or (:settings current) {})
-                    new    (settings-patch u stored params)]
+                    new    (settings-patch (update u :fields only-field "settings" (:unit/control params))
+                                           stored (toggled-params "settings" u stored params))]
                 (when (not= stored new)
                   [entity (:xid current) {:settings new}]))
     :config   (let [stored (config-value u current)
-                    new    (config-merge u current params)]
+                    new    (config-merge (update u :layouts update-vals
+                                                 #(only-field % "config" (:unit/control params)))
+                                         current params)]
                 (when (not= stored new)
                   [entity (:xid current) {(:attr u) (config-encode u new)}]))
     :link     (let [[k _ link-entity] u
-                    submitted (listy (get params k))]
+                    submitted (listy (get params k))
+                    toggles   (control-toggles (:unit/control params) (name k))]
                 (if-let [[rel via-entity] (link-via u)]
                   (when-let [target (get-in current [rel :xid])]
-                    (link-change via-entity target k link-entity submitted))
-                  (link-change entity (:xid current) k link-entity submitted)))))
+                    (link-change via-entity target k link-entity submitted toggles))
+                  (link-change entity (:xid current) k link-entity submitted toggles)))))
 
 (def unit-locks
   (vec (repeatedly 64 #(Object.))))
@@ -529,12 +577,14 @@
          (keyword (str/replace (name fk) "-" "_"))]))
 
 (defn child-changes
+  "The card fields that differ from `child` — a switch only when its control was flipped (`:card/touched`), never from its posted state."
   [fields child card]
   (into {}
         (keep (fn [[fk _ kind]]
-                (let [v (if (= :switch kind) (boolean (get card fk)) (not-empty (get card fk)))]
-                  (when-not (same-value? kind (child-value child fk) v)
-                    [fk v]))))
+                (when (or (not= :switch kind) (contains? (:card/touched card) fk))
+                  (let [v (if (= :switch kind) (boolean (get card fk)) (not-empty (get card fk)))]
+                    (when-not (same-value? kind (child-value child fk) v)
+                      [fk v])))))
         fields))
 
 (defn panel-write!

@@ -44,9 +44,8 @@
   "What the page needs after profile field `nm` was posted."
   [nm [status _ after :as outcome]]
   (let [[_ f] (data/profile-field nm)]
-    (cond-> []
-      (= :ok status) (conj [(field-unit after f) :morph])
-      :always        (conj [(ui/unit-status nm (ui/unit-notice (unit-uri nm) outcome)) :replace]))))
+    (cond-> (ui/status-patches (unit-uri nm) nm outcome)
+      (= :ok status) (conj [(field-unit after f) :morph]))))
 
 (defn render
   [request]
@@ -61,7 +60,7 @@
       [:div.console-page
        [:div.console-page-head
         [:div.console-eyebrow "Your account"]
-        [:h1.console-title "Profile"]
+        [:div.console-title-row [:h1.console-title "Profile"] (ui/saved-mark)]
         [:p.console-subtitle
          "Your public profile and personal info. These are yours to change — "
          "nothing here is shared without your say."]]

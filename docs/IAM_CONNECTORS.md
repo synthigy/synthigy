@@ -477,7 +477,7 @@ Typical workflow for a new install:
 ```bash
 # 1. Boot Synthigy with the DB backend of choice. Patches run on first start
 #    and create __iam_auth_connector with a default :database connector seeded.
-clj -M:postgres:pedestal:dev      # or :sqlite:pedestal:dev
+clj -M:engine-postgres:server-pedestal:dev      # or :sqlite:pedestal:dev
 
 # 2. Verify the chain via the admin API
 PORT=$(cat ~/.synthigy/admin.port)
@@ -559,12 +559,12 @@ Lower-priority items (defer until requested):
 
 | Path | Purpose |
 |---|---|
-| `auth/synthigy/iam/connector.clj` | Multimethod, protocol, sugar API, `MemoryCredentialsProvider`, default chain |
-| `auth/synthigy/iam/connector/dev.clj` | REPL helpers (require manually) |
+| `server/oauth/src/synthigy/iam/connector.clj` | Multimethod, protocol, sugar API, `MemoryCredentialsProvider`, default chain |
+| `server/oauth/src/synthigy/iam/connector/dev.clj` | REPL helpers (require manually) |
 | `postgres/src/synthigy/iam/connector/postgres.clj` | Postgres provider, patch (table + trigger + seed), LISTEN thread, lifecycle module |
 | `sqlite/src/synthigy/iam/connector/sqlite.clj` | SQLite provider, patch (table + seed), lifecycle module |
 | `core/core/src/synthigy/admin/core.clj` | Admin HTTP handlers + router (mixed in with other admin endpoints) |
-| `auth/synthigy/oauth/core.clj` | `validate-resource-owner` integration point |
+| `server/oauth/src/synthigy/oauth/core.clj` | `validate-resource-owner` integration point |
 | `test/synthigy/iam/connector_test.clj` | Multimethod / chain / sugar / `authenticate` unit tests |
 | `test/synthigy/admin/connector_test.clj` | Admin HTTP endpoint tests (Ring-handler-direct, no server) |
 

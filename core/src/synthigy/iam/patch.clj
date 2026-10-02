@@ -33,14 +33,17 @@
     [synthigy.dataset.core :as core]
     [synthigy.dataset.id :as id]
     [synthigy.dataset.sql.naming :as naming]
+    [synthigy.iam.access :refer [with-principal]]
     [synthigy.iam.keys]
+    [synthigy.iam.transfer :as transfer]
+    [synthigy.data :refer [*ROOT* *PUBLIC_ROLE*]]
     [synthigy.db :refer [*db*]]))
 
 ;; ============================================================================
 ;; Component Version Registration
 ;; ============================================================================
 
-(patch/current-version :synthigy/iam "1.0.1")
+(patch/current-version :synthigy/iam "1.0.2")
 ;; ============================================================================
 ;; Version Patches
 ;; ============================================================================
@@ -145,3 +148,14 @@
 
 (patch/upgrade :synthigy/iam "1.0.1"
                (migrate-public-profiles!))
+
+(patch/upgrade :synthigy/iam "1.0.2"
+               (with-principal nil
+                 (transfer/import-role "exports/role_xsql_developer.json")
+                 (doseq [role [*ROOT* *PUBLIC_ROLE*]]
+                   (dataset/stack-entity :iam/user-role (select-keys role [(id/key) :description])))
+                 (when-let [iam-user (dataset/get-entity :iam/user-role {:name "IAM User"} {(id/key) nil})]
+                   (dataset/stack-entity :iam/user-role
+                                         (assoc iam-user
+                                                :active      false
+                                                :description "Deprecated, not created on new installs. Read-only IAM view, fully covered by IAM Auditor.")))))

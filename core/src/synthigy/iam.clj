@@ -405,6 +405,7 @@
     (doseq [role ["exports/role_dataset_developer.json"
                   "exports/role_dataset_modeler.json"
                   "exports/role_dataset_explorer.json"
+                  "exports/role_xsql_developer.json"
                   "exports/role_iam_admin.json"
                   "exports/role_user_admin.json"
                   "exports/role_role_admin.json"

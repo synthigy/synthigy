@@ -207,29 +207,6 @@
           (and synthigy-id principal-id (= synthigy-id principal-id))))
     (contains? (or roles #{}) (id/extract *ROOT*)))))
 
-(defn roles->schema-principal
-  "Resolve role names to a synthetic principal for `with-principal`; the caller
-   must hold every requested role or be superuser."
-  [role-names]
-  (let [wanted (set role-names)
-        found  (dataset/search-entity
-                :iam/user-role
-                {:name {:_in (vec wanted)}}
-                {(id/key) nil :_eid nil :name nil})
-        by-name (into {} (map (juxt :name identity)) found)
-        missing (remove by-name wanted)]
-    (when (seq missing)
-      (throw (ex-info (str "Unknown role(s): " (str/join ", " missing))
-                      {:code "UNKNOWN_ROLE" :roles (vec missing)})))
-    (let [target-xids (into #{} (map id/extract) found)]
-      (when-not (or (superuser?)
-                    (and (seq target-xids)
-                         (set/subset? target-xids (role-xids))))
-        (throw (ex-info (str "Not permitted to project schema for role(s): "
-                             (str/join ", " wanted))
-                        {:code "FORBIDDEN" :roles (vec wanted)}))))
-    {:roles (into {} (map (juxt id/extract identity)) found)}))
-
 (defn entity-allows?
   "Whether a principal holding `roles` may perform any of `rules` on `entity`."
   ([entity rules] (entity-allows? entity rules (role-xids)))
@@ -317,6 +294,29 @@
            false))
      false
      (select-keys *scopes* roles)))))
+
+(defn roles->schema-principal
+  "Resolve role names to a synthetic principal for `with-principal`; the caller
+   must hold schema:read or every requested role."
+  [role-names]
+  (let [wanted     (set role-names)
+        found      (with-principal nil
+                     (dataset/search-entity
+                      :iam/user-role
+                      {:name {:_in (vec wanted)}}
+                      {(id/key) nil :_eid nil :name nil}))
+        missing    (remove (into #{} (map :name) found) wanted)
+        privileged (or (superuser?) (scope-allowed? "schema:read"))]
+    (when-not (or privileged
+                  (and (empty? missing)
+                       (set/subset? (into #{} (map id/extract) found) (role-xids))))
+      (throw (ex-info (str "Not permitted to project schema for role(s): "
+                           (str/join ", " wanted))
+                      {:code "FORBIDDEN" :roles (vec wanted)})))
+    (when (seq missing)
+      (throw (ex-info (str "Unknown role(s): " (str/join ", " missing))
+                      {:code "UNKNOWN_ROLE" :roles (vec missing)})))
+    {:roles (into {} (map (juxt id/extract identity)) found)}))
 
 (defn get-roles-scope-data
   []

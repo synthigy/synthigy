@@ -1,0 +1,11 @@
+{
+    "active": true,
+    "description": "Codegen and editor tooling: the full model schema and its projection onto any role. No data access.",
+    "name": "XSQL Developer",
+    "scopes": [
+        {
+            "xid": "7ipbiNugGoy2y2DTNZWgEo"
+        }
+    ],
+    "xid": "HAMzQJ7JFCerkUKKrCgadj"
+}

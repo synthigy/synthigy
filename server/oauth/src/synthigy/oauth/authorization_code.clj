@@ -55,6 +55,7 @@
    (id/entity :oauth/authorization-code)
    {:code code
     :issued (boolean issued?)
+    ;; SDK pending-login TTLs (10 min) must stay above this, or slow logins fail at the callback
     :expires_at (java.util.Date. (+ (System/currentTimeMillis) (minutes 8)))
     :data {"client" client
            "agent" agent

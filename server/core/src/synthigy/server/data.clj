@@ -32,7 +32,6 @@
    [synthigy.dataset :as dataset]
    [synthigy.dataset.access :as daccess]
    [synthigy.dataset.id :as id]
-   [synthigy.dataset.runtime :as runtime]
    [synthigy.engine :as engine]
    [synthigy.iam :as iam]
    [synthigy.iam.access :as access]
@@ -147,28 +146,16 @@
       (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
       (try
         (access/with-principal (:principal iam)
-          (let [raw-roles    (get-in request [:query-params "roles"])
-                role-names   (when (seq raw-roles)
-                               (->> (str/split raw-roles #",")
-                                    (map str/trim)
-                                    (filter seq)))
-                projected    (when (seq role-names)
-                               (access/roles->schema-principal role-names))]
-            (access/with-principal (or projected (:principal iam))
-              (let [model         (-> (dataset/deployed-model)
-                                      daccess/protect-model
-                                      runtime/build)
-                    raw-entities  (get-in request [:query-params "entities"])
-                    entity-filter (when (seq raw-entities)
-                                    (->> (str/split raw-entities #",")
-                                         (map str/trim)
-                                         (filter seq)))
-                    key-fmt       (get-in request [:query-params "key_format"])
-                    name-fn       (get daccess/name-fn-for key-fmt daccess/*name-fn*)
-                    result        (dataset/stamp-schema
-                                    (binding [daccess/*name-fn* name-fn]
-                                      (daccess/schema model entity-filter)))]
-                (json-response 200 result)))))
+          (let [split-param   (fn [k]
+                                (when-let [raw (not-empty (get-in request [:query-params k]))]
+                                  (->> (str/split raw #",") (map str/trim) (filter seq))))
+                key-fmt       (get-in request [:query-params "key_format"])
+                name-fn       (get daccess/name-fn-for key-fmt daccess/*name-fn*)
+                result        (dataset/stamp-schema
+                                (binding [daccess/*name-fn* name-fn]
+                                  (daccess/schema (engine/schema-model (split-param "roles"))
+                                                  (split-param "entities"))))]
+            (json-response 200 result)))
         (catch clojure.lang.ExceptionInfo e
           (let [status (case (:code (ex-data e))
                          "UNKNOWN_ROLE" 400

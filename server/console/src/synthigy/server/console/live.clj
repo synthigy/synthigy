@@ -195,9 +195,9 @@
 
 (defn link-panel-response
   "Re-render the whole owned-child panel from `rows`, and open or close its modal."
-  [request base [k label _ icon _ show] rows state]
+  [request base [k label _ icon _ show] rows state & [extra]]
   (patch-response request
-                  [[(ui/link-panel base label k icon show rows state) :replace]]
+                  (into [[(ui/link-panel base label k icon show rows state) :replace]] extra)
                   {(ui/panel-signal k) (ui/panel-open? state)}))
 
 (defn redirect-response

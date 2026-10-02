@@ -15,7 +15,7 @@ one branch of one write function plus the usual per-backend DDL/plug grind.
 ## How backends work here (recap)
 
 A backend is a **self-contained source root** (`postgres/`, `sqlite/`, `cockroach/`) added to the
-classpath by a `deps.edn` alias (`clj -M:postgres:httpkit:dev`). Selection is the alias, not an env
+classpath by a `deps.edn` alias (`clj -M:engine-postgres:server-httpkit:dev`). Selection is the alias, not an env
 var. Each backend provides the same shadowed namespaces and extends the shared-core protocols onto
 its own `defrecord`. Runtime wiring is the patcho lifecycle chain:
 `:synthigy/database → :synthigy/dataset → :synthigy/plug → :synthigy/audit → :synthigy.iam/connector`.

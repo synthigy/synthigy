@@ -469,9 +469,11 @@
     (when-let [row (data/editable-row spec xid)]
       (let [fields  (get-in show [:create :fields])
             raw     (posted-form request)
-            {:strs [add target drop confirm] new-q "new"} (query-params request)
+            {:strs [add target drop confirm control] new-q "new"} (query-params request)
             editing (some-> (get raw (keyword (str (name k) "_editing"))) str not-empty)
-            card    (card-values k fields raw)
+            card    (assoc (card-values k fields raw)
+                           :card/touched (into #{} (map keyword)
+                                               (data/controls-under control (str (name k) "_new_"))))
             op      (cond (and drop confirm) :delete
                           add                (if editing :edit :add))
             [status msg] (when op
@@ -482,20 +484,22 @@
                       (= :denied status)       {:editing editing :values card
                                                 :notice [:warn "You don't have permission to change this."]}
                       (= :error status)        {:editing editing :values card :notice [:warn msg]}
-                      (= :ok status)           {:notice [:ok (case op :add "Added." :edit "Saved." "Deleted.")]}
+                      (= :ok status)           {}
                       (and target (not add))   {:editing target
                                                 :values (some #(when (= target (:xid %)) %) (get row k))}
                       new-q                    {:open true}
                       :else                    {})]
         (live/link-panel-response request (ui/panel-base (:slug spec) k xid) link
-                                  (get row k) (assoc state :persisted? true))))))
+                                  (get row k) (assoc state :persisted? true)
+                                  (when (= :ok status)
+                                    [[(ui/saved-mark (case op :add "Added" :edit "Saved" "Deleted")) :replace]]))))))
 
 (defn unit-action!
   "POST /console/iam/<slug>/<xid>/unit/<name> — save one detail unit, writing only a real change."
   [request spec xid nm]
   (when (data/unit spec nm)
-    (let [{:strs [confirm cancel]} (query-params request)
-          params  (posted-form request)
+    (let [{:strs [confirm cancel control]} (query-params request)
+          params  (cond-> (posted-form request) control (assoc :unit/control control))
           outcome (if cancel
                     (if-let [row (data/detail-row spec xid)] [:reverted row] [:denied])
                     (data/save-unit! spec xid nm params (some? confirm)))

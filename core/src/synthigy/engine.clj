@@ -342,6 +342,20 @@
     (throw (ex-info (str "Missing required scope: " scope)
                     {:code "FORBIDDEN" :scope scope}))))
 
+(defn schema-model
+  "Runtime model a schema read sees: with schema:read the full model or its
+   projection onto `role-names`, otherwise the caller's own view."
+  [role-names]
+  (let [own-view #(-> (dataset/deployed-model) daccess/protect-model runtime/build)]
+    (cond
+      (seq role-names)
+      (access/with-principal (access/roles->schema-principal role-names) (own-view))
+
+      (access/scope-allowed? "schema:read")
+      (runtime/build (dataset/deployed-model))
+
+      :else (own-view))))
+
 ;;; ============================================================================
 ;;; Operation Dispatch
 ;;; ============================================================================
@@ -804,15 +818,8 @@
                           runtime/build))))
 
 (defmethod execute-operation "schema"
-  [{:keys [entities] :as ctx}]
-  (assert-scope! "schema:read" "dataset:load")
-  ;; Runtime model so the projection covers everything the wire emits
-  ;; (system/audit attrs,
-  ;; reference-as-relation) — otherwise SDK resolvers can't name audit-attr xids
-  ;; and XSQL
-  ;; lint rejects legit created-on/modified-on references.
-  (let [model (-> (dataset/deployed-model) daccess/protect-model runtime/build)]
-    (assoc ctx :result (daccess/schema model entities))))
+  [{:keys [entities roles] :as ctx}]
+  (assoc ctx :result (daccess/schema (schema-model roles) entities)))
 
 ;; Codegen IR — XSQL program source → typed, language-neutral operation IR.
 (defn describe-files
@@ -831,11 +838,9 @@
                     {:code "BAD_OP" :rule "operation_shape"}))))
 
 (defmethod execute-operation "describe"
-  [{:keys [params] :as ctx}]
-  (assert-scope! "schema:read" "dataset:load")
+  [{:keys [params roles] :as ctx}]
   (let [files  (describe-files ctx)
-        model  (-> (dataset/deployed-model) daccess/protect-model runtime/build)
-        schema (daccess/schema model)]
+        schema (daccess/schema (schema-model roles))]
     (assoc ctx :result (codegen/describe schema files params))))
 
 (defn deploy-payload

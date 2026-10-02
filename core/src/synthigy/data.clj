@@ -50,12 +50,14 @@
   {:euuid (id/data :data/root-role :euuid)
    :xid (id/data :data/root-role :xid)
    :name "SUPERUSER"
+   :description "System role. Bypasses every access rule: all data, the data model and the whole IAM. Hold it only for break-glass administration."
    :active true})
 
 (def ^:dynamic *PUBLIC_ROLE*
   {:euuid (id/data :data/public-role :euuid)
    :xid (id/data :data/public-role :xid)
-   :name "Public"})
+   :name "Public"
+   :description "System role of the anonymous __public__ user. Grant it on an entity to make that entity reachable without a token; takes effect only while public access is enabled."})
 
 (def ^:dynamic *PUBLIC_USER*
   {:euuid (id/data :data/public-user :euuid)

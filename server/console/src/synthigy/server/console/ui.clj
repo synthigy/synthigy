@@ -553,7 +553,8 @@
           [:ty-input {:name (str nm "__" sub) :type "number" :size "sm"
                       :label (str/capitalize sub)
                       :placeholder (str (get (:defaults opts) sub))
-                      :value (str (or (get v sub) ""))}])]
+                      :value (str (or (get v sub) ""))}
+           [:span {:slot "end"} "seconds"]])]
 
        [:ty-input {:name nm :size "sm" :autocomplete "off"
                    :value (str (or v ""))}])]))
@@ -740,6 +741,10 @@
         :size "sm"
         :value sel
         :placeholder (str "Search " (str/lower-case label) "…")
+        (keyword "data-on:open") "el._open = true"
+        (keyword "data-on:close")
+        (str "el._open = false; "
+             "if (el._picked) { el.dispatchEvent(new CustomEvent('change', {bubbles: true, detail: {}})); el._picked = false }")
         (keyword "data-on:search")
         (format (str "@get('/console/iam/%s/options?link=%s&offset=0&q=' "
                      "+ encodeURIComponent(evt.detail.query || '') "
@@ -827,11 +832,40 @@
                        (keyword "data-on:click") (ep "add=1")}
            (if (some? editing) "Save" (str "Add " sing))]]))]]))
 
+(defn unit-uri
+  [slug xid nm]
+  (str "/console/iam/" slug "/" xid "/unit/" nm))
+
+(defn unit-post
+  [uri & [q]]
+  (format "@post('%s%s',{contentType:'form'})" uri (if q (str "?" q) "")))
+
+(defn unit-status
+  [nm & [content]]
+  [:div.console-unit-status {:id (str "unit-" nm "-status")} content])
+
+(def remember-control
+  (str "if (evt.detail?.originalEvent?.type !== 'input') { "
+       "if (evt.target._open) { evt.target._picked = true }; "
+       "el._controls = (el._controls ? el._controls + ',' : '') + (evt.target.getAttribute('name') || '')"
+       " + (evt.target.tagName === 'TY-CHECKBOX' ? '~' + (evt.target.checked ? '+' : '-') + evt.target.getAttribute('value')"
+       " : evt.target.tagName === 'TY-SELECT' && evt.target.hasAttribute('multiple')"
+       " ? ({add: '~+', remove: '~-', clear: '~*'}[evt.detail?.action] || '') + (evt.detail?.action === 'clear' ? '' : (evt.detail?.item ?? ''))"
+       " : '') }"))
+
+(defn controls-post
+  "`@post` to `url` naming the controls `form` collected since its last post, which it then forgets."
+  [url form]
+  (format "@post('%s%scontrol=' + encodeURIComponent(%s._controls || ''), {contentType:'form'}); %s._controls = ''"
+          url (if (str/includes? url "?") "&" "?") form form))
+
 (defn link-panel
   "The owned-child panel — pure form state on a create page, a writer of stored children when `persisted?`."
-  [base label link-key icon show rows {:keys [notice persisted?] :as state}]
+  [base label link-key icon show rows {:keys [persisted?] :as state}]
   (let [sing (singular label)
-        ep   (fn [q] (format "@post('%s?%s',{contentType:'form'})" base q))]
+        ep   (if persisted?
+               #(controls-post (str base "?" %) "el.closest('form')")
+               #(unit-post base %))]
     [:div.console-links.console-owned
      {:id (str (name link-key) "-panel")
       (keyword (str "data-signals:" (panel-signal link-key) "__ifmissing")) "false"}
@@ -841,8 +875,6 @@
                    (keyword "data-on:click") (ep "new=1")}
        (icon/icon :plus {:size "12" :slot "start"})
        (str "Add " sing)]]
-     (when (= :ok (first notice))
-       [:div.console-notice.console-rounded-notice.ok (second notice)])
      (panel-list ep link-key icon show rows persisted?)
      (panel-modal ep link-key show sing rows state)]))
 
@@ -906,7 +938,8 @@
 (defn owned-panel
   "A detail page's owned-child panel, in a form of its own so its card posts alone."
   [{:keys [slug]} row [k label _ icon _ show] & [state]]
-  [:form.console-unit {:id (str "unit-" (name k)) :novalidate true}
+  [:form.console-unit {:id (str "unit-" (name k)) :novalidate true
+                       (keyword "data-on:change") remember-control}
    (link-panel (panel-base slug k (:xid row)) label k icon show (get row k)
                (assoc state :persisted? true))])
 
@@ -925,26 +958,16 @@
       (config-section spec row)]]
     [:div.console-form-actions actions]]])
 
-(defn unit-uri
-  [slug xid nm]
-  (str "/console/iam/" slug "/" xid "/unit/" nm))
-
-(defn unit-post
-  [uri & [q]]
-  (format "@post('%s%s',{contentType:'form'})" uri (if q (str "?" q) "")))
-
-(defn unit-status
-  [nm & [content]]
-  [:div.console-unit-status {:id (str "unit-" nm "-status")} content])
-
 (defn unit-form
   "One independently saved piece of a page: its own form, posted to `uri` when a control inside it commits."
   [uri nm body]
   [:form.console-unit
    {:id (str "unit-" nm)
     :novalidate true
+    (keyword "data-on:change") remember-control
     (keyword "data-on:change__debounce.300ms")
-    (str "if (evt.detail?.originalEvent?.type !== 'input') { " (unit-post uri) " }")
+    (str "if (evt.detail?.originalEvent?.type !== 'input' && !evt.target._open) { "
+         (controls-post uri "el") " }")
     (keyword "data-on:keydown")
     (str "if (evt.key === 'Enter' && evt.target.tagName === 'TY-INPUT') "
          "{ evt.preventDefault(); evt.composedPath()[0].blur() }")}
@@ -988,6 +1011,12 @@
   [row]
   [:h1.console-title {:id "detail-title"} (or (:name row) "Edit")])
 
+(defn saved-mark
+  "The page's one save confirmation, pinned after the title — patched in as a fresh element so its fade restarts."
+  [& [msg]]
+  [:span.console-detail-saved {:id "detail-saved"}
+   (when msg (list (icon/icon :check {:size "13"}) msg))])
+
 (defn detail-form
   "The editor: every field, link, settings and config block saves itself — there is no Save."
   [{:keys [detail] :as spec} row notice]
@@ -1011,7 +1040,6 @@
 (defn unit-notice
   [uri [status msg]]
   (case status
-    :ok      [:span.console-unit-saved (icon/icon :check {:size "12"}) "Saved"]
     :denied  [:span.console-unit-error "You don't have permission to change this."]
     :error   [:span.console-unit-error msg]
     :confirm [:div.console-unit-confirm
@@ -1025,6 +1053,13 @@
                 "Confirm"]]]
     nil))
 
+(defn status-patches
+  "Unit `nm`'s status after a post: the title's saved mark on success, the message inside the unit otherwise."
+  [uri nm [status :as outcome]]
+  (if (= :ok status)
+    [[(unit-status nm) :replace] [(saved-mark "Saved") :replace]]
+    [[(unit-status nm (unit-notice uri outcome)) :replace]]))
+
 (defn page-signals
   [spec row]
   (when-let [sig (get-in spec [:detail :signals])] (sig row)))
@@ -1034,7 +1069,7 @@
   [{:keys [slug detail] :as spec} xid nm [status a b :as outcome] params]
   (let [[kind u] (data/unit spec nm)
         k        (when (= :link kind) (first u))
-        notice   (fn [o] [(unit-status nm (unit-notice (unit-uri slug xid nm) o)) :replace])]
+        status-p (status-patches (unit-uri slug xid nm) nm outcome)]
     (case status
       :ok
       (let [after     b
@@ -1044,17 +1079,14 @@
         {:patches (cond-> []
                     rerender?               (conj [(detail-unit spec after nm) :morph])
                     (seq (:sections detail)) (conj [(detail-sections spec after) :morph])
-                    :always                 (conj [(detail-title after) :morph] (notice outcome)))
+                    :always                 (into (cons [(detail-title after) :morph] status-p)))
          :signals (page-signals spec after)})
 
       :reverted
       {:patches [[(detail-unit spec a nm) :morph]]
        :signals (page-signals spec a)}
 
-      :unchanged
-      {:patches [(notice nil)]}
-
-      {:patches [(notice outcome)]})))
+      {:patches status-p})))
 
 (defn unit-values
   "What each re-renderable part of a detail page shows of `row`, keyed by part name."
@@ -1190,7 +1222,7 @@
         [:div.console-eyebrow
          [:a.console-back {:href (str "/console/iam/" slug)}
           (icon/icon :chevron-right {:size "11"}) label]]
-        (detail-title row)
+        [:div.console-title-row (detail-title row) (saved-mark)]
         [:div.console-detail-actions
          (when-let [tt (data/transfer-by-slug slug)]
            (when (data/transfer-exportable? (:type tt))

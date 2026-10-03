@@ -821,6 +821,18 @@
   [{:keys [entities roles] :as ctx}]
   (assoc ctx :result (daccess/schema (schema-model roles) entities)))
 
+;; Who this request runs as, after acting_as; :client is the HTTP handler's delay.
+(defmethod execute-operation "whoami"
+  [{:keys [principal client] :as ctx}]
+  (let [names #(->> (vals %) (keep :name) sort vec)]
+    (assoc ctx :result {:xid (some-> principal id/extract)
+                        :name (:name principal)
+                        :active (not (false? (:active principal)))
+                        :superuser (access/superuser?)
+                        :roles (names (:roles principal))
+                        :groups (names (:groups principal))
+                        :client (force client)})))
+
 ;; Codegen IR — XSQL program source → typed, language-neutral operation IR.
 (defn describe-files
   "`describe`'s input as `[{:path :source}]`: `sources` (one per .xsql file) or a single `source`."
@@ -1306,7 +1318,9 @@
                      {:principal (:principal user-ctx)
                       ;; Claims ride from the TOKEN, not the impersonated user —
                       ;; scope checks are the client's.
-                      :claims (:claims auth)}
+                      :claims (:claims auth)
+                      ;; always present: operation-context merges the op body UNDER this map
+                      :client (:client auth)}
                      operations)]
         {:results (transform-results key-fn operations results)}))))
 

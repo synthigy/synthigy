@@ -27,6 +27,7 @@
    [buddy.hashers :as hashers]
    clojure.pprint
    clojure.set
+   [clojure.string :as str]
    [clojure.walk :as walk]
    [synthigy.log :as log]
    [synthigy.supervisor :as supervisor]
@@ -113,9 +114,10 @@
         true))))
 
 (defn add-client [{:keys [id name secret settings type apis]
-                   :or {id (gen/client-id)
-                        type :public}}]
-  (let [existing (get-client id)
+                   :or {type :public}}]
+  ;; blank, not absent: callers pass {:id nil} for "no id", which :or never defaults
+  (let [id (if (str/blank? id) (gen/client-id) id)
+        existing (get-client id)
         created? (nil? existing)
         raw-secret (or secret
                        (when (and (service-user/confidential? {:type type}) created?)

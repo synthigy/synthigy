@@ -97,13 +97,14 @@
    :extra-deps {org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}}}
 
   :audit-clickhouse
-  {:extra-paths ["audit/clickhouse/src"]}
+  {:extra-paths ["audit/clickhouse/src" "lib/clickhouse/src"]}
 
   :audit-memory
   {:extra-paths ["audit/memory/src"]}
 
   :audit-duckdb
-  {:extra-paths ["audit/duckdb/src"]}
+  {:extra-paths ["audit/duckdb/src" "lib/duckdb/src"]
+   :extra-deps {org.duckdb/duckdb_jdbc {:mvn/version "1.1.3"}}}
 
   ;; =========================================================================
   ;; Log store + traffic — exactly one per classpath, each ships `synthigy.log.store`
@@ -113,17 +114,19 @@
    :extra-deps {org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}}}
 
   :log-clickhouse
-  {:extra-paths ["log/clickhouse/src"]}
+  {:extra-paths ["log/clickhouse/src" "lib/clickhouse/src"]}
 
   :log-memory
   {:extra-paths ["log/memory/src"]}
 
   :log-duckdb
-  {:extra-paths ["log/duckdb/src"]}
+  {:extra-paths ["log/duckdb/src" "lib/duckdb/src"]
+   :extra-deps {org.duckdb/duckdb_jdbc {:mvn/version "1.1.3"}}}
 
   
   ;; =========================================================================
-  ;; Libraries — on a module's classpath, never shipped as a dimension
+  ;; Libraries — on a module's classpath, never shipped as a dimension.
+  ;; A module that needs one repeats its path (and deps) in its own alias.
   ;; =========================================================================
   ;; ClickHouse over HTTP — both ClickHouse modules need it; no driver.
   :lib-clickhouse

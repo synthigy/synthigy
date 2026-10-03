@@ -117,8 +117,6 @@
 (def leaf-aliases (into [:server-console]
                         (remove unshipped (map #(module-alias "server" %) (filter adapter? (impls "server"))))))
 (def core-aliases [])
-(def module-libs {:audit-clickhouse [:lib-clickhouse] :log-clickhouse [:lib-clickhouse]
-                  :audit-duckdb [:lib-duckdb] :log-duckdb [:lib-duckdb]})
 
 (defn check-layout!
   "Every module folder has its deps.edn alias pointing at it, and every dimension alias has its folder."
@@ -318,9 +316,8 @@
         core-libs  (set (keys (:libs core-basis)))
         lib-dirs (set (mapcat #(dirs-of (b/create-basis {:aliases [%]})) lib-aliases))
         entry (fn [a]
-                (let [extra (get module-libs a [])
-                      bs  (b/create-basis {:aliases (into core-aliases (conj extra a))})
-                      cbs (b/create-basis {:aliases (into core-aliases (concat extra [a] (witnesses-for a)))})]
+                (let [bs  (b/create-basis {:aliases (conj core-aliases a)})
+                      cbs (b/create-basis {:aliases (into core-aliases (cons a (witnesses-for a)))})]
                   {:basis bs :compile-basis cbs
                    :dirs (remove (into (set core-dirs) (if (some #{a} lib-aliases) #{} lib-dirs)) (dirs-of bs))
                    :libs (remove core-libs (keys (:libs bs)))}))

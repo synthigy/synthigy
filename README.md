@@ -106,20 +106,21 @@ even though neither appears in a release name.
 
 ## License
 
-Synthigy is **free software** under the **GNU Affero General Public License,
-version 3** — see [LICENSE](LICENSE). OSI-approved open source: no revenue
-threshold, no field-of-use restriction, no features held back.
+Synthigy is licensed under the **Elastic License 2.0** (SPDX `Elastic-2.0`) —
+see [LICENSE](LICENSE). It is source-available, free of charge for everyone:
 
-Use it, modify it, self-host it, commercially or not. The AGPL asks for
-reciprocity in return: if you modify Synthigy and let users reach it **over a
-network**, section 13 requires that those users can get its source.
+- use it, modify it, self-host it, inside any company of any size;
+- build your own products on it and sell them — an ERP, a SaaS, an internal
+  tool with Synthigy as its data layer.
 
-Synthigy is also **dual-licensed**. A commercial license removes the AGPL's
-reciprocity obligations — for embedding Synthigy in a proprietary product, or
-offering it as a hosted service without releasing your source. See
-[COMMERCIAL.md](COMMERCIAL.md); contact r.gersak@gmail.com.
+One thing is not allowed: providing Synthigy itself to third parties as a
+**hosted or managed service**. Licensing and copyright notices must stay
+intact, and no trademark rights are granted.
 
-The client **SDKs are MIT** — they are libraries you embed in your own
-application, and calling a Synthigy server over HTTP does not make your
-application a derivative work. Bundled third-party dependencies keep their own
+A **commercial license** covers what the Elastic License 2.0 does not — hosting
+Synthigy as a service, OEM and reseller arrangements, warranty and support.
+See [COMMERCIAL.md](COMMERCIAL.md); contact r.gersak@gmail.com.
+
+The client **SDKs are MIT**, and so are the bundled web components
+(`tooling.js`). Bundled third-party dependencies keep their own
 licenses — see [NOTICE.md](NOTICE.md).

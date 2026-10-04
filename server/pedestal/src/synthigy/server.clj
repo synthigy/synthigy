@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server
   "Pedestal HTTP server implementation for Synthigy.
@@ -423,16 +411,13 @@
                 (assoc ctx :response {:status 404 :body "Not found"}))))})
 
 (def static-routes
-  "Routes for serving static OAuth resources (CSS, JS, images) plus the
-   optional custom login page mounted at /login/* via SYNTHIGY_IAM_LOGIN_PAGE_PATH.
-   /login (no trailing slash) 302s to /login/; /login/ serves index.html;
-   /login/* serves any file under the configured directory."
+  "Routes for static OAuth resources (CSS, JS, images) and the custom login
+   page bundles at /login/<name>/*."
   #{["/oauth/css/*" :get [serve-resource] :route-name ::static-css]
     ["/oauth/js/*" :get [serve-resource] :route-name ::static-js]
     ["/oauth/images/*" :get [serve-resource] :route-name ::static-images]
-    ["/login" :get [login-page/serve-login-page-interceptor] :route-name ::login-page-redirect]
-    ["/login/" :get [login-page/serve-login-page-interceptor] :route-name ::login-page-root]
-    ["/login/*" :get [login-page/serve-login-page-interceptor] :route-name ::login-page-files]})
+    ["/login/*" :get [(ring-handler->pedestal-interceptor #'login-page/handler ::login-page)]
+     :route-name ::login-page]})
 
 ;;; ============================================================================
 ;;; Server Lifecycle
@@ -597,7 +582,6 @@
   HTTP server:
     SYNTHIGY_SERVER_HOST - Bind address (default: 'localhost')
     SYNTHIGY_SERVER_PORT - Port number (default: 7887)
-    SYNTHIGY_IAM_LOGIN_PAGE_PATH - Custom login page directory served at /login/* (optional)
 
   Application:
     SYNTHIGY_USER - Superuser username

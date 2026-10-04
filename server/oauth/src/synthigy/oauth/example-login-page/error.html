@@ -1,25 +1,13 @@
 <!--
       Synthigy — model-driven IAM and data platform
       Copyright (C) 2026 Robert Geršak
+      SPDX-License-Identifier: Elastic-2.0
 
-      This program is free software: you can redistribute it and/or modify
-      it under the terms of the GNU Affero General Public License as
-      published by the Free Software Foundation, either version 3 of the
-      License, or (at your option) any later version.
-
-      This program is distributed in the hope that it will be useful,
-      but WITHOUT ANY WARRANTY; without even the implied warranty of
-      MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-      GNU Affero General Public License for more details.
-
-      You should have received a copy of the GNU Affero General Public
-      License along with this program.  If not, see
-      <https://www.gnu.org/licenses/>.
-
-      Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-      in a proprietary product, or offering it as a service without
-      releasing your source under section 13 — a commercial license is
-      available: r.gersak@gmail.com  See COMMERCIAL.md.
+      Licensed under the Elastic License 2.0 — see LICENSE, or
+      <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+      and build your own products on; you may not provide Synthigy to third
+      parties as a hosted or managed service. Commercial licensing:
+      r.gersak@gmail.com  See COMMERCIAL.md.
 -->
 
 <!doctype html>
@@ -36,10 +24,10 @@
   <!--
     CONTRACT
     ========
-    The server redirects here as:  /login/error.html?error=<code>&secure=<bool>
+    The server redirects here as:  /login/default/error.html?error=<code>&secure=<bool>
     (+ optional context keys, e.g. client-name, invalid-value). No POST, no token.
     `secure=true` → a potentially malicious client: warn "do not enter credentials".
-    Full code list + copy live in oauth/page/error.clj (error-messages).
+    Every code is listed below and in the console: System -> Login pages -> Page reference.
   -->
   <div class="oauth-container">
     <div class="error-card">
@@ -58,19 +46,27 @@
     var error = q.get('error') || 'unknown';
     var secure = q.get('secure') === 'true';
 
+    // Every code the server sends here — generated from oauth/page/error.clj.
     var TITLES = {
-      no_redirections: 'Authorization Blocked',
-      redirect_missmatch: 'Authorization Blocked',
-      client_not_registered: 'Unknown Application',
-      invalid_login_page: 'Configuration Error',
-      corrupt_session: 'Session Error'
+      client_not_registered: "Unknown Application",
+      corrupt_session: "Session Error",
+      invalid_login_page: "Configuration Error",
+      missing_redirect: "Invalid Request",
+      missing_response_type: "Invalid Request",
+      no_redirections: "Authorization Blocked",
+      redirect_missmatch: "Authorization Blocked",
+      unsupported_grant_type: "Unsupported Request"
     };
     var MESSAGES = {
-      no_redirections: 'This application has no configured redirect addresses. The request cannot be completed safely.',
-      redirect_missmatch: "The return address doesn't match this application's configuration. Do not enter any credentials.",
-      client_not_registered: 'This application is not recognized by the authorization server. Do not enter any credentials.',
-      corrupt_session: 'Your authorization session could not be verified. Please try again or contact support.',
-      invalid_login_page: 'This client has an invalid login-page setting. Please contact the application developer.'
+      client_not_registered: "This application is not recognized by the authorization server. Do not enter any credentials.",
+      corrupt_session: "Your authorization session could not be verified. Please try again or contact support.",
+      missing_redirect: "The authorization request is missing required information. Please contact the application developer.",
+      missing_response_type: "The authorization request is incomplete. Please contact the application developer.",
+      no_redirections: "This application has no configured redirect addresses. The authorization request cannot be completed safely.",
+      redirect_missmatch: "The return address provided by this application doesn't match its configuration. Do not enter any credentials.",
+      unsupported_grant_type: "The requested authorization method is not supported. Please contact the application developer.",
+      invalid_login_page: 'App "' + (q.get('client-name') || '?') + '" has an invalid Login page setting ("' +
+        (q.get('invalid-value') || '') + '"). It must name a login page bundle. Contact the application developer.'
     };
 
     document.getElementById('title').textContent = TITLES[error] || 'Authorization Error';

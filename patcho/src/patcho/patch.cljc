@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns patcho.patch
   "A simple version migration system for Clojure applications.
@@ -50,7 +38,7 @@
     (patch/apply ::my-app nil)        ; Runs all upgrades"
   (:refer-clojure :exclude [apply])
   (:require
-    [version-clj.core :as vrs]))
+   [version-clj.core :as vrs]))
 
 ;;; Protocol for version persistence
 
@@ -95,7 +83,6 @@
   Set globally via set-store!, or temporarily via with-store macro.
   State is automatically migrated when switching stores."
   (->AtomVersionStore (atom {})))
-
 
 (declare registered-topics)
 
@@ -171,7 +158,6 @@
                :cljs (js/console.error msg))))))
     store))
 
-
 (defmacro with-store
   "Execute body with a specific VersionStore bound to *version-store*.
 
@@ -239,35 +225,35 @@
   ([topic current target]
    (let [current (or current "0")]
      (when (or
-             (vrs/older? target current)
-             (vrs/newer? target current))
+            (vrs/older? target current)
+            (vrs/newer? target current))
        (let [patch-direction (if (vrs/newer? target current)
                                :upgrade
                                :downgrade)
              patch-sequence (filter
-                              (fn [[_topic _]]
-                                (= _topic topic))
-                              (keys
-                                (methods (case patch-direction
-                                           :upgrade _upgrade
-                                           :downgrade _downgrade))))
+                             (fn [[_topic _]]
+                               (= _topic topic))
+                             (keys
+                              (methods (case patch-direction
+                                         :upgrade _upgrade
+                                         :downgrade _downgrade))))
              sorted (sort-by
-                      second
-                      (case patch-direction
-                        :upgrade vrs/older?
-                        :downgrade vrs/newer?)
-                      patch-sequence)
+                     second
+                     (case patch-direction
+                       :upgrade vrs/older?
+                       :downgrade vrs/newer?)
+                     patch-sequence)
              valid-sequence (keep
-                              (fn [[_ version :as data]]
-                                (when (case patch-direction
-                                        :upgrade (and
-                                                   (vrs/older-or-equal? version target)
-                                                   (vrs/newer? version current))
-                                        :downgrade (and
-                                                     (vrs/older-or-equal? version current)
-                                                     (vrs/newer? version target)))
-                                  data))
-                              sorted)]
+                             (fn [[_ version :as data]]
+                               (when (case patch-direction
+                                       :upgrade (and
+                                                 (vrs/older-or-equal? version target)
+                                                 (vrs/newer? version current))
+                                       :downgrade (and
+                                                   (vrs/older-or-equal? version current)
+                                                   (vrs/newer? version target)))
+                                 data))
+                             sorted)]
          (doseq [[topic version] valid-sequence]
            (case patch-direction
              :upgrade (_upgrade topic version)
@@ -382,13 +368,12 @@
     (available-versions :app :db :unknown)  ; => {:app \"2.0.0\" :db \"1.5.0\"}"
   ([& topics]
    (reduce-kv
-     (fn [r k f]
-       (assoc r k (f k)))
-     nil
-     (if (empty? topics)
-       (methods version)
-       (select-keys (methods version) topics)))))
-
+    (fn [r k f]
+      (assoc r k (f k)))
+    nil
+    (if (empty? topics)
+      (methods version)
+      (select-keys (methods version) topics)))))
 
 (defn topic-version
   "Returns the currently deployed/installed version for a topic."
@@ -432,8 +417,7 @@
    (doseq [t (cons topic more-topics)]
      (level! t))))
 
-
-(current-version :dev.gersak/patcho "0.4.3")
+(current-version :dev.gersak/patcho "0.4.4")
 
 (comment
   (topic-version :dev.gersak/patcho)
@@ -453,5 +437,5 @@
   (vrs/newer-or-equal? "0.0.1" "0")
   (apply ::datasets nil "0.0.1")
   (macroexpand-1
-    `(upgrade ::datasets "0.3.37" (println "Patching 0.3.37")))
+   `(upgrade ::datasets "0.3.37" (println "Patching 0.3.37")))
   (group-by first (keys (methods _upgrade))))

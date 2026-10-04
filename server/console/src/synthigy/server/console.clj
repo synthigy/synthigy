@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server.console
   (:require
@@ -37,6 +25,7 @@
    [synthigy.oauth.federated :as federated]
    [synthigy.oauth.federated.registry :as registry]
    [synthigy.oauth.login :as oauth.login]
+   [synthigy.oauth.page.custom :as custom]
    [synthigy.server.console.data :as data]
    [synthigy.server.console.live :as live]
    [synthigy.server.console.pages :as pages]
@@ -45,6 +34,7 @@
    [synthigy.server.console.pages.profile :as profile-page]
    [synthigy.server.console.pages.sessions :as sessions]
    [synthigy.server.console.pages.encryption :as encryption]
+   [synthigy.server.console.pages.login-pages :as login-pages]
    [synthigy.server.console.pages.system :as system]
    [synthigy.server.console.pages.topology :as topology]
    [synthigy.server.console.session :as session]
@@ -229,6 +219,98 @@
         (if (= ::failed outcome)
           (land "error=rotate")
           (land (str "rotated=" outcome)))))))
+
+(def login-page-errors
+  {"upload-failed" "The upload did not reach the server — bundles are capped at 8 MB."
+   "verify" "Could not verify that password — nothing was changed."})
+
+(defn login-pages-notice
+  [request]
+  (let [{:strs [uploaded activated deactivated deleted error name version]} (query-params request)
+        what (when (custom/valid-name? name)
+               (str "\"" name "\"" (when-let [v (some-> version parse-long)] (str " version " v))))]
+    (cond
+      uploaded    [:ok (str "Stored " what ". Preview it, then activate.")]
+      activated   [:ok (str "Serving " what " at " (custom/page-url name) ".")]
+      deactivated [:ok (str "Stopped serving " what ".")]
+      deleted     [:ok (str "Deleted " what ".")]
+      error       [:warn (or (get custom/bundle-errors (keyword error))
+                             (get login-page-errors error)
+                             "Something went wrong — details are in the system log.")])))
+
+(defn login-pages-land
+  [request q]
+  (let [uri (str login-pages/base "?" q)]
+    (if (get-in request [:headers "datastar-request"])
+      (live/redirect-response request uri)
+      {:status 303 :headers {"Location" uri}})))
+
+(defn bundle-failure
+  [request e]
+  (if-let [reason (:reason (ex-data e))]
+    (login-pages-land request (str "error=" (name reason)))
+    (throw e)))
+
+(defn upload-login-page!
+  [request]
+  (let [nm (get (query-params request) "name")
+        zip (if-let [in (:body request)]
+              (with-open [^java.io.InputStream in in] (.readAllBytes in))
+              (byte-array 0))]
+    (try
+      (let [{:keys [version]} (custom/upload! nm zip (get-in request [:console/session :resource-owner/name]))]
+        (login-pages-land request (str "uploaded=1&name=" nm "&version=" version)))
+      (catch clojure.lang.ExceptionInfo e (bundle-failure request e)))))
+
+(defn login-page-action!
+  [request verb]
+  (let [{:strs [name version]} (query-params request)
+        version (some-> version parse-long)
+        user (get-in request [:console/session :resource-owner/name])]
+    (cond
+      (not (custom/valid-name? name)) nil
+
+      (not (reauthenticated? (assoc request ::signals (signals request))))
+      (login-pages-land request "error=verify")
+
+      :else
+      (try
+        (case verb
+          "activate"   (custom/activate! name version user)
+          "deactivate" (custom/activate! name nil user)
+          "delete"     (custom/delete! name version user))
+        (login-pages-land request (str verb "d=1&name=" name "&version=" version))
+        (catch clojure.lang.ExceptionInfo e (bundle-failure request e))))))
+
+(defn export-login-page
+  [request]
+  (let [{:strs [name version]} (query-params request)
+        version (some-> version parse-long)]
+    (when-let [zip (and (custom/valid-name? name) version (custom/export name version))]
+      {:status 200
+       :headers {"Content-Type" "application/zip"
+                 "Content-Disposition" (str "attachment; filename=\"login-page-" name "-v" version ".zip\"")}
+       :body (java.io.ByteArrayInputStream. zip)})))
+
+(defonce preview-cache (atom nil))
+
+(defn preview-page
+  [name version]
+  (let [k [name version]]
+    (if (= k (:key @preview-cache))
+      (:page @preview-cache)
+      (when-let [zip (custom/export name version)]
+        (let [page {:digest (custom/sha256 zip) :files (custom/read-bundle zip)}]
+          (reset! preview-cache {:key k :page page})
+          page)))))
+
+(defn preview-login-page
+  [request]
+  (when-let [[_ name version rest] (re-matches #"/console/login-pages/preview/([^/]+)/(\d+)(/.*)?" (:uri request))]
+    (when-let [page (and (custom/valid-name? name) (preview-page name (parse-long version)))]
+      (if rest
+        (custom/serve-path page (codec/url-decode (subs rest 1)) request)
+        {:status 302 :headers {"Location" (str (:uri request) "/")}}))))
 
 (def ^:private unlink-messages
   {"link_reauth_required" [:warn "Sign in again before changing your sign-in methods."]
@@ -788,9 +870,25 @@
          (when (and (= :post (:request-method request))
                     (data/system-operator?))
            (rotate-dek! request))
+         "/console/login-pages"
+         (when (and (= :get (:request-method request)) (data/system-operator?))
+           (html-response (login-pages/render request (login-pages-notice request))))
+         "/console/login-pages/upload"
+         (when (and (= :post (:request-method request)) (data/system-operator?))
+           (upload-login-page! request))
+         ("/console/login-pages/activate" "/console/login-pages/deactivate" "/console/login-pages/delete")
+         (when (and (= :post (:request-method request)) (data/system-operator?))
+           (login-page-action! request (subs uri (count "/console/login-pages/"))))
+         "/console/login-pages/export"
+         (when (and (= :get (:request-method request)) (data/system-operator?))
+           (export-login-page request))
          "/console/transfer/export" (when (= :get (:request-method request))
                                       (transfer-export request))
-         (or (when-let [[_ nm] (and (= :post (:request-method request))
+         (or (when (and (= :get (:request-method request))
+                        (str/starts-with? uri "/console/login-pages/preview/")
+                        (data/system-operator?))
+               (preview-login-page request))
+             (when-let [[_ nm] (and (= :post (:request-method request))
                                      (re-matches #"/console/profile/unit/([a-z_]+)" uri))]
                (profile-unit! request nm))
              (when-let [[slug tail link-key action] (under uri "/console/iam/")]

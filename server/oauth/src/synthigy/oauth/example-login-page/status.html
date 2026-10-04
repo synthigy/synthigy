@@ -1,0 +1,107 @@
+<!--
+      Synthigy — model-driven IAM and data platform
+      Copyright (C) 2026 Robert Geršak
+      SPDX-License-Identifier: Elastic-2.0
+
+      Licensed under the Elastic License 2.0 — see LICENSE, or
+      <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+      and build your own products on; you may not provide Synthigy to third
+      parties as a hosted or managed service. Commercial licensing:
+      r.gersak@gmail.com  See COMMERCIAL.md.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign-in status</title>
+  <link rel="icon" type="image/png" href="/oauth/images/favicon.png">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/oauth/css/status.css">
+</head>
+<body>
+  <!--
+    CONTRACT
+    ========
+    The server redirects here as:  /login/default/status.html?value=<v>&...
+    It is where a flow ENDS when there is no app to send the browser back to.
+    Query params (any may be absent):
+      value              success | error | canceled
+      error              code when value=error (table below; idp_<code> = the provider's own error)
+      error_description  extra human text some errors carry
+      flow               login | authorization_code | device_code | federated |
+                         federated_link | onboarding | onboarding_claim
+      user               who signed in (device success)
+      client, client_name  the app a device login was for (internal id, display name)
+      provider           federated provider (e.g. after linking an account)
+    Terminal page: no state, nothing to POST.
+  -->
+  <div class="oauth-container">
+    <div class="status-card" id="card">
+      <div class="header"><h2 id="title">Sign-in status</h2></div>
+      <div class="message" id="message"></div>
+    </div>
+  </div>
+
+  <script src="/oauth/js/starfield.js"></script>
+  <script>
+    var q = new URLSearchParams(location.search);
+    var value = q.get('value') || 'unknown';
+    var error = q.get('error');
+
+    // Every code the server sends here — generated from oauth/page/status.clj.
+    // retry = the person can start again; support = only an admin can fix it.
+    var CODES = {
+      already_authorized: ["retry", "Someone already authenticated using this code."],
+      broken_flow: ["retry", "The authorization flow is broken."],
+      callback_error: ["support", "The identity provider returned an error."],
+      cancelled: ["retry", "You cancelled the sign-in."],
+      challenge: ["retry", "A potentially malicious challenge change was detected."],
+      claim_invalid: ["retry", "This invitation link is invalid or has already been used."],
+      claim_method_not_allowed: ["support", "This invitation doesn't allow that sign-in method."],
+      device_code_expired: ["retry", "The code you entered has expired."],
+      email_exists: ["retry", "An account with this email already exists. Sign in with your existing method, then link this identity."],
+      expired_code: ["retry", "Your login grace period has expired."],
+      identity_already_linked: ["support", "This external identity is already linked to an account."],
+      ip_address: ["retry", "A potentially malicious IP-address change was detected."],
+      link_reauth_required: ["retry", "For your security, please sign in again before linking a new login method."],
+      link_requires_login: ["retry", "You must be signed in to link an external account."],
+      link_session_mismatch: ["support", "Account-link verification failed. Please try linking again."],
+      no_code: ["retry", "The identity provider sent no authorization code."],
+      no_flow: ["support", "The sign-in request carried no flow to continue."],
+      not_linked: ["retry", "This external identity isn't linked to any account."],
+      provider_disabled: ["support", "That sign-in method is switched off."],
+      provider_unknown: ["support", "That sign-in method doesn't exist."],
+      provider_unsupported: ["retry", "Could not reach that identity provider."],
+      provision_failed: ["support", "We couldn't create your account."],
+      reauth_identity_mismatch: ["retry", "You verified with a different account than the one signed in."],
+      state_invalid: ["retry", "That sign-in link expired."],
+      token_invalid: ["support", "The identity provider's response couldn't be verified."],
+      user_agent: ["retry", "A potentially malicious app change was detected."]
+    };
+
+    function message() {
+      if (error) {
+        var c = CODES[error];
+        if (c) return c[1] + (c[0] === 'retry' ? ' Please start again.' : ' Please contact support.');
+        if (error.indexOf('idp_') === 0) return 'The identity provider refused: ' + error.slice(4).replace(/_/g, ' ') + '.';
+        return q.get('error_description') || ('Sign-in error: ' + error);
+      }
+      if (value === 'success') {
+        if (q.get('user') && q.get('client_name'))
+          return q.get('client_name') + ' is authorized by ' + q.get('user') + '. You can close this window.';
+        if (q.get('provider')) return 'Your ' + q.get('provider') + ' account is now linked.';
+        return 'You may now return to your application.';
+      }
+      if (value === 'canceled') return 'You canceled the authorization. You can close this window.';
+      return '';
+    }
+
+    var TITLES = { success: 'Signed in', error: 'Sign-in failed', canceled: 'Canceled' };
+    document.getElementById('card').classList.add(value);
+    document.getElementById('title').textContent = TITLES[value] || 'Sign-in status';
+    document.getElementById('message').textContent = message();
+  </script>
+</body>
+</html>

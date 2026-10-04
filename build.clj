@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns build
   "Uberjar for a chosen backend combo. Combo via SYNTHIGY_COMBO env,
@@ -29,7 +17,8 @@
   (:require [clojure.edn]
             [clojure.tools.build.api :as b]
             [clojure.tools.namespace.find :as find]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [deps-deploy.deps-deploy :as dd]))
 
 ;; test-only namespaces whose deps aren't on the shipped combos' classpath
 (def no-aot '#{synthigy.oauth.client})
@@ -40,6 +29,9 @@
 ;; Excluded at b/uber, which matches full paths — copy-dir :ignores are
 ;; matched against the file NAME, so a directory pattern silently misses.
 (def never-ship "public/js/.*")
+
+;; under synthigy/, not the jar root: b/uber append-merges every dependency's root/META-INF LICENSE and NOTICE into one file
+(def license-files ["LICENSE" "NOTICE.md" "COMMERCIAL.md"])
 
 (def combo (or (System/getenv "SYNTHIGY_COMBO") "engine-postgres:audit-postgres:log-sqlite:server-httpkit:server-console"))
 (def aot? (= "true" (System/getenv "SYNTHIGY_AOT")))
@@ -57,6 +49,8 @@
     (doseq [d dirs]
       (b/copy-dir (cond-> {:src-dirs [d] :target-dir class-dir}
                     aot? (assoc :ignores [#".*\.clj[cs]?$"]))))
+    (doseq [f license-files]
+      (b/copy-file {:src f :target (str class-dir "/synthigy/" f)}))
     (when aot?
       (let [nses (remove no-aot (mapcat #(find/find-namespaces-in-dir (java.io.File. ^String %)) dirs))]
         (b/compile-clj {:basis basis :class-dir class-dir :ns-compile (vec nses)})))
@@ -382,3 +376,76 @@
       (doseq [[a {:keys [libs]}] leaf]
         (println (format "  %-16s libs: %s" (name a) (pr-str (vec libs)))))
       (println "core entries:" (count core-entries)))))
+
+;; --- Clojars: one fused SOURCE jar per product bundle ----------------------
+;; SYNTHIGY_COMBO picks the folders, SYNTHIGY_BUNDLE names the artifact
+;; (com.synthigy/<bundle>-bundle), SYNTHIGY_VERSION its version, and
+;; SYNTHIGY_TOOLING_JS the built web components. Run from the exported pub/core
+;; tree, never edge. See docs/plans/PLAN-CLOJARS-PUBLISHING.md.
+
+(def patcho-version "0.4.4")
+
+(defn bundle-params []
+  (let [env #(or (System/getenv %) (throw (ex-info (str % " is required") {})))
+        bundle (env "SYNTHIGY_BUNDLE")
+        version (env "SYNTHIGY_VERSION")]
+    {:bundle bundle
+     :version version
+     :class-dir (str "target/bundle-classes-" bundle)
+     :lib (symbol "com.synthigy" (str bundle "-bundle"))
+     :jar-file (format "target/%s-bundle-%s.jar" bundle version)}))
+
+(defn bundle-deps
+  "Maven deps the bundle's pom declares: top-level libs, the console's own deps, and patcho from Clojars."
+  [basis]
+  (let [libs (:libs basis)
+        local (set (filter #(:local/root (libs %)) (keys libs)))
+        console-only? #(and (seq %) (every? #{'dev.synthigy/console} %))]
+    (into {'dev.gersak/patcho {:mvn/version patcho-version}}
+          (for [[lib {:keys [mvn/version dependents]}] libs
+                :when (and version (not (local lib))
+                           (or (empty? dependents) (console-only? dependents)))]
+            [lib {:mvn/version version}]))))
+
+(defn clojars-bundle [_]
+  (let [{:keys [lib version jar-file class-dir]} (bundle-params)
+        tooling-js (or (System/getenv "SYNTHIGY_TOOLING_JS")
+                       (throw (ex-info "SYNTHIGY_TOOLING_JS is required" {})))
+        basis (b/create-basis {:aliases aliases})
+        patcho (set (get-in basis [:libs 'dev.gersak/patcho :paths]))
+        dirs (remove patcho (dirs-of basis))]
+    (b/delete {:path class-dir})
+    (b/copy-dir {:src-dirs (vec dirs) :target-dir class-dir})
+    (b/delete {:path (str class-dir "/public/js")})
+    (b/copy-file {:src tooling-js :target (str class-dir "/synthigy/console/js/tooling.js")})
+    (doseq [f license-files]
+      (b/copy-file {:src f :target (str class-dir "/synthigy/" f)}))
+    (b/write-pom {:class-dir class-dir :lib lib :version version
+                  :basis (b/create-basis {:project {:deps (bundle-deps basis) :paths []}})
+                  :repos {"clojars" {:url "https://repo.clojars.org/"}}
+                  :scm {:url "https://github.com/synthigy/synthigy"
+                        :connection "scm:git:https://github.com/synthigy/synthigy.git"
+                        :tag (str "v" version)}
+                  :pom-data [[:description "Synthigy — model-driven IAM and data platform, one dependency."]
+                             [:url "https://github.com/synthigy/synthigy"]
+                             [:licenses
+                              [:license
+                               [:name "Elastic License 2.0"]
+                               [:url "https://www.elastic.co/licensing/elastic-license"]]]]})
+    (b/jar {:class-dir class-dir :jar-file jar-file})
+    (println "Built" jar-file)))
+
+(defn deploy-bundle
+  "Push the bundle to Clojars. Needs CLOJARS_USERNAME + CLOJARS_PASSWORD (a deploy token)."
+  [_]
+  (let [{:keys [lib jar-file class-dir]} (bundle-params)]
+    (dd/deploy
+     {:installer :remote :artifact (b/resolve-path jar-file)
+      :pom-file (b/pom-path {:lib lib :class-dir class-dir})})))
+
+(defn install-bundle
+  "Install the bundle into the local ~/.m2 for hand testing."
+  [_]
+  (let [{:keys [lib jar-file class-dir]} (bundle-params)]
+    (dd/deploy {:installer :local :artifact (b/resolve-path jar-file)
+                :pom-file (b/pom-path {:lib lib :class-dir class-dir})})))

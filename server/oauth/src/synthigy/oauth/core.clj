@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.core
   (:require
@@ -46,6 +34,7 @@
    [synthigy.iam.context :as iam.context]
    [synthigy.iam.connector :as connector]
    [synthigy.iam.encryption :as encryption]
+   [synthigy.oauth.page.custom :as custom]
    [synthigy.oauth.page.error :as error-page]
    [synthigy.util :as util])
   (:import
@@ -486,35 +475,25 @@
           (swap! client-cache assoc id client)
           client)))))
 
-(defn server-login-page-url
-  "Mount URL of the server-level custom login page, or nil when unset."
-  []
-  (when (seq env/login-page-path)
-    "/login/"))
-
 (defn get-client-login-url
-  "Login URL for a client; per-client setting must be a relative path or this
-   throws (credential-phishing guard)."
+  "Login URL for a client: its named bundle, else the default bundle, else the
+   built-in page; a setting that is not a bundle name throws."
   [client]
-  (let [custom-page (get-in client [:settings "login-page"])
+  (let [page (not-empty (get-in client [:settings "login-page"]))
         client-name (:name client)]
     (cond
-      (or (nil? custom-page) (empty? custom-page))
-      (or (server-login-page-url) "/oauth/login")
-
-      (and (string? custom-page)
-           (str/starts-with? custom-page "/")
-           (not (str/includes? custom-page "..")))
-      custom-page
-
-      :else
+      (and page (not (custom/valid-name? page)))
       (throw
        (ex-info
         (str "Client '" client-name "' has invalid login-page setting. "
-             "Only relative URLs starting with '/' are allowed.")
+             "It must name a login page bundle.")
         {:type "invalid_login_page"
          :client-name client-name
-         :invalid-value custom-page})))))
+         :invalid-value page}))
+
+      (and page (custom/active? page)) (custom/page-url page)
+      (custom/active? custom/default-name) (custom/page-url custom/default-name)
+      :else "/oauth/login")))
 
 (defn get-session
   "Assemble the legacy session map from the row; keys are absent (not nil) when

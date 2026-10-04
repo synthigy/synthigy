@@ -22,7 +22,9 @@ and you confirm you are authorised to bind them.
 project — code, documentation, configuration, tests, or anything else —
 whether by pull request, patch, issue attachment, or any other means.
 
-**The licensor** is Robert Geršak, the copyright holder of Synthigy.
+**The licensor** is Robert Geršak, the copyright holder of Synthigy, and his
+successors and assigns, including any company to which he transfers the
+rights in Synthigy.
 
 ## 2. Copyright License
 
@@ -38,8 +40,8 @@ including terms different from the license the project uses today, and
 including proprietary or commercial terms.
 
 This is the clause the project actually depends on. Synthigy is distributed
-under the AGPL-3.0 and is also offered under commercial terms to those who
-cannot accept the AGPL's obligations. Without this grant, any contributed
+under the Elastic License 2.0 and is also offered under commercial terms to
+those who need what the Elastic License 2.0 does not allow. Without this grant, any contributed
 code could not appear in a commercially licensed build, and the project would
 fragment into parts that can be dual-licensed and parts that cannot.
 

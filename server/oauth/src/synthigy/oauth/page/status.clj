@@ -1,88 +1,80 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.page.status
   "User-facing terminal status page for interactive OAuth flows with no client
    redirect to bounce to. See docs/core/synthigy/oauth/page/status.md."
   (:require
+   [clojure.string :as str]
    [hiccup2.core :refer [html]]
    [synthigy.dataset.id :as id]
    [synthigy.iam :as iam]
    [synthigy.oauth.core :as core]
    [synthigy.oauth.page.custom :as login-page]))
 
+(def status-errors
+  "Every `error` code /oauth/status can receive, as [kind text]; :retry means the
+   person can start again, :support means only an admin can fix it."
+  {"cancelled"                [:retry "You cancelled the sign-in."]
+   "broken_flow"              [:retry "The authorization flow is broken."]
+   "expired_code"             [:retry "Your login grace period has expired."]
+   "device_code_expired"      [:retry "The code you entered has expired."]
+   "already_authorized"       [:retry "Someone already authenticated using this code."]
+   "ip_address"               [:retry "A potentially malicious IP-address change was detected."]
+   "user_agent"               [:retry "A potentially malicious app change was detected."]
+   "challenge"                [:retry "A potentially malicious challenge change was detected."]
+   "not_linked"               [:retry "This external identity isn't linked to any account."]
+   "link_requires_login"      [:retry "You must be signed in to link an external account."]
+   "link_reauth_required"     [:retry "For your security, please sign in again before linking a new login method."]
+   "email_exists"             [:retry "An account with this email already exists. Sign in with your existing method, then link this identity."]
+   "state_invalid"            [:retry "That sign-in link expired."]
+   "no_code"                  [:retry "The identity provider sent no authorization code."]
+   "provider_unsupported"     [:retry "Could not reach that identity provider."]
+   "claim_invalid"            [:retry "This invitation link is invalid or has already been used."]
+   "reauth_identity_mismatch" [:retry "You verified with a different account than the one signed in."]
+   "provider_unknown"         [:support "That sign-in method doesn't exist."]
+   "provider_disabled"        [:support "That sign-in method is switched off."]
+   "claim_method_not_allowed" [:support "This invitation doesn't allow that sign-in method."]
+   "no_flow"                  [:support "The sign-in request carried no flow to continue."]
+   "provision_failed"         [:support "We couldn't create your account."]
+   "token_invalid"            [:support "The identity provider's response couldn't be verified."]
+   "callback_error"           [:support "The identity provider returned an error."]
+   "link_session_mismatch"    [:support "Account-link verification failed. Please try linking again."]
+   "identity_already_linked"  [:support "This external identity is already linked to an account."]})
+
 (defn message-for
   "Human copy for a status outcome; never returns blank — falls back to
    error_description or the raw code."
-  [{:keys [value error error_description user client provider]}]
-  (letfn [(retry [x] (str x "\nPlease restart the authentication process."))
-          (support [x] (str x "\nPlease contact application support."))]
-    (cond
-      error
-      (case error
-        ;; interactive-flow outcomes — user can retry
-        "broken_flow"           (retry "The authorization flow is broken.")
-        "expired_code"          (retry "Your login grace period has expired.")
-        "device_code_expired"   (retry "The code you entered has expired.")
-        "already_authorized"    (retry "Someone already authenticated using this code.")
-        "ip_address"            (retry "A potentially malicious IP-address change was detected.")
-        "user_agent"            (retry "A potentially malicious app change was detected.")
-        "challenge"             (retry "A potentially malicious challenge change was detected.")
-        "not_linked"            (retry "This external identity isn't linked to any account.")
-        "link_requires_login"   (retry "You must be signed in to link an external account.")
-        "link_reauth_required"  (retry "For your security, please sign in again before linking a new login method.")
-        ;; federated login failures
-        "email_exists"          (retry "An account with this email already exists. Sign in with your existing method, then link this identity.")
-        ;; configuration / integrity — contact support
-        "corrupt_session"       (support "Your session could not be verified.")
-        "missing_response_type" (support "The client didn't specify a response_type.")
-        "client_not_registered" (support "The client is not registered.")
-        "missing_redirect"      (support "The client's authorization request was incomplete.")
-        "redirect_missmatch"    (support "The requested redirect didn't match any configured for the client.")
-        "no_redirections"       (support "The client has no configured redirect addresses.")
-        "unsupported_grant_type" (support "The requested grant type isn't supported.")
-        "provision_failed"      (support "We couldn't create your account.")
-        "state_invalid"         (support "Login verification failed (state mismatch).")
-        "token_invalid"         (support "The identity provider's response couldn't be verified.")
-        "callback_error"        (support "The identity provider returned an error.")
-        "link_session_mismatch" (support "Account-link verification failed. Please try linking again.")
-        "identity_already_linked" (support "This external identity is already linked to an account.")
-        ;; never blank
-        (or error_description (str "Authentication error: " error)))
+  [{:keys [value error error_description user client_name provider]}]
+  (cond
+    error
+    (if-let [[kind text] (status-errors error)]
+      (str text (if (= :retry kind)
+                  "\nPlease restart the authentication process."
+                  "\nPlease contact application support."))
+      (if (str/starts-with? error "idp_")
+        (str "The identity provider refused: " (str/replace (subs error 4) "_" " ") ".")
+        (or error_description (str "Authentication error: " error))))
 
-      ;; success variants
-      (and user client)
-      (let [c (iam/get-client-by-key (id/coerce-arg client))]
-        [:span "Client " [:b (:name c)] " is authorized by " [:b user] "."])
+    (and user client_name)
+    [:span "Client " [:b client_name] " is authorized by " [:b user] "."]
 
-      (= value "success")
-      (if provider
-        (str "Your " provider " account is now linked.")
-        "You may now return to your application.")
+    (= value "success")
+    (if provider
+      (str "Your " provider " account is now linked.")
+      "You may now return to your application.")
 
-      (= value "canceled")
-      "You canceled the authorization. You can close this window."
+    (= value "canceled")
+    "You canceled the authorization. You can close this window."
 
-      :else nil)))
+    :else nil))
 
 (defn state-icon
   [value]
@@ -134,7 +126,8 @@
       error (assoc :error error)
       error_description (assoc :error_description error_description)
       user (assoc :user user)
-      client (assoc :client client)
+      client (assoc :client client
+                    :client_name (:name (iam/get-client-by-key (id/coerce-arg client))))
       provider (assoc :provider provider)
       flow (assoc :flow flow))))
 

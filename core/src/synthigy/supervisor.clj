@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.supervisor
   "JSON-RPC-over-stdio supervision channel — the protocol half of
@@ -30,8 +18,8 @@
   (:require
     [clojure.string :as str]
     [patcho.lifecycle :as lifecycle]
+    [synthigy.boot :as boot]
     [synthigy.dataline :as dataline]
-    [synthigy.dataset.id :as id]
     [synthigy.json :as json]
     [synthigy.log :as log]))
 
@@ -139,26 +127,10 @@
   (loop [e t]
     (if-let [c (.getCause e)] (recur c) (or (ex-message e) (str (class e))))))
 
-(def shadowed-resources
-  {"engine"         "synthigy/core__init.class"
-   "audit"          "synthigy/audit__init.class"
-   "log-store"      "synthigy/log/store__init.class"
-   "server adapter" "synthigy/server__init.class"})
-
-(defn duplicate-backends
-  "Backend kinds appearing more than once on the classpath, as {kind count}; two of a kind means the JVM silently runs whichever came first."
-  ([] (duplicate-backends (.getContextClassLoader (Thread/currentThread))))
-  ([^ClassLoader loader]
-   (into {}
-         (keep (fn [[kind resource]]
-                 (let [n (count (enumeration-seq (.getResources loader resource)))]
-                   (when (> n 1) [kind n]))))
-         shadowed-resources)))
-
 (register-method! "server.start"
   (fn [_]
     ;; two modules of one dimension boot fine and then answer with the wrong backend — refuse
-    (when-let [dupes (not-empty (duplicate-backends))]
+    (when-let [dupes (not-empty (boot/duplicate-backends))]
       (throw (ex-info (str "Classpath carries more than one backend module: "
                            (str/join ", " (map (fn [[kind n]] (str n " " kind)) dupes))
                            ". Exactly one engine, one audit, one log-store and one server adapter module belong "
@@ -166,31 +138,19 @@
                            "comes first.")
                       {:code -32000 :duplicates dupes})))
     (if-let [modules (seq @start-modules)]
-      ;; Dataset first, alone: its boot detection sets the id provider, and a
-      ;; LEGACY euuid layout must never have IAM/OAuth setup plowed into it —
-      ;; the one-time migrate.xid verb (and a restart) is the only way forward.
-      ;; A lifecycle failure answers {:success false :error …}, never a thrown
-      ;; error — the daemon must keep supervising the warm engine so the
-      ;; operator console can show the failure (a sealed encryption boot, say)
-      ;; and offer the fix, instead of the whole daemon dying.
+      ;; a failure answers {:success false …}, never throws — the daemon keeps the warm engine for diagnosis
       (try
-        (progress-begin! :boot "starting :synthigy/dataset")
-        (lifecycle/start! :synthigy/dataset)
-        (if (= :euuid (id/key))
-          {:success false :legacy true
-           :message (str "Legacy euuid-keyed database detected — Synthigy is "
-                         "xid-native. Run the migration before starting the server.")}
-          (do (progress-phase! "starting :synthigy/server")
-              (apply lifecycle/start! modules)
-              (progress-phase! "starting Dataline")
-              (dataline/start!)
-              {:success true :message "Server started"}))
+        (progress-begin! :boot "starting")
+        (boot/start! modules {:on-phase progress-phase!})
+        {:success true :message "Server started"}
         (catch Throwable t
-          (log/error! {:id ::server-start-failed
-                       :msg "server.start failed — engine stays warm for diagnosis"
-                       :data {:action :starting :subject :http-server}}
-                      t)
-          {:success false :error (root-cause-message t)})
+          (if (:legacy (ex-data t))
+            {:success false :legacy true :message (ex-message t)}
+            (do (log/error! {:id ::server-start-failed
+                             :msg "server.start failed — engine stays warm for diagnosis"
+                             :data {:action :starting :subject :http-server}}
+                            t)
+                {:success false :error (root-cause-message t)})))
         (finally (when (progress-running? :boot) (progress-finish!))))
       (throw (ex-info "no start modules configured — serve! was called without :modules"
                       {:code -32000})))))

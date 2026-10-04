@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.page.error
   "OAuth error page for cases where the server MUST NOT redirect (RFC 6749
@@ -27,12 +15,12 @@
    [hiccup2.core :refer [html raw]]
    [synthigy.oauth.page.custom :as login]))
 
-(def ^:private security-errors
+(def security-errors
   #{"redirect_missmatch"
     "client_not_registered"
     "no_redirections"})
 
-(def ^:private error-messages
+(def error-messages
   {"no_redirections"
    {:title "Authorization Blocked"
     :message "This application has no configured redirect addresses. The authorization request cannot be completed safely."}
@@ -44,7 +32,7 @@
                    "Client " [:b client-name] " has an invalid login page setting:"
                    [:br] [:code invalid-value]
                    [:br] [:br]
-                   "Only relative URLs (starting with '/') are allowed for the 'login-page' setting. "
+                   "The 'login-page' setting must name a login page bundle (lowercase letters, digits and dashes). "
                    "Please contact the application developer."])}
 
    "missing_redirect"
@@ -71,7 +59,7 @@
    {:title "Unsupported Request"
     :message "The requested authorization method is not supported. Please contact the application developer."}})
 
-(def ^:private default-error
+(def default-error
   {:title "Authorization Error"
    :message "An error occurred during authorization. Please contact support."})
 

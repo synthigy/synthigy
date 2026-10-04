@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server.console.pages.apps
   (:require
@@ -66,9 +54,9 @@
      {:choices grant-types}]
     [:token-expiry "Token lifetime" :expiry nil
      {:defaults expiry-defaults}]
-    [:login-page "Login page override" :relative-path
-     (str "Relative path to a custom login page for this client, "
-          "e.g. /login/acme. Blank uses the deployment default.")]
+    [:login-page "Login page" :login-page
+     (str "Name of a login page bundle (System → Login pages) for this "
+          "client. Blank uses the \"default\" bundle, else the built-in page.")]
     [:logo-url "Logo URL" :text nil]
     [:allow-signup "Allow sign-up" :switch
      (str "A federated login may create a new account rather than "

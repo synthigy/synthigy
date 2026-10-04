@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.db.cockroach
   "CockroachDB connection management and lifecycle.
@@ -243,6 +231,81 @@
        (name topic)
        (:setup-complete? state)
        (:cleanup-complete? state)])))
+
+;;; ============================================================================
+;;; LoginPageStore Implementation
+;;; ============================================================================
+
+(defn ensure-login-page-table!
+  [{:keys [datasource]}]
+  (jdbc/execute-one!
+    datasource
+    ["CREATE TABLE IF NOT EXISTS __login_pages__ (
+       name TEXT NOT NULL,
+       version INT8 NOT NULL,
+       zip BYTEA NOT NULL,
+       digest TEXT NOT NULL,
+       size INT8 NOT NULL,
+       uploaded_by TEXT,
+       uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+       active BOOL NOT NULL DEFAULT FALSE,
+       PRIMARY KEY (name, version)
+     )"]))
+
+(extend-type Cockroach
+  db/LoginPageStore
+
+  (put-login-page [db name zip digest uploaded-by]
+    (ensure-login-page-table! db)
+    (:version
+      (jdbc/execute-one!
+        (:datasource db)
+        ["INSERT INTO __login_pages__ (name, version, zip, digest, size, uploaded_by)
+          SELECT ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
+          FROM __login_pages__ WHERE name = ?
+          RETURNING version"
+         name zip digest (alength ^bytes zip) uploaded-by name]
+        {:builder-fn rs/as-unqualified-kebab-maps})))
+
+  (login-pages [db]
+    (ensure-login-page-table! db)
+    (jdbc/execute!
+      (:datasource db)
+      ["SELECT name, version, digest, size, uploaded_by, uploaded_at, active
+        FROM __login_pages__ ORDER BY name, version DESC"]
+      {:builder-fn rs/as-unqualified-kebab-maps}))
+
+  (login-page-zip [db name version]
+    (ensure-login-page-table! db)
+    (:zip
+      (jdbc/execute-one!
+        (:datasource db)
+        ["SELECT zip FROM __login_pages__ WHERE name = ? AND version = ?" name version]
+        {:builder-fn rs/as-unqualified-kebab-maps})))
+
+  (active-login-pages [db]
+    (ensure-login-page-table! db)
+    (into {}
+          (map (juxt :name #(select-keys % [:version :digest])))
+          (jdbc/execute!
+            (:datasource db)
+            ["SELECT name, version, digest FROM __login_pages__ WHERE active"]
+            {:builder-fn rs/as-unqualified-kebab-maps})))
+
+  (activate-login-page [db name version]
+    (ensure-login-page-table! db)
+    (jdbc/execute-one!
+      (:datasource db)
+      ["UPDATE __login_pages__ SET active = COALESCE(version = ?::INT8, FALSE) WHERE name = ?"
+       version name])
+    nil)
+
+  (delete-login-page [db name version]
+    (ensure-login-page-table! db)
+    (jdbc/execute-one!
+      (:datasource db)
+      ["DELETE FROM __login_pages__ WHERE name = ? AND version = ?" name version])
+    nil))
 
 ;;; ============================================================================
 ;;; Module Lifecycle Registration

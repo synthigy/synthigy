@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server.console.data
   (:require
@@ -31,7 +19,8 @@
    [synthigy.iam.transfer :as transfer]
    [synthigy.json :as json]
    [synthigy.oauth.core :as oauth]
-   [synthigy.oauth.federated.registry :as registry]))
+   [synthigy.oauth.federated.registry :as registry]
+   [synthigy.oauth.page.custom :as custom]))
 
 (defn denied->nil
   [thunk]
@@ -132,10 +121,6 @@
                                                 ls)}]}))
               (group-by (comp first link-via) (filter link-via links))))))
 
-(defn relative-path?
-  [s]
-  (and (str/starts-with? s "/") (not (str/includes? s ".."))))
-
 (defn listy
   [v]
   (cond (nil? v) [] (sequential? v) (vec v) :else [v]))
@@ -157,14 +142,14 @@
                                                  not-empty parse-long)]
                                  :when n]
                              [sub n]))
-      :relative-path (not-empty (str/trim (str v)))
+      :login-page    (not-empty (str/trim (str v)))
       (not-empty (str v)))))
 
 (defn check-setting!
   [[_ label kind] v]
-  (when (and (= :relative-path kind) v (not (relative-path? v)))
-    (throw (ex-info (str label " must be a relative path starting with "
-                         "\"/\", with no \"..\" segments.")
+  (when (and (= :login-page kind) v (not (custom/valid-name? v)))
+    (throw (ex-info (str label " must name a login page bundle — lowercase letters, "
+                         "digits and dashes.")
                     {}))))
 
 (defn settings-value

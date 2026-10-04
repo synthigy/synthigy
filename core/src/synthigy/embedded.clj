@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.embedded
   "The Synthigy data API in-process — the SDK surface, dispatched straight at
@@ -28,6 +16,8 @@
    [clojure.core.async :as a]
    [clojure.string :as str]
    synthigy.audit
+   synthigy.core
+   [synthigy.data :refer [*SYNTHIGY*]]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.access :as daccess]
    [synthigy.dataset.delta :as delta]
@@ -46,7 +36,7 @@
   "kebab")
 
 (defn resolve-principal
-  "The principal a call runs as."
+  "The principal a call runs as; with none given, the Synthigy service user, so writes are attributed."
   [{:keys [acting-as principal]}]
   (if acting-as
     (let [user-ctx (iam.context/get-user-context acting-as)]
@@ -60,7 +50,7 @@
                         {:code "USER_INACTIVE" :acting-as acting-as}))
 
         :else user-ctx))
-    (clojure.core/or principal access/*principal*)))
+    (clojure.core/or principal access/*principal* *SYNTHIGY*)))
 
 (defn key-fn-for
   [opts]

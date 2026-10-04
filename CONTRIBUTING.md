@@ -19,9 +19,10 @@ not fit the private half is a frustrating thing to discover after writing it.
 
 ## Contributor License Agreement
 
-Synthigy is dual-licensed: AGPL-3.0 for everyone, and a commercial license
-for those who cannot take on the AGPL's obligations. Dual licensing only
-works if one party can license the whole codebase both ways, so contributors
+Synthigy is licensed under the Elastic License 2.0 for everyone, and under
+commercial terms for those who need what it does not allow (offering Synthigy
+as a hosted service). That only works if one party can license the whole
+codebase both ways, so contributors
 sign a CLA — see [CLA.md](CLA.md). You keep your copyright; you grant the
 right to license your contribution under both.
 

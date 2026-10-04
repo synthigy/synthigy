@@ -1,24 +1,12 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
+;   SPDX-License-Identifier: Elastic-2.0
 ;
-;   This program is free software: you can redistribute it and/or modify
-;   it under the terms of the GNU Affero General Public License as
-;   published by the Free Software Foundation, either version 3 of the
-;   License, or (at your option) any later version.
-;
-;   This program is distributed in the hope that it will be useful,
-;   but WITHOUT ANY WARRANTY; without even the implied warranty of
-;   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;   GNU Affero General Public License for more details.
-;
-;   You should have received a copy of the GNU Affero General Public
-;   License along with this program.  If not, see
-;   <https://www.gnu.org/licenses/>.
-;
-;   Synthigy is dual-licensed. If the AGPL does not suit you — embedding
-;   in a proprietary product, or offering it as a service without
-;   releasing your source under section 13 — a commercial license is
-;   available: r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Elastic License 2.0 — see LICENSE, or
+;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
+;   and build your own products on; you may not provide Synthigy to third
+;   parties as a hosted or managed service. Commercial licensing:
+;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.env
   (:require
@@ -27,6 +15,12 @@
    [environ.core :refer [env]]))
 
 (def home (str (fs/expand-home (env :synthigy-home "~/.synthigy"))))
+
+(def db-dir
+  "Where local database files live by default: beside SQLITE_PATH when set, else <home>/db."
+  (str (if-let [p (not-empty (env :sqlite-path))]
+         (fs/parent (fs/absolutize (fs/expand-home p)))
+         (str home "/db"))))
 (def pid (str home "/pid"))
 (def log-dir (str (fs/absolutize (env :synthigy-log-dir (str home "/logs")))))
 (def config-dir (str (fs/absolutize (env :synthigy-config-dir (str home "/config")))))
@@ -37,10 +31,6 @@
 (def id-format
   "ID format preference (\"euuid\" or \"xid\"); verified against the stored format on startup."
   (env :synthigy-id-format))
-
-(def login-page-path
-  "Fallback custom login surface at /login/*, overridable per-client."
-  (env :synthigy-iam-login-page-path))
 
 (def trust-proxy
   "Trust X-Forwarded-For for the client IP; set only when a reverse proxy fronts

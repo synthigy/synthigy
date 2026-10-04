@@ -361,6 +361,13 @@
     (when-let [target (strip-port redirect-uri)]
       (boolean (some #(= target (strip-port %)) redirections)))))
 
+(defn redirect-allowed?
+  "Whether a client with these registered redirections may be sent to uri:
+   exact match, or a loopback match ignoring the port."
+  [uri redirections]
+  (boolean (or (some #{uri} redirections)
+               (loopback-redirect-matches? uri redirections))))
+
 (defn uri-origin
   "scheme://host[:port] of a URI, or nil."
   [uri]

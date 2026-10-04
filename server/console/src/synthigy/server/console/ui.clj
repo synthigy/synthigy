@@ -17,7 +17,9 @@
    [synthigy.dataline :as dataline]
    [synthigy.env :as env]
    [synthigy.iam.access :as access]
+   [synthigy.info :as info]
    [synthigy.json :as json]
+   [synthigy.oauth.core :as oauth]
    [synthigy.oauth.page.assets :as assets]
    [synthigy.server.console.data :as data]
    [synthigy.server.console.icon :as icon]
@@ -164,23 +166,36 @@
 (defn root-url []
   (some-> (not-empty (str env/iam-root-url)) (str/replace #"/+$" "")))
 
-(defn tools-redirect-uri
-  "The Synthigy Tools client's login and silent-renew address for this deployment."
-  []
-  (some-> (root-url) (str "/console/tools/callback")))
+(def loopback-callbacks
+  ["http://localhost/console/tools/callback" "http://127.0.0.1/console/tools/callback"])
 
-(defn tools-logout-uri
-  "Where a tool logout lands: the console login page."
+(def ^:dynamic *origins*
+  "Candidate origins of the current console request, request origin first."
+  nil)
+
+(defn tools-redirections []
+  (access/with-principal nil
+    (get-in (oauth/get-client info/modeler-public-client-id) [:settings "redirections"])))
+
+(defn tools-origin
+  "The first candidate origin whose tools callback the Synthigy Tools app allows."
   []
-  (some-> (root-url) (str "/console/login?logged_out=1")))
+  (when (io/resource "synthigy/console/js/tooling.js")
+    (let [allowed (tools-redirections)]
+      (some #(when (oauth/redirect-allowed? (str % "/console/tools/callback") allowed) %)
+            *origins*))))
+
+(defn tools-redirect-uri []
+  (some-> (tools-origin) (str "/console/tools/callback")))
+
+(defn tools-logout-uri []
+  (some-> (tools-origin) (str "/console/login?logged_out=1")))
 
 (defn tools-available?
-  "The web components ship only in the product bundles, and their login can
-   only come back to a registered address — no bundle or no root URL, no Tools
-   nav, rather than a nav that dead-ends on redirect_missmatch."
+  "Tools show when the bundle is on the classpath and this console's callback is
+   one of the Synthigy Tools app's allowed redirect URLs."
   []
-  (and (some? (io/resource "synthigy/console/js/tooling.js"))
-       (some? (tools-redirect-uri))))
+  (some? (tools-origin)))
 
 (defn tools-callback-page
   "The registered redirect address. Deliberately bare: a silent-renew iframe

@@ -17,6 +17,7 @@
     [next.jdbc.result-set :as rs]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
+    [synthigy.boot :as boot]
     [synthigy.data :as data]
     [synthigy.dataline :as dataline]
     [synthigy.dataset :as dataset]
@@ -381,7 +382,7 @@
 
 (supervisor/register-method! "info"
   (fn [_]
-    {:version "0.1.0"
+    {:version boot/version
      :encryption (dataset-encryption/encryption-status)
      :message "Synthigy supervisor"}))
 

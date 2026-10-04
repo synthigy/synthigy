@@ -996,7 +996,8 @@
 (defn handler
   [request]
   (try
-    (route request)
+    (binding [ui/*origins* (distinct (keep not-empty [(oauth/original-uri request) (ui/root-url)]))]
+      (route request))
     (catch Throwable e
       (let [{:keys [code entity-name]} (ex-data e)]
         (log/error! {:id ::request-failed
@@ -1021,20 +1022,22 @@
     (not (some #{uri} urls)) (conj uri)))
 
 (defn register-tools-redirect!
-  "Registers this deployment's tools callback and logout landing with the Synthigy Tools client."
+  "Registers the loopback tools callbacks, and this deployment's root-URL callback
+   and logout landing when SYNTHIGY_IAM_ROOT_URL is set, with the Synthigy Tools client."
   []
-  (when-let [uri (and (ui/tools-available?) (ui/tools-redirect-uri))]
+  (let [root (ui/root-url)
+        callbacks (cond-> ui/loopback-callbacks
+                    root (conj (str root "/console/tools/callback")))]
     (try
       (when (iam/update-client-settings!
              info/modeler-public-client-id
-             #(-> %
-                  (update "redirections" ensure-redirect uri)
-                  (update "logout-redirections" ensure-redirect (ui/tools-logout-uri))))
-        (log/info {:id ::tools-redirect-registered :data {:uri uri}}
-                  "Registered console tools callback"))
+             #(cond-> (update % "redirections" (fn [urls] (reduce ensure-redirect urls callbacks)))
+                root (update "logout-redirections" ensure-redirect (str root "/console/login?logged_out=1"))))
+        (log/info {:id ::tools-redirect-registered :data {:uris callbacks}}
+                  "Registered console tools callbacks"))
       (catch Throwable e
-        (log/error! {:id ::tools-redirect-failed :msg "Registering console tools callback failed"
-                     :data {:uri uri}}
+        (log/error! {:id ::tools-redirect-failed :msg "Registering console tools callbacks failed"
+                     :data {:uris callbacks}}
                     e)))))
 
 (lifecycle/register-module!

@@ -1107,10 +1107,12 @@
     :roles [{:selections {:name nil}}]}))
 
 (defn deployed-version-per-dataset-ids
-  []
-  (try
-    (set (map id/extract (last-deployed-version-per-dataset)))
-    (catch Throwable _ #{})))
+  ([] (deployed-version-per-dataset-ids nil))
+  ([superseded-dataset]
+   (try
+     (set (map id/extract (cond->> (last-deployed-version-per-dataset)
+                            superseded-dataset (remove #(= superseded-dataset (some-> % :dataset id/extract))))))
+     (catch Throwable _ #{}))))
 
 (defn latest-version-models
   "Models of the latest deployed version of every dataset, plus `include-version`
@@ -1130,13 +1132,11 @@
        include-version (conj (:model include-version))))))
 
 (defn gen-activation-filter
-  "Returns a filter function for activate-model.
-   Bootstrap behavior: if no versions deployed, everything is active.
-   Optional: include-version-id to include a version being deployed (not yet visible in DB query)."
+  "Filter for activate-model; `include-version` replaces its dataset's latest deployed version."
   ([] (gen-activation-filter nil))
-  ([include-version-id]
-   (let [deployed-versions (cond-> (deployed-version-per-dataset-ids)
-                             include-version-id (conj include-version-id))]
+  ([include-version]
+   (let [deployed-versions (cond-> (deployed-version-per-dataset-ids (some-> include-version :dataset id/extract))
+                             include-version (conj (id/extract include-version)))]
      (if (empty? deployed-versions)
        (constantly true)
        (fn [claims]
@@ -1216,7 +1216,7 @@
                      (core/map->ERDModel {:entities {} :relations {}}))]
       (core/fold-version global (:model version) (id/extract version)
                          (latest-version-models version)
-                         (gen-activation-filter (id/extract version)))))
+                         (gen-activation-filter version))))
   (core/deploy!
     [this version]
     (let [version (-> version decode-version-model (update :model core/normalize-legacy-types))
@@ -1498,10 +1498,9 @@
            ;; Use id/extract to get the version ID in the current provider format (xid or euuid)
            ;; This ensures claims match deployed-version-per-dataset-ids which also uses id/extract
            version-id (id/extract version)
-           ;; Pass version-id to the filter so it's included even if not yet visible in DB query
            model'' (core/fold-version global model version-id
                                       (latest-version-models version)
-                                      (gen-activation-filter version-id))
+                                      (gen-activation-filter version))
            schema (query/model->schema model'')]
        (query/deploy-schema schema)
        (dataset/save-model! model'')

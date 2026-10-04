@@ -140,7 +140,7 @@
          :request request}))
       ;;
       (and (not-any? #(= base-redirect-uri %) redirections)
-           (not (core/loopback-redirect-matches? redirect_uri redirections)))
+           (not (core/redirect-allowed? redirect_uri redirections)))
       (throw
        (ex-info
         "Client provided uri doesn't match available redirect URI(s)"
@@ -177,6 +177,7 @@
          {:strs [allowed-grants]} :settings
          session-client :id} (iam/get-client-by-key client-key)
         grants (set allowed-grants)
+        session-active? (:active (core/session-row session {:active nil}))
         {:keys [active]} (core/get-session-resource-owner session)]
     (log/debug {:id ::token-grant-request
                 :data {:client-id client_id}}
@@ -232,6 +233,14 @@
                       :data {:request-client id :token-client client_id}}
                      "Client doesn't match client from authorization request")
           client-id-missmatch)
+        ;;
+        (not session-active?)
+        (do
+          (delete code)
+          (token-error
+           "invalid_grant"
+           "The session this authorization code was"
+           "issued for is no longer active"))
         ;;
         (not active)
         (do

@@ -17,6 +17,7 @@
    `serve!` over their inherited stdin/stdout."
   (:require
     [clojure.string :as str]
+    [environ.core :refer [env]]
     [patcho.lifecycle :as lifecycle]
     [synthigy.boot :as boot]
     [synthigy.dataline :as dataline]
@@ -28,6 +29,8 @@
 (defonce ^:private start-modules (atom nil))
 
 (defonce ^:private activity (atom nil))
+
+(defonce start-error (atom nil))
 
 (defn progress
   "The one long-running operation this engine is doing, or `{:op nil}`."
@@ -127,6 +130,15 @@
   (loop [e t]
     (if-let [c (.getCause e)] (recur c) (or (ex-message e) (str (class e))))))
 
+(defn env-list [k]
+  (seq (remove str/blank? (str/split (or (env k) "") #"[\s,]+"))))
+
+(defn app-modules
+  "The SYNTHIGY_MODULES start list, or nil when unset."
+  []
+  (some->> (env-list :synthigy-modules)
+           (mapv #(keyword (str/replace % #"^:" "")))))
+
 (register-method! "server.start"
   (fn [_]
     ;; two modules of one dimension boot fine and then answer with the wrong backend — refuse
@@ -137,13 +149,16 @@
                            "on a launch classpath — the JVM would silently run whichever "
                            "comes first.")
                       {:code -32000 :duplicates dupes})))
-    (if-let [modules (seq @start-modules)]
+    (if (seq @start-modules)
       ;; a failure answers {:success false …}, never throws — the daemon keeps the warm engine for diagnosis
       (try
         (progress-begin! :boot "starting")
-        (boot/start! modules {:on-phase progress-phase!})
+        (run! (comp require symbol) (env-list :synthigy-require))
+        (boot/start! (or (app-modules) @start-modules) {:on-phase progress-phase!})
+        (reset! start-error nil)
         {:success true :message "Server started"}
         (catch Throwable t
+          (reset! start-error (root-cause-message t))
           (if (:legacy (ex-data t))
             {:success false :legacy true :message (ex-message t)}
             (do (log/error! {:id ::server-start-failed
@@ -157,7 +172,7 @@
 
 (register-method! "server.stop"
   (fn [_]
-    (lifecycle/stop! (first @start-modules))
+    (run! lifecycle/stop! (filter lifecycle/module-info (cons (first @start-modules) (app-modules))))
     {:success true :message "Server stopped"}))
 
 (register-method! "server.status"
@@ -169,6 +184,18 @@
        :console (when (lifecycle/module-info :synthigy/console)
                   (lifecycle/started? :synthigy/console))
        :message (if running? "Server is running" "Server is stopped")})))
+
+(register-method! "modules"
+  (fn [_]
+    {:modules
+     (vec (for [[topic {:keys [status depends-on doc error]}] (sort-by key (:modules (lifecycle/system-report)))]
+            (cond-> {:topic (str topic)
+                     :status (name status)
+                     :depends-on (mapv str depends-on)}
+              doc (assoc :doc doc)
+              error (assoc :error (:message error)
+                           :error-at (str (.toInstant ^java.util.Date (:timestamp error)))))))
+     :start-error @start-error}))
 
 (register-method! "shutdown"
   (fn [_]

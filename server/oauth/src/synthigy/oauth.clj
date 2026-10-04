@@ -198,6 +198,9 @@
           (contains? response_type "code")
           (let [{cookie-session :idsrv/session
                  :keys [prompt state max_age response_mode]} req-params
+                session (core/get-session cookie-session)
+                ;; never renew a killed or unknown session silently — revocation and session TTLs rely on it
+                session-live? (and (:active session) (some? (:resource-owner session)))
                 prompt-none? (= prompt "none")
                 prompt-login? (= prompt "login")
                 prompt-consent? (= prompt "consent")
@@ -205,8 +208,7 @@
                 max-age-seconds (when max_age
                                   (try (Long/parseLong (str max_age))
                                        (catch Exception _ nil)))
-                session-auth-time (when cookie-session
-                                    (core/get-session-authorized-at cookie-session))
+                session-auth-time (:authorized-at session)
                 auth-time-ms (when session-auth-time
                                (if (instance? java.util.Date session-auth-time)
                                  (.getTime ^java.util.Date session-auth-time)
@@ -214,10 +216,10 @@
                 session-too-old? (when (and max-age-seconds auth-time-ms)
                                    (> (- (System/currentTimeMillis) auth-time-ms)
                                       (* max-age-seconds 1000)))
-                silent? (and (some? cookie-session) prompt-none? (not session-too-old?))
+                silent? (and session-live? prompt-none? (not session-too-old?))
                 force-login? (or prompt-login? prompt-select-account? session-too-old?)]
             (cond
-              (and prompt-none? (nil? cookie-session))
+              (and prompt-none? (not session-live?))
               (core/handle-request-error
                {:request req-params
                 :type "login_required"
@@ -229,7 +231,7 @@
                 :type "login_required"
                 :description (str "Authentication is older than max_age (" max_age " seconds)")})
 
-              (and silent? (contains? (core/get-session cookie-session) :code))
+              (and silent? (contains? session :code))
               (core/handle-request-error
                {:request req-params
                 :type "invalid_request"

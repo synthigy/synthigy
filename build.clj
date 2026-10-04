@@ -51,6 +51,8 @@
                     aot? (assoc :ignores [#".*\.clj[cs]?$"]))))
     (doseq [f license-files]
       (b/copy-file {:src f :target (str class-dir "/synthigy/" f)}))
+    (when-let [v (System/getenv "SYNTHIGY_VERSION")]
+      (b/write-file {:path (str class-dir "/synthigy/VERSION") :string v}))
     (when aot?
       (let [nses (remove no-aot (mapcat #(find/find-namespaces-in-dir (java.io.File. ^String %)) dirs))]
         (b/compile-clj {:basis basis :class-dir class-dir :ns-compile (vec nses)})))
@@ -420,6 +422,7 @@
     (b/copy-file {:src tooling-js :target (str class-dir "/synthigy/console/js/tooling.js")})
     (doseq [f license-files]
       (b/copy-file {:src f :target (str class-dir "/synthigy/" f)}))
+    (b/write-file {:path (str class-dir "/synthigy/VERSION") :string version})
     (b/write-pom {:class-dir class-dir :lib lib :version version
                   :basis (b/create-basis {:project {:deps (bundle-deps basis) :paths []}})
                   :repos {"clojars" {:url "https://repo.clojars.org/"}}

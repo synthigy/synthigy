@@ -11,10 +11,17 @@
 (ns synthigy.boot
   "One boot order for every runtime — supervisor, dev REPL, embedding apps."
   (:require
+   [clojure.java.io :as io]
    [patcho.lifecycle :as lifecycle]
+   [patcho.patch :as patch]
    [synthigy.dataline]
    [clojure.string :as str]
    [synthigy.dataset.id :as id]))
+
+(def version
+  (or (some-> (io/resource "synthigy/VERSION") slurp str/trim not-empty) "dev"))
+
+(patch/current-version :synthigy/engine version)
 
 (def shadowed-resources
   {"engine"         "synthigy/core"

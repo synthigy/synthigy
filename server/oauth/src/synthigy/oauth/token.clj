@@ -192,8 +192,8 @@
 
 (def owner-not-authorized
   (token-error
-   "resource_owner_unauthorized"
-   "Provided refresh token doesn't have active user"))
+   "invalid_grant"
+   "The grant's resource owner is no longer active"))
 
 (def refresh-not-supported
   (token-error

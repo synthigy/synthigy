@@ -122,11 +122,11 @@
        (drift-notice status)
        [:div.console-guide
         [:p "Moving custody lives in the "
-         [:strong "operator console"]
+         [:strong "portal"]
          " — run " [:code "synthigy console"] " on the host that runs this "
          "deployment. A migration is three things that have to happen "
          "together: rewrap every data key, change the environment, restart "
-         "onto it. Only the operator console can do all three; this page "
+         "onto it. Only the portal can do all three; this page "
          "could rewrap the keys but neither write the env file nor restart, "
          "which left the next boot unable to start."]
         [:p "Rotation and the key table stay here, where the change can be "

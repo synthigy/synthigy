@@ -603,7 +603,7 @@ $$ LANGUAGE plpgsql;")
 ;;; Legacy Audit-Config Normalization (Model Blobs)
 ;;; ============================================================================
 ;;
-;; Real EYWA tables carry `modified_by` columns (modified-auditing) but their
+;; Real legacy tables carry `modified_by` columns (modified-auditing) but their
 ;; stored data models declare NO audit CONFIG. The modern schema augmentation
 ;; (`iam/audit` `augment-schema-impl`) gates the `modified_by`/`created_by`
 ;; schema fields ENTIRELY on `[:configuration :audit :actions]`, so without
@@ -614,7 +614,7 @@ $$ LANGUAGE plpgsql;")
 
 (defn audited-table-names
   "Set of public table names carrying a `modified_by` column — i.e. the tables
-   legacy EYWA modified-audits. Read from live information_schema so it matches
+   legacy modified-audits. Read from live information_schema so it matches
    exactly the tables `reconcile-legacy-audit-columns!` brought up to the modern
    created+modified layout."
   []
@@ -623,7 +623,7 @@ $$ LANGUAGE plpgsql;")
                             WHERE table_schema = 'public' AND column_name = 'modified_by'"]))))
 
 (defn normalize-stored-audit-config!
-  "Bring legacy EYWA model blobs in line with their audit COLUMNS.
+  "Bring legacy model blobs in line with their audit COLUMNS.
 
    For every deployed `dataset_version`, unions `#{:modified :created}` into
    `[:configuration :audit :actions]` on each entity whose table carries
@@ -632,7 +632,7 @@ $$ LANGUAGE plpgsql;")
    `:who`/`:when` config) are preserved — never clobbered.
 
    Format-agnostic and idempotent (the union is a no-op once the actions are
-   present). Postgres / legacy-EYWA import only — call BEFORE `migrate-to-xid!`."
+   present). Postgres / legacy import only — call BEFORE `migrate-to-xid!`."
   []
   (log/info {:id ::audit-config-normalize-starting :data {:action :patching :subject :model}}
             "Normalizing legacy audit config across stored models")
@@ -958,11 +958,11 @@ $$ LANGUAGE plpgsql;")
 
 (defn detect-format
   "Detect ID format for Postgres when no format stamp is stored: \"xid\" for a
-   fresh install, \"euuid\" for a legacy EYWA layout."
+   fresh install, \"euuid\" for a legacy layout."
   []
   (cond
     ;; No dataset_version table → fresh install → xid. euuid is NOT a
-    ;; fresh-deploy format: it exists only as a legacy EYWA source brought in
+    ;; fresh-deploy format: it exists only as a legacy source brought in
     ;; via import. A stray SYNTHIGY_ID_FORMAT=euuid is ignored (and flagged) so
     ;; we never create a euuid provider over xid-only fresh-create DDL.
     (not (table-exists? "dataset_version"))
@@ -1074,8 +1074,8 @@ $$ LANGUAGE plpgsql;")
                   (.getMessage ex))))))
 
 (defn reconcile-legacy-audit-columns!
-  "Bring a legacy EYWA schema's audit columns up to the modern Synthigy layout.
-   Real EYWA tables carry `modified_by`/`modified_on` (modified-auditing) but NOT
+  "Bring a legacy schema's audit columns up to the modern Synthigy layout.
+   Real legacy tables carry `modified_by`/`modified_on` (modified-auditing) but NOT
    `created_by`/`created_on` — yet modern Synthigy's audit-augmented schema
    declares and QUERIES created_by/created_on for every audited entity, so a
    query against a legacy table fails with `column \"created_by\" does not exist`.
@@ -1103,18 +1103,18 @@ $$ LANGUAGE plpgsql;")
                 (.getMessage ex)))))
 
 ;;; ============================================================================
-;;; Legacy EYWA → Synthigy import (Postgres only)
+;;; Legacy → Synthigy import (Postgres only)
 ;;;
-;;; Synthigy is xid. euuid exists ONLY as a legacy EYWA source layout. This is
-;;; the one-time, idempotent importer that converts a connected legacy EYWA
+;;; Synthigy is xid. euuid exists ONLY as a legacy source layout. This is
+;;; the one-time, idempotent importer that converts a connected legacy
 ;;; (euuid) database into the native Synthigy (xid) layout. The runtime stays
 ;;; xid-only; this is the only euuid-aware path besides boot detection.
 ;;; ============================================================================
 
-(defn legacy-eywa-layout?
+(defn legacy-euuid-layout?
   "True when the connected Postgres is running on a LEGACY euuid layout — i.e.
    the active id format is euuid. Synthigy is xid-native; any euuid layout is a
-   legacy EYWA database to be imported to xid (one-time). Format, not structure,
+   legacy database to be imported to xid (one-time). Format, not structure,
    is the right signal: a modern euuid deploy already carries `xid` columns on the
    meta-schema, so a 'no xid column' test would miss it. After the import flips
    the provider to xid this returns false — making the import gate idempotent."
@@ -1122,7 +1122,7 @@ $$ LANGUAGE plpgsql;")
   (= :euuid (id/key)))
 
 (defn migrate->synthigy!
-  "One-time, idempotent forward migration of a LEGACY EYWA (euuid) Postgres
+  "One-time, idempotent forward migration of a LEGACY (euuid) Postgres
    database into the native Synthigy (xid) layout. No-op (returns
    `{:skipped :already-synthigy}`) on an already-native DB. After it runs the
    database is xid forever and the runtime treats it like any native deploy.
@@ -1134,19 +1134,19 @@ $$ LANGUAGE plpgsql;")
 
    Postgres ONLY — SQLite/CRDB never carry a legacy euuid layout."
   []
-  (if-not (legacy-eywa-layout?)
+  (if-not (legacy-euuid-layout?)
     (do (log/info {:id ::migrate-skip :data {:action :migrating :subject :xid}}
                   "Native Synthigy (xid) layout — no migration needed")
         {:skipped :already-synthigy})
     (do (log/warn {:id ::migrate-starting :data {:action :migrating :subject :xid}}
-                  "Legacy EYWA database detected — migrating to Synthigy xid layout")
+                  "Legacy database detected — migrating to Synthigy xid layout")
         ;; transform-stored-models! reads dataset_version.deployed_on and the
         ;; model patches read `active` — add those columns BEFORE migrating.
         (reconcile-legacy-meta-columns!)
         (let [result (migrate-to-xid!)]
           (verify-xid-migration)
           (log/info {:id ::migrate-complete :data {:action :migrated :subject :xid}}
-                    "EYWA → Synthigy xid migration complete and verified")
+                    "Legacy → Synthigy xid migration complete and verified")
           (assoc result :migrated true)))))
 
 ;; The operator console's migrate affordance — registered HERE so the verb

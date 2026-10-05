@@ -39,6 +39,7 @@
    "provider_unsupported"     [:retry "Could not reach that identity provider."]
    "claim_invalid"            [:retry "This invitation link is invalid or has already been used."]
    "reauth_identity_mismatch" [:retry "You verified with a different account than the one signed in."]
+   "access_denied"            [:support "Access was denied."]
    "provider_unknown"         [:support "That sign-in method doesn't exist."]
    "provider_disabled"        [:support "That sign-in method is switched off."]
    "claim_method_not_allowed" [:support "This invitation doesn't allow that sign-in method."]

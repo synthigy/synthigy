@@ -43,8 +43,7 @@
 
 (defn env-config []
   (merge default-config
-         {:logs-path          (or (not-empty (env :duckdb-logs-path)) (:logs-path default-config))
-          :buffer-size        (duck/parse-int-or (env :duckdb-buffer-size) (:buffer-size default-config))
+         {:buffer-size        (duck/parse-int-or (env :duckdb-buffer-size) (:buffer-size default-config))
           :batch-rows         (duck/parse-int-or (env :duckdb-batch-rows) (:batch-rows default-config))
           :batch-ms           (duck/parse-int-or (env :duckdb-batch-ms) (:batch-ms default-config))
           :log-max-rows       (duck/parse-int-or (env :duckdb-log-max-rows) (:log-max-rows default-config))

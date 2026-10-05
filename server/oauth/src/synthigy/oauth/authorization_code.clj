@@ -198,7 +198,7 @@
         ;;
         (not (contains? grants "authorization_code"))
         (token-error
-         "unauthorized_grant"
+         "unauthorized_client"
          "Client sent access token request"
          "for grant type that is outside"
          "of client configured privileges")

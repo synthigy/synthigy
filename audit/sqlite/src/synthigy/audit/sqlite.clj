@@ -12,7 +12,6 @@
   "Audit provider in its own SQLite file (`audit.db`), beside the data database."
   (:require
    [clojure.string :as str]
-   [environ.core :refer [env]]
    [patcho.patch :as patch]
    [synthigy.audit.protocol :as audit]
    [synthigy.audit.policy :as policy]
@@ -30,7 +29,7 @@
 ;;; ============================================================================
 
 (defn audit-path []
-  (or (not-empty (env :sqlite-audit-path)) (str synthigy.env/db-dir "/audit.db")))
+  (str synthigy.env/db-dir "/audit.db"))
 
 (defn memory? [path]
   (or (nil? path) (str/blank? path) (= ":memory:" path)))

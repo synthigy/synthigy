@@ -190,7 +190,7 @@
           as' (keep #(attribute->ddl entity %) as)
           pk ["_eid bigserial not null primary key"
               ;; Fresh installs are xid-only. euuid exists solely as a legacy
-              ;; EYWA source format, brought in via import — never freshly
+              ;; legacy source format, brought in via import — never freshly
               ;; created — so we only ever emit the xid id column here.
               (str (id/field) " varchar(64) not null unique")]
           cs' (keep-indexed
@@ -354,7 +354,7 @@
    {:keys [name type]
     {:keys [values]} :configuration
     :as attribute}]
-  ;; Don't look at primary key since that is EYWA problem
+  ;; Don't look at primary key since that is a legacy-layout problem
   (let [oentity (core/suppress entity)
         old-table (entity->table-name oentity)
         diff (core/diff attribute)]
@@ -421,7 +421,7 @@
                          ;; enum is stored as TEXT - any type converts via text cast
                              (= "enum" type) (str " using(" column "::text)"))]
                    ;; never run the json USING guard on an already-jsonb column
-                   ;; (legacy EYWA dumps) — jsonb ~ text has no operator
+                   ;; (legacy dumps) — jsonb ~ text has no operator
                        (if (= "json" type)
                          (format
                           (str "do $$ begin\n"
@@ -1343,7 +1343,7 @@
               _ (rls/assert-guards-compile! (core/preview-model this version) model)
 
             ;; 3. Call mount to transform database with updated global model
-              _ (core/mount this version)
+              _ (core/mount this (update version :model #(core/with-merged-config global %)))
 
             ;; 4. Prepare version metadata for saving (with original model v1, not global)
               version'' (encode-version-model
@@ -1816,19 +1816,19 @@
             ;; Detect and set ID provider BEFORE loading model
            (xid/detect-and-set-provider!)
            ;; First-class legacy awareness: Synthigy is xid-native. A legacy
-           ;; EYWA (euuid) layout is loudly flagged and requires an EXPLICIT,
+           ;; (euuid) layout is loudly flagged and requires an EXPLICIT,
            ;; operator-run one-time import — we never auto-migrate on boot.
-           (when (xid/legacy-eywa-layout?)
-             (log/warn {:id ::legacy-eywa-detected
+           (when (xid/legacy-euuid-layout?)
+             (log/warn {:id ::legacy-euuid-detected
                         :data {:action :not-initialized :subject :id-format :format "euuid"}}
-                       (str "LEGACY EYWA (euuid) DATABASE DETECTED. Synthigy is xid-native — "
+                       (str "LEGACY (euuid) DATABASE DETECTED. Synthigy is xid-native — "
                             "run (synthigy.dataset.postgres.xid/migrate->synthigy!) to convert "
                             "this database to the Synthigy xid layout. Until then the system "
                             "runs against the legacy euuid layout.")))
            ;; NB: the per-boot reconcile band-aid is gone from the normal start.
            ;; The migration (`migrate->synthigy!`) owns the proactive reconcile
            ;; (step 0); a native/modern boot already has `deployed_on`/`active`,
-           ;; and an un-imported old-EYWA boot self-heals via the
+           ;; and an un-imported legacy boot self-heals via the
            ;; `latest-deployed-version` nil-catch + the model patch that adds them.
            (dataset/start)
            ;; Plug delta-queue triggers + drainer are owned by
@@ -2242,7 +2242,11 @@
 
   (max-bind-params [_db]
     ;; PostgreSQL wire protocol counts Bind parameters in an Int16.
-    65535))
+    65535)
+
+  (row-lock-clause [_db]
+    ;; NO KEY: other relations' foreign-key checks on the row stay unblocked
+    " for no key update"))
 
 ;;; SchemaManager Protocol - PostgreSQL schema introspection and maintenance
 

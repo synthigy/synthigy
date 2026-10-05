@@ -381,7 +381,7 @@
      {:keys [values]} :configuration
      :as attribute}
     conn]
-  ;; Don't look at primary key since that is EYWA problem
+  ;; Don't look at primary key since that is a legacy-layout problem
   (let [oentity (core/suppress entity)
         old-table (entity->table-name oentity)
         diff (core/diff attribute)]
@@ -1241,7 +1241,7 @@
               _ (rls/assert-guards-compile! (core/preview-model this version) model)
 
             ;; 3. Call mount to transform database with updated global model
-              dataset' (core/mount this (assoc version :model model))
+              _ (core/mount this (assoc version :model (core/with-merged-config global model)))
 
             ;; 4. Prepare version metadata for saving (with original model v1, not global)
               version'' (encode-version-model
@@ -1252,7 +1252,7 @@
         ;; Mark version as deployed in database
           (sync-entity this :dataset/version version'')
         ;; Reload current projection so that you can sync data for new model
-          (core/reload this dataset')
+          (core/reload this (assoc version :model model))
 
         ;; Rebuild global model from ALL deployed versions to compute correct :active flags
         ;; This ensures entities not in latest versions are marked as inactive
@@ -1895,7 +1895,11 @@
 
   (max-bind-params [_db]
     ;; SQLITE_MAX_VARIABLE_NUMBER — 32766 since SQLite 3.32 (2020).
-    32766))
+    32766)
+
+  (row-lock-clause [_db]
+    ;; one writer per file — the write transaction already holds the lock
+    nil))
 
 ;;; ============================================================================
 ;;; SchemaManager Protocol - SQLite schema introspection and maintenance

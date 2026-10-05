@@ -12,6 +12,7 @@
   "Schema-aware linter, producing `[{:severity :from :to :message} …]`."
   (:require [clojure.string :as str]
             [synthigy.xsql.ast :as ast]
+            [synthigy.xsql.compile :as compile-impl]
             [synthigy.xsql.parser :as parser]
             [synthigy.xsql.sql-params :as sql-params]))
 
@@ -315,9 +316,17 @@
                              (entity-name-of entity-def (:schema ctx)))))))
 
 (defn lint-meta-key [meta-node entity-def ctx]
-  (when (and entity-def (= "order" (some-> meta-node :children first :text)))
-    (when-let [pref (first (filter #(= :param-ref (:node %)) (:children meta-node)))]
-      (lint-order-restriction-set pref entity-def ctx))))
+  (when (and entity-def
+             (= "_order_by" (parser/normalize-meta-kw (some-> meta-node :children first :text))))
+    (if-let [pref (first (filter #(= :param-ref (:node %)) (:children meta-node)))]
+      (lint-order-restriction-set pref entity-def ctx)
+      (doseq [spec (ast/find-children meta-node :order-spec)
+              :let [col (first (:children spec))]
+              :when (and (= :identifier (:node col))
+                         (not (contains? (:attributes entity-def) (:text col))))]
+        (vswap! (:diags ctx) conj
+                (error-diag col (str "Unknown order column '" (:text col) "' on "
+                                     (entity-name-of entity-def (:schema ctx)))))))))
 
 (defn lint-args-of-parens [parens-node entity-def ctx]
   (when-let [list (ast/find-child parens-node :arg-list)]
@@ -415,9 +424,26 @@
    "_in" "in" "_not_in" "not in"
    "is_null" "is null" "is_not_null" "is not null"})
 
+(defn lint-enum-literals
+  "A literal outside an enum's stored labels matches no row."
+  [pred-op-node attr-def field-name ctx]
+  (when-let [members (seq (map #(str/replace % #"-|\s" "_") (:enum attr-def)))]
+    (doseq [v (concat (ast/find-children pred-op-node :value)
+                      (some-> (ast/find-child pred-op-node :list-literal) (ast/find-children :value)))
+            :let [lit (first (:children v))
+                  x   (when (#{:string :identifier} (:node lit)) (compile-impl/compile-value v))]
+            :when (and (string? x) (not (some #{x} members)))]
+      (vswap! (:diags ctx) conj
+              (error-diag lit
+                          (str "'" x "' is not a value of enum '" field-name "'"
+                               (if-let [m (some #(when (= (str/lower-case %) (str/lower-case x)) %) members)]
+                                 (str " — values are case-sensitive: \"" m "\"")
+                                 (str " (" (str/join ", " members) ")"))))))))
+
 (defn lint-pred-op-against-type
   "Check operator/type compatibility and empty-list cases."
   [pred-op-node attr-def field-name ctx]
+  (lint-enum-literals pred-op-node attr-def field-name ctx)
   (let [[kind op-key] (classify-pred-op pred-op-node)]
     (when op-key
       (when (#{"in" "not_in"} kind)

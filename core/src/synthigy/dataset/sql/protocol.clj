@@ -37,7 +37,9 @@
   (excluded-ref [db column]
     "Generate reference to the excluded row in an UPSERT.")
   (max-bind-params [db]
-    "Hard cap on bound parameters per prepared statement, used to size bulk-write chunks."))
+    "Hard cap on bound parameters per prepared statement, used to size bulk-write chunks.")
+  (row-lock-clause [db]
+    "SELECT suffix locking the selected rows until commit, or nil where writers are serialized anyway."))
 
 ;;; ============================================================================
 ;;; Protocol 3: SchemaManager

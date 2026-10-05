@@ -174,7 +174,7 @@
 (patch/current-version :synthigy.iam/model (:name (current-version)))
 
 (defn ensure-system-user-name
-  "EYWA-migrated databases carry the system user under its old name."
+  "Migrated legacy databases carry the system user under its old name."
   []
   (let [k {(id/key) (id/data :data/synthigy-user)}
         {stored :name} (dataset/get-entity :iam/user k {:name nil})]

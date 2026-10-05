@@ -84,17 +84,10 @@
                         e))))))
 
 (defn from-env
-  "Builds SQLite connection config from environment variables.
-
-  Environment variables:
-    SQLITE_PATH      - Path to SQLite database file (default: synthigy.db)
-    SQLITE_POOL_SIZE - Connection pool size (default: 8)
-
-  Returns:
-    Config map with :path and :max-connections keys"
+  "SQLite connection config: the instance's db/synthigy.db, pool size from SQLITE_POOL_SIZE."
   []
-  (let [path (env :sqlite-path (str synthigy.env/home "/db/synthigy.db"))]
-    (log/info {:id ::path-from-env :data {:path path}} "Database path from env")
+  (let [path (str synthigy.env/db-dir "/synthigy.db")]
+    (log/info {:id ::path-from-env :data {:path path}} "SQLite database path")
     {:path path
      :max-connections (Integer/parseInt (env :sqlite-pool-size "8"))}))
 

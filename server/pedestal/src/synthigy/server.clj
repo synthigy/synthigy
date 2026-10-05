@@ -595,9 +595,6 @@
     POSTGRES_PASSWORD - PostgreSQL password
     POSTGRES_POOL_SIZE - Connection pool size (default: 20)
 
-  Database-specific (SQLite):
-    SQLITE_PATH - SQLite database file path
-
   See synthigy.db and synthigy.server docstrings for details."
   [& _]
   (try

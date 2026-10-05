@@ -226,6 +226,12 @@
                          (get (id/key)))]
     (get-resource-owner user-id)))
 
+(defn live-session-owner
+  "Resource owner of `session` while it is active; nil once killed."
+  [session]
+  (when (:active (session-row session {:active nil}))
+    (get-session-resource-owner session)))
+
 (defmulti process-scope (fn [_ _ scope] scope))
 
 (defmethod process-scope :default

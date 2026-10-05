@@ -1,10 +1,10 @@
 # Embedding Synthigy
 
-An embedded app is ONE jar: your code plus the engine, pulled from Clojars as a
-bundle (`com.synthigy/sqlite-bundle`, `postgres-bundle`,
+An embedded app is **one jar**: your code plus the engine, pulled from Clojars
+as a bundle (`com.synthigy/sqlite-bundle`, `postgres-bundle`,
 `postgres-clickhouse-bundle`). The same jar runs two ways: on its own
-(`java -jar`), or supervised by the `synthigy` CLI, which adds the operator
-console: first superuser, Stop/Start/Restart, logs, versions and module health.
+(`java -jar`), or supervised by the `synthigy` CLI, which adds the portal:
+first superuser, Stop/Start/Restart, logs, versions and module health.
 
 ## 1. Your app is a module
 
@@ -33,7 +33,7 @@ what you use. The engine starts dependencies first and stops dependents first.
   :stop  (fn [] (routes/unregister-prefix! ::home))})
 ```
 
-Ship exactly ONE bundle on the classpath. Two engines are refused at boot.
+Ship exactly **one** bundle on the classpath. Two engines are refused at boot.
 
 ## 2. Run it standalone
 
@@ -55,8 +55,14 @@ Ship exactly ONE bundle on the classpath. Two engines are refused at boot.
   @(promise))
 ```
 
-Configuration is environment variables (`SQLITE_PATH`, `SYNTHIGY_SERVER_PORT`,
-...). `synthigy exec` loads the project's `.synthigy/.env` for you:
+A module that fails to start does not stop the others. `boot/start!` starts
+every module it can, skips the ones that need the failed one, starts audit and
+logs, and then throws an error naming each module that did not start.
+
+Configuration is environment variables (`SYNTHIGY_SERVER_PORT`, ...). The
+SQLite files live in `$SYNTHIGY_HOME/db/`: `synthigy.db`, `audit.db` and
+`logs.db`. `synthigy exec` loads the project's `.synthigy/.env` and runs your
+jar with the project's `.synthigy/` as its home:
 
 ```bash
 synthigy exec -- java -jar target/my-app.jar
@@ -73,22 +79,24 @@ SYNTHIGY_BUNDLE=sqlite                     # the bundle your jar carries
 SYNTHIGY_JAR=/abs/path/target/my-app.jar   # absolute path
 SYNTHIGY_REQUIRE=my.app                    # namespaces to load, comma separated
 SYNTHIGY_MODULES=:my/app,:synthigy/console # modules to start, comma separated
-SQLITE_PATH=/abs/path/data/synthigy.db
 ```
 
+The database files are in the instance's `db/` folder, next to that `.env`.
+
 ```bash
-synthigy up      # console at http://127.0.0.1:7888
+synthigy up      # portal at http://127.0.0.1:7888
 synthigy down
 ```
 
-- `SYNTHIGY_MODULES` REPLACES the default start list (`:synthigy/server`,
+- `SYNTHIGY_MODULES` **replaces** the default start list (`:synthigy/server`,
   `:synthigy/console`). Dependencies start on their own. List
   `:synthigy/console` when your module does not depend on it and you want the
-  engine console at `/console`.
+  console at `/console`.
 - Unset, the engine starts the default list and your code is not loaded.
 - Stop stops the server and every listed module. Start brings them back.
 - The Engine panel shows the version your jar's engine reports and the state of
   your modules. A namespace or module that fails to load is shown there with
-  its error, and the engine stays up so you can fix `.env` and restart.
+  its error. The other modules and the console still start, and the engine
+  stays up so you can fix `.env` and restart.
 - Your `-main` is not used here. The portal boots the engine itself and starts
   your modules through the same lifecycle.

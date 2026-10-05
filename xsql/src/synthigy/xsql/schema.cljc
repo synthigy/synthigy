@@ -30,7 +30,7 @@
 
 (defn wire->lint
   "Adapt a parsed, string-keyed `schema.json` into `{:entities {name
-   {:attributes {a {:type :unique}} :relations {r {:target :cardinality}}}}}`."
+   {:attributes {a {:type :unique :enum}} :relations {r {:target :cardinality}}}}}`."
   [wire]
   {:entities
    (into {}
@@ -40,8 +40,9 @@
                   [ename
                    {:attributes
                     (into {} (map (fn [[a adef]]
-                                    [a {:type   (normalize-type (get adef "type"))
-                                        :unique (contains? unique a)}]))
+                                    [a (cond-> {:type   (normalize-type (get adef "type"))
+                                                :unique (contains? unique a)}
+                                         (get adef "enum") (assoc :enum (get adef "enum")))]))
                           (get edef "attributes"))
                     :relations
                     (into {} (map (fn [[r rdef]]

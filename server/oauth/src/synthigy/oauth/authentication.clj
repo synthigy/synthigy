@@ -21,7 +21,7 @@
   "Extract the Bearer token from the Authorization header."
   [request]
   (when-let [authorization (get-in request [:headers "authorization"])]
-    (second (re-find #"Bearer\s+(.+)" authorization))))
+    (second (re-find #"(?i)^Bearer\s+(.+)" authorization))))
 
 (defn validate-token
   "Validate a bearer token by JWT signature; stateless — revocation is enforced

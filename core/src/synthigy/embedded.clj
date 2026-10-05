@@ -191,9 +191,12 @@
     (-> (dataset/deployed-model) daccess/protect-model runtime/build)))
 
 (defn describe
-  "Compile an XSQL program `source` to codegen IR — `{:operations [...]}`."
+  "Compile XSQL to codegen IR `{:operations [...]}`; `source` is one program or `[{:path :source}]`, one per .xsql file."
   [source & {:as opts}]
-  (run {:op "describe" :source source} (assoc opts :key-format nil)))
+  (run (if (string? source)
+         {:op "describe" :source source}
+         {:op "describe" :sources (vec source)})
+       (assoc opts :key-format nil)))
 
 (defn history
   [op hopts opts]

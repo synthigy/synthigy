@@ -425,7 +425,7 @@
   (vrs/newer? "0" "0.0.0")
   (vrs/older? "0" "0.0.0")
   (available-versions)
-  (available-versions :eywa/robotics)
+  (available-versions :synthigy/robotics)
   (upgrade ::datasets "0.0.1" (println "Patching 0.3.37"))
   (upgrade ::datasets "0.3.37" (println "Patching 0.3.37"))
   (upgrade ::datasets "0.3.38" (println "Patching 0.3.38"))

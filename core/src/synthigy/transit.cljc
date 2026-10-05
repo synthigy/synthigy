@@ -10,7 +10,7 @@
 
 (ns synthigy.transit
   "Transit serialization with custom handlers for Synthigy dataset/modeling
-   records, plus legacy EYWA tags (neyho.eywa.*) converted to Synthigy on read."
+   records, plus legacy tags converted to Synthigy on read."
   (:require
     #?(:clj [patcho.lifecycle :as lifecycle])
     #?(:clj [patcho.patch :as patch])
@@ -149,7 +149,7 @@
            "synthigy.modeling.core.Path"
            (record-read-handler synthigy.modeling.core/map->Path)})
 
-        (eywa-read-handlers []
+        (legacy-read-handlers []
           {"neyho.eywa.dataset.core.ERDRelation"
            (record-read-handler synthigy.dataset.core/map->ERDRelation)
 
@@ -173,12 +173,12 @@
 
   (defn init
     "Initialize transit read/write handlers — writes synthigy.* tags; reads
-     synthigy.* and legacy neyho.eywa.* tags (converted to Synthigy records)."
+     synthigy.* and legacy tags (converted to Synthigy records)."
     []
     (init-transit-handlers
       {:write (synthigy-write-handlers)
        :read (merge (synthigy-read-handlers)
-                    (eywa-read-handlers))})))
+                    (legacy-read-handlers))})))
 
 
 #? (:clj

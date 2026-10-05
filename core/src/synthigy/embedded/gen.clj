@@ -48,15 +48,14 @@
            (when (seq (:params op))
              (str " — params: " (str/join ", " (map :name (:params op))))))))
 
-(defn read-source
-  "Every .xsql in `dir`, filename-sorted, joined into one program."
+(defn read-files
+  "Every .xsql in `dir`, filename-sorted, as `[{:path :source}]`."
   [dir]
   (->> (.listFiles (io/file dir))
        (filter #(and (.isFile ^java.io.File %)
                      (str/ends-with? (.getName ^java.io.File %) ".xsql")))
        (sort-by #(.getName ^java.io.File %))
-       (map slurp)
-       (str/join "\n\n")))
+       (mapv (fn [^java.io.File f] {:path (.getName f) :source (slurp f)}))))
 
 (defn emit-fn
   [op]
@@ -168,7 +167,7 @@
   "Read `:dir`'s .xsql, describe it in-process, and write generated namespaces
    under `:out`/`:ns-prefix`."
   [{:keys [dir acting-as] :as opts}]
-  (let [{:keys [operations]} (embedded/describe (read-source dir) :acting-as acting-as)
+  (let [{:keys [operations]} (embedded/describe (read-files dir) :acting-as acting-as)
         {:keys [files skipped]} (emit-files operations opts)]
     (report-skipped skipped)
     (doseq [[path {:keys [content]}] files]
@@ -198,7 +197,7 @@
         done-src (atom ::none)
         last-err (atom nil)
         step!    (fn []
-                   (let [src (try (read-source dir) (catch Exception _ nil))]
+                   (let [src (try (read-files dir) (catch Exception _ nil))]
                      (when (and src (not= src @done-src))
                        (try
                          (run! load-file (generate opts))

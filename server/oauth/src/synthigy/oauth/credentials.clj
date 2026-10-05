@@ -19,6 +19,7 @@
    [synthigy.iam.encryption :as encryption]
    [synthigy.json :as json]
    [synthigy.log :as log]
+   [synthigy.oauth.authentication :as authentication]
    [synthigy.oauth.core :as core]
    [synthigy.oauth.onboarding :as onboarding]))
 
@@ -28,13 +29,11 @@
   {:status status :headers {"Content-Type" "application/json"} :body (json/write-str body)})
 
 (defn token-subject
-  "The user behind this request's bearer token, with the stored credential, or
+  "The user behind an unexpired bearer token, with the stored credential, or
    nil. Reads under no principal — the credential column is superuser-only."
-  [request]
-  (when-let [token (some->> (get-in request [:headers "authorization"])
-                            (re-find #"(?i)bearer\s+(.+)")
-                            second)]
-    (when-let [{:keys [sub xid]} (encryption/unsign-data token)]   ; verifies signature + exp
+  [token]
+  (when (authentication/validate-token token)
+    (let [{:keys [sub xid]} (encryption/unsign-data token)]
       (when-let [args (cond xid {(id/key) xid} sub {:name sub})]
         (dataset/get-entity :iam/user
                             args
@@ -47,13 +46,15 @@
   [request]
   (binding [core/*domain* (core/original-uri request)]
     (let [{:keys [current_password new_password]} (core/parse-body request)
-          user (token-subject request)]
+          token (authentication/extract-bearer-token request)
+          user  (token-subject token)]
       (cond
-        (nil? user)
-        (json-response 401 {:error "unauthorized"})
+        (nil? token)
+        {:status 401 :headers {"WWW-Authenticate" "Bearer"}}
 
         (not (:active user))
-        (json-response 403 {:error "account_inactive"})
+        (assoc-in (json-response 401 {:error "invalid_token"})
+                  [:headers "WWW-Authenticate"] "Bearer error=\"invalid_token\"")
 
         (or (str/blank? current_password) (str/blank? new_password))
         (json-response 400 {:error "invalid_request"})

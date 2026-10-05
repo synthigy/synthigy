@@ -35,8 +35,9 @@
         [:div.console-eyebrow "Your account"]
         [:h1.console-title "Sessions"]
         [:p.console-subtitle
-         "Everywhere you're currently signed in. Revoking a session also "
-         "revokes its tokens, so an app using it is signed out immediately."]
+         "Everywhere you're currently signed in. Revoking a session ends it "
+         "and revokes its tokens; an app using it loses access once its "
+         "current access token expires."]
         (when (pos? others)
           [:ty-button {:type "button" :size "sm" :flavor "danger" :muted true
                        :appearance "outlined"

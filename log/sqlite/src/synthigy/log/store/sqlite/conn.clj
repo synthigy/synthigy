@@ -40,7 +40,7 @@
 (defn env-config
   "Log store config from SQLITE_LOGS_* env on top of `defaults`."
   []
-  {:logs-path          (or (not-empty (env :sqlite-logs-path)) (:logs-path defaults))
+  {:logs-path          (:logs-path defaults)
    :buffer-size        (parse-long-or (env :sqlite-logs-buffer-size) (:buffer-size defaults))
    :batch-rows         (parse-long-or (env :sqlite-logs-batch-rows) (:batch-rows defaults))
    :batch-ms           (parse-long-or (env :sqlite-logs-batch-ms) (:batch-ms defaults))

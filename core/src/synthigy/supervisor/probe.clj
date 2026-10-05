@@ -50,7 +50,7 @@
         pending (pending-upgrades installed)]
     (if (and legacy-aware? (not= fmt "xid"))
       {:ok true :kind "legacy" :versions installed
-       :message (str "Connected. LEGACY euuid-keyed (EYWA) database — Synthigy is xid-native; "
+       :message (str "Connected. LEGACY euuid-keyed database — Synthigy is xid-native; "
                      "a one-time migration is required and the status page offers it after launch.")}
       {:ok true :kind "synthigy" :versions installed
        :message (if (seq pending)
@@ -61,13 +61,13 @@
 (defn dek-rows
   "__deks rows at `conn` (an ad-hoc probe connection, not db/*db*), or [] when
    the table doesn't exist. `select *`, not named columns: a pre-migration
-   EYWA `__deks` predates the `wrap_provider`/`wrap_key_version` columns
+   legacy `__deks` predates the `wrap_provider`/`wrap_key_version` columns
    entirely (added later by `ensure-deks-columns!`, which hasn't run yet on
    a database this engine has never booted against) — naming the column
    would throw and get caught as `[]`, silently reporting no encrypted data
    on exactly the legacy dump this check exists to catch. A row with no such
    key reads as nil `:wrap_provider`, which `local-custody?` already treats
-   as local — correct: an EYWA-era DEK has no other custody to be under."
+   as local — correct: a legacy DEK has no other custody to be under."
   [conn]
   (try
     (jdbc/execute! conn ["select * from __deks"]

@@ -7,7 +7,7 @@
     },
     "type" : "icons"
   },
-  "description" : "This API is used to store and read data on EYWA hosted database. Usually this includes sync, stack, slice, search, get, delete, purge operations on modeled and deployed Datasets.",
+  "description" : "This API is used to store and read data in the Synthigy database. Usually this includes sync, stack, slice, search, get, delete, purge operations on modeled and deployed Datasets.",
   "name" : "Synthigy",
   "scopes" : [ {
     "description" : "Allows user to view saved datasets",

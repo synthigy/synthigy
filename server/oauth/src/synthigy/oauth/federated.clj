@@ -179,11 +179,12 @@
                                       params)))}}))
 
 (defn login-retry
-  "Send a still-recoverable login failure back to the login page, carrying the
-   flow's own state."
+  "Send a still-recoverable login failure back to the client's own login page,
+   carrying the flow's own state."
   [err-code ac-code]
-  (error-redirect err-code "/oauth/login"
-                  {:state (core/encrypt {:authorization-code ac-code})}))
+  (error-redirect err-code (core/get-client-login-url (ac/get-code-client ac-code))
+                  {:state (core/encrypt {:authorization-code ac-code
+                                         :flow "authorization_code"})}))
 
 ;; =============================================================================
 ;; Provider dispatch (per-provider, families share one implementation)
@@ -261,8 +262,15 @@
 
                      :else
                      {:error "not_linked"})]
-      (if (:error outcome)
+      (cond
+        (:error outcome)
         (login-retry (:error outcome) ac-code)
+
+        (not (:active (:user outcome)))
+        (or (login/abort-authorization! ac-code "access_denied")
+            (error-redirect "access_denied"))
+
+        :else
         (let [{:keys [redirect-uri response-mode cookies params]}
               (login/complete-authorization-code-login! ac-code (:user outcome) [(name provider)]
                                                         client-info)]
@@ -271,8 +279,8 @@
 (defn console-return
   "Sanitize a caller-supplied console return path; nil unless site-relative."
   [r]
-  (when (and (string? r) (str/starts-with? r "/") (not (str/starts-with? r "//")))
-    r))
+  ;; browsers read \ as / and drop tab/CR/LF — "/\evil.com" leaves the site
+  (when (string? r) (re-matches #"/(?![/\\])[^\\\p{Cntrl}]*" r)))
 
 (def allowed-prompts
   "`prompt` values a caller may ask for; anything else is dropped."
@@ -292,26 +300,33 @@
   "Console mode: mint a console session directly for an already-linked identity;
    deliberately no provisioning branch."
   [id provider return client-info]
-  (if-let [resolved (*resolve-identity* (:iss id) (:sub id) (:claims id))]
-    (let [sid (core/gen-session-id)]
-      (core/create-session! sid (merge {:user resolved :flow "console"
-                                        :authorized-at (java.util.Date.)
-                                        :amr [(name provider)]}
-                                       client-info))
-      (log/info {:id ::console-login :data {:action :authenticated :subject :console
-                                            :provider provider :user (:name resolved)}}
-                "Console login via federated identity")
-      {:status 303
-       :headers {"Location" (or (console-return return) "/console")}
-       :cookies (login/session-cookie sid)})
-    (error-redirect "not_linked" "/console/login")))
+  (let [resolved (*resolve-identity* (:iss id) (:sub id) (:claims id))]
+    (cond
+      (nil? resolved)
+      (error-redirect "not_linked" "/console/login")
+
+      (not (:active resolved))
+      (error-redirect "access_denied" "/console/login")
+
+      :else
+      (let [sid (core/gen-session-id)]
+        (core/create-session! sid (merge {:user resolved :flow "console"
+                                          :authorized-at (java.util.Date.)
+                                          :amr [(name provider)]}
+                                         client-info))
+        (log/info {:id ::console-login :data {:action :authenticated :subject :console
+                                              :provider provider :user (:name resolved)}}
+                  "Console login via federated identity")
+        {:status 303
+         :headers {"Location" (or (console-return return) "/console")}
+         :cookies (login/session-cookie sid)}))))
 
 (defn handle-reauth
   "Step-up through an ALREADY-LINKED identity: stamp the current session as
    freshly authenticated rather than minting a second one."
   [request id provider reauth-session return]
   (let [current (get-in request [:cookies "idsrv.session" :value])
-        owner   (some-> current core/get-session-resource-owner)
+        owner   (some-> current core/live-session-owner)
         err     #(error-redirect % (return-target return))]
     (cond
       (or (nil? current) (not= current reauth-session))
@@ -322,15 +337,21 @@
 
       :else
       (let [resolved (*resolve-identity* (:iss id) (:sub id) (:claims id))]
-        (if (and resolved (= (:xid resolved) (:xid owner)))
+        (cond
+          (not (and resolved (= (:xid resolved) (:xid owner))))
+          (err "reauth_identity_mismatch")
+
+          (not (:active resolved))
+          (err "access_denied")
+
+          :else
           (do
             (core/set-session-authorized-at current (java.util.Date.))
             (log/info {:id ::reauthenticated
                        :data {:action :authenticated :subject :console
                               :provider provider :user (:name owner)}}
                       "Session stepped up via a linked federated identity")
-            {:status 303 :headers {"Location" (or (console-return return) "/console")}})
-          (err "reauth_identity_mismatch"))))))
+            {:status 303 :headers {"Location" (or (console-return return) "/console")}}))))))
 
 (defn create-link!
   [provider iss sub claims owner]
@@ -358,7 +379,7 @@
    CSRF/hijack guards."
   [request id provider link-session return]
   (let [current (get-in request [:cookies "idsrv.session" :value])
-        owner   (some-> current core/get-session-resource-owner)
+        owner   (some-> current core/live-session-owner)
         err     #(error-redirect % (return-target return))]
     (cond
       ;; CSRF: callback session must match the one that initiated the link
@@ -434,8 +455,12 @@
           err (fn [code]
                 (cond
                   (= mode "console") (error-redirect code "/console/login")
-                  (and (nil? mode) state) (error-redirect code "/oauth/login"
-                                                          {:state state})
+                  (and (nil? mode) state) (error-redirect
+                                           code
+                                           (core/get-client-login-url
+                                            (ac/get-code-client
+                                             (:authorization-code (core/decrypt state))))
+                                           {:state state})
                   :else (error-redirect code (return-target return))))]
       (cond
         (nil? cfg)           (err "provider_unknown")
@@ -452,7 +477,7 @@
 
         (= mode "reauth")
         (let [session (get-in request [:cookies "idsrv.session" :value])]
-          (if-not (some-> session core/get-session-resource-owner)
+          (if-not (some-> session core/live-session-owner)
             (err "link_requires_login")
             (try (begin-upstream cfg provider (cond-> {:reauth session}
                                                 (console-return return) (assoc :r return))
@@ -466,7 +491,7 @@
         (= mode "link")
         (let [session (get-in request [:cookies "idsrv.session" :value])]
           (cond
-            (not (some-> session core/get-session-resource-owner))
+            (not (some-> session core/live-session-owner))
             (err "link_requires_login")
 
             ;; step-up: fail fast before bouncing to the IdP if auth is stale
@@ -564,7 +589,7 @@
    cookie, or nil."
   [request]
   (when-let [owner (some-> (get-in request [:cookies "idsrv.session" :value])
-                           core/get-session-resource-owner)]
+                           core/live-session-owner)]
     (dataset/get-entity :iam/user {:name (:name owner)}
                         {:name nil :password nil
                          :external_identities

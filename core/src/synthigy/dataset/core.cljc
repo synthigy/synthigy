@@ -265,14 +265,14 @@
     "Returns all entities and relations for given account")
   (mount
     [this module]
-    "Mounts module in EYWA by storing its dataset and special handlers")
+    "Mounts module in Synthigy by storing its dataset and special handlers")
   (reload
     [this]
     [this module]
     "Reloads module. If module is not specified, than whole dataset is reloaded")
   (unmount
     [this module]
-    "Removes module from EYWA by removing all data for that module")
+    "Removes module from Synthigy by removing all data for that module")
   (get-last-deployed
     [this] [this offset]
     "MANUAL RECOVERY ONLY — reads model from __deploy_history; use reload for normal bootstrap.")
@@ -668,18 +668,61 @@
       m
       (get-relations m)))))
 
+(def entity-config-keys
+  "The entity :configuration keys a model may carry; anything else is out of scope."
+  #{:rls :audit :constraints :rbac :audit/persist})
+
+(def relation-config-keys
+  "The relation :configuration keys a model may carry."
+  #{:rbac})
+
+(defn clean-entity
+  "Entity without out-of-scope :configuration keys or :claimed-by."
+  [entity]
+  (-> entity
+      (update :configuration #(not-empty (select-keys % entity-config-keys)))
+      (assoc :claimed-by nil)))
+
+(defn clean-relation
+  "Relation without out-of-scope :configuration keys or :claimed-by."
+  [relation]
+  (-> relation
+      (update :configuration #(not-empty (select-keys % relation-config-keys)))
+      (assoc :claimed-by nil)))
+
+(defn clean-model
+  "Model as it is stored: out-of-scope configuration and fold state removed."
+  [model]
+  (some-> model
+          (update :entities #(reduce-kv (fn [m k e] (assoc m k (clean-entity e))) (empty %) %))
+          (update :relations #(reduce-kv (fn [m k r] (assoc m k (clean-relation r))) (empty %) %))))
+
+(defn with-merged-config
+  "Model whose entities carry the configuration a deploy into `global` produces; each keeps its own :rls."
+  [global model]
+  (some-> model
+          (update :entities
+                  #(reduce-kv
+                    (fn [m k e]
+                      (assoc m k
+                             (if-let [g (get-entity global (id/extract e))]
+                               (let [own (:configuration e)]
+                                 (assoc e :configuration
+                                        (not-empty
+                                         (cond-> (deep-merge (dissoc (:configuration g) :rls) (dissoc own :rls))
+                                           (contains? own :rls) (assoc :rls (:rls own))))))
+                               e)))
+                    (empty %) %))))
+
 (defn add-claims
-  "Adds version-id as a claim to all entities and relations in the provided
-   model"
+  "Sets version-id as the only claim on every entity and relation of the model."
   ([model version-id]
    (letfn [(add-claim [model object-id]
              (cond
                (get-in model [:entities object-id])
-               (update-in model [:entities object-id :claimed-by]
-                          (fnil conj #{}) version-id)
+               (assoc-in model [:entities object-id :claimed-by] #{version-id})
                (get-in model [:relations object-id])
-               (update-in model [:relations object-id :claimed-by]
-                          (fnil conj #{}) version-id)
+               (assoc-in model [:relations object-id :claimed-by] #{version-id})
                :else model))]
      (as-> model gm
        (reduce

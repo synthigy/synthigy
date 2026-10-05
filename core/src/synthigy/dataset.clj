@@ -585,6 +585,7 @@
   (let [model (if (string? model) (<-transit model) model)]
     (-> model
         core/normalize-legacy-types
+        core/clean-model
         adapt-model-to-provider
         (assoc :version 1)
         ->transit
@@ -600,7 +601,7 @@
     (boolean
      (and (:deployed stored)
           (not= (persisted-model (:model version))
-                (let [m (:model stored)] (if (string? m) (<-transit m) m)))))))
+                (persisted-model (:model stored)))))))
 
 (defn deploy!
   "Deploy a dataset version. Creates/updates schema, tables, etc.
@@ -617,7 +618,7 @@
               (str "Deploying dataset version "
                    (or (:version-name summary) (:version-xid summary) "")))
     (try
-      (let [result (core/deploy! *db* version)]
+      (let [result (core/deploy! *db* (update version :model persisted-model))]
         (log/info {:id ::deployed
                    :data (assoc base :action :deployed)}
                   (str "Deployed dataset version "
@@ -941,19 +942,19 @@
 (defn reload [] (core/reload *db*))
 
 ;;; ============================================================================
-;;; Unified Startup (Following EYWA Pattern)
+;;; Unified Startup
 ;;; ============================================================================
 
 (defn start
   "Initialize dataset system: load model and set up event channels.
 
-  This is the unified startup function following EYWA's neyho.eywa.dataset/start pattern.
+  This is the unified startup function.
   It orchestrates:
   1. ID provider initialization (based on user's stored format choice)
   2. Delta pipe initialization (async channels for change notifications)
   3. Model versioning (apply patches for dataset meta-model)
   4. Model loading from __deploy_history
-  5. Service user binding (*EYWA*)
+  5. Service user binding (*SYNTHIGY*)
 
   This should be called during application startup."
   ([]
@@ -998,7 +999,22 @@
   (log/info {:id ::stopped :data {:action :stopped :subject :dataset}} "Datasets stopped")
   nil)
 
-(patch/current-version :synthigy/dataset "1.5.0")
+(patch/current-version :synthigy/dataset "1.6.0")
+
+(patch/upgrade :synthigy/dataset
+               "1.6.0"
+               (let [cleaned (for [{:keys [model] :as version} (search-entity :dataset/version nil {(id/key) nil :model nil})
+                                   :let [stored (if (string? model) (<-transit model) model)]
+                                   :when (instance? synthigy.dataset.core.ERDModel stored)
+                                   :let [clean (persisted-model stored)]
+                                   :when (not= clean stored)]
+                               {(id/key) (id/extract version) :model (->transit clean)})]
+                 (doseq [version cleaned]
+                   (sync-entity :dataset/version version))
+                 (log/info {:id ::v160-models-cleaned
+                            :data {:action :upgraded :subject :dataset-model :version "1.6.0" :count (count cleaned)}}
+                           (str "Cleaned " (count cleaned) " stored dataset version models"))
+                 (core/reload *db*)))
 
 (defn can-migrate-to-xid?
   "Check if system can migrate to XID format.

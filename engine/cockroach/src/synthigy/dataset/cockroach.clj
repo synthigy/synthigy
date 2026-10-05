@@ -353,7 +353,7 @@
    {:keys [name type]
     {:keys [values]} :configuration
     :as attribute}]
-  ;; Don't look at primary key since that is EYWA problem
+  ;; Don't look at primary key since that is a legacy-layout problem
   (let [oentity (core/suppress entity)
         old-table (entity->table-name oentity)
         diff (core/diff attribute)]
@@ -1397,7 +1397,7 @@
               _ (rls/assert-guards-compile! (core/preview-model this version) model)
 
             ;; 3. Call mount to transform database with updated global model
-              _ (core/mount this version)
+              _ (core/mount this (update version :model #(core/with-merged-config global %)))
 
             ;; 4. Prepare version metadata for saving (with original model v1, not global)
               version'' (encode-version-model
@@ -2405,7 +2405,10 @@
 
   (max-bind-params [_db]
     ;; PostgreSQL wire protocol counts Bind parameters in an Int16.
-    65535))
+    65535)
+
+  (row-lock-clause [_db]
+    " for update"))
 
 ;;; SchemaManager Protocol - PostgreSQL schema introspection and maintenance
 

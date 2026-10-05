@@ -126,10 +126,6 @@
       (throw (ex-info (str "no db probe for backend '" db "' on this classpath")
                       {:code -32602})))))
 
-(defn root-cause-message [^Throwable t]
-  (loop [e t]
-    (if-let [c (.getCause e)] (recur c) (or (ex-message e) (str (class e))))))
-
 (defn env-list [k]
   (seq (remove str/blank? (str/split (or (env k) "") #"[\s,]+"))))
 
@@ -153,19 +149,19 @@
       ;; a failure answers {:success false …}, never throws — the daemon keeps the warm engine for diagnosis
       (try
         (progress-begin! :boot "starting")
-        (run! (comp require symbol) (env-list :synthigy-require))
-        (boot/start! (or (app-modules) @start-modules) {:on-phase progress-phase!})
+        (boot/start! (or (app-modules) @start-modules)
+                     {:on-phase progress-phase! :namespaces (env-list :synthigy-require)})
         (reset! start-error nil)
         {:success true :message "Server started"}
         (catch Throwable t
-          (reset! start-error (root-cause-message t))
+          (reset! start-error (boot/root-cause-message t))
           (if (:legacy (ex-data t))
             {:success false :legacy true :message (ex-message t)}
             (do (log/error! {:id ::server-start-failed
                              :msg "server.start failed — engine stays warm for diagnosis"
                              :data {:action :starting :subject :http-server}}
                             t)
-                {:success false :error (root-cause-message t)})))
+                {:success false :error (boot/root-cause-message t)})))
         (finally (when (progress-running? :boot) (progress-finish!))))
       (throw (ex-info "no start modules configured — serve! was called without :modules"
                       {:code -32000})))))

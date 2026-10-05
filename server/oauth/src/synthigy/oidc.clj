@@ -21,6 +21,7 @@
    [synthigy.iam.context :as iam.context]
    [synthigy.iam.encryption :as encryption]
    [synthigy.oauth :as oauth]
+   [synthigy.oauth.authentication :as authentication]
    [synthigy.oauth.core :as core
     :refer [process-scope
             defscope
@@ -241,9 +242,7 @@
   "Extract the access token from a request per RFC 6750: Authorization header,
    form body, or query param, in that preference order; throws if not found."
   [{:keys [headers params form-params] :as request}]
-  (let [authorization (get headers "authorization" "")
-        header-token (when (and authorization (.startsWith authorization "Bearer"))
-                       (subs authorization 7))
+  (let [header-token (authentication/extract-bearer-token request)
         form-token (or (:access_token form-params)
                        (get form-params "access_token"))
         query-token (or (:access_token params)
@@ -322,9 +321,7 @@
   "OpenID Connect UserInfo endpoint; requires a valid Bearer access token."
   [request]
   (try
-    (let [authorization (get-in request [:headers "authorization"])
-          access-token (when (and authorization (.startsWith authorization "Bearer"))
-                         (subs authorization 7))
+    (let [access-token (authentication/extract-bearer-token request)
           ;; Stateless: unsign-data verifies signature but skips exp by design,
           ;; so exp is checked here; token-revoked? adds the RFC 7009 check
           ;; (row-less client_credentials tokens still pass on signature alone).
@@ -334,12 +331,18 @@
                         (or (nil? exp)
                             (> exp (quot (System/currentTimeMillis) 1000))))
                       (not (token-revoked? :access_token access-token)))]
-      (if-not valid?
+      (cond
+        (nil? access-token)
+        {:status 401 :headers {"WWW-Authenticate" "Bearer"}}
+
+        (not valid?)
         {:status 401
          :headers {"Content-Type" "application/json"
                    "WWW-Authenticate" "Bearer error=\"invalid_token\""}
          :body (json/write-str {:error "invalid_token"
                                 :error_description "Access token is invalid or has been revoked"})}
+
+        :else
         ;; OIDC Core 5.4: the response MUST be limited to the claims the
         ;; token's granted scopes cover — this used to return the whole
         ;; person-info map regardless of consent.

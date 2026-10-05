@@ -182,8 +182,8 @@
                                    (if current? "Sign out" "Revoke")
                                    (if current?
                                      "You will be signed out of this device."
-                                     (str "That session will be signed out immediately, "
-                                          "along with any tokens it issued.")))}
+                                     (str "That session ends now. Apps using it keep access "
+                                          "only until their current access token expires.")))}
                (if current? "Sign out" "Revoke")]])])]]])])
 
 (defn identities-table

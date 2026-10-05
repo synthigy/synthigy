@@ -53,6 +53,7 @@
     // Every code the server sends here — generated from oauth/page/status.clj.
     // retry = the person can start again; support = only an admin can fix it.
     var CODES = {
+      access_denied: ["support", "Access was denied."],
       already_authorized: ["retry", "Someone already authenticated using this code."],
       broken_flow: ["retry", "The authorization flow is broken."],
       callback_error: ["support", "The identity provider returned an error."],

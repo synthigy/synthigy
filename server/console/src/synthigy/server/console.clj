@@ -91,6 +91,7 @@
 (def ^:private federated-login-errors
   {"not_linked" (str "That sign-in method isn't linked to any account here. "
                      "Sign in with your password, then link it under Sign-in methods.")
+   "access_denied" "Access denied. Contact an administrator."
    "link_reauth_required" "Sign in again before changing your sign-in methods."
    "provider_unknown" "That sign-in method isn't configured."
    "provider_disabled" "That sign-in method is currently disabled."

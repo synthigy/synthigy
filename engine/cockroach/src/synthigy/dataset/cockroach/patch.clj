@@ -527,7 +527,7 @@ END;"
 ;;; ============================================================================
 
 ;; Patch 0.5.0 - Database schema fixes (PostgreSQL only)
-;; (Matches EYWA's 0.5.0 patch for compatibility)
+;; (Matches the legacy 0.5.0 patch for compatibility)
 (patch/upgrade :synthigy/dataset
                "0.5.0"
                (when (instance? synthigy.db.Cockroach *db*)

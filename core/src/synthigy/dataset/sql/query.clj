@@ -950,6 +950,7 @@
                                           :to/field (entity->relation-field to)
                                           :to/table (entity->table-name to)
                                           :table (relation->table-name relation)
+                                          :cardinality cardinality
                                           :type (case cardinality
                                                   ("m2o" "o2o") :one
                                                   ("m2m" "o2m") :many)})
@@ -3069,22 +3070,33 @@
 (defn delete-by-from-side!
   "Deletes a link table's from-side rows; with `guard` only the rows whose
    to-side is inside the caller's read window (never widen this — an unscoped
-   delete destroys links the caller cannot see)."
+   delete destroys links the caller cannot see). `evict` targets lose their
+   other holders too, only those passing every `:evict/guards` on `:evict/table`."
   ([tx table from current] (delete-by-from-side! tx table from current nil))
-  ([tx table from current {to-field :to/field to-table :to/table guard :guard}]
+  ([tx table from current {to-field :to/field to-table :to/table guard :guard evict :evict
+                           evict-table :evict/table evict-guards :evict/guards}]
    (let [scope (when guard
                  (str " and \"" to-field "\" in (select \"_eid\" from \"" to-table
                       "\" where " (:sql guard) ")"))
+         evict-scope (when (seq evict-guards)
+                       (str " and \"" from "\" in (select \"_eid\" from \"" evict-table "\" where "
+                            (clojure.string/join " and " (map #(str "(" (:sql %) ")") evict-guards)) ")"))
          params (vec (:params guard))
-         budget (max 1 (- (chunk-rows-for 1) (count params)))]
+         evict-params (into [] (mapcat :params) evict-guards)
+         budget (max 1 (- (chunk-rows-for 1) (count params) (count evict-params)))
+         evict (vec (distinct evict))
+         in-list (fn [n] (str "(" (clojure.string/join ", " (repeat n \?)) ")"))
+         delete! (fn [where args]
+                   (let [sql (str "delete from \"" table "\" where " where)]
+                     (log/trace {:id ::delete-from-side-chunk
+                                 :data {:table table :rows (count args) :sql sql}}
+                                "Deleting from-side rows (chunk)")
+                     (sql/execute! tx (into [sql] args))))]
      (doseq [chunk (partition-all budget current)]
-       (let [sql (str "delete from \"" table "\" where \"" from "\" in ("
-                      (clojure.string/join ", " (repeat (count chunk) \?))
-                      ")" scope)]
-         (log/trace {:id ::delete-from-side-chunk
-                     :data {:table table :rows (count chunk) :sql sql}}
-                    "Deleting from-side rows (chunk)")
-         (sql/execute! tx (into (into [sql] chunk) params)))))))
+       (delete! (str "\"" from "\" in " (in-list (count chunk)) scope) (concat chunk params)))
+     (doseq [chunk (partition-all budget evict)]
+       (delete! (str "\"" to-field "\" in " (in-list (count chunk)) evict-scope)
+                (concat chunk evict-params))))))
 
 (defn occupied-from-side
   "From-side values still linked after a scoped delete — i.e. holding an
@@ -3122,33 +3134,40 @@
              :raw)))
       true)))
 
+(defn rows-outside
+  "The `ids` of `table` that fail `guard`; a guard evaluating to NULL fails it."
+  [tx table ids guard]
+  (let [sql (:sql guard)
+        params (vec (:params guard))
+        ids (into [] (comp (remove nil?) (distinct)) ids)
+        budget (max 1 (- (chunk-rows-for 1) (count params)))]
+    (into []
+          (mapcat (fn [chunk]
+                    (let [q (str "select _eid from \"" table "\" where _eid in ("
+                                 (clojure.string/join ", " (repeat (count chunk) \?))
+                                 ") and (" sql ") is not true")]
+                      (map (comp first vals) (sql/execute! tx (into (into [q] chunk) params) :raw)))))
+          (partition-all budget ids))))
+
 (defn assert-from-side-writable!
   "Throws ROW_FORBIDDEN unless every from-side row passes the origin's :write
    guard."
   [tx table from-table froms guard]
-  (let [sql (:sql guard)
-        params (vec (:params guard))
-        froms (into [] (comp (remove nil?) (distinct)) froms)
-        budget (max 1 (- (chunk-rows-for 1) (count params)))]
-    (doseq [chunk (partition-all budget froms)]
-      (let [q (str "select _eid from \"" from-table "\" where _eid in ("
-                   (clojure.string/join ", " (repeat (count chunk) \?))
-                   ") and not (" sql ")")]
-        (when-let [denied (seq (sql/execute! tx (into (into [q] chunk) params) :raw))]
-          (log/info {:id   :synthigy.iam.access/access-denied
-                     :data {:action :denied :subject :request :kind :relation
-                            :table table :from-table from-table
-                            :rows (count denied)}}
-                    "RLS denied relation write — origin outside write scope")
-          (throw
-           (ex-info
-            (str "You don't have sufficient privileges to write links of '"
-                 from-table "' — " (count denied) " row(s) outside your write scope")
-            {:type ::enforce-link-access
-             :code "ROW_FORBIDDEN"
-             :table table
-             :from-table from-table
-             :denied (count denied)})))))))
+  (when-let [denied (seq (rows-outside tx from-table froms guard))]
+    (log/info {:id   :synthigy.iam.access/access-denied
+               :data {:action :denied :subject :request :kind :relation
+                      :table table :from-table from-table
+                      :rows (count denied)}}
+              "RLS denied relation write — origin outside write scope")
+    (throw
+     (ex-info
+      (str "You don't have sufficient privileges to write links of '"
+           from-table "' — " (count denied) " row(s) outside your write scope")
+      {:type ::enforce-link-access
+       :code "ROW_FORBIDDEN"
+       :table table
+       :from-table from-table
+       :denied (count denied)}))))
 
 (defn throw-slot-occupied
   "Throws when a to-one slot's current occupant is outside the caller's read
@@ -3160,6 +3179,47 @@
     {:type ::slot-occupied
      :code "SLOT_OCCUPIED"
      :table table})))
+
+(defn lock-rows!
+  "Locks `ids` of `table` until commit where the engine has row locks; sorted, so two writers never deadlock."
+  [tx table ids]
+  (when-let [clause (proto/row-lock-clause *db*)]
+    (doseq [chunk (partition-all (chunk-rows-for 1) (sort (distinct ids)))]
+      (sql/execute! tx (into [(str "select _eid from \"" table "\" where _eid in ("
+                                    (clojure.string/join ", " (repeat (count chunk) \?))
+                                    ") order by _eid" clause)]
+                             chunk)))))
+
+(defn slot-owners
+  "[owner target] pairs where a from-side row outside `froms` holds one of `tos`."
+  [tx table from to froms tos]
+  (let [froms (set froms)]
+    (into []
+          (comp (mapcat (fn [chunk]
+                          (sql/execute! tx (into [(str "select \"" from "\" as owner, \"" to "\" as target"
+                                                       " from \"" table "\" where \"" to "\" in ("
+                                                       (clojure.string/join ", " (repeat (count chunk) \?)) ")")]
+                                                 chunk))))
+                (map (juxt :owner :target))
+                (remove (comp froms first)))
+          (partition-all (chunk-rows-for 1) (distinct tos)))))
+
+(defn assert-one-owner-per-target!
+  "Throws when one write links two rows to the same one-to-one target; answers the analysis."
+  [{one :relations/one entity :entity :as analysis}]
+  (doseq [[{:keys [cardinality] to-entity :to to-table :to/table} links] one
+          :when (= "o2o" cardinality)
+          [target holders] (group-by second links)
+          :when (and target (< 1 (count (distinct (map first holders)))))]
+    (let [named (or (id/extract (get-in entity [to-table target])) "one record")]
+      (throw
+       (ex-info
+        (format "One write links %s %s to more than one row — a one-to-one link has one owner"
+                (or (:name (deployed-entity to-entity)) "the target") named)
+        {:code "BAD_DATA_SHAPE"
+         :rule "one_to_one_target"
+         :target named}))))
+  analysis)
 
 (defn link-relations
   ([tx analysis] (link-relations tx analysis true))
@@ -3199,12 +3259,12 @@
            mapping))
         result
         recursion))
-     ;; Link single relations — delete on from side
-     ;; then link through execute multi
+     ;; Link single relations — delete on from side, a one-to-one target moves
+     ;; to the writer (last write wins), then link through execute multi
      (let [{:keys [:relations/one]} result
            xid-mode? (= :xid (id/key))]
        (reduce-kv
-        (fn [result {:keys [table]
+        (fn [result {:keys [table cardinality]
                      to :to/field
                      from :from/field
                      from-entity :from
@@ -3226,14 +3286,32 @@
                            (filter second)
                            (mapv (fn [[f t]] [f t]))))
                 scope (when-let [guard (read-scope-guard to-entity to-table)]
-                        {:to/field to :to/table to-table :guard guard})]
+                        {:to/field to :to/table to-table :guard guard})
+                o2o? (and (not-empty new) (= "o2o" cardinality))
+                targets (when o2o? (mapv second new))
+                rg (when o2o? (read-scope-guard from-entity from-table))
+                wg (write-scope-guard from-entity from-table)]
+            (when o2o? (lock-rows! tx to-table targets))
             ;; never gate after the delete — a denied write would still evict
-            (when-let [wg (write-scope-guard from-entity from-table)]
+            (when wg
               (assert-from-side-writable! tx table from-table current wg))
             (log/trace {:id ::delete-old-one-relations
-                        :data {:table table :from-side-count (count current)}}
+                        :data {:table table :from-side-count (count current) :targets (count targets)}}
                        "Deleting old one-relations")
-            (delete-by-from-side! tx table from current scope)
+            ;; the eviction is guarded in the DELETE itself — a holder outside the caller's window is never touched
+            (delete-by-from-side! tx table from current
+                                  (cond-> scope
+                                    o2o? (assoc :to/field to :evict targets
+                                                :evict/table from-table
+                                                :evict/guards (filterv some? [rg wg]))))
+            (when (and o2o? (or rg wg))
+              (when-let [kept (seq (map first (slot-owners tx table from to current targets)))]
+                (when (and rg (seq (rows-outside tx from-table kept rg)))
+                  (log/info {:id ::slot-occupied
+                             :data {:table table}}
+                            "One-to-one target held by a row outside the caller's read window")
+                  (throw-slot-occupied table))
+                (assert-from-side-writable! tx table from-table kept (or wg {:sql "1=0" :params []}))))
             (when (and scope (seq new))
               (when (seq (occupied-from-side tx table from (map first new)))
                 (log/info {:id ::slot-occupied
@@ -3555,15 +3633,16 @@
                              tx row-data (count ks')
                              (fn [n]
                                (str
-                                "UPDATE \"" entity-table "\" SET "
+                                "WITH v (" (str/join ", " ks-quoted) ") AS (VALUES "
+                                (str/join ", " (repeat n values-?)) ")"
+                                " UPDATE \"" entity-table "\" SET "
                                 (str/join ", "
                                           (map (fn [col]
                                                  (let [q (columns-fn col)]
                                                    (str q "=v." q)))
                                                (or (seq fields-to-update)
                                                    [(keyword id-field)])))
-                                " FROM (VALUES " (str/join ", " (repeat n values-?))
-                                ") AS v (" (str/join ", " ks-quoted) ")"
+                                " FROM v"
                                 " WHERE " (str/join
                                            " AND "
                                            (map (fn [k]
@@ -3710,6 +3789,7 @@
        (log/trace {:id ::store-analysis :data {:analysis analysis}}
                   "Storing based on analysis")
        (as-> analysis result
+         (assert-one-owner-per-target! result)
          (resolve-one-satellites tx result)
          (prepare-references tx result)
          (enhance-write tx result)

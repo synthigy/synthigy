@@ -10,9 +10,12 @@
 
 (ns synthigy.dataset.codegen
   "XSQL program → language-neutral codegen IR (what op:\"describe\" returns)."
-  (:require [synthigy.xsql.program :as prog]
+  (:require [synthigy.xsql.api :as xsql]
+            [synthigy.xsql.program :as prog]
+            [synthigy.xsql.schema :as xschema]
             [synthigy.xsql.sql-params :as sp]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clojure.walk :as walk]))
 
 (def ^:private read-verbs #{"search" "get" "slice" "purge"})
 
@@ -159,6 +162,15 @@
                            (str "is ambiguous (" (str/join ", " (map prog/op-identity ambiguous)) ") — qualify it")))
                     {:code "BATCH_MEMBER_UNRESOLVED" :batch (:name b) :member m :path (:path b)}))))
 
+(defn check-lint!
+  "Refuse a file with lint errors — what the runtime gate or the schema would reject on first run."
+  [lint-schema {:keys [path source]}]
+  (when-let [errors (seq (filter #(= :error (:severity %)) (prog/lint source lint-schema)))]
+    (let [located (mapv #(merge % (xsql/line-col source (:from %))) errors)]
+      (throw (ex-info (str/join "; " (for [{:keys [line col message]} located]
+                                       (str (some-> path (str ":")) line ":" col ": " message)))
+                      {:code "XSQL_PARSE_ERROR" :path path :diagnostics located})))))
+
 (defn describe
   "XSQL program → codegen IR `{:operations [...]}`. `sources` is one program
    string or `[{:path :source}]`, one per file — each file is parsed on its own,
@@ -167,6 +179,7 @@
   (let [files (if (string? sources) [{:source sources}] sources)
         ops   (into [] (mapcat file-ops) files)]
     (check-program! ops)
+    (run! (partial check-lint! (xschema/wire->lint (walk/stringify-keys schema))) files)
     {:operations
      (mapv (fn [op]
              (if (:batch op)

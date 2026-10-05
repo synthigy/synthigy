@@ -1,18 +1,16 @@
 # Running Synthigy behind a reverse proxy
 
 Synthigy serves plain HTTP on one port (`SYNTHIGY_SERVER_PORT`, default 7887).
-It terminates no TLS and does no virtual hosting, so any internet-facing
-instance sits behind nginx, Caddy, Traefik or a cloud load balancer.
+It terminates no TLS and does no virtual hosting, so an internet-facing
+instance sits behind nginx, Caddy, Traefik or a cloud load balancer. This page
+is what that proxy has to do; copy-paste configs are at the bottom.
 
-This page is what that proxy has to do. Copy-paste configs are at the bottom.
+## TLS is required
 
-## TLS is not optional
-
-Session and login cookies are minted `Secure` + `SameSite=None`. A browser
-discards those over plain `http://` on anything but `localhost`, so an instance
-published over HTTP appears to accept the password and then bounces straight
-back to the login page. Terminate TLS at the proxy and keep the engine on
-loopback:
+Session and login cookies are `Secure`, so a browser drops them over plain
+`http://` on anything but `localhost`: the login page accepts the password and
+comes straight back to itself. Terminate TLS at the proxy and keep the engine
+on loopback:
 
 ```bash
 SYNTHIGY_SERVER_HOST=127.0.0.1
@@ -22,34 +20,28 @@ SYNTHIGY_SERVER_PORT=7887
 ## Two engine settings
 
 ```bash
-SYNTHIGY_SERVER_TRUST_PROXY=true
 SYNTHIGY_IAM_ROOT_URL=https://synthigy.example.com
+SYNTHIGY_SERVER_TRUST_PROXY=true
 ```
 
-**`SYNTHIGY_SERVER_TRUST_PROXY`** makes Synthigy read the client address from
-`X-Forwarded-For` rather than from the connection. Set it whenever a proxy is
-in front; without it, sessions and login events on a Jetty/Undertow deployment
-are all recorded against the proxy's own address.
+**`SYNTHIGY_IAM_ROOT_URL`** is the public origin: the token issuer and the
+base of every login and redirect link. Unset, they are derived per request
+from `X-Forwarded-Host` and `X-Forwarded-Proto` — fine on a laptop, wrong
+behind a load balancer, and steerable by whoever can set those headers. The
+portal flags it until it is set.
 
-On the default http-kit adapter the flag changes nothing by itself — http-kit
-resolves `X-Forwarded-For` inside `getRemoteAddr()` before Ring ever sees the
-request, and it does so unconditionally, with no trust setting of its own. Set
-it anyway: it states the deployment's intent and it is what makes the behavior
-the same across adapters.
+**`SYNTHIGY_SERVER_TRUST_PROXY`** records that a proxy is in front and the
+client address comes from `X-Forwarded-For`. The released engine reads that
+header whether or not the flag is set; set it anyway, so the deployment says
+what it relies on.
 
-**`SYNTHIGY_IAM_ROOT_URL`** is the public origin. Unset, the OAuth issuer,
-redirect URIs and login links are derived per request from `X-Forwarded-Host`
-and `X-Forwarded-Proto` — fine on a laptop, wrong in front of a load balancer,
-and attacker-steerable if the proxy passes through what the client sent. The
-operator console flags this until it is set.
+## The client address is only as good as the proxy
 
-## The proxy is what makes X-Forwarded-For trustworthy
-
-Both Synthigy and http-kit take the **first** element of `X-Forwarded-For` as
-the client address. Nothing checks who wrote it. An engine reachable directly
-from the internet therefore records whatever address the caller claims — so
-the proxy is not just a TLS terminator here, it is the only thing that makes
-the recorded client address mean anything. Two rules follow.
+Synthigy takes the client address from the **first** value of
+`X-Forwarded-For` whenever the header is present, and nothing checks who wrote
+it. An in-flight login is pinned to that address, so a stolen login state
+replayed from elsewhere is rejected — a check worth something only when the
+caller cannot choose the address. Two rules follow.
 
 **Never expose the engine port directly** once a proxy is in front. Bind it to
 loopback, or firewall it; a request that reaches 7887 around the proxy carries
@@ -67,18 +59,17 @@ read:
 | Traefik | default — leave `forwardedHeaders.trustedIPs` unset  |
 
 Forward `X-Forwarded-Proto` and `X-Forwarded-Host` too; the OAuth layer builds
-absolute URLs from them whenever the root URL is unset.
-
-If a second proxy or a cloud load balancer sits in front, only the outermost
-hop can establish the client address. Have that hop write the header and the
-inner one pass it through unchanged.
+absolute URLs from them whenever the root URL is unset. If a second proxy or a
+cloud load balancer sits in front, only the outermost hop can establish the
+client address: have that hop write the header and the inner one pass it
+through unchanged.
 
 ## Streaming endpoints
 
-| path              | shape                                        |
-|-------------------|----------------------------------------------|
-| `/data/events`    | SSE, keepalive every 20s, open indefinitely  |
-| `/console/live/*` | SSE, heartbeat every 15s, recycled every 90s |
+| path              | shape                                                                   |
+|-------------------|-------------------------------------------------------------------------|
+| `/data/events`    | SSE, keepalive every 20s, open until `SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` (15 minutes by default) |
+| `/console/live/*` | SSE, heartbeat every 15s, recycled every 90s                            |
 
 Both need response buffering and compression **off** on those paths and a read
 timeout well above the keepalive interval. A buffering proxy holds events until
@@ -92,37 +83,27 @@ upgrade handling is needed.
   (`/data`, `/oauth/*`, `/console/*`, `/.well-known/*`). Pass the URI through
   unrewritten — no `StripPrefix`, no mounting under a subpath.
 - **Do not add CORS at the proxy.** Synthigy emits its own `Access-Control-*`
-  and `Vary: Origin`; a second copy makes browsers reject the response.
+  and `Vary: Origin`; a second copy makes browsers reject the response
+  ([CORS.md](CORS.md)).
 - **Raise the body limit.** `/data` writes, model deploys and `/iam/import`
   arrive as a single POST body. 64m is a workable ceiling; nginx's 1m default
   is not.
-- **Never proxy port 7888.** That is the portal daemon — the operator/admin
-  surface — and it defends itself by rejecting any connection whose peer is
-  not loopback. A reverse proxy on the same host connects *from* 127.0.0.1, so
-  the check passes and the admin surface is published to the internet. Reach it
-  with `ssh -L 7888:127.0.0.1:7888 <host>` instead. The engine's own console at
+- **Never proxy port 7888.** That is the portal, and it accepts any connection
+  that comes from 127.0.0.1; a reverse proxy on the same host connects from
+  there, so proxying it publishes the operator surface to the internet. Reach
+  it with `ssh -L 7888:127.0.0.1:7888 <host>` instead. The console at
   `/console` on 7887 is a normal route and is proxied like everything else.
-
-## What this buys you
-
-An in-flight login is pinned to the client address, so a stolen authorization
-state replayed from somewhere else is rejected. That check is only worth
-something when the address cannot be chosen by the caller — which is to say,
-when the proxy in front is writing `X-Forwarded-For` and the engine port is not
-reachable around it. Configured as above, it holds; on a directly exposed
-engine, an attacker sets both sides of the comparison and it does not.
 
 ---
 
 ## nginx
 
-`proxy_pass http://synthigy;` names the `upstream` block, and `http://` is the
-protocol *to the engine* — plain HTTP, since it terminates no TLS. Write it
-with **no path after the host**: a bare `proxy_pass http://synthigy;` forwards
-the request URI untouched, while adding even a slash
-(`proxy_pass http://synthigy/;`) makes nginx strip the matched `location`
-prefix and rewrite the path. Synthigy's routes are absolute, so a rewrite means
-`/console/live/system` arrives as `/live/system` and 404s.
+`proxy_pass http://synthigy;` names the `upstream` block; `http://` is the
+protocol to the engine, which terminates no TLS. Write it with **no path after
+the host**: a bare `proxy_pass http://synthigy;` forwards the request URI
+untouched, while `proxy_pass http://synthigy/;` makes nginx strip the matched
+`location` prefix, so `/console/live/system` arrives as `/live/system` and
+404s.
 
 ```nginx
 upstream synthigy {

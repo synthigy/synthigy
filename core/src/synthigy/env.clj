@@ -17,14 +17,8 @@
 (def home (str (fs/expand-home (env :synthigy-home "~/.synthigy"))))
 
 (def db-dir
-  "Where local database files live by default: beside SQLITE_PATH when set, else <home>/db."
-  (str (if-let [p (not-empty (env :sqlite-path))]
-         (fs/parent (fs/absolutize (fs/expand-home p)))
-         (str home "/db"))))
-(def pid (str home "/pid"))
-(def log-dir (str (fs/absolutize (env :synthigy-log-dir (str home "/logs")))))
-(def config-dir (str (fs/absolutize (env :synthigy-config-dir (str home "/config")))))
-(def git-dir (str (fs/absolutize (env :synthigy-git-dir (str home "/git")))))
+  "Where every local database file lives."
+  (str home "/db"))
 
 (def iam-root-url (env :synthigy-iam-root-url))
 

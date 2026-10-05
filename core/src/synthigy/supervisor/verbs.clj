@@ -227,9 +227,9 @@
              ;; own field (drives the enter-master-key form), everything else
              ;; surfaces generically
              :encryption_error (some-> (get @lifecycle/module-errors :synthigy.dataset/encryption)
-                                       :error supervisor/root-cause-message)
+                                       :error boot/root-cause-message)
              :boot_error (some->> (vals @lifecycle/module-errors)
-                                  first :error supervisor/root-cause-message)
+                                  first :error boot/root-cause-message)
              :checks {:dataset dataset-started?
                       ;; xid-native runtime on a legacy euuid layout — the
                       ;; operator console renders the migrate affordance off

@@ -12,7 +12,6 @@
   "Audit history in its own embedded DuckDB file."
   (:require
    [clojure.string :as str]
-   [environ.core :refer [env]]
    [patcho.patch :as patch]
    [synthigy.audit.policy :as policy]
    [synthigy.audit.protocol :as audit]
@@ -26,7 +25,7 @@
    [org.duckdb DuckDBAppender DuckDBConnection]))
 
 (defn audit-path []
-  (or (not-empty (env :duckdb-audit-path)) (str synthigy.env/db-dir "/audit.duckdb")))
+  (str synthigy.env/db-dir "/audit.duckdb"))
 
 (def schema-ddl
   ["CREATE TABLE IF NOT EXISTS audit_entity (

@@ -210,7 +210,7 @@
         ;;
         (not (contains? grants grant))
         (token-error
-         "unauthorized_grant"
+         "unauthorized_client"
          "Client sent access token request"
          "for grant type that is outside"
          "of client configured privileges")
@@ -245,6 +245,14 @@
          :body (json/write-str
                 {:error "authorization_pending"
                  :error_description "The authorization request is still pending as the end user hasn't yet completed the user-interaction steps"})}
+        ;;
+        (not (:active (core/session-row session {:active nil})))
+        (do
+          (delete device_code)
+          (token-error
+           "invalid_grant"
+           "The session this device code was"
+           "approved in is no longer active"))
         :else
         (let [response (json/write-str (token/generate client session original-request))
               resource-owner (core/get-session-resource-owner session)]

@@ -10,7 +10,7 @@ first superuser, Stop/Start/Restart, logs, versions and module health.
 
 ```clojure
 ;; deps.edn
-{:deps {com.synthigy/sqlite-bundle {:mvn/version "0.2.13-SNAPSHOT"}}}
+{:deps {com.synthigy/sqlite-bundle {:mvn/version "0.2.13"}}}
 ```
 
 Register a patcho (`dev.gersak/patcho`) lifecycle module. Depend on
@@ -61,8 +61,12 @@ logs, and then throws an error naming each module that did not start.
 
 Configuration is environment variables (`SYNTHIGY_SERVER_PORT`, ...). The
 SQLite files live in `$SYNTHIGY_HOME/db/`: `synthigy.db`, `audit.db` and
-`logs.db`. `synthigy exec` loads the project's `.synthigy/.env` and runs your
-jar with the project's `.synthigy/` as its home:
+`logs.db`. The engine refuses to start without a master key for its
+[encryption](ENCRYPTION.md). `synthigy up` writes one into `.env` the first
+time it starts an engine; before that, set your own as
+`SYNTHIGY_ENCRYPTION_MASTER_KEY=b64:` followed by the output of
+`openssl rand -base64 32`. `synthigy exec` loads the project's
+`.synthigy/.env` and runs your jar with the project's `.synthigy/` as its home:
 
 ```bash
 synthigy exec -- java -jar target/my-app.jar

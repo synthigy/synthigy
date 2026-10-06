@@ -10,7 +10,7 @@
 
 (ns synthigy.server.data
   "Server-agnostic /data endpoint handler — direct dataset operations via JSON,
-   for service-to-service use with acting_as impersonation. See SDK.md."
+   for service-to-service use with acting_as impersonation."
   (:require
    [clojure.edn :as edn]
    [clojure.java.io :as io]

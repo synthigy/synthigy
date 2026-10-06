@@ -68,7 +68,7 @@ side and `movies` on the other is read as `movie → actors` and
 | Cardinality | Meaning |
 |---|---|
 | `o2o` | one to one: linking a target to another record moves it there |
-| `o2m` / `m2o` | one to many / many to one |
+| `o2m` / `m2o` | one to many / many to one: a child has one parent; listing it under another moves it there |
 | `m2m` | many to many |
 | `tree` | an entity related to itself as parent and children |
 

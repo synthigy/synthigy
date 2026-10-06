@@ -25,6 +25,7 @@
 - [Running Synthigy](OPERATIONS.md) — instances, services, upgrades, backups, containers
 - [Portal and console](CONSOLE.md) — the portal runs the instance, the console administers it
 - [Reverse proxy](PROXY.md) — TLS, client addresses, streaming
+- [AWS provisioning](AWS_PROVISIONING.md) — a small EC2 server: swap, apt, a service that survives the OOM killer
 - [Encryption](ENCRYPTION.md) — data keys, master key custody, rotation
 - [Audit, logs and traffic](DATALINE.md) — history of your data, engine logs
 - [Troubleshooting](TROUBLESHOOTING.md) — symptoms, causes, fixes

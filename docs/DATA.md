@@ -204,11 +204,13 @@ After this `sync` the movie has exactly these two genres; any other it had is
 unlinked. The same `data` under `stack` adds the two and keeps the rest. A
 relation absent from `data` is untouched by both.
 
-A one-to-one target has one owner. Linking it to a record moves it there:
-the record that held it is unlinked in the same write, under `stack` and
-`sync` alike. Taking it is a change to that previous owner, so your access
-rules must let you see and write it. One write that gives a target two
-owners is refused.
+A one-to-one target has one owner, and a one-to-many child has one parent.
+Linking it to a record — or listing the child under a parent — moves it
+there: the record that held it is unlinked in the same write, under `stack`
+and `sync` alike. Taking it is a change to that previous owner, so your access
+rules must let you see and write it. One write that gives a target or a child
+two owners is refused. Listing a child its parent already holds changes
+nothing. Many-to-many links are never moved.
 
 `delete` names records by identity, never by filter:
 
@@ -236,8 +238,8 @@ Branch on `error.code`; messages may change.
 | `UNIQUE_VIOLATION`, `NOT_NULL_VIOLATION`, `FK_VIOLATION`, `CHECK_VIOLATION`, `TYPE_CAST_FAILURE` | The database refused the write. |
 | `DELETE_FORBIDDEN` | The record exists but your access rules hide it. |
 | `ROW_FORBIDDEN` | The write changes a record your access rules let you see but not write. |
-| `SLOT_OCCUPIED` | The link you are replacing, or the one-to-one target you are taking, belongs to a record your access rules hide. |
-| `BAD_DATA_SHAPE` | `data` contradicts the model, e.g. one write gives a one-to-one target two owners. |
+| `SLOT_OCCUPIED` | The link you are replacing, or the one-to-one target or one-to-many child you are taking, belongs to a record your access rules hide. |
+| `BAD_DATA_SHAPE` | `data` contradicts the model, e.g. one write gives a one-to-one target or a one-to-many child two owners. |
 | `XSQL_PARSE_ERROR` | With line and column. |
 | `TIMEOUT` | The statement was cancelled. |
 | `INTERNAL_ERROR` | Details are in the server log only. |

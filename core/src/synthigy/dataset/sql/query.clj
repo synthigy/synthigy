@@ -3191,33 +3191,63 @@
                              chunk)))))
 
 (defn slot-owners
-  "[owner target] pairs where a from-side row outside `froms` holds one of `tos`."
-  [tx table from to froms tos]
-  (let [froms (set froms)]
-    (into []
-          (comp (mapcat (fn [chunk]
-                          (sql/execute! tx (into [(str "select \"" from "\" as owner, \"" to "\" as target"
-                                                       " from \"" table "\" where \"" to "\" in ("
-                                                       (clojure.string/join ", " (repeat (count chunk) \?)) ")")]
-                                                 chunk))))
-                (map (juxt :owner :target))
-                (remove (comp froms first)))
-          (partition-all (chunk-rows-for 1) (distinct tos)))))
+  "[owner target] pairs holding one of `tos` that `own?` does not claim."
+  [tx table from to own? tos]
+  (into []
+        (comp (mapcat (fn [chunk]
+                        (sql/execute! tx (into [(str "select \"" from "\" as owner, \"" to "\" as target"
+                                                     " from \"" table "\" where \"" to "\" in ("
+                                                     (clojure.string/join ", " (repeat (count chunk) \?)) ")")]
+                                               chunk))))
+              (map (juxt :owner :target))
+              (remove own?))
+        (partition-all (chunk-rows-for 1) (distinct tos))))
 
-(defn assert-one-owner-per-target!
-  "Throws when one write links two rows to the same one-to-one target; answers the analysis."
-  [{one :relations/one entity :entity :as analysis}]
-  (doseq [[{:keys [cardinality] to-entity :to to-table :to/table} links] one
-          :when (= "o2o" cardinality)
+(defn evict-other-parents!
+  "Unlinks each one-to-many child in `pairs` from every parent but its new one; throws for a parent the caller cannot read or write."
+  [tx table from to from-entity from-table pairs]
+  (let [rg (read-scope-guard from-entity from-table)
+        wg (write-scope-guard from-entity from-table)
+        guards (filterv some? [rg wg])
+        scope (when (seq guards)
+                (str " and \"" from "\" in (select \"_eid\" from \"" from-table "\" where "
+                     (clojure.string/join " and " (map #(str "(" (:sql %) ")") guards)) ")"))
+        scope-params (into [] (mapcat :params) guards)
+        budget (max 1 (quot (- (chunk-rows-for 1) (count scope-params)) 3))]
+    (doseq [chunk (partition-all budget pairs)]
+      (sql/execute! tx (-> [(str "delete from \"" table "\" where \"" to "\" in ("
+                                 (clojure.string/join ", " (repeat (count chunk) \?))
+                                 ") and (\"" from "\", \"" to "\") not in (values "
+                                 (clojure.string/join ", " (repeat (count chunk) "(?, ?)"))
+                                 ")" scope)]
+                           (into (map second) chunk)
+                           (into cat chunk)
+                           (into scope-params))))
+    (when (seq guards)
+      (when-let [kept (seq (map first (slot-owners tx table from to (set pairs) (map second pairs))))]
+        (when (and rg (seq (rows-outside tx from-table kept rg)))
+          (log/info {:id ::slot-occupied
+                     :data {:table table}}
+                    "One-to-many child held by a parent outside the caller's read window")
+          (throw-slot-occupied table))
+        (assert-from-side-writable! tx table from-table kept (or wg {:sql "1=0" :params []}))))))
+
+(defn verify-links!
+  "Throws when one write gives a one-to-one target or a one-to-many child two owners; answers the analysis."
+  [{one :relations/one many :relations/many entity :entity :as analysis}]
+  (doseq [[{:keys [cardinality] to-entity :to to-table :to/table} links] (concat one many)
+          :when (#{"o2o" "o2m"} cardinality)
           [target holders] (group-by second links)
           :when (and target (< 1 (count (distinct (map first holders)))))]
-    (let [named (or (id/extract (get-in entity [to-table target])) "one record")]
+    (let [named (or (id/extract (get-in entity [to-table target])) "one record")
+          o2o? (= "o2o" cardinality)]
       (throw
        (ex-info
-        (format "One write links %s %s to more than one row — a one-to-one link has one owner"
-                (or (:name (deployed-entity to-entity)) "the target") named)
+        (format "One write links %s %s to more than one row — %s"
+                (or (:name (deployed-entity to-entity)) "the target") named
+                (if o2o? "a one-to-one link has one owner" "a one-to-many child has one parent"))
         {:code "BAD_DATA_SHAPE"
-         :rule "one_to_one_target"
+         :rule (if o2o? "one_to_one_target" "one_to_many_child")
          :target named}))))
   analysis)
 
@@ -3305,7 +3335,7 @@
                                                 :evict/table from-table
                                                 :evict/guards (filterv some? [rg wg]))))
             (when (and o2o? (or rg wg))
-              (when-let [kept (seq (map first (slot-owners tx table from to current targets)))]
+              (when-let [kept (seq (map first (slot-owners tx table from to (comp current first) targets)))]
                 (when (and rg (seq (rows-outside tx from-table kept rg)))
                   (log/info {:id ::slot-occupied
                              :data {:table table}}
@@ -3326,11 +3356,12 @@
             result))
         result
         one))
-     ;; Link many relations — one multi-row INSERT per chunk, as above.
+     ;; Link many relations — a one-to-many child moves to the parent listing
+     ;; it (last write wins), then one multi-row INSERT per chunk, as above.
      (let [{:keys [:relations/many]} result
            xid-mode? (= :xid (id/key))]
        (reduce-kv
-        (fn [result {:keys [table]
+        (fn [result {:keys [table cardinality]
                      to :to/field
                      from :from/field
                      from-entity :from
@@ -3350,7 +3381,10 @@
                            (mapv (fn [[f t fx tx]] [f t fx tx])))
                       (->> bindings
                            (filter second)
-                           (mapv (fn [[f t]] [f t]))))]
+                           (mapv (fn [[f t]] [f t]))))
+                pairs (when (= "o2m" cardinality)
+                        (into [] (comp (map (fn [[f t]] [f t])) (distinct)) new))]
+            (when (seq pairs) (lock-rows! tx to-table (map second pairs)))
             ;; never gate after the delete — a denied sync would still evict
             (when-let [wg (write-scope-guard from-entity from-table)]
               (assert-from-side-writable! tx table from-table current wg))
@@ -3364,6 +3398,8 @@
                tx table from current
                (when-let [guard (read-scope-guard to-entity to-table)]
                  {:to/field to :to/table to-table :guard guard})))
+            (when (seq pairs)
+              (evict-other-parents! tx table from to from-entity from-table pairs))
             (execute-multi-row!
              tx new (if xid-mode? 4 2)
              (fn [n]
@@ -3789,7 +3825,7 @@
        (log/trace {:id ::store-analysis :data {:analysis analysis}}
                   "Storing based on analysis")
        (as-> analysis result
-         (assert-one-owner-per-target! result)
+         (verify-links! result)
          (resolve-one-satellites tx result)
          (prepare-references tx result)
          (enhance-write tx result)

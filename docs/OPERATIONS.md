@@ -37,7 +37,8 @@ synthigy service uninstall
 The unit runs `synthigy up --join` for this instance. No root is needed; on
 Linux the CLI enables lingering so the service runs without anyone logged in.
 Its output goes to the journal (`journalctl --user -u synthigy -f`), and
-`synthigy logs` reads it from there.
+`synthigy logs` reads it from there. On a small cloud server, see
+[AWS provisioning](AWS_PROVISIONING.md).
 
 ## Upgrades
 

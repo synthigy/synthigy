@@ -108,12 +108,18 @@
                         {:length (count decoded)})))
       decoded)
 
-    :else
     ;; legacy decimal — old keys only, zero-pads short values, never for new keys
+    (re-matches #"-?\d+" s)
     (byte-array
      (take 32
            (concat (.toByteArray (BigInteger. s))
-                   (repeat 0))))))
+                   (repeat 0))))
+
+    ;; never hand anything else to BigInteger — its exception message echoes the key
+    :else
+    (throw (ex-info (str "A master key must start with \"b64:\" (32 bytes, base64) or \"hex:\" (64 hex chars)"
+                         " — e.g. \"b64:\" followed by the output of `openssl rand -base64 32`")
+                    {:code :unrecognized-master-key-encoding}))))
 
 (defn env-master-key
   "Reads SYNTHIGY_ENCRYPTION_MASTER_KEY."

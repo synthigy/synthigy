@@ -1985,7 +1985,7 @@
            ;; that module → no plug → no audit-plug trigger tax
            ;; on writes. Full-server / test fixtures must explicitly start
            ;; :synthigy/subscriptions for SSE + audit to capture.
-           ;; Plug-default audit provider auto-bind (per AUDIT.md).
+           ;; Plug-default audit provider auto-bind.
            ;; Call plug + audit start fns DIRECTLY (not via
            ;; `lifecycle/start!`). Both modules declare
            ;; `:depends-on [:synthigy/dataset]` (or transitively on

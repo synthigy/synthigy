@@ -38,11 +38,11 @@
 
   See individual handler functions for details."
   (:require
+   [synthigy.client-address :as client-address]
    [synthigy.cors :as cors]
    [clojure.core.async :as async]
    [clojure.string :as str]
    [environ.core :refer [env]]
-   [nano-id.core :refer [nano-id]]
    [org.httpkit.server :as httpkit]
    [starfederation.datastar.clojure.adapter.http-kit :as d*hk]
    [patcho.lifecycle :as lifecycle]
@@ -276,34 +276,13 @@
     (catch Throwable _ {})))
 
 (defn wrap-request-id
-  "Ring middleware that establishes a request-id (and, when the request
-  authenticates, user-xid + tenant) for the lifetime of the request and
-  emits one `::request-completed` info signal per call.
-
-  - Uses an inbound X-Request-Id header if present (preserving upstream
-    tracing), otherwise generates a fresh nano-id.
-  - Resolves auth once via `auth/authenticate-request`. If a principal
-    is found, `:user-xid` (and `:tenant` if present) are bound to
-    `log/with-ctx` for the request's lifetime — so request-completed
-    AND every signal the handler emits land with promoted `user_xid`
-    in the wire row.
-  - On the way out, emits `:synthigy.server/request-completed` with
-    method, uri, status, and duration_ms — guarantees one row per
-    request even when the handler is silent.
-  - Echoes the id as the X-Request-Id response header.
-
-  Inner handlers still call `auth/authenticate-request` themselves —
-  this middleware does not pre-resolve into the request map. The
-  duplicate auth call is the price for clean separation; if it becomes
-  a hot-path concern we can stash the principal in the request map
-  for inner handlers to pick up."
+  "Ring middleware binding the request's log context and resolved client address."
   [handler]
   (fn [request]
-    (let [req-id    (or (some-> request :headers (get "x-request-id"))
-                        (nano-id 10))
+    (let [req-ctx   (client-address/request-context request)
+          request   (assoc request :remote-addr (:ip req-ctx))
           started   (System/currentTimeMillis)
-          auth-ctx  (auth-ctx-from-request request)
-          full-ctx  (assoc auth-ctx :request-id req-id)
+          full-ctx  (merge (auth-ctx-from-request request) req-ctx)
           response  (log/with-ctx full-ctx
                       (let [resp (handler request)
                             duration (- (System/currentTimeMillis) started)]
@@ -321,7 +300,7 @@
                                  :duration-ms duration}}
                          "request completed")
                         resp))]
-      (assoc-in response [:headers "X-Request-Id"] req-id))))
+      (assoc-in response [:headers "X-Request-Id"] (:request-id req-ctx)))))
 
 (defn make-handler
   "Creates the complete Ring handler with all middleware.
@@ -396,7 +375,9 @@
 
    (let [handler (make-handler {:routes routes :info info})
          stop-fn (httpkit/run-server handler {:ip host
-                                              :port port})]
+                                              :port port
+                                              ;; never true — :remote-addr would become client-chosen
+                                              :legacy-unsafe-remote-addr? false})]
      ;; Opt-in modules register their prefix after boot, so they can't be
      ;; handed :sse-handler as an argument — they look the adapter up.
      (routes/register-sse-transport! d*hk/->sse-response)

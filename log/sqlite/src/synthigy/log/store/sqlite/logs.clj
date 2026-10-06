@@ -12,6 +12,7 @@
   (:require
    [clojure.string :as str]
    [synthigy.json :as json]
+   [synthigy.log.store.signal :as signal]
    [synthigy.log.store.sqlite.conn :as conn])
   (:import
    [java.sql Connection PreparedStatement ResultSet]
@@ -37,14 +38,23 @@
       ctx         TEXT,
       error_class TEXT,
       error_msg   TEXT,
-      error_trace TEXT)"
+      error_trace TEXT,
+      ip          TEXT)"
    "CREATE INDEX IF NOT EXISTS synthigy_logs_inst ON synthigy_logs(inst)"
    "CREATE INDEX IF NOT EXISTS synthigy_logs_level_inst ON synthigy_logs(level, inst)"
    "CREATE INDEX IF NOT EXISTS synthigy_logs_id_inst ON synthigy_logs(id, inst)"
-   "CREATE INDEX IF NOT EXISTS synthigy_logs_request ON synthigy_logs(request_id) WHERE request_id IS NOT NULL"])
+   "CREATE INDEX IF NOT EXISTS synthigy_logs_request ON synthigy_logs(request_id) WHERE request_id IS NOT NULL"
+   "CREATE INDEX IF NOT EXISTS synthigy_logs_ip_inst ON synthigy_logs(ip, inst) WHERE ip IS NOT NULL"])
+
+(defn ensure-ip-column! [c]
+  (when-not (some #{"ip"} (conn/query-rows c "PRAGMA table_info(synthigy_logs)" []
+                                           (fn [^ResultSet rs] (.getString rs "name"))))
+    (conn/exec! c "ALTER TABLE synthigy_logs ADD COLUMN ip TEXT")))
 
 (defn apply-schema! [c]
-  (apply conn/exec! c schema-ddl))
+  (conn/exec! c (first schema-ddl))
+  (ensure-ip-column! c)
+  (apply conn/exec! c (rest schema-ddl)))
 
 (defn drop-schema! [c]
   (conn/exec! c "DROP TABLE IF EXISTS synthigy_logs"))
@@ -53,7 +63,7 @@
 ;;; Signal → row
 ;;; ============================================================================
 
-(def promoted-ctx-keys [:request-id :user-xid :tenant])
+(def promoted-ctx-keys [:request-id :user-xid :tenant :ip])
 
 (defn topics->delimited [topics]
   (let [names (->> topics (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t)))) sort)]
@@ -102,10 +112,13 @@
      (json/->json (apply dissoc ctx-map promoted-ctx-keys))
      err-class
      err-msg
-     err-trace]))
+     err-trace
+     (or (:ip signal) (get ctx-map :ip))]))
 
 (def insert-sql
-  "INSERT INTO synthigy_logs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+  (str "INSERT INTO synthigy_logs (inst, level, ns, id, msg, request_id, user_xid, tenant, host,"
+       " topics, data, ctx, error_class, error_msg, error_trace, ip)"
+       " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"))
 
 (defn insert-batch! [^Connection c signals]
   (when (seq signals)
@@ -252,7 +265,7 @@
 
 (defn kebab->snake [k] (str/replace (name k) "-" "_"))
 
-(defn json-path [path] (str "'$." (str/join "." (map kebab->snake path)) "'"))
+(defn json-path [path] (str "'$." (str/join "." (map #(str "\"" (signal/json-key %) "\"") path)) "'"))
 
 (defn field-expr
   "Text-valued SQL for a field; JSON paths render booleans as 'true'/'false' like the other stores."
@@ -389,7 +402,8 @@
    :ctx         (try (json/<-json (.getString rs "ctx")) (catch Throwable _ nil))
    :error_class (.getString rs "error_class")
    :error_msg   (.getString rs "error_msg")
-   :error_trace (.getString rs "error_trace")})
+   :error_trace (.getString rs "error_trace")
+   :ip          (.getString rs "ip")})
 
 (defn search [c {:keys [count? group-by bucket-ms] :as opts}]
   (let [{:keys [sql params]} (compile-sql opts)]

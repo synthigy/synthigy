@@ -27,7 +27,12 @@
       default-ring-size))
 
 (def promoted-ctx-keys
-  [:request-id :user-xid :tenant])
+  [:request-id :user-xid :tenant :ip])
+
+(defn json-key
+  "A JSON path key exactly as stored, minus the quote and backslash characters no path literal can carry."
+  [k]
+  (str/replace (name k) #"[\"'\\]" ""))
 
 (defn id->str [id]
   (cond
@@ -66,6 +71,8 @@
     (or (:user-xid signal)   (get-in signal [:ctx :user-xid]))
     (= field :tenant)
     (or (:tenant signal)     (get-in signal [:ctx :tenant]))
+    (= field :ip)
+    (or (:ip signal)         (get-in signal [:ctx :ip]))
     (= field :v) 1
     (= field :error-class)
     (when-let [e (:error signal)]
@@ -229,6 +236,7 @@
      :request_id  (or (:request-id signal) (get ctx-map :request-id))
      :user_xid    (or (:user-xid signal)   (get ctx-map :user-xid))
      :tenant      (or (:tenant signal)     (get ctx-map :tenant))
+     :ip          (or (:ip signal)         (get ctx-map :ip))
      :host        (host-of signal)
      ;; (subs (str kw) 1), not `name` — :traffic/sse must stay "traffic/sse"
      :topics      (->> (:topics signal)

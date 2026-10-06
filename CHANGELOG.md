@@ -1,0 +1,44 @@
+# Changelog
+
+All notable changes to the Synthigy engine. Releases before 0.2.14 are
+described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
+
+## [0.2.14-SNAPSHOT] — 2026-10-06
+
+### Breaking
+- **`SYNTHIGY_SERVER_TRUST_PROXY` lists your proxies.** It takes IPs or CIDRs,
+  comma separated — `127.0.0.1/32,::1/128` for a proxy on the same host —
+  instead of `true`. `X-Forwarded-For` is believed only from those addresses
+  and is read from the right, skipping trusted hops, so a proxy may overwrite
+  or append to the header. `true` is ignored with a warning: until you change
+  it, every request is recorded with the proxy's address. See
+  [PROXY.md](docs/PROXY.md).
+
+### Added
+- **Every log line knows where its request came from.** Request-scoped lines
+  carry the client address in a new, indexed `ip` column — filter with
+  `{:where {:ip "198.51.100.7"}}` or `:group-by :ip` — and `ctx` carries the
+  proxy's address (`peer`), the user agent and the raw `X-Forwarded-For`.
+  Existing log tables gain the column on first boot.
+- **Successful writes are logged.** `/data` writes log at info like reads: one
+  line per operation, with its source address. The audit trail keeps the
+  values; the log line says who and from where. Expect more log lines.
+- **A request id from an untrusted caller is kept aside.** An `X-Request-Id`
+  sent by a trusted proxy becomes the request's id; from anyone else it is
+  recorded as `client-request-id` and a fresh id is issued. The response's
+  `X-Request-Id` always names the id in use.
+
+### Fixed
+- **Audit rows record their request.** `request_id` on audit rows was always
+  empty. It now carries the request's id, which joins an audit row to the log
+  lines of the request that made the change; history timelines grouped by
+  request work.
+- **The client cannot choose its own address.** http-kit took the first
+  `X-Forwarded-For` entry from any caller. The engine now sees the connection's
+  own address (http-kit 2.9.0-beta3) and decides the client address in one
+  place for every server adapter; sessions and login checks use it.
+- **Log filters on keys containing a dash.** Paths such as `[:data :elapsed-ms]`
+  or `[:ctx :user-agent]` never matched on the SQLite, DuckDB and ClickHouse
+  log stores.
+- **Login events name the client.** `login-authenticated` and
+  `login-credentials-rejected` logged `client: null`.

@@ -20,6 +20,7 @@
    [synthigy.log :as log]
    [synthigy.log.store.protocol :as store]
    [synthigy.log.store.ring :as ring]
+   [synthigy.log.store.signal :as signal]
    [synthigy.traffic :as traffic])
   (:import
    [java.sql Connection ResultSet]
@@ -74,8 +75,10 @@
       ctx         JSON,
       error_class VARCHAR,
       error_msg   VARCHAR,
-      error_trace VARCHAR
+      error_trace VARCHAR,
+      ip          VARCHAR
     )"
+   "ALTER TABLE synthigy_logs ADD COLUMN IF NOT EXISTS ip VARCHAR"
    (str "CREATE TABLE IF NOT EXISTS traffic_minutes (
       node            VARCHAR,
       minute          BIGINT,
@@ -92,7 +95,7 @@
 ;;; Signal → row
 ;;; ============================================================================
 
-(def promoted-ctx-keys [:request-id :user-xid :tenant])
+(def promoted-ctx-keys [:request-id :user-xid :tenant :ip])
 
 (defn topics->delimited
   "A topic set as a pipe-bounded sorted string (`|system|dataset|`), so membership is a bounded LIKE."
@@ -140,12 +143,15 @@
      :ctx         (json/->json (apply dissoc ctx-map promoted-ctx-keys))
      :error_class err-class
      :error_msg   err-msg
-     :error_trace err-trace}))
-
-(def insert-log-sql "INSERT INTO synthigy_logs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+     :error_trace err-trace
+     :ip          (or (:ip signal) (get ctx-map :ip))}))
 
 (def log-columns [:inst :level :ns :id :msg :request_id :user_xid :tenant :host :topics
-                  :data :ctx :error_class :error_msg :error_trace])
+                  :data :ctx :error_class :error_msg :error_trace :ip])
+
+(def insert-log-sql
+  (str "INSERT INTO synthigy_logs (" (str/join ", " (map name log-columns)) ") VALUES ("
+       (str/join "," (repeat (count log-columns) "?")) ")"))
 
 (defn insert-log-batch! [^Connection conn signals]
   (when (seq signals)
@@ -302,7 +308,8 @@
     (keyword? field) (kebab->snake field)
     (vector? field)
     (let [[root & path] field]
-      (str "json_extract_string(" (kebab->snake root) ", '$." (str/join "." (map kebab->snake path)) "')"))
+      (str "json_extract_string(" (kebab->snake root) ", '$."
+           (str/join "." (map #(str "\"" (signal/json-key %) "\"") path)) "')"))
     :else
     (throw (ex-info (str "Unsupported field reference: " (pr-str field)) {:field field}))))
 
@@ -422,7 +429,8 @@
    :ctx         (try (json/<-json (.getString rs "ctx")) (catch Throwable _ nil))
    :error_class (.getString rs "error_class")
    :error_msg   (.getString rs "error_msg")
-   :error_trace (.getString rs "error_trace")})
+   :error_trace (.getString rs "error_trace")
+   :ip          (.getString rs "ip")})
 
 (defn run-query [^Connection conn {:keys [sql params]} read-row]
   (with-open [ps (.prepareStatement conn ^String sql)]

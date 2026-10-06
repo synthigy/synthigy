@@ -946,26 +946,18 @@
   nil)
 
 (defn set-context!
-  "Write tx-local request/principal GUCs so plug triggers can record
-   who drove the mutation.
-
-   Called at the top of every mutation tx-opener (set-entity,
-   slice-entity, purge-entity 2-arity wrappers). GUCs are tx-local and
-   auto-clear at commit/rollback."
+  "Write the tx-local provenance GUCs the plug triggers stamp on every delta."
   [_db tx]
   (let [principal (access/current-principal)]
     (jdbc/execute! tx
-                   ["SELECT set_config('synthigy.actor_xid', ?, true)"
-                    (some-> principal :xid str)])
-    (jdbc/execute! tx
-                   ["SELECT set_config('synthigy.request_id', ?, true)"
-                    (some-> principal :request-id str)])
-    (jdbc/execute! tx
-                   ["SELECT set_config('synthigy.scope_xid', ?, true)"
-                    (some-> principal :scope-xid str)]))
-  (jdbc/execute! tx
-                 ["SELECT set_config('synthigy.tenant_xid', ?, true)"
-                  (str (id/data :dataset/id))])
+                   [(str "SELECT set_config('synthigy.actor_xid', ?, true),"
+                         " set_config('synthigy.request_id', ?, true),"
+                         " set_config('synthigy.scope_xid', ?, true),"
+                         " set_config('synthigy.tenant_xid', ?, true)")
+                    (some-> principal :xid str)
+                    (log/request-id)
+                    (some-> principal :scope-xid str)
+                    (str (id/data :dataset/id))]))
   nil)
 
 (defn start-drainer!

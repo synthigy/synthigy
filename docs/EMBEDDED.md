@@ -35,6 +35,18 @@ what you use. The engine starts dependencies first and stops dependents first.
 
 Ship exactly **one** bundle on the classpath. Two engines are refused at boot.
 
+A route registered this way runs inside the engine's request context: every
+log line it produces carries the request's id and the client's `ip`, and every
+audit row the request's id. Work that starts anywhere else — your own HTTP
+server, a scheduler — attaches the same context itself:
+
+```clojure
+(require '[synthigy.log :as log])
+
+(log/with-ctx {:request-id "import-2026-10-06" :ip "198.51.100.7"}
+  (import-orders!))
+```
+
 ## 2. Run it standalone
 
 ```clojure

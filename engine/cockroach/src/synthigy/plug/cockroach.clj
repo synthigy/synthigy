@@ -665,7 +665,7 @@
   [_db tx]
   (let [principal (access/current-principal)
         actor   (some-> principal :xid str)
-        request (some-> principal :request-id str)
+        request (log/request-id)
         scope   (some-> principal :scope-xid str)
         tenant  (str (id/data :dataset/id))
         txid    (str (uuid-v7))]

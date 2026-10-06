@@ -787,7 +787,7 @@
                     (some-> principal :xid str)])
     (jdbc/execute! tx
                    ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('request_id', ?)"
-                    (some-> principal :request-id str)])
+                    (log/request-id)])
     (jdbc/execute! tx
                    ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('scope_xid', ?)"
                     (some-> principal :scope-xid str)]))

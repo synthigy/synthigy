@@ -78,7 +78,7 @@
            m keys-to-redact)))
 
 (def ^:private promoted-ctx-keys
-  [:request-id :user-xid :tenant])
+  [:request-id :user-xid :tenant :ip])
 
 (defn current-principal-xid
   "xid of the principal bound in the current scope, or nil."
@@ -136,6 +136,7 @@
             (.put "request_id"  (or (:request-id signal) (get ctx-map :request-id)))
             (.put "user_xid"    (or (:user-xid signal)   (get ctx-map :user-xid)))
             (.put "tenant"      (or (:tenant signal)     (get ctx-map :tenant)))
+            (.put "ip"          (or (:ip signal)         (get ctx-map :ip)))
             (.put "host"        (let [h (:host signal)]
                                   (cond
                                     (string? h) h
@@ -507,6 +508,11 @@
    request."
   []
   (:request-id t/*ctx*))
+
+(defn request-ip
+  "The current request's client address from Telemere's *ctx*, or nil outside a request."
+  []
+  (:ip t/*ctx*))
 
 ;;; ============================================================================
 ;;; Patcho lifecycle bridge

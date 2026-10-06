@@ -113,7 +113,7 @@
    (complete-authorization-code-login! authorization-code resource-owner amr nil))
   ([authorization-code resource-owner amr client-info]
   (let [{{redirect-uri :redirect_uri
-          :keys [state audience scope response_mode]} :request
+          :keys [state audience scope response_mode client_id]} :request
          :keys [client]}
         (ac/get-code authorization-code)
         session (core/gen-session-id)
@@ -136,7 +136,7 @@
                :data {:action :authenticated
                       :subject :resource-owner
                       :flow "authorization_code"
-                      :client (:id client)
+                      :client client_id
                       :session (core/short-id session)
                       :code (core/short-id authorization-code)
                       :method (str/join "+" amr)}}
@@ -278,7 +278,7 @@
                                     :subject :resource-owner
                                     :flow "authorization_code"
                                     :username username
-                                    :client (:id (:client prepared-code))}}
+                                    :client (get-in prepared-code [:request :client_id])}}
                             "Authentication failed: invalid credentials")
                   (if json?
                     (json-body 400 {:ok false :error "credentials"})
@@ -307,7 +307,7 @@
           ;; Device Code Flow
             "device_code"
             (let [{:keys [session client expires-at]
-                   {:keys [audience scope]} :request} (dc/get-device-code-data device-code)
+                   {:keys [audience scope client_id]} :request} (dc/get-device-code-data device-code)
                   security-error (security-check request)]
               (cond
                 (some? session)
@@ -344,7 +344,7 @@
                                     :subject :resource-owner
                                     :flow "device_code"
                                     :username username
-                                    :client (:id client)}}
+                                    :client client_id}}
                             "Authentication failed: invalid credentials")
                   (if json?
                     (json-body 400 {:ok false :error "credentials"})
@@ -374,7 +374,7 @@
                                     :subject :resource-owner
                                     :flow "device_code"
                                     :username username
-                                    :client (:id client)
+                                    :client client_id
                                     :session (core/short-id session)
                                     :code (core/short-id device-code)
                                     :method "pwd"}}

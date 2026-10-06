@@ -50,7 +50,7 @@
 
 (def built-in-columns
   "Top-level wire-schema fields addressable as bare keywords in `:where`."
-  #{:level :ns :id :msg :request-id :user-xid :tenant
+  #{:level :ns :id :msg :request-id :user-xid :tenant :ip
     :host :error-class :error-msg :error-trace :inst :v :topics})
 
 (def default-limit 100)

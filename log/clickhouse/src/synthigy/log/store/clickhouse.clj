@@ -48,7 +48,9 @@
           error_class  LowCardinality(String)   CODEC(ZSTD),
           error_msg    String                   CODEC(ZSTD),
           error_trace  String                   CODEC(ZSTD),
-          date         Date MATERIALIZED toDate(inst)
+          ip           String                   CODEC(ZSTD),
+          date         Date MATERIALIZED toDate(inst),
+          INDEX ip_bf ip TYPE bloom_filter GRANULARITY 4
         )
         ENGINE = MergeTree
         PARTITION BY date
@@ -83,7 +85,9 @@
         SETTINGS index_granularity = 8192"))
 
 (defn migrations-ddl [db]
-  [(str "ALTER TABLE " db ".logs ADD COLUMN IF NOT EXISTS topics Array(LowCardinality(String)) CODEC(ZSTD)")])
+  [(str "ALTER TABLE " db ".logs ADD COLUMN IF NOT EXISTS topics Array(LowCardinality(String)) CODEC(ZSTD)")
+   (str "ALTER TABLE " db ".logs ADD COLUMN IF NOT EXISTS ip String CODEC(ZSTD)")
+   (str "ALTER TABLE " db ".logs ADD INDEX IF NOT EXISTS ip_bf ip TYPE bloom_filter GRANULARITY 4")])
 
 (defn apply-schema! [client {:keys [database log-retention-days] :as config}]
   (ch/exec-ddl! client config (ch/create-db-ddl database))
@@ -126,7 +130,8 @@
      :ctx         (json/->json (apply dissoc ctx-map signal/promoted-ctx-keys))
      :error_class (ch/str-or-empty err-class)
      :error_msg   (ch/str-or-empty err-msg)
-     :error_trace (ch/str-or-empty err-trace)}))
+     :error_trace (ch/str-or-empty err-trace)
+     :ip          (ch/str-or-empty (or (:ip sig) (get ctx-map :ip)))}))
 
 ;; never on audit — wait_for_async_insert=0 returns before CH has flushed
 (def async-insert-settings {"async_insert" 1 "wait_for_async_insert" 0})
@@ -257,7 +262,7 @@
     (keyword? field) (ch/kebab->snake field)
     (vector? field)  (let [[root & path] field]
                        (str (json-extract-fn for-value-type) "(" (ch/kebab->snake root) ", "
-                            (str/join ", " (map #(str "'" (ch/kebab->snake %) "'") path)) ")"))
+                            (str/join ", " (map #(str "'" (signal/json-key %) "'") path)) ")"))
     :else (throw (ex-info (str "Unsupported field reference: " (pr-str field)) {:field field}))))
 
 (defn compile-comparison [field [op value] state]
@@ -288,7 +293,7 @@
   (if (vector? field)
     (let [[root & path] field
           base (str "JSONHas(" (ch/kebab->snake root) ", "
-                    (str/join ", " (map #(str "'" (ch/kebab->snake %) "'") path)) ")")]
+                    (str/join ", " (map #(str "'" (signal/json-key %) "'") path)) ")")]
       (if (= op :exists?) base (str "NOT " base)))
     ;; columns are non-Nullable: CH stores "missing" as the empty string
     (let [col (ch/kebab->snake field)]

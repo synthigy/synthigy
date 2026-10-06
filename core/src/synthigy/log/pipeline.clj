@@ -89,7 +89,7 @@
 
 (def default-promoted-ctx-keys
   "Context keys the default pipeline promotes from `:ctx` to top-level signal fields."
-  [:request-id :user-xid :tenant])
+  [:request-id :user-xid :tenant :ip])
 
 (defn enrich-host-stage
   "Pipeline stage normalizing the signal's `:host` to a String, falling back to

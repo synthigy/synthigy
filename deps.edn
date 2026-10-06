@@ -152,11 +152,10 @@
   ;; Adapters — exactly one per classpath, each ships `synthigy.server`.
   :server-httpkit
   {:extra-paths ["server/httpkit/src" "server/oauth/src" "server/core/src"]
-   :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}
+   :extra-deps {http-kit/http-kit {:mvn/version "2.9.0-beta3"}
                 ring/ring-core {:mvn/version "1.12.2"}
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                ;; Datastar SSE adapter for this backend. Pulls http-kit
-                ;; 2.9.0-beta3 transitively; our 2.8.0 pin wins (:use-top).
+                ;; Datastar SSE adapter for this backend.
                 dev.data-star.clojure/http-kit {:mvn/version "1.0.0-RC11"}}}
 
   :server-pedestal

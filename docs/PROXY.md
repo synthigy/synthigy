@@ -21,7 +21,7 @@ SYNTHIGY_SERVER_PORT=7887
 
 ```bash
 SYNTHIGY_IAM_ROOT_URL=https://synthigy.example.com
-SYNTHIGY_SERVER_TRUST_PROXY=true
+SYNTHIGY_SERVER_TRUST_PROXY=127.0.0.1/32,::1/128
 ```
 
 **`SYNTHIGY_IAM_ROOT_URL`** is the public origin: the token issuer and the
@@ -30,27 +30,35 @@ from `X-Forwarded-Host` and `X-Forwarded-Proto` — fine on a laptop, wrong
 behind a load balancer, and steerable by whoever can set those headers. The
 portal flags it until it is set.
 
-**`SYNTHIGY_SERVER_TRUST_PROXY`** records that a proxy is in front and the
-client address comes from `X-Forwarded-For`. The released engine reads that
-header whether or not the flag is set; set it anyway, so the deployment says
-what it relies on.
+**`SYNTHIGY_SERVER_TRUST_PROXY`** lists your proxies as IPs or CIDRs, comma
+separated. Only a request that arrives from one of them has its
+`X-Forwarded-For` believed; from anyone else the header is ignored and the
+connection's own address is the client. A proxy on the same host connects from
+loopback, hence `127.0.0.1/32,::1/128`; in a container network, name the
+proxy's subnet. Unset, the header is never believed.
 
-## The client address is only as good as the proxy
+## The client address
 
-Synthigy takes the client address from the **first** value of
-`X-Forwarded-For` whenever the header is present, and nothing checks who wrote
-it. An in-flight login is pinned to that address, so a stolen login state
-replayed from elsewhere is rejected — a check worth something only when the
-caller cannot choose the address. Two rules follow.
+Synthigy reads `X-Forwarded-For` from the right: it skips every hop that is one
+of your proxies and takes the first one that is not. Whatever a client writes
+into the header itself sits to the left of what your proxy adds, so it is never
+reached — the proxy may overwrite the header (`$remote_addr`) or append to it
+(`$proxy_add_x_forwarded_for`), both are safe. Behind a load balancer *and* a
+proxy, list both hops.
 
-**Never expose the engine port directly** once a proxy is in front. Bind it to
-loopback, or firewall it; a request that reaches 7887 around the proxy carries
-its own idea of who sent it.
+That address is the request's `ip` on every log line it produces (`peer` — the
+proxy — and the raw `forwarded_for` sit in the line's `ctx`), it is recorded on
+the OAuth session, and an in-flight login is pinned to it, so a stolen login
+state replayed from elsewhere is rejected.
 
-**Have the proxy overwrite the header, not append to it.** The idiomatic nginx
-value `$proxy_add_x_forwarded_for` *appends* to whatever the client sent, which
-leaves the client's own value in first position — exactly the slot that is
-read:
+An `X-Request-Id` sent by one of your proxies becomes the request's id. From
+anyone else it is kept as `client_request_id` and a fresh id is issued; the
+response's `X-Request-Id` always names the id in use.
+
+**Do not expose the engine port directly** once a proxy is in front. Bind it
+to loopback or firewall it: a caller that goes around the proxy can no longer
+choose its address, but it still skips TLS and everything else the proxy
+enforces.
 
 | proxy   | directive                                           |
 |---------|-----------------------------------------------------|
@@ -59,10 +67,7 @@ read:
 | Traefik | default — leave `forwardedHeaders.trustedIPs` unset  |
 
 Forward `X-Forwarded-Proto` and `X-Forwarded-Host` too; the OAuth layer builds
-absolute URLs from them whenever the root URL is unset. If a second proxy or a
-cloud load balancer sits in front, only the outermost hop can establish the
-client address: have that hop write the header and the inner one pass it
-through unchanged.
+absolute URLs from them whenever the root URL is unset.
 
 ## Streaming endpoints
 
@@ -138,7 +143,6 @@ server {
     proxy_set_header Connection        "";
     proxy_set_header Host              $host;
     proxy_set_header X-Real-IP         $remote_addr;
-    # $remote_addr, NOT $proxy_add_x_forwarded_for — see above.
     proxy_set_header X-Forwarded-For   $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Host  $host;

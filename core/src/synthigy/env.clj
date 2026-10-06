@@ -27,9 +27,8 @@
   (env :synthigy-id-format))
 
 (def trust-proxy
-  "Trust X-Forwarded-For for the client IP; set only when a reverse proxy fronts
-   this server, since a client can forge the header."
-  (boolean (env :synthigy-server-trust-proxy)))
+  "Comma-separated IPs/CIDRs of the reverse proxies whose X-Forwarded-For is believed."
+  (env :synthigy-server-trust-proxy))
 
 (def allowed-origins
   "Extra browser origins allowed on top of the registered clients' redirect origins."

@@ -414,11 +414,7 @@
 (defn client-info
   "Client IP + user-agent, for recording where a session was minted from."
   [request]
-  ;; advisory only — http-kit's :remote-addr already honours X-Forwarded-For
-  {:ip (or (when env/trust-proxy
-             (some-> (get-in request [:headers "x-forwarded-for"])
-                     (str/split #",") first str/trim not-empty))
-           (:remote-addr request))
+  {:ip (:remote-addr request)
    :agent (not-empty (get-in request [:headers "user-agent"]))})
 
 (defn create-session!

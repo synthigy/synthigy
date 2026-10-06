@@ -33,7 +33,7 @@ Where the instance lives and which engine runs.
 | `SYNTHIGY_PORTAL_PORT` | `7888` | Port of the portal (always bound to 127.0.0.1). |
 | `SYNTHIGY_IAM_ROOT_URL` |  | Public URL of this instance, e.g. `https://id.example.com`. Issuer of tokens and base of every login and redirect link — set it whenever the instance is reached by any other name than localhost. |
 | `SYNTHIGY_SERVER_ALLOWED_ORIGINS` |  | Extra browser origins allowed to call the API, comma separated ([CORS.md](CORS.md)). |
-| `SYNTHIGY_SERVER_TRUST_PROXY` |  | Any value: take the client address from `X-Forwarded-For`. Set only behind a reverse proxy ([PROXY.md](PROXY.md)). |
+| `SYNTHIGY_SERVER_TRUST_PROXY` |  | IPs or CIDRs of the reverse proxies in front of the engine, comma separated, e.g. `127.0.0.1/32,::1/128`. Only a request arriving from one of them has its `X-Forwarded-For` believed ([PROXY.md](PROXY.md)). |
 | `SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` | `900000` | Longest life of one subscription stream, in milliseconds, before the server closes it; clients reconnect on their own. |
 
 ## SQLite

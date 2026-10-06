@@ -1000,18 +1000,10 @@
                           (when-let [code (:code err)] (str " (" code ")")))
                      :else
                      (if write? "write finished" "read finished"))]
-    ;; errors -> :error always; successful reads -> :info (first-class audit
-    ;; fact);
-    ;; successful writes -> :debug (audit plug already stores them
-    ;; verbatim).
     (traffic/count! :ops)
-    (cond
-      (= status :error)
+    (if (= status :error)
       (log/error {:id :synthigy.server.data/op-completed :data payload
                   :error throwable} msg)
-      write?
-      (log/debug {:id :synthigy.server.data/op-completed :data payload} msg)
-      :else
       (log/info {:id :synthigy.server.data/op-completed :data payload} msg))))
 
 (defn ^:no-doc maybe-audit-op!

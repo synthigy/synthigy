@@ -37,12 +37,12 @@
    (server/stop)
    ```"
   (:require
+    [synthigy.client-address :as client-address]
     [synthigy.cors :as cors]
     [clojure.core.async :as async]
     [synthigy.json :as json]
     [clojure.string :as str]
     [environ.core :refer [env]]
-    [nano-id.core :refer [nano-id]]
     [synthigy.log :as log]
     [synthigy.traffic :as traffic]
     [patcho.lifecycle :as lifecycle]
@@ -222,24 +222,13 @@
         (handler request)))))
 
 (defn wrap-request-id
-  "Ring middleware that establishes a request-id for the lifetime of the
-  request and emits one `::request-completed` info signal per call.
-
-  - Uses an inbound X-Request-Id header if present (preserving upstream
-    tracing), otherwise generates a fresh nano-id.
-  - The downstream handler runs inside `(log/with-ctx {:request-id ...})`,
-    so every signal emitted during the request carries :request-id in ctx
-    and lands in the promoted request_id wire column.
-  - On the way out, emits `:synthigy.server/request-completed` with method,
-    uri, status, and duration_ms — guarantees one row per request even when
-    the handler is silent.
-  - Echoes the id as the X-Request-Id response header."
+  "Ring middleware binding the request's log context and resolved client address."
   [handler]
   (fn [request]
-    (let [req-id   (or (some-> request :headers (get "x-request-id"))
-                       (nano-id 10))
+    (let [req-ctx  (client-address/request-context request)
+          request  (assoc request :remote-addr (:ip req-ctx))
           started  (System/currentTimeMillis)
-          response (log/with-ctx {:request-id req-id}
+          response (log/with-ctx req-ctx
                      (let [resp (handler request)
                            duration (- (System/currentTimeMillis) started)]
                        ;; measurement = counters; the DEBUG signal exists for
@@ -253,7 +242,7 @@
                                  :duration-ms duration}}
                          "request completed")
                        resp))]
-      (assoc-in response [:headers "X-Request-Id"] req-id))))
+      (assoc-in response [:headers "X-Request-Id"] (:request-id req-ctx)))))
 
 (defn make-handler
   "Creates the complete Ring handler with all middleware."

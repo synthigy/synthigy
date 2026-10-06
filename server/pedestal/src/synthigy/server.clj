@@ -47,12 +47,12 @@
     [io.pedestal.http :as http]
     [io.pedestal.http.content-negotiation :as conneg]
     [io.pedestal.http.cors :as cors]
+    [synthigy.client-address :as client-address]
     [synthigy.cors :as origin-policy]
     [io.pedestal.interceptor :as interceptor]
     [io.pedestal.interceptor.chain :as chain]
     [io.pedestal.http.ring-middlewares :as middlewares]
     [io.pedestal.http.route :as route]
-    [nano-id.core :refer [nano-id]]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
     [ring.util.response :as response]
@@ -148,35 +148,17 @@
 ;;; Ring Handler Conversion
 ;;; ============================================================================
 
-(defn- ring-handler->pedestal-interceptor
-  "Converts a Ring handler function to a Pedestal interceptor.
-
-  - Every request flowing through this wrapper gets a request-id (reused
-    from an inbound X-Request-Id header if present, otherwise generated).
-  - The handler call runs inside `(log/with-ctx {:request-id ...})` so
-    every signal emitted while servicing the request carries :request-id
-    in its ctx and lands in the promoted request_id column.
-  - On the way out, emits `:synthigy.server/request-completed` with
-    method, uri, status, and duration_ms — guarantees one row per request
-    even when the handler is silent.
-  - Echoes the id back as the X-Request-Id response header.
-
-  Args:
-    handler - Ring handler function (request -> response)
-    name    - Optional interceptor name keyword
-
-  Returns:
-    Pedestal interceptor"
+(defn ring-handler->pedestal-interceptor
+  "Pedestal interceptor running a Ring handler under the request's log context and resolved client address."
   ([handler] (ring-handler->pedestal-interceptor handler ::ring-handler))
   ([handler name]
    {:name name
     :enter
     (fn [ctx]
-      (let [request  (:request ctx)
-            req-id   (or (some-> request :headers (get "x-request-id"))
-                         (nano-id 10))
+      (let [req-ctx  (client-address/request-context (:request ctx))
+            request  (assoc (:request ctx) :remote-addr (:ip req-ctx))
             started  (System/currentTimeMillis)
-            response (log/with-ctx {:request-id req-id}
+            response (log/with-ctx req-ctx
                        (let [resp (handler request)
                              duration (- (System/currentTimeMillis) started)]
                          ;; measurement = counters; the DEBUG signal exists
@@ -191,7 +173,7 @@
                            "request completed")
                          resp))]
         (assoc ctx :response
-               (assoc-in response [:headers "X-Request-Id"] req-id))))}))
+               (assoc-in response [:headers "X-Request-Id"] (:request-id req-ctx)))))}))
 
 ;;; ============================================================================
 ;;; Route Definitions

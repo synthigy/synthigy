@@ -781,7 +781,8 @@
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam         (when iam-active? (auth/authenticate-request request))]
     (if (and iam-active? (not iam))
-      (data/json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+      (-> (data/json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (let [body (data/parse-request-body request)]
         (if-not body
           (data/json-response 400 {:error {:message "Invalid or missing JSON body"
@@ -802,7 +803,8 @@
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam         (when iam-active? (auth/authenticate-request request))]
     (if (and iam-active? (not iam))
-      (data/json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+      (-> (data/json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (data/json-response 200 (subscription-status (request-identity request iam))))))
 
 (defn format-sse [{:keys [event data]}]

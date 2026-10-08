@@ -326,21 +326,22 @@
           ;; so exp is checked here; token-revoked? adds the RFC 7009 check
           ;; (row-less client_credentials tokens still pass on signature alone).
           claims (some-> access-token encryption/unsign-data)
-          valid? (and claims
-                      (let [exp (:exp claims)]
-                        (or (nil? exp)
-                            (> exp (quot (System/currentTimeMillis) 1000))))
-                      (not (token-revoked? :access_token access-token)))]
+          refused (cond
+                    (nil? claims) :signature
+                    (some-> (:exp claims) (<= (quot (System/currentTimeMillis) 1000))) :expired
+                    (token-revoked? :access_token access-token) :revoked)]
       (cond
         (nil? access-token)
         {:status 401 :headers {"WWW-Authenticate" "Bearer"}}
 
-        (not valid?)
-        {:status 401
-         :headers {"Content-Type" "application/json"
-                   "WWW-Authenticate" "Bearer error=\"invalid_token\""}
-         :body (json/write-str {:error "invalid_token"
-                                :error_description "Access token is invalid or has been revoked"})}
+        refused
+        (do
+          (authentication/log-rejection {:rejected refused :claims claims})
+          {:status 401
+           :headers {"Content-Type" "application/json"
+                     "WWW-Authenticate" "Bearer error=\"invalid_token\""}
+           :body (json/write-str {:error "invalid_token"
+                                  :error_description "Access token is invalid or has been revoked"})})
 
         :else
         ;; OIDC Core 5.4: the response MUST be limited to the claims the

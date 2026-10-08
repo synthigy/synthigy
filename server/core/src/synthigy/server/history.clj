@@ -54,7 +54,8 @@
              "No audit provider loaded — /history endpoint is not active")
 
       (and iam-active? (not iam))
-      (error 401 "UNAUTHORIZED" "Unauthorized")
+      (-> (error 401 "UNAUTHORIZED" "Unauthorized")
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
 
       :else
       (let [body (parse-body request)

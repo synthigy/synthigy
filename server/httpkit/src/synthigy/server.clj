@@ -135,7 +135,8 @@
           iam (when iam-active? (auth/authenticate-request request))]
       (if (and iam-active? (not iam))
         {:status 401
-         :headers {"Content-Type" "application/json"}
+         :headers {"Content-Type" "application/json"
+                   "WWW-Authenticate" (auth/challenge request)}
          :body (json/write-str {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})}
         (let [identity-key (subscription/request-identity request iam)
               stream-chan  (subscription/create-event-stream identity-key)
@@ -259,22 +260,6 @@
             (handler request)))
         (handler request)))))
 
-(defn- auth-ctx-from-request
-  "Best-effort: if the request carries a Bearer token that resolves, return
-  `{:user-xid … :tenant …}` (omitting any keys whose values are nil) for
-  `log/with-ctx`. Returns `{}` for unauthenticated requests. Never throws —
-  auth failures fall back to empty ctx so the request still gets logged."
-  [request]
-  (try
-    ;; BOTH faces here, never the authorizing default — this only decorates
-    ;; logs, and an identity-token request must stay attributable.
-    (when-let [{:keys [principal]} (auth/authenticate-request
-                                    request auth/first-party-audiences)]
-      (cond-> {}
-        (:xid    principal) (assoc :user-xid (:xid    principal))
-        (:tenant principal) (assoc :tenant   (:tenant principal))))
-    (catch Throwable _ {})))
-
 (defn wrap-request-id
   "Ring middleware binding the request's log context and resolved client address."
   [handler]
@@ -282,7 +267,7 @@
     (let [req-ctx   (client-address/request-context request)
           request   (assoc request :remote-addr (:ip req-ctx))
           started   (System/currentTimeMillis)
-          full-ctx  (merge (auth-ctx-from-request request) req-ctx)
+          full-ctx  (merge (auth/log-context request) req-ctx)
           response  (log/with-ctx full-ctx
                       (let [resp (handler request)
                             duration (- (System/currentTimeMillis) started)]

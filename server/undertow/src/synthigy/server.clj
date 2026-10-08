@@ -148,7 +148,8 @@
           iam (when iam-active? (auth/authenticate-request request))]
       (if (and iam-active? (not iam))
         {:status 401
-         :headers {"Content-Type" "application/json"}
+         :headers {"Content-Type" "application/json"
+                   "WWW-Authenticate" (auth/challenge request)}
          :body (json/write-str {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})}
         (let [identity-key (subscription/request-identity request iam)
               stream-chan (subscription/create-event-stream identity-key)]
@@ -228,7 +229,7 @@
     (let [req-ctx  (client-address/request-context request)
           request  (assoc request :remote-addr (:ip req-ctx))
           started  (System/currentTimeMillis)
-          response (log/with-ctx req-ctx
+          response (log/with-ctx (merge (auth/log-context request) req-ctx)
                      (let [resp (handler request)
                            duration (- (System/currentTimeMillis) started)]
                        ;; measurement = counters; the DEBUG signal exists for

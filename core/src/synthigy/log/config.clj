@@ -107,14 +107,17 @@
         ON CONFLICT (id) DO UPDATE SET config = excluded.config,
                                        updated_at = excluded.updated_at"
        json-str updated-at])
-    (log/apply-routing! (wire->internal config))
-    (log/info {:id ::config-changed
+    ;; recorded before applying and always — a raised level would drop its own record
+    (log/warn {:id ::config-changed
+               :allow? true
                :data (cond-> {:action       :changed
                               :subject      :log-config
                               :root-level   (:root_level config)
                               :ns-overrides (vec (:ns_overrides config))}
+                       (:store config) (assoc :store (:store config))
                        actor (assoc :actor-xid actor))}
               "Log config changed")
+    (log/apply-routing! (wire->internal config))
     config))
 
 (defn clear-config!
@@ -122,12 +125,13 @@
   []
   (let [actor (log/current-principal-xid)]
     (execute! ["DELETE FROM synthigy_log_config WHERE id = 1"])
-    (log/revert-to-env-routing!)
-    (log/info {:id ::config-cleared
+    (log/warn {:id ::config-cleared
+               :allow? true
                :data (cond-> {:action  :cleared
                               :subject :log-config}
                        actor (assoc :actor-xid actor))}
               "Log config cleared, reverted to env defaults")
+    (log/revert-to-env-routing!)
     nil))
 
 ;;; ============================================================================

@@ -16,7 +16,6 @@
    [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
    [synthigy.iam :as iam]
-   [synthigy.iam.encryption :as encryption]
    [synthigy.json :as json]
    [synthigy.log :as log]
    [synthigy.oauth.authentication :as authentication]
@@ -29,15 +28,14 @@
   {:status status :headers {"Content-Type" "application/json"} :body (json/write-str body)})
 
 (defn token-subject
-  "The user behind an unexpired bearer token, with the stored credential, or
+  "The user behind the request's bearer token, with the stored credential, or
    nil. Reads under no principal — the credential column is superuser-only."
-  [token]
-  (when (authentication/validate-token token)
-    (let [{:keys [sub xid]} (encryption/unsign-data token)]
-      (when-let [args (cond xid {(id/key) xid} sub {:name sub})]
-        (dataset/get-entity :iam/user
-                            args
-                            {:xid nil :name nil :active nil :password nil})))))
+  [request]
+  (when-let [{:keys [principal]} (authentication/authenticate-request
+                                  request authentication/first-party-audiences)]
+    (dataset/get-entity :iam/user
+                        {(id/key) (id/extract principal)}
+                        {:xid nil :name nil :active nil :password nil})))
 
 (defn change-password-handler
   "POST /oauth/password {current_password, new_password} — the subject, and only
@@ -47,7 +45,7 @@
   (binding [core/*domain* (core/original-uri request)]
     (let [{:keys [current_password new_password]} (core/parse-body request)
           token (authentication/extract-bearer-token request)
-          user  (token-subject token)]
+          user  (token-subject request)]
       (cond
         (nil? token)
         {:status 401 :headers {"WWW-Authenticate" "Bearer"}}

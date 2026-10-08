@@ -131,7 +131,8 @@
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam         (when iam-active? (auth/authenticate-request request engine/platform-audience))]
     (if (and iam-active? (not iam))
-      (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+      (-> (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (try
         (access/with-principal (:principal iam)
           (let [split-param   (fn [k]
@@ -162,7 +163,8 @@
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam         (when iam-active? (auth/authenticate-request request engine/platform-audience))]
     (if (and iam-active? (not iam))
-      (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+      (-> (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (let [body (parse-request-body request)]
         (if-not body
           (json-response 400 {:error {:message "Invalid or missing JSON body"
@@ -191,7 +193,8 @@
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam         (when iam-active? (auth/authenticate-request request engine/platform-audience))]
     (if (and iam-active? (not iam))
-      (format-response request 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+      (-> (format-response request 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (let [body (parse-request-body request)]
         (if-not body
           (format-response request 400 {:error {:message "Invalid or missing JSON body"
@@ -255,7 +258,8 @@
   [request]
   (let [iam (auth/authenticate-request request engine/platform-audience)]
     (if-not iam
-      (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+      (-> (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (try
         (access/with-principal (:principal iam)
           (require-root!)
@@ -275,7 +279,8 @@
   [request]
   (let [iam (auth/authenticate-request request engine/platform-audience)]
     (if-not iam
-      (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+      (-> (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (try
         (access/with-principal (:principal iam)
           (require-root!)
@@ -328,7 +333,8 @@
   [request]
   (let [iam (auth/authenticate-request request engine/platform-audience)]
     (if-not iam
-      (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+      (-> (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (try
         (access/with-principal (:principal iam)
           (require-root!)
@@ -418,8 +424,9 @@
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam (when iam-active? (auth/authenticate-request request engine/platform-audience))]
     (if (and iam-active? (not iam))
-      (format-response request 401 {:error {:message "Unauthorized"
-                                            :code "UNAUTHORIZED"}})
+      (-> (format-response request 401 {:error {:message "Unauthorized"
+                                                :code "UNAUTHORIZED"}})
+          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
       (let [body (parse-request-body request)]
         (if-not body
           (format-response request 400 {:error {:message "Invalid or missing JSON body"

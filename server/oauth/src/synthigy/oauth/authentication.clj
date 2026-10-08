@@ -42,41 +42,96 @@
    identity-token request loses attribution without gaining any safety."
   #{oauth/platform-audience oauth/oidc-audience})
 
-(defn token->user-context
-  "Extract user/service context from a valid token, or nil; `:audience` is a
-   string or a set of acceptable ones, defaulting to the platform audience."
-  [token & {:keys [audience]}]
-  (try
-    (when-let [claims (encryption/unsign-data token)]
-      (let [{:keys [sub xid client_id aud]} claims
+(defn verdict
+  "Judge `token` for `audience`: {:principal :claims}, or {:rejected reason} with
+   the claims once its signature holds."
+  [token audience]
+  (if-let [claims (and token (> (count token) 6) (encryption/unsign-data token))]
+    (try
+      (let [{:keys [exp aud client_id sub xid]} claims
             accepted (cond
                        (nil? audience) #{oauth/platform-audience}
                        (set? audience) audience
-                       :else           #{audience})]
-        (when (contains? accepted aud)
-          (let [user-id (or xid sub)]
-            (when (or (nil? client_id)
-                      (:active (oauth/get-client client_id)))
-              (when-let [user-ctx (and user-id (iam.context/get-user-context user-id))]
-                {:principal user-ctx
-                 :claims claims}))))))
-    (catch Exception e
-      (log/error! {:id ::token-context-failed
-                   :msg "Error extracting context from token"} e)
-      nil)))
+                       :else           #{audience})
+            user-id  (or xid sub)
+            refuse   (fn [reason] {:rejected reason :claims claims})]
+        (cond
+          (and exp (<= exp (quot (System/currentTimeMillis) 1000))) (refuse :expired)
+          (not (contains? accepted aud))                             (refuse :audience)
+          (and client_id (not (:active (oauth/get-client client_id)))) (refuse :client)
+          :else (if-let [user-ctx (and user-id (iam.context/get-user-context user-id))]
+                  (if (false? (:active user-ctx))
+                    (refuse :inactive)
+                    {:principal user-ctx :claims claims})
+                  (refuse :user))))
+      (catch Exception e
+        (log/error! {:id ::token-context-failed
+                     :msg "Error extracting context from token"} e)
+        {:rejected :error :claims claims}))
+    {:rejected :signature}))
+
+(defn token->user-context
+  "User/service context of an acceptable token, or nil; `:audience` is a string
+   or a set of acceptable ones, defaulting to the platform audience."
+  [token & {:keys [audience]}]
+  (let [v (verdict token audience)]
+    (when-not (:rejected v) v)))
+
+(defn log-rejection
+  [{:keys [rejected claims]}]
+  (let [{:keys [jti client_id sid aud exp xid sub]} claims
+        user (or xid sub)]
+    (log/warn {:id ::token-rejected
+               :data (cond-> {:action :rejected :subject :token :reason rejected}
+                       jti       (assoc :jti jti)
+                       client_id (assoc :client client_id)
+                       user      (assoc :user user)
+                       ;; short form only — the full id IS the idsrv.session cookie
+                       sid       (assoc :session (oauth/short-id sid))
+                       aud       (assoc :audience aud)
+                       (= :expired rejected)
+                       (assoc :expired-at (str (java.time.Instant/ofEpochSecond (long exp)))))}
+              "Bearer token rejected")
+    nil))
 
 (defn authenticate-request
-  "Authenticate request; returns {:principal user-ctx :claims jwt-claims} or
-   nil. No audience argument means the platform audience — never 'any'."
+  "Authenticate request to {:principal :claims} or nil, logging a refused token;
+   no audience means the platform audience, never 'any'."
   ([request] (authenticate-request request nil))
   ([request audience]
-   (let [token (extract-bearer-token request)]
-     (when (validate-token token)
-       (or (token->user-context token :audience audience)
-           (do
-             (log/warn {:id ::user-context-from-token-failed}
-                       "Failed to extract user context from valid token")
-             nil))))))
+   (when-let [token (extract-bearer-token request)]
+     (let [v (verdict token audience)]
+       (if (:rejected v)
+         (log-rejection v)
+         v)))))
+
+(defn challenge
+  "RFC 6750 §3 WWW-Authenticate value for a refused request."
+  [request]
+  (if (extract-bearer-token request) "Bearer error=\"invalid_token\"" "Bearer"))
+
+(defn session-cookie
+  [request]
+  (some->> (get-in request [:headers "cookie"])
+           (re-find #"(?:^|;\s*)idsrv\.session=([^;]+)")
+           second
+           not-empty))
+
+(defn log-context
+  "Who a request is, for its log lines: principal, client, and session/token ids — never a credential."
+  [request]
+  (let [{{:keys [xid tenant]} :principal
+         {:keys [sid jti client_id]} :claims}
+        (try (token->user-context (extract-bearer-token request) :audience first-party-audiences)
+             (catch Throwable _ nil))
+        session (or sid (session-cookie request))]
+    (cond-> {}
+      xid       (assoc :user-xid xid)
+      tenant    (assoc :tenant tenant)
+      client_id (assoc :client client_id)
+      jti       (assoc :jti jti)
+      ;; short form only — the full id IS the idsrv.session cookie
+      session   (assoc :session (oauth/short-id session)))))
 
 (defn wrap-authenticate
   "Ring middleware for OAuth token-based authentication. Adds ::principal +

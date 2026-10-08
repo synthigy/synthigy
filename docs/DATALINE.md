@@ -49,6 +49,20 @@ over `POST /logs` with the `log:read` scope. Levels and per-namespace overrides
 can be changed at runtime from the cockpit (`log:configure` scope), without a
 restart.
 
+Every line written while serving a request says who and from where: the
+request id, the user, and the client address (`ip`, see
+[PROXY.md](PROXY.md)) as columns, and in the line's `ctx` the user agent, the
+OAuth client, the access token's `jti` and the first six characters of the
+session id — never the whole id, which is the session cookie. One session or
+token showing up from two addresses is the line to look for.
+
+A refused bearer token leaves a `token-rejected` line at warn: the reason
+(`signature`, `expired`, `revoked`, `audience`, `client`, `user`,
+`inactive`), the address, and — when the signature holds — the token's `jti`,
+client and user, with `expired-at` for an expired one. Changing log levels
+leaves a `config-changed` line at warn, written before the change applies, so
+raising the level cannot hide who raised it.
+
 The local log file is capped by size and by age — `SQLITE_LOGS_MAX_MB` and
 `SQLITE_LOGS_RETENTION_DAYS`; ClickHouse keeps logs for
 `CLICKHOUSE_LOG_RETENTION_DAYS` ([ENV.md](ENV.md)).

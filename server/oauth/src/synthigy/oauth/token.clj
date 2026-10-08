@@ -366,6 +366,14 @@
                       :client_id client_id
                       :scope (str/join " " granted-scopes)}
         signed (sign-token nil :access_token access-token)]
+    (log/info {:id ::cc-tokens-generated
+               :data {:action :issued
+                      :subject :access-token
+                      :flow "client_credentials"
+                      :client client_id
+                      :jti (:jti access-token)
+                      :audience audience}}
+              "Client credentials tokens issued")
     (iam/publish
      :oauth.grant/tokens
      {:tokens {:access_token signed}
@@ -422,14 +430,15 @@
                       ;; (a string seed here breaks :default's `conj`).
                       :scope []}
         refresh? (some #(= "refresh_token" %) allowed-grants)]
-    (log/debug {:id ::generated-access-token
-                :data {:action :generated
-                       :subject :access-token
-                       :token-key :access_token
-                       :client client_id
-                       :session (when session (core/short-id session))
-                       :audience audience}}
-               "Generated access token")
+    (log/info {:id ::generated-access-token
+               :data {:action :generated
+                      :subject :access-token
+                      :token-key :access_token
+                      :client client_id
+                      :session (when session (core/short-id session))
+                      :jti (:jti access-token)
+                      :audience audience}}
+              "Generated access token")
     (if (pos? access-exp)
       (let [refresh-token (when (and refresh? session (contains? scope "offline_access"))
                             (log/debug {:id ::creating-refresh-token
@@ -732,13 +741,6 @@
           (let [tokens (generate-client-token client service-user
                                                (assoc request :audience resolved-audience))
                 response (json/write-str tokens)]
-            (log/info {:id ::cc-tokens-generated
-                       :data {:action :issued
-                              :subject :access-token
-                              :flow "client_credentials"
-                              :client client_id
-                              :audience resolved-audience}}
-                      "Client credentials tokens issued")
             {:status 200
              :headers {"Content-Type" "application/json;charset=UTF-8"
                        "Pragma" "no-cache"

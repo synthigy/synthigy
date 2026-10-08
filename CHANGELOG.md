@@ -3,7 +3,7 @@
 All notable changes to the Synthigy engine. Releases before 0.2.14 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
-## [0.2.14-SNAPSHOT] — 2026-10-06
+## [0.2.14-SNAPSHOT] — 2026-10-08
 
 ### Breaking
 - **`SYNTHIGY_SERVER_TRUST_PROXY` lists your proxies.** It takes IPs or CIDRs,
@@ -20,6 +20,19 @@ described in their [GitHub release notes](https://github.com/synthigy/synthigy/r
   `{:where {:ip "198.51.100.7"}}` or `:group-by :ip` — and `ctx` carries the
   proxy's address (`peer`), the user agent and the raw `X-Forwarded-For`.
   Existing log tables gain the column on first boot.
+- **Log lines name the session and the token.** A request with a bearer token
+  carries the OAuth client, the token's `jti` and the first six characters of
+  its session id in `ctx`; a request with only the session cookie carries the
+  session. Issued access tokens are logged at info with their `jti`, so a
+  token can be followed from the address it was issued to every address that
+  uses it. The full session id is never logged.
+- **Refused tokens are logged.** A bearer token refused on `/data`, `/logs`,
+  `/history`, subscriptions, SSE, `/oauth/userinfo` or `/oauth/password`
+  leaves one `token-rejected` line at warn
+  with the reason — forged, expired, minted for another audience, for a
+  disabled client, for a deactivated user or for a user that no longer
+  exists — and the address. When the signature holds, the line also names
+  the token's `jti`, client and user, and when an expired token expired.
 - **Successful writes are logged.** `/data` writes log at info like reads: one
   line per operation, with its source address. The audit trail keeps the
   values; the log line says who and from where. Expect more log lines.
@@ -42,3 +55,20 @@ described in their [GitHub release notes](https://github.com/synthigy/synthigy/r
   log stores.
 - **Login events name the client.** `login-authenticated` and
   `login-credentials-rejected` logged `client: null`.
+- **Turning logging down is recorded.** A log-level change was logged at info
+  after it took effect, so raising the level to `error` dropped the record of
+  the change itself. `config-changed` and `config-cleared` are now written at
+  warn before the change applies, whatever the levels, and name the store
+  level too.
+- **A deactivated user's tokens stop working.** Bearer requests checked that
+  the client was active but not the user, so a deactivated user's access
+  token kept working until it expired. It is now refused as soon as the
+  deactivation is processed.
+- **Every 401 carries a `WWW-Authenticate` challenge.** `/data`, `/logs`,
+  `/history`, subscriptions and SSE answered 401 without the header RFC 6750
+  requires. They now send `Bearer`, or `Bearer error="invalid_token"` when a
+  token was refused.
+- **Only a first-party token changes a password.** `/oauth/password` took a
+  token for any audience from any client — a token minted for a partner API
+  could change its user's password. It now requires the platform or identity
+  audience, an active client and an active user.

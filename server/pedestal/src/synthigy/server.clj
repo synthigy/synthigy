@@ -158,7 +158,7 @@
       (let [req-ctx  (client-address/request-context (:request ctx))
             request  (assoc (:request ctx) :remote-addr (:ip req-ctx))
             started  (System/currentTimeMillis)
-            response (log/with-ctx req-ctx
+            response (log/with-ctx (merge (auth/log-context request) req-ctx)
                        (let [resp (handler request)
                              duration (- (System/currentTimeMillis) started)]
                          ;; measurement = counters; the DEBUG signal exists

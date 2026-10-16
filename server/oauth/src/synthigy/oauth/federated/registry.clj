@@ -35,9 +35,9 @@
                :token-url     "https://github.com/login/oauth/access_token"
                :userinfo-url  "https://api.github.com/user"
                :scopes        "read:user user:email"}
-   :facebook  {:authorize-url "https://www.facebook.com/dialog/oauth"
-               :token-url     "https://graph.facebook.com/oauth/access_token"
-               :userinfo-url  "https://graph.facebook.com/me?fields=id,name,email"
+   :facebook  {:authorize-url "https://www.facebook.com/v26.0/dialog/oauth"
+               :token-url     "https://graph.facebook.com/v26.0/oauth/access_token"
+               :userinfo-url  "https://graph.facebook.com/v26.0/me?fields=id,name,email"
                :scopes        "email public_profile"}
    :discord   {:authorize-url "https://discord.com/oauth2/authorize"
                :token-url     "https://discord.com/api/oauth2/token"

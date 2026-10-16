@@ -11,6 +11,9 @@
 (ns synthigy.oauth.federated.oauth2
   "The `:oauth2` provider family — plain OAuth2 IdPs without an ID token."
   (:require
+   [buddy.core.codecs :as codecs]
+   [buddy.core.mac :as mac]
+   [clojure.string :as str]
    [ring.util.codec :as codec]
    [synthigy.oauth.federated :as federated :refer [authorize-url fetch-identity]])
   (:import
@@ -73,7 +76,9 @@
   [cfg {:keys [code redirect-uri]}]
   ;; No email (phone-only signup) means no identity — fails closed.
   (when-let [token (oauth2-token cfg code redirect-uri)]
-    (let [user (http-get-bearer (:userinfo-url cfg) token)]
+    (let [proof (codecs/bytes->hex (mac/hash token {:key (:client-secret cfg) :alg :hmac+sha256}))
+          url   (:userinfo-url cfg)
+          user  (http-get-bearer (str url (if (str/includes? url "?") "&" "?") "appsecret_proof=" proof) token)]
       (when-let [email (:email user)]
         {:iss    (or (:issuer cfg) "https://www.facebook.com")
          :sub    (str (:id user))

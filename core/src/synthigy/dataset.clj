@@ -14,7 +14,6 @@
   (:require
    [clojure.core.async :as async]
    [clojure.java.io :as io]
-   clojure.set
    [synthigy.log :as log]
    [synthigy.supervisor :as supervisor]
    [patcho.patch :as patch]
@@ -29,11 +28,10 @@
    synthigy.dataset.operations
    [synthigy.dataset.patch.model :as model]
    [synthigy.dataset.projection :as projection]
+   [synthigy.dataset.system :as system]
    [synthigy.db :as db :refer [*db*]]
-   [synthigy.db.sql :as sql]
    [synthigy.env :as env]
-   [synthigy.transit :refer [<-transit ->transit]]
-   [version-clj.core :as version]))
+   [synthigy.transit :refer [<-transit ->transit]]))
 
 ;; ============================================================================
 ;; Dataset Meta-Entity Definitions
@@ -310,6 +308,14 @@
   []
   (<-resource "dataset/synthigy.json"))
 
+(def system-ids
+  "Dataset, entity and relation ids of the shipped system models (Synthigy, OAuth) for an ID provider key."
+  (memoize
+   (fn [_id-key]
+     (let [versions [(current-synthigy-version) (<-resource "dataset/oauth_session.json")]]
+       (assoc (system/model-ids (map :model versions))
+              :datasets (into #{} (map (comp id/extract :dataset)) versions))))))
+
 (defn bootstrap-version
   "Synthigy model without RLS, for compiling the meta tables before the global model exists."
   []
@@ -342,6 +348,19 @@
 ;;; ============================================================================
 ;;; Selection Normalization
 ;;; ============================================================================
+
+(defn order-by-map
+  "A `_order_by` given as [field direction] pairs, the wire and XSQL form, as the array-map the query layer reads."
+  [order-by]
+  (if (and (sequential? order-by)
+           (every? #(and (sequential? %) (= 2 (count %))) order-by))
+    (apply array-map (mapcat (fn [[f d]] [(keyword (name f)) (keyword (name d))]) order-by))
+    order-by))
+
+(defn normalize-config-args [args]
+  (let [args (dk/normalize-keys-deep args)]
+    (cond-> args
+      (contains? args :_order_by) (update :_order_by order-by-map))))
 
 (defn normalize-selection
   "Normalize a user-friendly selection into the internal format selection->schema expects."
@@ -376,7 +395,7 @@
            (assoc m k (mapv (fn [cfg]
                               (cond-> cfg
                                 (:selections cfg) (update :selections normalize-selection)
-                                (:args cfg) (update :args dk/normalize-keys-deep)))
+                                (:args cfg) (update :args normalize-config-args)))
                             v))
 
            ;; nil / true — scalar field
@@ -396,7 +415,7 @@
            (and (map? v) (contains? v :selections))
            (assoc m k [(cond-> v
                          (:selections v) (update :selections normalize-selection)
-                         (:args v) (update :args dk/normalize-keys-deep))])
+                         (:args v) (update :args normalize-config-args))])
 
            :else
            (assoc m k v))))
@@ -485,17 +504,30 @@
         ->transit
         <-transit)))
 
-(defn deployed-version-altered?
-  "True when `version` names a deployed row whose stored model differs from it."
+(defn meta-model-loaded?
+  "True once the deployed schema holds Dataset and Dataset Version, so versions can be read."
+  []
+  (let [schema (sql-schema/deployed-schema)]
+    (every? #(contains? schema (id/entity %)) [:dataset/dataset :dataset/version])))
+
+(defn stored-version
+  "The stored row of `version` (:name, :deployed, :model, :dataset), or nil."
   [version]
-  (let [vid (id/extract version)
-        stored (when vid
-                 (get-entity :dataset/version {(id/key) vid}
-                             {(id/key) nil :deployed nil :model nil}))]
-    (boolean
-     (and (:deployed stored)
-          (not= (persisted-model (:model version))
-                (persisted-model (:model stored)))))))
+  (when-let [vid (id/extract version)]
+    (get-entity :dataset/version {(id/key) vid}
+                {(id/key) nil :name nil :deployed nil :model nil
+                 :dataset [{:selections {(id/key) nil}}]})))
+
+(defn deployed-version-altered?
+  "True when `version` names a deployed row whose stored name, model or dataset differs from it."
+  ([version] (deployed-version-altered? version (stored-version version)))
+  ([version stored]
+   (boolean
+    (and (:deployed stored)
+         (or (not= (id/extract (:dataset stored)) (id/extract (:dataset version)))
+             (and (contains? version :name) (not= (:name stored) (:name version)))
+             (not= (persisted-model (:model version))
+                   (persisted-model (:model stored))))))))
 
 (defn log-deploy-changes!
   "Log what deploying `version` changes against the global model — the deploy drawer's diff, for every deploy path."
@@ -514,6 +546,33 @@
                  :data (assoc base :error (ex-message e))}
                 "Could not compute deploy changes"))))
 
+(def ^:dynamic *engine-write*
+  "True while deploy, recall or destroy write the rows only the engine writes."
+  false)
+
+(defn engine-write?
+  "True for the engine's own writes: no principal, or inside deploy, recall or destroy."
+  []
+  (or *engine-write* (nil? (synthigy.dataset.access/current-principal))))
+
+(defn model-change
+  "Calls `f` as the one model change in progress: holds the model lock, announces it on the model topic and marks its writes as the engine's."
+  [action dataset-name version-name f]
+  (let [holder (cond-> {:action action
+                        :since (str (java.time.Instant/now))}
+                 dataset-name (assoc :dataset dataset-name)
+                 version-name (assoc :version version-name)
+                 (:name (synthigy.dataset.access/current-principal))
+                 (assoc :by (:name (synthigy.dataset.access/current-principal))))]
+    (db/hold-model-lock
+     *db* holder
+     (fn [outer?]
+       (when outer? (async/put! subscription {:topic :model/deployed :busy holder}))
+       (try
+         (binding [*engine-write* true] (f))
+         (finally
+           (when outer? (async/put! subscription {:topic :model/deployed :busy nil}))))))))
+
 (defn deploy!
   "Deploy a dataset version: creates/updates schema and tables, logging deploying/deployed/deploy-failed."
   [version]
@@ -527,7 +586,8 @@
     (try
       (let [version (update version :model persisted-model)
             _ (log-deploy-changes! version base)
-            result (core/deploy! *db* version)]
+            result (model-change :deploy (get-in version [:dataset :name]) (:name version)
+                                 #(core/deploy! *db* version))]
         (log/info {:id ::deployed
                    :data (assoc base :action :deployed)}
                   (str "Deployed dataset version "
@@ -548,7 +608,7 @@
                   actor (assoc :actor-xid actor))
         id      (id/extract version)
         stored  (when id
-                  (get-entity :dataset/version {(id/key) id} {(id/key) nil :deployed nil}))]
+                  (get-entity :dataset/version {(id/key) id} {(id/key) nil :name nil :deployed nil}))]
     (if (and stored (not (:deployed stored)))
       (do (delete-entity :dataset/version {(id/key) id})
           (log/info {:id ::recalled
@@ -562,7 +622,7 @@
                   (str "Recalling dataset version "
                        (or (:version-name summary) (:version-xid summary) "")))
         (try
-          (let [result (core/recall! *db* version)]
+          (let [result (model-change :recall nil (:name stored) #(core/recall! *db* version))]
             (log/info {:id ::recalled
                        :data (assoc base :action :recalled)}
                       (str "Recalled dataset version "
@@ -586,7 +646,7 @@
                :data (assoc base :action :destroying)}
               (str "Destroying dataset " (or (:name dataset) "(unnamed)")))
     (try
-      (let [result (core/destroy! *db* dataset)]
+      (let [result (model-change :destroy (:name dataset) nil #(core/destroy! *db* dataset))]
         (log/warn {:id ::destroyed
                    :data (assoc base :action :destroyed)}
                   (str "Destroyed dataset " (or (:name dataset) "(unnamed)")))
@@ -596,79 +656,6 @@
                      :data (assoc base :action :destroy-failed)}
                     e)
         (throw e)))))
-
-(defn model-ids
-  "Active and all entity, relation and attribute ids of a model, for before/after comparison."
-  [model]
-  (let [active? #(not (false? (:active %)))
-        entities (core/get-entities model)
-        attr-ids (fn [pred] (set (for [e entities a (:attributes e) :when (pred a)]
-                                   [(id/extract e) (id/extract a)])))]
-    {:entities (set (map id/extract (filter active? entities)))
-     :relations (set (map id/extract (filter active? (core/get-relations model))))
-     :attributes (attr-ids active?)
-     :all-attributes (attr-ids any?)}))
-
-(defn retire-datasets!
-  "Remove the legacy Datasets dataset once Synthigy claims all it held — rows only, no DDL; no-op when absent."
-  []
-  (try
-    (when-let [datasets (get-entity :dataset/dataset {(id/key) (id/data :dataset/id)}
-                                    {(id/key) nil
-                                     :name nil
-                                     :versions [{:selections {(id/key) nil :name nil}}]})]
-      (let [base {:subject :dataset :dataset-name (:name datasets) :versions (mapv :name (:versions datasets))}
-            global (deployed-model)
-            version-ids (set (map id/extract (:versions datasets)))
-            exclusive (concat (core/find-exclusive-entities global version-ids)
-                              (core/find-exclusive-relations global version-ids))
-            {blocking true orphaned false} (group-by #(not (false? (:active %))) exclusive)
-            label #(or (:name %) (str (:from-label %) "->" (:to-label %)))
-            synthigy (:model (latest-deployed-version (id/data :synthigy/id)))
-            uncovered (when synthigy
-                        (for [e (some-> (latest-deployed-version (id/data :dataset/id)) :model core/get-entities)
-                              a (:attributes e)
-                              :when (not (false? (:active a)))
-                              :let [a' (some #(when (= (id/extract a) (id/extract %)) %)
-                                             (:attributes (core/get-entity synthigy (id/extract e))))]
-                              :when (or (nil? a') (false? (:active a')))]
-                          (str (:name e) "." (:name a))))]
-        (cond
-          (nil? synthigy)
-          (log/warn {:id ::datasets-retire-skipped :data (assoc base :action :skipped :reason :synthigy-not-deployed)}
-                    "Datasets kept: Synthigy model not deployed")
-
-          (or (seq blocking) (seq uncovered))
-          (log/warn {:id ::datasets-retire-skipped
-                     :data (assoc base :action :skipped :reason :not-covered
-                                  :exclusive (mapv label blocking) :attributes (vec uncovered))}
-                    "Datasets kept: Synthigy does not cover everything it holds")
-
-          :else
-          (let [before (model-ids global)]
-            (doseq [vid version-ids]
-              (delete-entity :dataset/version {(id/key) vid}))
-            (delete-entity :dataset/dataset {(id/key) (id/data :dataset/id)})
-            (core/reload *db*)
-            (let [after (model-ids (deployed-model))
-                  lost (into {} (for [k [:entities :relations :attributes]
-                                      :let [d (clojure.set/difference (get before k) (get after k))]
-                                      :when (seq d)]
-                                  [k (vec d)]))
-                  data (cond-> (assoc base :action :retired
-                                      :orphan-tables (mapv label orphaned)
-                                      :orphan-columns (vec (clojure.set/difference (:all-attributes before)
-                                                                                   (:all-attributes after))))
-                         (seq lost) (assoc :deactivated lost))]
-              (if (seq lost)
-                (log/warn {:id ::datasets-retired :data data} "Retired Datasets; some objects went inactive")
-                (log/info {:id ::datasets-retired :data data} "Retired Datasets; schema kept as is")))))))
-    ;; never block boot — the next boot retries
-    (catch Throwable e
-      (log/error! {:id ::datasets-retire-failed
-                   :msg "Retiring Datasets failed; retried on next boot"
-                   :data {:action :retiring :subject :dataset}}
-                  e))))
 
 ;;; ============================================================================
 ;;; Sugar API
@@ -866,69 +853,3 @@
 
   (log/info {:id ::stopped :data {:action :stopped :subject :dataset}} "Datasets stopped")
   nil)
-
-(defn mount-synthigy-schema!
-  "Bring the tables in line with synthigy.json without recording a version."
-  []
-  (let [version (current-synthigy-version)
-        global (or (deployed-model)
-                   (core/map->ERDModel {:entities {} :relations {}}))]
-    (core/mount *db* (update version :model #(core/with-merged-config global %)))
-    (core/reload *db* version)))
-
-(defn fix-deployed-on!
-  "Backfill dataset_version.deployed_on from modified_on where it is missing."
-  []
-  (let [table (entity->table-name (core/get-entity (deployed-model) (id/entity :dataset/version)))]
-    (when (pos? (:n (sql/execute-one! [(format "select count(*) as n from \"%s\" where deployed_on is null" table)])))
-      (sql/execute-one! [(format "update \"%s\" set deployed_on = modified_on where deployed_on is null" table)])
-      (log/info {:id ::deployed-on-backfilled :data {:action :patching :subject :deployed-on}}
-                "Backfilled deployed_on from modified_on"))))
-
-(patch/current-version :synthigy.dataset/model "1.0.6")
-
-;; never "0" once Synthigy 0.90.0+ is deployed — the legacy step would rerun on every boot
-(patch/installed-version
- :synthigy.dataset/model
- (if (some-> (latest-deployed-version (id/data :synthigy/id)) :name str (version/newer-or-equal? "0.90.0"))
-   "1.0.6"
-   (or (some-> (latest-deployed-version (id/data :dataset/id)) :name str)
-       "0")))
-
-(patch/upgrade :synthigy.dataset/model
-               "1.0.6"
-               (log/info {:id ::legacy-meta-upgrading
-                          :data {:action :upgrading :subject :dataset-model :version "1.0.6"}}
-                         "Upgrading legacy meta-model tables to the Synthigy model")
-               (mount-synthigy-schema!)
-               (fix-deployed-on!))
-
-(patch/current-version :synthigy/dataset "1.6.0")
-
-(patch/upgrade :synthigy/dataset
-               "1.6.0"
-               (let [cleaned (for [{:keys [model] :as version} (search-entity :dataset/version nil {(id/key) nil :model nil})
-                                   :let [stored (if (string? model) (<-transit model) model)]
-                                   :when (instance? synthigy.dataset.core.ERDModel stored)
-                                   :let [clean (persisted-model stored)]
-                                   :when (not= clean stored)]
-                               {(id/key) (id/extract version) :model (->transit clean)})]
-                 (doseq [version cleaned]
-                   (sync-entity :dataset/version version))
-                 (log/info {:id ::v160-models-cleaned
-                            :data {:action :upgraded :subject :dataset-model :version "1.6.0" :count (count cleaned)}}
-                           (str "Cleaned " (count cleaned) " stored dataset version models"))
-                 (core/reload *db*)))
-
-(defn can-migrate-to-xid?
-  "Check if the system can migrate to XID format."
-  []
-  (try
-    ; (model/verify-xid-migration)
-    true
-    (catch Exception e
-      (log/warn {:id ::xid-migration-blocked
-                 :data {:action :migrating :subject :xid
-                        :error-message (.getMessage e)}}
-                "Cannot migrate to xid format")
-      false)))

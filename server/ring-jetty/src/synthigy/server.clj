@@ -159,7 +159,7 @@
   [handler]
   (fn [request]
     (let [req-ctx  (client-address/request-context request)
-          request  (assoc request :remote-addr (:ip req-ctx))
+          request  (assoc (client-address/drop-untrusted-forwarding request) :remote-addr (:ip req-ctx))
           started  (System/currentTimeMillis)
           response (log/with-ctx (merge (auth/log-context request) req-ctx)
                      (let [resp (handler request)

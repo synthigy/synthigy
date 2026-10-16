@@ -470,3 +470,8 @@
   (json-remove [_ expr k] (str "json_remove(" expr ", '$.\"" k "\"')"))
   (cast-placeholder [_ _type] "?")
   (template-sql [_ raw-sql] (-> raw-sql dialect/strip-casts dialect/ilike->like)))
+
+;; query_only is per connection and outlives the transaction — :off must run before the pool reuses it
+(extend-type SQLite
+  db/ReadOnly
+  (read-only-statements [_] {:on "PRAGMA query_only = ON" :off "PRAGMA query_only = OFF"}))

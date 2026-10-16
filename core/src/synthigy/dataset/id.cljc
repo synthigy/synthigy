@@ -133,6 +133,11 @@
                 (subs padded 20 32)))
          (catch :default _ nil)))))
 
+(defn xid-of
+  "The xid form of a schema id: an euuid converted, anything else as is."
+  [id]
+  (if (uuid? id) (uuid->nanoid id) id))
+
 
 ;; MD5 (UUID v3) is locked forever — changing it shifts every derived id ever produced
 (defn canonical-anchor-string

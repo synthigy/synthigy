@@ -1051,7 +1051,8 @@
                (mapv :tmp/id data')
                (:tmp/id data'))
        :root/table (:table (get (deployed-schema) entity))
-       :entity/id entity}
+       :entity/id entity
+       :write/stack? (boolean stack?)}
       entity
       data'
       stack?)))

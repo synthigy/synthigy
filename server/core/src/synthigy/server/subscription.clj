@@ -601,23 +601,25 @@
           fingerprint (atom (when-not superuser?
                               (model-fingerprint (dataset/deployed-model) principal)))]
       (async/go-loop []
-        (if-let [{:keys [model]} (async/<! model-chan)]
-          (let [notify? (if superuser?
-                          true
-                          (let [new-fp (model-fingerprint model principal)
-                                old-fp @fingerprint]
-                            (when (not= new-fp old-fp)
-                              (reset! fingerprint new-fp)
-                              true)))]
+        (if-let [{:keys [model] :as event} (async/<! model-chan)]
+          (let [lock? (contains? event :busy)
+                notify? (cond
+                          lock? true
+                          superuser? true
+                          :else (let [new-fp (model-fingerprint model principal)
+                                      old-fp @fingerprint]
+                                  (when (not= new-fp old-fp)
+                                    (reset! fingerprint new-fp)
+                                    true)))]
             (when notify?
               (let [types (get-in @subscriptions-state [identity-key :model :types])
-                    ts    (str (Instant/now))]
+                    ts    (str (Instant/now))
+                    data  (cond
+                            (not lock?) {:action "deploy" :timestamp ts}
+                            (:busy event) {:action "busy" :busy (:busy event) :timestamp ts}
+                            :else {:action "idle" :timestamp ts})]
                 (when (seq types)
-                  (fan-out! identity-key
-                            (mapv (fn [t] {:event t
-                                           :data {:action "deploy"
-                                                  :timestamp ts}})
-                                  types)))))
+                  (fan-out! identity-key (mapv (fn [t] {:event t :data data}) types)))))
             (recur))
           (end-loop! identity-key :model))))))
 

@@ -27,8 +27,12 @@
    [synthigy.dataset.id :as id]
    [synthigy.dataset.key :as dk]
    [synthigy.dataset.runtime :as runtime]
+   [synthigy.dataset.system :as system]
+   [synthigy.dataset.meta :as dataset-meta]
+   [synthigy.dataset.version :as dataset-version]
    [synthigy.transit :as transit]
    [synthigy.dataset.sql.query :as sql-query]
+   [synthigy.dataset.sql.rls :as rls]
    [synthigy.dataset.sql.template :as template]
    [synthigy.iam.access :as access]
    [synthigy.iam.context :as iam.context]
@@ -266,19 +270,21 @@
     (throw (ex-info (str "Missing required scope: " scope)
                     {:code "FORBIDDEN" :scope scope}))))
 
+(defn lens-model
+  "Deployed model a schema read sees: the full model with schema:read, otherwise the caller's own view."
+  []
+  (if (access/scope-allowed? "schema:read")
+    (dataset/deployed-model)
+    (daccess/protect-model (dataset/deployed-model))))
+
 (defn schema-model
   "Runtime model a schema read sees: with schema:read the full model or its
    projection onto `role-names`, otherwise the caller's own view."
   [role-names]
-  (let [own-view #(-> (dataset/deployed-model) daccess/protect-model runtime/build)]
-    (cond
-      (seq role-names)
-      (access/with-principal (access/roles->schema-principal role-names) (own-view))
-
-      (access/scope-allowed? "schema:read")
-      (runtime/build (dataset/deployed-model))
-
-      :else (own-view))))
+  (if (seq role-names)
+    (access/with-principal (access/roles->schema-principal role-names)
+      (-> (dataset/deployed-model) daccess/protect-model runtime/build))
+    (runtime/build (lens-model))))
 
 ;;; ============================================================================
 ;;; Operation Dispatch
@@ -444,9 +450,9 @@
          (dataset/get-entity-tree entity-id root (keyword on) selection)))
 
 (defmulti mutate
-  "Extensible write hook chain, dispatching on [op entity-id priority]."
+  "Extensible write hook chain, dispatching on [op entity xid priority]."
   (fn [{:keys [op entity-id]} priority]
-    [op entity-id priority]))
+    [op (id/xid-of entity-id) priority]))
 
 (defn write-result
   "Shapes a sync/stack result per the op's `returning` flag."
@@ -477,7 +483,7 @@
                               (if (keyword? k)
                                 result
                                 (let [[op eid priority] k]
-                                  (if (and (= op operation) (= entity-id eid))
+                                  (if (and (= op operation) (= (id/xid-of entity-id) eid))
                                     (if (pos? priority)
                                       (update result :post (fnil conj []) priority)
                                       (update result :pre (fnil conj []) priority))
@@ -491,25 +497,76 @@
      ctx
      steps)))
 
+(def system-dataset-problem
+  {:code "SYSTEM_DATASET_ENGINE_OWNED"
+   :rule "system_dataset"
+   :message "Synthigy and OAuth datasets change only through engine upgrades."})
+
+(defn system-change-problem
+  [changes]
+  {:code "SYSTEM_ENTITY_ALTERED"
+   :rule "system_entity"
+   :message (str "Deploy changes system entities: "
+                 (str/join "; " (map system/change-text (take 10 changes)))
+                 (when (> (count changes) 10) (str "; and " (- (count changes) 10) " more")))
+   :hint "Accept the global model for these entities (Pull or Revert in the deploy drawer), then deploy."
+   :details changes})
+
+(defn problem-ex [{:keys [message] :as problem}]
+  (ex-info message (dissoc problem :message)))
+
+(defn assert-removal-allowed!
+  "Refuse a non-superuser recall or destroy that touches a system dataset or changes a system entity."
+  [dataset-ids version-ids]
+  (when-not (access/superuser?)
+    (let [system-ids (dataset/system-ids (id/key))]
+      (when (some (:datasets system-ids) dataset-ids)
+        (throw (problem-ex system-dataset-problem)))
+      (let [changes (system/system-changes (dataset/deployed-model)
+                                           (dataset.core/preview-recall db/*db* version-ids)
+                                           system-ids)]
+        (when (seq changes)
+          (throw (problem-ex (system-change-problem changes))))))))
+
+(defn removed-dataset
+  "Id and deployed version ids of the dataset a destroy names by id or name."
+  [ref]
+  (when (or (id/extract ref) (:name ref))
+    (dataset/get-entity :dataset/dataset
+                        (if-let [i (id/extract ref)] {(id/key) i} {:name (:name ref)})
+                        {(id/key) nil
+                         :versions [{:selections {(id/key) nil}
+                                     :args {:deployed {:_eq true}}}]})))
+
 ;; Delete Dataset → destroy! (scope check + short-circuit)
 (defmethod mutate ["delete" dataset-xid -1]
   [ctx _]
   (assert-scope! "dataset:delete")
-  (log/info {:id ::destroying-dataset
-             :data {:action :destroying :subject :dataset
-                    :dataset (:data ctx)}}
-            "Destroying dataset")
-  (reduced (assoc ctx :result (dataset/destroy! (:data ctx)))))
+  (dataset/model-change
+   :destroy (:name (:data ctx)) nil
+   (fn []
+     (let [found (removed-dataset (:data ctx))]
+       (assert-removal-allowed! [(id/extract found)] (map id/extract (:versions found))))
+     (log/info {:id ::destroying-dataset
+                :data {:action :destroying :subject :dataset
+                       :dataset (:data ctx)}}
+               "Destroying dataset")
+     (reduced (assoc ctx :result (dataset/destroy! (:data ctx)))))))
 
 ;; Delete Dataset Version → recall! (scope check + short-circuit)
 (defmethod mutate ["delete" version-xid -1]
   [ctx _]
   (assert-scope! "dataset:delete")
-  (log/info {:id ::recalling-dataset-version
-             :data {:action :recalling :subject :dataset
-                    :version (:data ctx)}}
-            "Recalling dataset version")
-  (reduced (assoc ctx :result (dataset/recall! (:data ctx)))))
+  (let [stored (dataset/stored-version (:data ctx))]
+    (dataset/model-change
+     :recall nil (:name stored)
+     (fn []
+       (assert-removal-allowed! [(id/extract (:dataset stored))] [(id/extract (:data ctx))])
+       (log/info {:id ::recalling-dataset-version
+                  :data {:action :recalling :subject :dataset
+                         :version (:data ctx)}}
+                 "Recalling dataset version")
+       (reduced (assoc ctx :result (dataset/recall! (:data ctx))))))))
 
 ;; Purge Dataset — forbidden
 (defmethod mutate ["purge" dataset-xid -1]
@@ -533,11 +590,15 @@
 
 (defmethod execute-operation "slice"
   [ctx]
-  (execute-operation-chain (assert-map-selections ctx) "slice"))
+  (let [ctx (assert-map-selections ctx)]
+    (dataset-meta/assert-slice! (:entity-id ctx) (:selections ctx))
+    (execute-operation-chain ctx "slice")))
 
 (defmethod execute-operation "purge"
   [ctx]
-  (execute-operation-chain (assert-map-selections ctx) "purge"))
+  (let [ctx (assert-map-selections ctx)]
+    (dataset-meta/assert-purge! (:entity-id ctx) (:selections ctx))
+    (execute-operation-chain ctx "purge")))
 
 (defmethod execute-operation "delete"
   [ctx]
@@ -663,15 +724,17 @@
 (defmethod execute-operation "deployed-model"
   [ctx]
   (assert-scope! "dataset:load")
-  (assoc ctx :result (transit/->transit (daccess/protect-model (dataset/deployed-model)))))
+  (assoc ctx :result (transit/->transit (lens-model))))
 
 (defmethod execute-operation "runtime-model"
   [ctx]
   (assert-scope! "dataset:load")
-  (assoc ctx :result (transit/->transit
-                      (-> (dataset/deployed-model)
-                          daccess/protect-model
-                          runtime/build))))
+  (assoc ctx :result (transit/->transit (runtime/build (lens-model)))))
+
+(defmethod execute-operation "synthigy-datasets"
+  [ctx]
+  (assert-scope! "dataset:load")
+  (assoc ctx :result (vec (sort (:datasets (dataset/system-ids (id/key)))))))
 
 (defmethod execute-operation "schema"
   [{:keys [entities roles] :as ctx}]
@@ -719,17 +782,113 @@
       (update data :model transit/<-transit)
       data)))
 
+(defn deploy-version
+  "The version a deploy writes: ids, name, configuration, model and a dataset reference with an id, nothing nested."
+  [data]
+  (let [version (deploy-payload data)
+        dataset (select-keys (:dataset version) [:xid :euuid :name])]
+    (when-not (id/extract dataset)
+      (throw (ex-info "Deploy needs :dataset with an id."
+                      {:code "BAD_OP" :rule "operation_shape" :argument "dataset"})))
+    (assoc (select-keys version [:xid :euuid :name :configuration :model])
+           :dataset dataset)))
+
+(defn guard-problem
+  "RLS_GUARD_BROKEN when `candidate` breaks an RLS guard it authors in `preview`, else nil."
+  [preview candidate]
+  (try
+    (rls/assert-guards-compile! preview candidate)
+    nil
+    (catch clojure.lang.ExceptionInfo e
+      (when (= "RLS_GUARD_BROKEN" (:code (ex-data e)))
+        {:code "RLS_GUARD_BROKEN"
+         :rule "rls_guard"
+         :message (ex-message e)
+         :details (mapv #(select-keys % [:entity :guard-id :operation :unresolved]) (:guards (ex-data e)))}))))
+
+(defn deploy-problems
+  "Errors and warnings deploying `version` raises, each shaped as a wire error; system changes only warn a superuser."
+  [version]
+  (let [superuser (access/superuser?)
+        stored (dataset/stored-version version)
+        system-ids (dataset/system-ids (id/key))
+        global (or (dataset/deployed-model)
+                   (dataset.core/map->ERDModel {:entities {} :relations {}}))
+        candidate (dataset/persisted-model (:model version))
+        preview (dataset.core/preview-model db/*db* (assoc version :model candidate))
+        name-conflicts (system/new-name-conflicts global preview)
+        conflicts (mapv system/conflict-details (system/new-field-conflicts global preview))
+        changes (system/system-changes global preview system-ids)
+        rls-additions (when-not (contains? (:datasets system-ids) (id/extract (:dataset version)))
+                        (system/system-rls-additions global candidate system-ids))
+        broken-guards (guard-problem preview candidate)
+        name-taken (dataset-version/name-problem version)]
+    (cond-> {:errors [] :warnings []}
+      name-taken
+      (update :errors conj name-taken)
+
+      broken-guards
+      (update :errors conj broken-guards)
+
+      (seq rls-additions)
+      (update :errors conj {:code "SYSTEM_ENTITY_RLS"
+                            :rule "system_entity_rls"
+                            :message (str "RLS on system entities comes only from the Synthigy and OAuth datasets: "
+                                          (str/join ", " (map system/rls-addition-text rls-additions)) ".")
+                            :hint "Remove the RLS from these entities in this dataset; put guards on your own entities instead."
+                            :details rls-additions})
+
+      (dataset/deployed-version-altered? version stored)
+      (update :errors conj {:code "IMMUTABLE_VERSION_ALTERED"
+                            :rule "deploy_immutable"
+                            :message "Deployed version is immutable; create a new version to change the model."})
+
+      (and (not superuser)
+           (some (:datasets system-ids) [(id/extract (:dataset version)) (id/extract (:dataset stored))]))
+      (update :errors conj system-dataset-problem)
+
+      (seq name-conflicts)
+      (update :errors conj {:code "ENTITY_NAME_CONFLICT"
+                            :rule "entity_name"
+                            :message (str "Entity names collide: " (str/join "; " (map system/name-conflict-text name-conflicts)))
+                            :hint "Rename the entity; each entity name maps to one table."
+                            :details name-conflicts})
+
+      (seq conflicts)
+      (update :errors conj {:code "FIELD_KEY_CONFLICT"
+                            :rule "field_key"
+                            :message (str "Field keys collide: " (str/join "; " (map system/conflict-text conflicts)))
+                            :hint "Rename the attribute or relation label so each field key is used once per entity."
+                            :details conflicts})
+
+      (seq changes)
+      (update (if superuser :warnings :errors) conj (system-change-problem changes)))))
+
+(defmethod execute-operation "deploy-check"
+  [ctx]
+  (assert-scope! "dataset:deploy")
+  (assoc ctx :result (deploy-problems (deploy-version (:data ctx)))))
+
 (defmethod execute-operation "deploy"
   [ctx]
   (assert-scope! "dataset:deploy")
-  (let [data (deploy-payload (:data ctx))]
-    (when (dataset/deployed-version-altered? data)
-      (throw (ex-info "Deployed version is immutable; create a new version to change the model."
-                      {:code "IMMUTABLE_VERSION_ALTERED" :rule "deploy_immutable"})))
-    (dataset/deploy! data)
+  (let [version (deploy-version (:data ctx))]
+    (dataset/model-change
+     :deploy (get-in version [:dataset :name]) (:name version)
+     (fn []
+       (let [{:keys [errors warnings]} (deploy-problems version)]
+         (when-let [problem (first errors)]
+           (throw (problem-ex problem)))
+         (doseq [{:keys [code message details]} warnings]
+           (log/warn {:id ::deploy-warning
+                      :data {:action :deploying :subject :dataset :code code
+                             :version (:name version) :dataset (id/extract (:dataset version))
+                             :details details}}
+                     message))
+         (dataset/deploy! version))))
     (assoc ctx :result {:deployed true
-                        :version (:name data)
-                        :dataset (id/extract (:dataset data))})))
+                        :version (:name version)
+                        :dataset (id/extract (:dataset version))})))
 
 (defn ensure-tree-on-relation
   "Inject the on-relation into :selections if absent, so tree-op consumers can

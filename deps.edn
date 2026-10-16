@@ -31,7 +31,7 @@
 
   ;; Utilities
   nano-id/nano-id {:mvn/version "1.1.0"}
-  dev.gersak/patcho {:local/root "patcho"}
+  dev.gersak/patcho {:mvn/version "0.4.4"}
   com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
   babashka/fs {:mvn/version "0.5.22"}
 
@@ -159,27 +159,19 @@
                 ;; Datastar SSE adapter for this backend.
                 dev.data-star.clojure/http-kit {:mvn/version "1.0.0-RC11"}}}
 
-  :server-pedestal
-  {:extra-paths ["server/pedestal/src" "server/oauth/src" "server/core/src"]
-   :extra-deps {io.pedestal/pedestal.service {:mvn/version "0.7.0"}
-                io.pedestal/pedestal.route {:mvn/version "0.7.0"}
-                io.pedestal/pedestal.jetty {:mvn/version "0.7.0"}
-                hiccup/hiccup {:mvn/version "2.0.0-RC3"}}}
-
-  :server-undertow
-  {:extra-paths ["server/undertow/src" "server/oauth/src" "server/core/src"]
-   :extra-deps {luminus/ring-undertow-adapter {:mvn/version "1.3.1"}
-                ring/ring-core {:mvn/version "1.12.2"}
-                hiccup/hiccup {:mvn/version "2.0.0-RC3"}}}
+  :server-enso
+  {:extra-paths ["server/enso/src" "server/oauth/src" "server/core/src"]
+   :extra-deps {com.s-exp/enso {:mvn/version "1.0.0-beta94"}
+                ring/ring-core {:mvn/version "1.15.4"}
+                hiccup/hiccup {:mvn/version "2.0.0-RC3"}
+                dev.data-star.clojure/ring {:mvn/version "1.0.0-RC11"}}}
 
   :server-ring-jetty
   {:extra-paths ["server/ring-jetty/src" "server/oauth/src" "server/core/src"]
    :extra-deps {ring/ring-jetty-adapter {:mvn/version "1.15.4"}
                 ring/ring-core {:mvn/version "1.15.4"}
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
-                ;; Datastar SSE adapter, built on StreamableResponseBody —
-                ;; which this backend honours (undertow does not, so it gets
-                ;; no transport and its console renders static).
+                ;; Datastar SSE adapter, built on StreamableResponseBody.
                 dev.data-star.clojure/ring {:mvn/version "1.0.0-RC11"}}}
 
   ;; =========================================================================

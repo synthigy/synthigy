@@ -98,7 +98,7 @@
 ;; folders that exist but ship no jar: the compile witness, deprecated CockroachDB,
 ;; the adapters no bundle uses, and DuckDB (source only — its native driver
 ;; would otherwise count as shared and land in core.jar)
-(def unshipped #{:engine-stub :engine-cockroach :server-pedestal :server-undertow :server-ring-jetty
+(def unshipped #{:engine-stub :engine-cockroach :server-ring-jetty :server-enso
                  :audit-duckdb :log-duckdb :lib-duckdb})
 
 (defn shipped [dim] (vec (remove unshipped (aliases-of dim))))

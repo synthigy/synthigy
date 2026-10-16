@@ -18,6 +18,7 @@
    [synthigy.dataset.sql.protocol :as proto]
    [synthigy.dataset.sql.query :as sql-query]
    [synthigy.xsql.sql-params :as sql-params]
+   [next.jdbc :as jdbc]
    [synthigy.db :as db :refer [*db*]]
    [synthigy.db.sql :as sql]))
 
@@ -500,6 +501,28 @@
       (throw (ex-info "Only SELECT queries are allowed"
                       {:code "QUERY_NOT_SELECT"})))))
 
+(defn select-body? [body]
+  (let [b (str/upper-case (str/triml body))]
+    (some #(str/starts-with? b %) ["SELECT" "VALUES" "("])))
+
+(defn assert-select-scopes!
+  "Throw unless every CTE body and the outer statement is a SELECT."
+  [ctes outer-body]
+  (when-not (every? select-body? (conj (mapv :body ctes) outer-body))
+    (throw (ex-info "Only SELECT queries are allowed"
+                    {:code "QUERY_NOT_SELECT"}))))
+
+(defn execute-read-only!
+  "Runs `sqlvec` in a read-only transaction, so no statement it carries can write."
+  [sqlvec]
+  (let [{:keys [on off]} (db/read-only-statements *db*)]
+    (jdbc/with-transaction [tx (:datasource *db*)]
+      (sql/execute! tx [on])
+      (try
+        (sql/execute! tx sqlvec :edn)
+        (finally
+          (when off (sql/execute! tx [off])))))))
+
 ;;; ============================================================================
 ;;; CTE Scope Parsing
 ;;; ============================================================================
@@ -723,6 +746,7 @@
          template          rw-sql
          cached?           (get opts :cached true)
          [ctes outer-body] (parse-cte-scopes template)
+         _                 (assert-select-scopes! ctes outer-body)
          user-params       (if rw-types
                              (mapv (fn [v t]
                                      (if (and (= :timestamp t) (string? v))
@@ -777,10 +801,7 @@
                 "Resolved SQL template params")
      (try
        (decode-rows
-        (sql/execute!
-          (:datasource *db*)
-          (into [final-sql] final-params)
-          :edn)
+        (execute-read-only! (into [final-sql] final-params))
         (:columns outer-scope))
        (catch clojure.lang.ExceptionInfo e (throw e))
        (catch Exception e

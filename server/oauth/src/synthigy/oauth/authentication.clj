@@ -11,6 +11,8 @@
 (ns synthigy.oauth.authentication
   "Server-agnostic authentication middleware and utilities."
   (:require
+   [buddy.sign.jwt :as jwt]
+   [clojure.core.cache :as cache]
    [synthigy.log :as log]
    [synthigy.dataset.id :as id]
    [synthigy.iam.context :as iam.context]
@@ -23,16 +25,26 @@
   (when-let [authorization (get-in request [:headers "authorization"])]
     (second (re-find #"(?i)^Bearer\s+(.+)" authorization))))
 
+(defonce verified (atom (cache/ttl-cache-factory {} :ttl 60000)))
+
+(defn verified-claims
+  "Signature-checked claims of `token`; the RSA check is memoised per token while its signing key is live."
+  [token]
+  (when (and token (> (count token) 6))
+    (let [hit (cache/lookup @verified token)]
+      (if (and hit (encryption/get-keypair-by-kid encryption/*encryption-provider* (:kid hit)))
+        (:claims hit)
+        (when-let [claims (encryption/unsign-data token)]
+          (swap! verified cache/miss token {:claims claims :kid (:kid (jwt/decode-header token))})
+          claims)))))
+
 (defn validate-token
   "Validate a bearer token by signature and expiry; stateless — revocation is enforced at refresh."
   [token]
-  (and token
-       (> (count token) 6)
-       ;; unsign-data verifies signature only — expiry is enforced here
-       (boolean
-        (when-let [{:keys [exp]} (encryption/unsign-data token)]
-          (or (nil? exp)
-              (> exp (quot (System/currentTimeMillis) 1000)))))))
+  (boolean
+   (when-let [{:keys [exp]} (verified-claims token)]
+     (or (nil? exp)
+         (> exp (quot (System/currentTimeMillis) 1000))))))
 
 (def first-party-audiences
   "Platform + identity audiences, for log attribution only — NEVER pass it to authorize a data-plane request."
@@ -41,7 +53,7 @@
 (defn verdict
   "Judge `token` for `audience`: {:principal :claims}, or {:rejected reason} with claims once the signature holds."
   [token audience]
-  (if-let [claims (and token (> (count token) 6) (encryption/unsign-data token))]
+  (if-let [claims (verified-claims token)]
     (try
       (let [{:keys [exp aud client_id sub xid]} claims
             accepted (cond

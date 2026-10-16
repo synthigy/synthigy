@@ -13,6 +13,7 @@
   (:require
    [synthigy.log :as log]
    [synthigy.dataset.access :as access]
+   [synthigy.dataset.id :as id]
    [synthigy.dataset.rls :as rls]
    [synthigy.db :refer [*db*]]))
 
@@ -126,9 +127,9 @@
 
 (defmulti write
   "Checks whether the current user can perform the mutation; dispatches on
-   [(class db) entity-id]."
+   [(class db) entity xid]."
   (fn [db entity-id data tx]
-    [(class db) entity-id])
+    [(class db) (id/xid-of entity-id)])
   :default ::default)
 
 (defmethod write ::default
@@ -149,9 +150,9 @@
 
 (defmulti delete
   "Checks whether the current user can perform the mutation; dispatches on
-   [(class db) entity-id]."
+   [(class db) entity xid]."
   (fn [db entity-id data tx]
-    [(class db) entity-id])
+    [(class db) (id/xid-of entity-id)])
   :default ::default)
 
 (defmethod delete ::default

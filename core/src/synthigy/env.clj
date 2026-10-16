@@ -27,7 +27,7 @@
   (env :synthigy-id-format))
 
 (def trust-proxy
-  "Comma-separated IPs/CIDRs of the reverse proxies whose X-Forwarded-For is believed."
+  "Comma-separated IPs/CIDRs of the reverse proxies whose X-Forwarded-For/-Host/-Proto are believed."
   (env :synthigy-server-trust-proxy))
 
 (def allowed-origins

@@ -59,6 +59,53 @@
 (defrecord Cockroach [host port user db password max-connections datasource])
 
 ;;; ============================================================================
+;;; Read-only transactions
+;;; ============================================================================
+
+(defprotocol ReadOnly
+  (read-only-statements [db]
+    "{:on :off} SQL that makes the current transaction read only, and undoes it when the setting outlives the transaction."))
+
+(extend-protocol ReadOnly
+  Object
+  (read-only-statements [_] {:on "SET TRANSACTION READ ONLY"}))
+
+;;; ============================================================================
+;;; Model Lock
+;;; ============================================================================
+
+(defprotocol ModelLock
+  (hold-model-lock [db holder f]
+    "Calls `(f outer?)` holding the model lock, or throws MODEL_BUSY naming the change that holds it."))
+
+(defonce model-lock (java.util.concurrent.locks.ReentrantLock.))
+
+(defonce model-lock-holder (atom nil))
+
+(defn model-busy-ex
+  [{:keys [action dataset version by since] :as holder}]
+  (ex-info (str "Another model change is running: " (name (or action "change"))
+                (when dataset (str " of " dataset (when version (str " " version))))
+                (when by (str " by " by))
+                (when since (str ", since " since))
+                ". Try again when it finishes.")
+           {:code "MODEL_BUSY" :rule "model_lock" :details holder}))
+
+(extend-protocol ModelLock
+  Object
+  (hold-model-lock [_ holder f]
+    (let [^java.util.concurrent.locks.ReentrantLock lock model-lock]
+      (if-not (.tryLock lock)
+        (throw (model-busy-ex @model-lock-holder))
+        (let [outer? (= 1 (.getHoldCount lock))]
+          (when outer? (reset! model-lock-holder holder))
+          (try
+            (f outer?)
+            (finally
+              (when outer? (reset! model-lock-holder nil))
+              (.unlock lock))))))))
+
+;;; ============================================================================
 ;;; Login Page Store
 ;;; ============================================================================
 

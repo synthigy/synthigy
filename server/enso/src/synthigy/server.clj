@@ -9,23 +9,24 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server
-  "Undertow HTTP server adapter for Synthigy."
+  "enso HTTP server adapter for Synthigy."
   (:require
     [synthigy.client-address :as client-address]
     [synthigy.cors :as cors]
     [clojure.core.async :as async]
-    [synthigy.json :as json]
     [clojure.string :as str]
     [environ.core :refer [env]]
-    [synthigy.log :as log]
-    [synthigy.traffic :as traffic]
     [patcho.lifecycle :as lifecycle]
     [patcho.patch :as patch]
-    [ring.adapter.undertow :refer [run-undertow]]
-    ring.adapter.undertow.response
+    [s-exp.enso :as enso]
+    [ring.core.protocols :as ring-proto]
+    [starfederation.datastar.clojure.adapter.ring :as d*ring]
     [ring.middleware.keyword-params :refer [wrap-keyword-params]]
     [ring.middleware.params :refer [wrap-params]]
     [ring.util.response :as response]
+    [synthigy.json :as json]
+    [synthigy.log :as log]
+    [synthigy.traffic :as traffic]
     synthigy.core
     synthigy.audit
     synthigy.log.store
@@ -49,60 +50,45 @@
           routes)))
 
 (defn make-router
-  "Ring handler dispatching on exact [uri method handler] route vectors."
   [routes]
   (fn [request]
     (if-let [handler (match-route request routes)]
       (handler request)
       (routes/extension-handler request))))
 
-(defrecord SSEBody [identity-key stream-chan])
+(defrecord SSEBody [identity-key stream-chan]
+  ring-proto/StreamableResponseBody
+  (write-body-to-stream [_ _response out]
+    (try
+      (.flush out)
+      (loop []
+        (let [[val port] (async/alts!! [stream-chan (async/timeout 20000)])]
+          (cond
+            (and (nil? val) (= port stream-chan))
+            nil
 
-(extend-protocol ring.adapter.undertow.response/RespondBody
-  SSEBody
-  (respond [{:keys [identity-key stream-chan]} ^io.undertow.server.HttpServerExchange exchange]
-    (if (.isInIoThread exchange)
-      (.dispatch exchange ^Runnable
-        (^:once fn* [] (ring.adapter.undertow.response/respond
-                         (->SSEBody identity-key stream-chan) exchange)))
-      (do
-        (.startBlocking exchange)
-        (let [out (.getOutputStream exchange)]
-          (.flush out)
-          (loop []
-            (let [[val port] (async/<!! (async/go
-                                          (async/alts!
-                                            [stream-chan
-                                             (async/timeout 20000)])))]
-              (cond
-                (and (nil? val) (= port stream-chan))
-                (do (subscription/destroy-event-stream identity-key stream-chan)
-                    (try (.endExchange exchange) (catch Exception _)))
+            (not= port stream-chan)
+            (if (try
+                  (.write out (.getBytes ^String subscription/keepalive-msg "UTF-8"))
+                  (.flush out)
+                  true
+                  (catch Exception _ false))
+              (recur)
+              nil)
 
-                (not= port stream-chan)
-                (if (try
-                      (.write out (.getBytes ^String subscription/keepalive-msg "UTF-8"))
-                      (.flush out)
-                      true
-                      (catch Exception _
-                        (subscription/destroy-event-stream identity-key stream-chan)
-                        false))
-                  (recur)
-                  (try (.endExchange exchange) (catch Exception _)))
-
-                :else
-                (if (try
-                      (.write out (.getBytes ^String (subscription/format-sse val) "UTF-8"))
-                      (.flush out)
-                      true
-                      (catch Exception _
-                        (subscription/destroy-event-stream identity-key stream-chan)
-                        false))
-                  (recur)
-                  (try (.endExchange exchange) (catch Exception _)))))))))))
+            :else
+            (if (try
+                  (.write out (.getBytes ^String (subscription/format-sse val) "UTF-8"))
+                  (.flush out)
+                  true
+                  (catch Exception _ false))
+              (recur)
+              nil))))
+      (finally
+        (subscription/destroy-event-stream identity-key stream-chan)
+        (try (.close out) (catch Exception _))))))
 
 (defn make-sse-handler
-  "Ring handler streaming the identity's subscription events over Undertow."
   []
   (fn [request]
     (let [request (if (get-in request [:headers "authorization"])
@@ -120,9 +106,10 @@
         (let [identity-key (subscription/request-identity request iam)
               stream-chan (subscription/create-event-stream identity-key)]
           {:status 200
-           :headers {"Content-Type" "text/event-stream"
-                     "Cache-Control" "no-cache"
-                     "Connection" "keep-alive"}
+           :headers (cors/response-headers
+                      {"Content-Type" "text/event-stream"
+                       "Cache-Control" "no-cache"}
+                      (get-in request [:headers "origin"]))
            :body (->SSEBody identity-key stream-chan)})))))
 
 (defn default-routes
@@ -152,7 +139,6 @@
     (subs path (inc idx))))
 
 (defn wrap-static-resources
-  "Middleware serving /oauth/css|js|images/* from the classpath."
   [handler]
   (fn [request]
     (let [uri (:uri request)]
@@ -174,7 +160,7 @@
   [handler]
   (fn [request]
     (let [req-ctx  (client-address/request-context request)
-          request  (assoc request :remote-addr (:ip req-ctx))
+          request  (assoc (client-address/drop-untrusted-forwarding request) :remote-addr (:ip req-ctx))
           started  (System/currentTimeMillis)
           response (log/with-ctx (merge (auth/log-context request) req-ctx)
                      (let [resp (handler request)
@@ -191,36 +177,33 @@
       (assoc-in response [:headers "X-Request-Id"] (:request-id req-ctx)))))
 
 (defn make-handler
-  "Creates the complete Ring handler with all middleware."
   [{:keys [routes info]
     :or {info {}}}]
   (let [routes (or routes (default-routes {:info info}))
         router (routes/wrap-not-found (make-router routes))]
-    (-> router
-        wrap-static-resources
-        cors/wrap-cors
-        cors/wrap-options
-        wrap-keyword-params
-        wrap-params
-        ;; keep outermost — body readers downstream need :raw-body and a fresh stream
-        data/wrap-preserve-body
-        ;; must stay inside wrap-request-id — the error signal needs the request-id ctx
-        routes/wrap-errors
-        wrap-request-id)))
+    (wrap-request-id
+      ;; never outside wrap-request-id — the error signal needs the request-id ctx
+      (routes/wrap-errors
+        (-> router
+            wrap-static-resources
+            cors/wrap-cors
+            cors/wrap-options
+            wrap-keyword-params
+            wrap-params
+            data/wrap-preserve-body)))))
 
 (defonce server (atom nil))
 
 (defn stop
-  "Stops the Undertow server."
   []
   (when-let [s @server]
     (log/info {:id ::http-stopping :data {:action :stopping :subject :http-server}} "Stopping HTTP server")
-    (.stop s)
+    (enso/stop s)
+    (routes/unregister-sse-transport!)
     (reset! server nil))
   nil)
 
 (defn start
-  "Starts the Undertow HTTP server, replacing any running one."
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
   ([{:keys [host port info routes]
      :or {host (or (env :synthigy-server-host) "localhost")
@@ -231,20 +214,21 @@
              "Starting HTTP server")
 
    (let [handler (make-handler {:routes routes :info info})
-         s (run-undertow handler {:host host
-                                  :port port})]
+         s (enso/run-server handler {:host host
+                                     :port port
+                                     :shutdown-timeout 100})]
+     (routes/register-sse-transport! d*ring/->sse-response)
      (reset! server s)
      (log/info {:id ::http-started :data {:action :started :subject :http-server :host host :port port}}
                "HTTP server started")
      nil)))
 
 (defn -main
-  "Main entry point for Undertow server."
   [& _]
   (try
     (start)
     (log/info {:id ::server-running :data {:action :ready :subject :http-server}}
-              "Synthigy Undertow server running. Press Ctrl+C to stop.")
+              "Synthigy enso server running. Press Ctrl+C to stop.")
     (catch Throwable ex
       (log/error! {:id ::server-start-failed :data {:action :starting :subject :http-server}} ex)
       (System/exit 1))))
@@ -284,12 +268,9 @@
            (log/info {:id ::bare-stopped :data {:action :stopped :subject :bare-server}}
                      "Bare HTTP server lifecycle stopped"))})
 
-
 (comment
   (lifecycle/print-system-report)
-  (do
-    (lifecycle/start! :synthigy/dataset)
-    (lifecycle/start! :synthigy/server)
-
-    (lifecycle/stop! :synthigy/server)
-    (start)))
+  (lifecycle/start! :synthigy/server)
+  (lifecycle/start! :synthigy/bare-server)
+  (start)
+  (stop))

@@ -253,6 +253,9 @@
   (preview-model
     [this version]
     "Global model as it would stand after deploying `version`; nothing is written.")
+  (preview-recall
+    [this version-ids]
+    "Global model as it would stand after recalling `version-ids`; nothing is written.")
   (recall!
     [this version]
     "Deletes a specific deployed dataset version, rolling back when it is the most recent.")

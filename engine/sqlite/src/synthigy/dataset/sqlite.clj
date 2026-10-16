@@ -33,6 +33,7 @@
    [synthigy.dataset.sql.protocol :as proto]
    [synthigy.dataset.sql.query :as query]
    [synthigy.dataset.sql.rls :as rls]
+   [synthigy.dataset.system :as system]
     ;; required: extends ModelQueryProtocol for SQLite (no direct refs)
    synthigy.dataset.sqlite.query
     ;; required for its load-time patch registrations (no direct refs)
@@ -47,6 +48,9 @@
    [synthigy.log :as log]
    ;; loaded for its lifecycle registration — :synthigy/dataset depends on :synthigy/log.config
    [synthigy.log.config]
+   ;; loaded for their registrations — patches dataset/start levels, the meta-model write hooks
+   [synthigy.dataset.patch]
+   [synthigy.dataset.meta]
    [synthigy.transit
     :refer [<-transit ->transit]]
    [synthigy.timestamp :as ts])
@@ -995,30 +999,49 @@
     :groups [{:selections {:name nil}}]
     :roles [{:selections {:name nil}}]}))
 
+(defn read-versions
+  "`(read)`, or `empty` before the meta-model is deployed or on a legacy meta-model without deployed_on."
+  [read empty]
+  (if-not (dataset/meta-model-loaded?)
+    empty
+    (try
+      (read)
+      (catch clojure.lang.ExceptionInfo e
+        (if (= "UNKNOWN_ATTRIBUTE" (:code (ex-data e)))
+          empty
+          (throw e))))))
+
 (defn deployed-version-per-dataset-ids
   ([] (deployed-version-per-dataset-ids nil))
   ([superseded-dataset]
-   (try
-     (set (map id/extract (cond->> (last-deployed-version-per-dataset)
-                            superseded-dataset (remove #(= superseded-dataset (some-> % :dataset id/extract))))))
-     (catch Throwable _ #{}))))
+   (read-versions
+    #(set (map id/extract (cond->> (last-deployed-version-per-dataset)
+                            superseded-dataset (remove (fn [v] (= superseded-dataset (some-> v :dataset id/extract)))))))
+    #{})))
+
+(defn version-rls-model
+  "The model of `version`, without RLS on system entities unless its dataset is a system dataset."
+  [{:keys [model dataset]}]
+  (let [system-ids (dataset/system-ids (id/key))]
+    (cond-> model
+      (not (contains? (:datasets system-ids) (id/extract dataset)))
+      (system/without-system-rls system-ids))))
 
 (defn latest-version-models
   "Models of the latest deployed version of every dataset, plus `include-version`
-   when given."
+   when given, each as `version-rls-model`."
   ([] (latest-version-models nil))
   ([include-version]
-   (let [;; the meta-model is not queryable during the first deploy — it creates it
-         prior (try
-                 (let [latest (deployed-version-per-dataset-ids)
+   (let [prior (read-versions
+                #(let [latest (deployed-version-per-dataset-ids)
                        superseded (some-> include-version :dataset id/extract)]
                    (->> (deployed-versions)
-                        (filter #(contains? latest (id/extract %)))
-                        (remove #(= superseded (some-> % :dataset id/extract)))
-                        (mapv (comp dataset/adapt-model-to-provider :model))))
-                 (catch Throwable _ []))]
+                        (filter (fn [v] (contains? latest (id/extract v))))
+                        (remove (fn [v] (= superseded (some-> v :dataset id/extract))))
+                        (mapv (fn [v] (version-rls-model (update v :model dataset/adapt-model-to-provider))))))
+                [])]
      (cond-> prior
-       include-version (conj (:model include-version))))))
+       include-version (conj (version-rls-model include-version))))))
 
 (defn gen-activation-filter
   "Filter for activate-model; `include-version` replaces its dataset's latest deployed version."
@@ -1044,9 +1067,7 @@
          final-model
          (reduce
           (fn [global version]
-            (let [version-id (id/extract version)
-                  model (:model version)]
-              (core/join-models global (core/add-claims model version-id))))
+            (core/join-models global (core/add-claims (version-rls-model version) (id/extract version))))
           initial-model
           all-versions)]
      (-> final-model
@@ -1088,9 +1109,12 @@
                        (last-deployed-model)
                        (catch Throwable _ nil))
                      (core/map->ERDModel {:entities {} :relations {}}))]
-      (core/fold-version global (:model version) (id/extract version)
+      (core/fold-version global (version-rls-model version) (id/extract version)
                          (latest-version-models version)
                          (gen-activation-filter version))))
+  (core/preview-recall [_ version-ids]
+    (let [recalled (set version-ids)]
+      (rebuild-global-model (remove #(contains? recalled (id/extract %)) (deployed-versions)))))
   (core/deploy!
     [this version]
     (let [version (-> version decode-version-model (update :model core/normalize-legacy-types))

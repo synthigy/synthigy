@@ -1,9 +1,9 @@
 # Changelog
 
-All notable changes to the Synthigy engine. Releases before 0.2.14 are
+All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
-## [0.2.14-SNAPSHOT] — 2026-10-09
+## [0.3.0] — 2026-10-16
 
 ### Breaking
 - **`SYNTHIGY_SERVER_TRUST_PROXY` lists your proxies.** It takes IPs or CIDRs,
@@ -13,6 +13,13 @@ described in their [GitHub release notes](https://github.com/synthigy/synthigy/r
   or append to the header. `true` is ignored with a warning: until you change
   it, every request is recorded with the proxy's address. See
   [PROXY.md](docs/PROXY.md).
+- **`X-Forwarded-Host` and `X-Forwarded-Proto` follow the same list.** From
+  any caller not in `SYNTHIGY_SERVER_TRUST_PROXY` they are dropped before the
+  request is handled. With `SYNTHIGY_IAM_ROOT_URL` set nothing changes. Behind a
+  proxy, without `TRUST_PROXY` and without `ROOT_URL`, the token issuer and
+  login links now take the scheme of the connection (`http`) and the host from
+  `Host` — set one of the two. A directly exposed engine still believes
+  `Host`; only `SYNTHIGY_IAM_ROOT_URL` pins it.
 
 - **UserInfo requires the `openid` scope.** A token without it — every
   `client_credentials` token — gets 403 `insufficient_scope` (OIDC Core §5.3,
@@ -30,6 +37,43 @@ described in their [GitHub release notes](https://github.com/synthigy/synthigy/r
   so `synthigy schema check` and SDK codegen report the schema stale once —
   pull it again. A fresh install that starts only the dataset module gets the
   `user`, `user_group` and `user_role` tables too.
+- **Synthigy and OAuth change only through engine upgrades.** For anyone but
+  a superuser, a deploy, recall or destroy that targets either dataset is
+  refused (`SYSTEM_DATASET_ENGINE_OWNED`), and so is one whose result would
+  change a system entity or relation — a user dataset carrying a copy of
+  User, User Group, User Role or an OAuth entity that differs from the one in
+  force (`SYSTEM_ENTITY_ALTERED`; the error lists the changes). A superuser's
+  deploy goes through and the changes are logged at warn
+  (`:synthigy.engine/deploy-warning`). Such a dataset deploys again once its
+  copies match the global model (Pull or Revert in the modeler's deploy
+  drawer).
+- **RLS on system entities comes only from Synthigy and OAuth.** Guards that
+  another dataset declares on User, User Group, User Role or an OAuth entity
+  are ignored, for every role — they used to apply engine-wide, in the
+  console too. On upgrade such guards stop filtering, and the next deploy of
+  that dataset is refused with `SYSTEM_ENTITY_RLS` until they are removed. Put
+  guards on your own entities instead.
+- **Dataset meta-model rows are written by the engine only.** Through `/data`:
+  - Dataset Entity, Dataset Entity Attribute and Dataset Relation rows cannot
+    be created, changed, linked or deleted by anyone, superuser included
+    (`ENGINE_OWNED`). A role grant that names them by id keeps working.
+  - A version's `deployed` and `deployed_on` are set only by deploy and
+    recall. For anyone but a superuser, a deployed version cannot be changed,
+    moved to another dataset, unlinked from its dataset or deleted with a
+    plain delete (`IMMUTABLE_VERSION_ALTERED`); recall and destroy remove
+    them.
+  - A version name is used once per dataset: saving or deploying a second
+    version under a taken name is refused with `VERSION_NAME_TAKEN` (the
+    details say whether the holder is deployed). Duplicates already in the
+    database stay; upgrades only warn about them.
+  - `purge` whose selection reaches a meta-model entity is refused
+    (`FORBIDDEN_OP`); `slice` across a meta-model link is refused
+    (`ENGINE_OWNED`), and across Dataset → Versions for anyone but a
+    superuser.
+- **`deploy` needs the dataset's id.** The payload's `dataset` must carry an
+  `xid` or `euuid`; a name alone is refused with `BAD_OP`. Only the version's
+  ids, `name`, `configuration`, `model` and the dataset reference are written
+  — anything nested under `dataset` is ignored.
 - **Clojure API: IAM model names are Synthigy names.** For embedders and
   library callers: `:iam/id` is `:synthigy/id` (same xid);
   `synthigy.iam/current-version` and `register-reference-types!` are
@@ -38,7 +82,11 @@ described in their [GitHub release notes](https://github.com/synthigy/synthigy/r
   `:synthigy.iam/model` is `:synthigy/model`; `dataset/iam.json` is
   `dataset/synthigy.json`. Bootstrap log ids changed with them
   (`:synthigy-model-loading`, `:synthigy-model-mounted`,
-  `:synthigy.iam/deploying-synthigy-model`).
+  `:synthigy.iam/deploying-synthigy-model`). `retire-datasets!`,
+  `mount-synthigy-schema!`, `fix-deployed-on!`, `model-ids` and
+  `can-migrate-to-xid?` moved from `synthigy.dataset` to
+  `synthigy.dataset.patch`, and the `:synthigy/dataset` upgrade steps with
+  them.
 - **Audit history is no longer tenant-scoped.** New history rows and live
   subscription events carry no tenant (`tenant: null`); `/history` no longer
   forces one, so a `tenant` a caller passes now filters — and matches only
@@ -97,8 +145,61 @@ described in their [GitHub release notes](https://github.com/synthigy/synthigy/r
   an app (console picker, or `/oauth/onboard` without `return_url`) sends the
   person there after they set up their account; without an app it ends on
   the status page.
+- **`deploy-check` asks before deploying.** Same scope as `deploy`
+  (`dataset:deploy`); returns `{errors, warnings}` — each shaped like a `/data`
+  error with `code`, `message`, `hint` and `details` — for the version given,
+  without deploying it. A deploy throws the first of those errors. The
+  modeler's deploy drawer calls it as you edit.
+- **`synthigy-datasets` names the engine's own datasets** — the ids of
+  Synthigy and OAuth, scope `dataset:load`.
+- **Model subscriptions announce a running change.** Besides
+  `{"action": "deploy"}`, model subscribers get `{"action": "busy", "busy":
+  {action, dataset, version, by, since}}` when a deploy, recall or destroy
+  starts and `{"action": "idle"}` when it ends. A client that refetches on
+  every model event now refetches twice more per deploy.
+- **PROXY.md: behind an AWS Application Load Balancer.** ALB settings, and
+  nginx, Caddy and Traefik configs that keep the client address the ALB
+  recorded instead of replacing it with the ALB's. See
+  [PROXY.md](docs/PROXY.md#behind-an-aws-application-load-balancer).
 
 ### Changed
+- **One model change at a time.** A deploy, recall or destroy started while
+  another runs is refused at once with `MODEL_BUSY`, naming the change in
+  progress, who started it and when. Try again when it finishes. The deploy
+  checks run inside the same lock, against the model the change applies to.
+- **Deploys refuse new name collisions with a code.** Two active entities
+  whose names map to the same table were refused as `OPERATION_ERROR`; now
+  `ENTITY_NAME_CONFLICT`. New: an attribute and a relation label (or two
+  labels) that give an entity the same field key are refused with
+  `FIELD_KEY_CONFLICT`. Only collisions the global model does not already have
+  count. Renaming a deployed version through `deploy` is refused like any
+  other change to it (`IMMUTABLE_VERSION_ALTERED`).
+- **System models: Synthigy 0.90.1, OAuth 0.2.10.** Their copies of the shared
+  entities are now identical: `Name` is unique and mandatory on User, User
+  Group, User Role, Dataset and Dataset Entity, and User `Password` is
+  classified secret in both. Before, OAuth's copy won on a fresh install and
+  the password was not marked secret. Existing installs deploy both on
+  upgrade; no `NOT NULL` is added, so rows without a name do not block it.
+- **A bearer token's signature is checked once a minute, not on every
+  request.** Verified claims are kept for 60 seconds per token while its
+  signing key is still loaded; rotating a key away invalidates them at once.
+  Expiry, audience, client and user are still checked on every request. In a
+  benchmark (enso, Postgres) `/data` reads went from about 23k to 31k requests
+  per second.
+- **`deployed-model` and `runtime-model` return the full model to a token with
+  `schema:read`**, as `schema` already did. Without it they return what the
+  caller may read.
+- **Facebook sign-in uses Graph API v26.0 and sends `appsecret_proof`**, so it
+  works with Meta's "Require App Secret" setting on. The console's Facebook
+  guide now walks through developer registration, the `email` permission and
+  publishing the app.
+- **Server adapters: http-kit, enso and Jetty.** `:server-enso`
+  ([enso](https://github.com/mpenet/enso), virtual threads, HTTP/1.1, h2, h3)
+  is new; http-kit stays the default and is the only adapter in the
+  published bundles. `:server-pedestal` and
+  `:server-undertow` are removed. patcho now comes from Clojars
+  (`dev.gersak/patcho` 0.4.4) instead of a submodule.
+
 - **The console is for administrators only.** Signing in, and every console
   page, needs a System Operator role or the right to change users, groups,
   roles, apps, APIs, providers or connectors. Other accounts are told to
@@ -133,8 +234,22 @@ described in their [GitHub release notes](https://github.com/synthigy/synthigy/r
   not registered".
 - **Console create forms keep what you entered** when the create is
   rejected — links, owned rows, settings and config came back reset.
-- **Undertow: `/data/events` accepts `?access_token`** like the other
-  adapters; a browser `EventSource` got 401.
+- **SQL templates cannot write.** Only the first keyword was checked, so a
+  data-modifying statement inside a CTE or after it reached the database, with
+  no RBAC or RLS, from any role. Every CTE body and the outer statement must
+  now be a `SELECT` (or `VALUES`), and the template runs in a read-only
+  transaction. A template that wrote now fails with `QUERY_NOT_SELECT` or a
+  database error.
+- **Deleting a dataset or version on a UUID-format instance destroys or
+  recalls it.** With `SYNTHIGY_ID_FORMAT=euuid` the engine's delete hooks never
+  fired: a delete of a Dataset Version was a plain row delete, with no recall
+  and no checks.
+- **A failed read during deploy fails the deploy.** When the deployed versions
+  could not be read (lost connection, timeout), the deploy carried on as if
+  none existed: every entity of every version ever deployed came back active
+  and RLS was not reconciled.
+- **`_order_by` on a nested relation** in the `[[field, direction]]` form,
+  which XSQL's `order by` produces, failed with `INTERNAL_ERROR`.
 - **Reactivating an attribute on SQLite no longer fails the deploy** with
   `duplicate column name` — the column is reused, as on Postgres.
 - **Audit rows record their request.** `request_id` on audit rows was always

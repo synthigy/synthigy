@@ -28,6 +28,7 @@
             *PUBLIC_ROLE*
             *PUBLIC_USER*]]
    [synthigy.dataset :as dataset]
+   [synthigy.dataset.patch :as dataset-patch]
    [synthigy.dataset.access :as dataset.access]
    [synthigy.dataset.core :as core]
    [synthigy.dataset.id :as id]
@@ -277,7 +278,7 @@
     (patch/level! :synthigy/model
                   :synthigy/iam
                   :synthigy.iam/audit)
-    (dataset/retire-datasets!)
+    (dataset-patch/retire-datasets!)
 
     (context/start)
 

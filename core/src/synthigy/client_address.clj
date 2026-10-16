@@ -118,6 +118,19 @@
              (trusted? trusted a)  (recur more a)
              :else                 (->text a))))))))
 
+(defn from-proxy?
+  ([request] (from-proxy? request @trusted-proxies))
+  ([request trusted]
+   (boolean (some->> (parse-ip (:remote-addr request)) (trusted? trusted)))))
+
+(defn drop-untrusted-forwarding
+  "Drops X-Forwarded-Host/-Proto unless the socket peer is a trusted proxy."
+  ([request] (drop-untrusted-forwarding request @trusted-proxies))
+  ([request trusted]
+   (if (from-proxy? request trusted)
+     request
+     (update request :headers dissoc "x-forwarded-host" "x-forwarded-proto"))))
+
 (def request-id-re #"[A-Za-z0-9._:-]{1,128}")
 
 (defn truncate
@@ -129,7 +142,7 @@
   ([request] (request-context request @trusted-proxies))
   ([request trusted]
    (let [peer       (parse-ip (:remote-addr request))
-         from-proxy (and peer (trusted? trusted peer))
+         from-proxy (from-proxy? request trusted)
          ip         (client-address request trusted)
          inbound    (some-> (get-in request [:headers "x-request-id"]) str/trim
                             (#(when (re-matches request-id-re %) %)))

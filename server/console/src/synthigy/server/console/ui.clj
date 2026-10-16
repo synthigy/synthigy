@@ -1274,23 +1274,25 @@
                      :value (str (or v ""))}])))))
 
 (defn wizard-stage
-  [{:keys [steps callback?]} {:keys [where url]} callback first?]
-  (list
-   (when (and first? url)
-     [:p.console-field-hint
-      "Open " [:a.console-wizard-link {:href url :target "_blank" :rel "noopener noreferrer"} where]
-      " in another tab and work through these, then come back."])
-   [:ol.console-wizard-steps (for [s steps] [:li s])]
-   (when callback?
-     [:div.console-wizard-callback
-      [:ty-copy {:label "Redirect URI — register this one, exactly"
-                 :value callback :format "code" :size "xs"}]
-      (when-not env/iam-root-url
-        [:p.console-field-hint
-         (str "This URI is derived from the current request because "
-              "SYNTHIGY_IAM_ROOT_URL is not set. Behind a load balancer, set it "
-              "to the public origin first — otherwise you may register an "
-              "internal address at the provider.")])])))
+  "A guide stage; a stage's own `:where`/`:url` link wins over the guide's, which only the first stage shows."
+  [{:keys [steps callback?] :as stage} guide callback first?]
+  (let [{:keys [where url]} (cond (:url stage) stage first? guide)]
+    (list
+     (when url
+       [:p.console-field-hint
+        "Open " [:a.console-wizard-link {:href url :target "_blank" :rel "noopener noreferrer"} where]
+        " in another tab and work through these, then come back."])
+     [:ol.console-wizard-steps (for [s steps] [:li s])]
+     (when callback?
+       [:div.console-wizard-callback
+        [:ty-copy {:label "Redirect URI — register this one, exactly"
+                   :value callback :format "code" :size "xs"}]
+        (when-not env/iam-root-url
+          [:p.console-field-hint
+           (str "This URI is derived from the current request because "
+                "SYNTHIGY_IAM_ROOT_URL is not set. Behind a load balancer, set it "
+                "to the public origin first — otherwise you may register an "
+                "internal address at the provider.")])]))))
 
 (defn wizard-ids
   "Step ids in order: one per guide stage, then the config form."

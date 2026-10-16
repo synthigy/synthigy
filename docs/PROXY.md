@@ -16,12 +16,16 @@ SYNTHIGY_SERVER_TRUST_PROXY=127.0.0.1/32,::1/128
   page accepts the password and comes straight back.
 - **`SYNTHIGY_IAM_ROOT_URL`** is the public origin: token issuer and base of every
   login link. Unset, it is taken from `X-Forwarded-Host`/`-Proto` per request, which
-  is wrong behind a load balancer. The portal flags it until set.
+  is wrong behind a load balancer, or from `Host` when the proxy isn't trusted. The
+  portal flags it until set.
 - **`SYNTHIGY_SERVER_TRUST_PROXY`** lists your proxies (IPs or CIDRs). Only requests
-  from them have `X-Forwarded-For` believed. Synthigy reads the header from the
-  right and skips your proxies, so a client can't fake its address, whether the
-  proxy appends to the header or overwrites it. Behind a load balancer and a proxy,
-  list both. In a container network, list the proxy's subnet.
+  from them have `X-Forwarded-For`, `-Host` and `-Proto` believed; from anyone else
+  those headers are dropped. Synthigy reads `X-Forwarded-For` from the
+  right and skips your proxies, so a client can't fake its address. It can only
+  find the address the first hop recorded: behind a load balancer, the proxy on
+  the instance must keep that record, not overwrite it — see
+  [Behind an AWS load balancer](#behind-an-aws-application-load-balancer). In a
+  container network, list the proxy's subnet.
 - An `X-Request-Id` from a trusted proxy becomes the request id.
 
 ## What the proxy must do
@@ -41,6 +45,9 @@ SYNTHIGY_SERVER_TRUST_PROXY=127.0.0.1/32,::1/128
 - **Firewall 7887** so nothing bypasses the proxy.
 
 ---
+
+The configs below are for a proxy that faces the internet itself. Behind a load
+balancer, see [the last section](#behind-an-aws-application-load-balancer).
 
 ## nginx
 
@@ -136,7 +143,8 @@ synthigy.example.com {
 ```
 
 Caddy obtains the certificate itself. `{remote_host}` replaces the
-client-supplied `X-Forwarded-For` rather than appending to it.
+client-supplied `X-Forwarded-For` rather than appending to it — right when Caddy
+is the edge, wrong behind a load balancer.
 
 ## Traefik v3
 
@@ -206,3 +214,106 @@ labels:
   - "traefik.http.services.synthigy.loadbalancer.server.port=7887"
   - "traefik.http.services.synthigy.loadbalancer.responseforwarding.flushinterval=100ms"
 ```
+
+## Behind an AWS Application Load Balancer
+
+```
+client → ALB (TLS) → proxy on the instance, port 80 → engine on 127.0.0.1:7887
+```
+
+Each hop sees only the machine connected to it. The ALB records the client in
+`X-Forwarded-For`; the proxy on the instance sees the ALB. A proxy that overwrites
+the header with its own peer, as the configs above do, makes every request look
+like it came from the ALB. Make the proxy trust the ALB and take the client from
+the header instead; `SYNTHIGY_SERVER_TRUST_PROXY` then stays at loopback.
+
+**ALB**
+
+- **X-Forwarded-For header:** Append (the default). Leave client port
+  preservation off.
+- Terminate TLS on the ALB and redirect HTTP to HTTPS with an ALB listener rule.
+  The proxy only ever receives HTTP from the ALB, so a redirect there loops.
+- Target the instance's port 80, health check `GET /health`. The default 60s idle
+  timeout is above the 15–20s event-stream keepalive.
+- Allow port 80 on the instance only from the ALB's security group.
+- Identify the ALB by the **subnets it is attached to**: its node addresses
+  change as it scales.
+
+**Engine:** the settings at the top. `SYNTHIGY_IAM_ROOT_URL` is not optional here —
+the proxy receives plain HTTP, so anything derived from the request says `http://`.
+
+**nginx** — replaces both server blocks of the nginx config; keep its `upstream`
+and `location` blocks. Needs `ngx_http_realip_module`, included in the
+distribution packages.
+
+```nginx
+server {
+    listen 80;
+    server_name synthigy.example.com;
+
+    # one line per subnet the ALB is attached to
+    set_real_ip_from  10.0.1.0/24;
+    set_real_ip_from  10.0.2.0/24;
+    real_ip_header    X-Forwarded-For;
+    real_ip_recursive on;
+
+    client_max_body_size 64m;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection        "";
+    proxy_set_header Host              $host;
+    # $remote_addr is the client once realip has run
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_set_header X-Forwarded-Port  $http_x_forwarded_port;
+
+    # location blocks as in the nginx config
+}
+```
+
+**Caddy 2.8+**
+
+```caddyfile
+{
+	servers {
+		trusted_proxies static 10.0.1.0/24 10.0.2.0/24
+		trusted_proxies_strict
+	}
+}
+
+http://synthigy.example.com {
+	@sse  path /data/events /console/live/*
+	@rest not path /data/events /console/live/*
+
+	encode @rest zstd gzip
+
+	reverse_proxy @sse 127.0.0.1:7887 {
+		header_up X-Forwarded-For {client_ip}
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			compression off
+		}
+	}
+
+	reverse_proxy 127.0.0.1:7887 {
+		header_up X-Forwarded-For {client_ip}
+	}
+}
+```
+
+`trusted_proxies_strict` makes Caddy read the header from the right; without it
+Caddy takes the leftmost entry, which the client wrote. `http://` in the site
+address leaves TLS to the ALB, and the ALB's `X-Forwarded-Proto: https` passes
+through because the ALB is trusted.
+
+**Traefik:** set `forwardedHeaders.trustedIPs` to the ALB subnets on the entry
+point the ALB targets, and drop the `web` → `websecure` redirect (the ALB
+redirects). Traefik keeps the ALB's entries and appends its own peer rather than
+resolving the client, so add the ALB subnets to `SYNTHIGY_SERVER_TRUST_PROXY`
+as well.
+
+**Check it:** request log lines carry `ip`, the resolved client. Behind a
+correctly configured ALB it is your public address, never a `10.x` one.

@@ -123,20 +123,41 @@
                "it once you have tested a sign-in.")}
 
    "FACEBOOK"
-   {:where "Meta for Developers → My Apps"
-    :url "https://developers.facebook.com/apps/"
-    :stages
-    [{:label "Create app"
+   {:stages
+    [{:label "Register"
+      :where "Meta for Developers"
+      :url "https://developers.facebook.com/"
+      :steps
+      [(str "Log in with the Facebook account that should own the app — every Meta "
+            "app belongs to a person's developer account.")
+       (str "Get Started — register as a Meta developer: accept the terms and verify "
+            "your phone or email. Already registered? Skip to Next.")]}
+     {:label "Create app"
+      :where "Meta for Developers → My Apps"
+      :url "https://developers.facebook.com/apps/"
       :callback? true
       :steps
-      [(str "Create App, and pick the use case that includes Facebook Login for the "
-            "web — add the Facebook Login product if the use case didn't already.")
-       (str "Facebook Login → Settings → \"Valid OAuth Redirect URIs\" — paste the URI "
-            "below exactly, and save.")]}]
+      [(str "Create App, name it what your users should see on the sign-in prompt, "
+            "and pick the use case \"Authenticate and request data from users with "
+            "Facebook Login\".")
+       (str "Use cases → Facebook Login → Customize → Permissions — add email. "
+            "Without it Meta returns no address and the sign-in is refused.")
+       (str "Same page, Settings → \"Valid OAuth Redirect URIs\" — paste the URI "
+            "below exactly, and save.")]}
+     {:label "App settings"
+      :where "My Apps → your app → App settings → Basic"
+      :url "https://developers.facebook.com/apps/"
+      :steps
+      [(str "Open the app, then App settings → Basic: the App ID and App secret on "
+            "that page are what the next step asks for.")
+       (str "To let anyone beyond the app's own admins, developers and testers sign "
+            "in, fill Privacy Policy URL, Category, the 1024×1024 App icon and User "
+            "data deletion — pick \"Data deletion instructions URL\" and point it at "
+            "a page you host — then Publish the app.")]}]
     :note (str "Plain OAuth 2.0 — no discovery document, so this is created disabled; "
-               "test a sign-in, then enable. While the app is in development mode only "
-               "its listed testers can sign in. Accounts without an email address "
-               "(phone-only signups) cannot onboard.")}
+               "test a sign-in, then enable. Until the Meta app is published only its "
+               "own admins, developers and testers can sign in. Accounts without an "
+               "email address (phone-only signups) cannot onboard.")}
 
    "LINKEDIN"
    {:where "LinkedIn Developers → My Apps"

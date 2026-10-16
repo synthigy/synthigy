@@ -142,3 +142,9 @@
                (log/info {:id ::deploying-0-90-0 :data {:action :deploying :subject :synthigy-model :version "0.90.0"}}
                          "Deploying Synthigy model v0.90.0 (absorbs the Datasets meta-model; retire follows in iam/start)")
                (dataset/deploy! (dataset/current-synthigy-version)))
+
+(patch/upgrade :synthigy/model
+               "0.90.1"
+               (log/info {:id ::deploying-0-90-1 :data {:action :deploying :subject :synthigy-model :version "0.90.1"}}
+                         "Deploying Synthigy model v0.90.1 (User copy aligned with OAuth: Name unique+mandatory, Password secret)")
+               (dataset/deploy! (dataset/current-synthigy-version)))

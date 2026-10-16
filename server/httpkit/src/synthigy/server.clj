@@ -182,7 +182,7 @@
   [handler]
   (fn [request]
     (let [req-ctx   (client-address/request-context request)
-          request   (assoc request :remote-addr (:ip req-ctx))
+          request   (assoc (client-address/drop-untrusted-forwarding request) :remote-addr (:ip req-ctx))
           started   (System/currentTimeMillis)
           full-ctx  (merge (auth/log-context request) req-ctx)
           response  (log/with-ctx full-ctx

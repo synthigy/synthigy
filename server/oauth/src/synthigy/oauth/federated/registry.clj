@@ -9,19 +9,13 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.federated.registry
-  "Federation provider CONFIG — the read side of the ID Federation dataset,
-   sitting below every other federated namespace to break a require cycle. See
-   docs/core/synthigy/oauth/federated/registry.md."
+  "Federation provider config; must never require synthigy.oauth.* — it breaks the federated require cycle."
   (:require
    [clojure.string :as str]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
    [synthigy.json :as json]
    [synthigy.log :as log]))
-
-;; =============================================================================
-;; ID Federation entity references (pinned — deployed + stable)
-;; =============================================================================
 
 (id/defentity :id-federation/provider
   :euuid #uuid "5bc157c3-fa96-4ea2-9bf0-be2020b49bf8" :xid "CLAE8TtQwCKDKy5v6y5Qw1")
@@ -56,24 +50,17 @@
   (update-keys m (fn [k] (keyword (str/replace (name k) "_" "-")))))
 
 (defn provider-keyword
-  "Enum column -> dispatch key; the enum comes back as a keyword and `str` keeps
-   the colon, so strip it before lower-casing."
+  "Enum column -> dispatch key, stripping the colon `str` keeps on a keyword enum."
   [provider]
   (keyword (str/lower-case (str/replace (str provider) #"^:" ""))))
 
-;; :provider/:enabled are set from the columns LAST in the merge so a stray
-;; config key can't hijack dispatch.
+;; :provider/:enabled merged LAST — a stray config key must never hijack dispatch.
 (defn resolve-provider
-  "Load the one Federation Provider config for a dispatch type (e.g.
-   \"google\"), or nil if unconfigured/unparseable (fails closed). Each
-   provider type is a singleton slot — a model UNIQUE(provider) constraint
-   enforces at most one row; if stale duplicates exist anyway, the first is
-   used and the rest logged, never a 500 on the login page."
+  "Config of the one provider row for a dispatch type (e.g. \"google\"), or nil — fails closed."
   [provider-type]
   (try
     (let [enum-value (str/upper-case (name provider-type))
-          ;; `{:_eq …}` explicitly — a BARE value on an enum field throws
-          ;; (ClassCastException in query-selection->sql), unlike string fields.
+          ;; `{:_eq …}` explicitly — a bare value on an enum field throws.
           rows (dataset/search-entity
                 :id-federation/provider
                 {:provider {:_eq enum-value}}
@@ -98,10 +85,7 @@
    :oidc_1 "SSO" :oidc_2 "SSO 2" :oidc_3 "SSO 3"})
 
 (defn list-providers
-  "Active federation providers as a public button list [{:name :provider
-   :label :logo}], one entry per provider type; never reads the encrypted
-   configuration. `:name` is the dispatch type slug (the `?provider=` value);
-   a row's display_name overrides the baked label, logo_url rides as :logo."
+  "Active providers as a public button list [{:name :provider :label :logo}]; never reads the encrypted configuration."
   []
   (try
     (->> (dataset/search-entity :id-federation/provider

@@ -9,23 +9,16 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.xsql.tokens
-  "Tokenizer for the XSQL DSL — single-pass linear scan producing a flat
-   token vector, including virtual structural tokens (:indent :dedent
-   :newline :blank-line :eof) that encode block structure. Token shape:
-   `{:type :text :from :to :message?}`. Indent handling is Python-strict
-   (XSQL.md § Lexical rules) — see docs for the full state machine."
+  "Tokenizer for the XSQL DSL: a flat token vector with virtual structural tokens encoding block structure."
   (:require [clojure.string :as str]))
 
 ;; ── Helpers ────────────────────────────────────────────────────────────────
 
-;; XSQL identifiers are STRICT snake_case: [a-z_][a-z0-9_]* only.
-;; `-` is a join sigil, never part of an ident. Uppercase is rejected.
 (def ^:private re-ident-start    #"[a-zA-Z_]")   ; allow uppercase to scan, then reject
 (def ^:private re-ident-continue #"[a-zA-Z0-9_]")
 (def ^:private re-digit          #"[0-9]")
 
 (defn char-at
-  "1-char string at position `i`, or nil for out-of-bounds."
   [^String s i]
   (when (and (>= i 0) (< i (count s)))
     (subs s i (inc i))))
@@ -45,20 +38,17 @@
         i))))
 
 (defn scan-indent
-  "Index after leading spaces/tabs from `pos`."
   [s pos]
   (scan-while s pos ws?))
 
 (defn find-eol
-  "Index of the next \\n from `pos`, or n if EOF reached first."
   [s pos]
   (scan-while s pos #(and % (not= "\n" %))))
 
 ;; ── Content lexers (mid-line) ──────────────────────────────────────────────
 
 (defn lex-string
-  "Quoted string literal starting at `pos`; :error if EOF/newline hit
-   before the closing quote."
+  "Quoted string literal at `pos`; :error if EOF/newline comes before the closing quote."
   [s pos]
   (let [n (count s)]
     (loop [i (inc pos)]
@@ -101,16 +91,12 @@
       {:type :identifier :from pos :to end :text text})))
 
 (defn lex-param-ref
-  "Lex `?name`, `?name:type`, `?name[]`, `?name:type[]` at `pos`. XSQL is
-   named-only — a bare `?`/`?N` becomes an :error token. Metadata
-   captures the parsed pieces so parser/compiler don't have to re-scan."
+  "Lex a named param-ref at `pos`; a bare `?`/`?N` becomes an :error token."
   [s pos]
   (let [n     (count s)
         after (inc pos)
         nch   (char-at s after)]
     (cond
-      ;; Bare `?` at EOF / whitespace / structural char — positional,
-      ;; not supported in XSQL.
       (or (nil? nch) (not (ident-start? nch)))
       {:type :error :from pos :to after :text "?"
        :message "XSQL parameters must be named (?name[:type][])"}
@@ -118,14 +104,8 @@
       :else
       (let [name-end   (scan-while s after ident-continue?)
             param-name (subs s after name-end)
-            ;; `?name?` — optional marker, tight after the name, before
-            ;; `:type`. Absent param ⇒ the enclosing predicate is dropped
-            ;; at compile instead of raising PARAM_MISSING.
             optional?  (= "?" (char-at s name-end))
             mark-end   (if optional? (inc name-end) name-end)
-            ;; Optional `:type` — single colon. Reject a `::` cast so
-            ;; downstream SQL casts in sql-template stay valid (XSQL
-            ;; itself doesn't need them, but be consistent with sql_params).
             colon?     (and (= ":" (char-at s mark-end))
                             (not= ":" (char-at s (inc mark-end))))
             type-start (when colon? (inc mark-end))
@@ -133,9 +113,6 @@
                          (scan-while s type-start ident-continue?))
             type-raw   (when type-start
                          (subs s type-start type-end))
-            ;; Optional `(a, b, c)` restriction set — tight after the type
-            ;; (`?sort:order(a, b)`) or, for untyped order params, tight
-            ;; after the name (`?sort(a, b)`).
             paren-at   (cond
                          (and type-end (pos? (- type-end type-start))
                               (= "(" (char-at s type-end)))       type-end
@@ -183,10 +160,6 @@
            :message "restriction set must be comma-separated snake_case identifiers"}
 
           :else
-          ;; Optional default — `=literal` IMMEDIATELY after (tight, no
-          ;; whitespace, so it never collides with a predicate `=`). A quoted
-          ;; string default scans to its closing quote; a bare literal (number /
-          ;; true / false / word) scans to the next delimiter.
           (let [has-default? (= "=" (char-at s final-end))
                 def-start    (inc final-end)
                 def-end      (when has-default?
@@ -220,8 +193,7 @@
               has-default? (assoc :param-default (subs s def-start def-end)))))))))
 
 (defn lex-content-token
-  "Lex one token of mid-line content starting at `pos` (non-nil,
-   non-newline, non-whitespace)."
+  "Lex one mid-line content token at `pos` (not newline or whitespace)."
   [s pos]
   (let [c  (char-at s pos)
         c2 (char-at s (inc pos))]
@@ -242,9 +214,6 @@
       (= "(" c) {:type :lparen :from pos :to (inc pos) :text "("}
       (= ")" c) {:type :rparen :from pos :to (inc pos) :text ")"}
 
-      ;; Dash: digit after → negative number; word-char tight on both
-      ;; sides (`a-b`) → hard error (snake_case only, never silently
-      ;; split as subtraction); otherwise the join marker.
       (= "-" c)
       (cond
         (digit? c2) (lex-number s pos)
@@ -276,26 +245,18 @@
 ;; ── Main loop ──────────────────────────────────────────────────────────────
 
 (defn tokenize
-  "Tokenize an XSQL source string. Returns a vector of tokens
-   ending in `{:type :eof …}`."
+  "Tokenize an XSQL source string into a token vector ending in `:eof`."
   [^String src]
   (let [n (count src)]
     (loop [pos             0
            stack           [0]            ; indent depth stack
            at-line-start?  true
-           depth           0              ; open-paren depth — while > 0,
-                                          ; newlines/indentation are plain
-                                          ; whitespace (implicit line
-                                          ; joining, so arg-lists can span
-                                          ; lines)
+           depth           0              ; open-paren depth
            out             []]
       (cond
         ;; ── EOF ─────────────────────────────────────────────────────
         (>= pos n)
         (let [prev-char (when (pos? n) (char-at src (dec n)))
-              ;; If the source ended without a trailing \n on a content
-              ;; line, synthesize a zero-length :newline so the parser
-              ;; sees a clean line terminator.
               out (cond-> out
                     (and (pos? n)
                          (not= "\n" prev-char)
@@ -313,8 +274,6 @@
               width     (- ind-end pos)
               next-char (char-at src ind-end)]
           (cond
-            ;; Empty line, comment line, or end-of-input after ws:
-            ;; consume the whole line (incl. \n if any) as :blank-line.
             (or (nil? next-char) (= "\n" next-char) (= "#" next-char))
             (let [eol (find-eol src pos)
                   end (if (and (< eol n) (= "\n" (char-at src eol)))
@@ -331,8 +290,7 @@
                               :from pos :to ind-end
                               :text (subs src pos ind-end)}))
 
-            ;; Shallower: emit one zero-length :dedent, pop, stay at
-            ;; line-start so the next iteration re-checks (multi-pop).
+            ;; Shallower: zero-length :dedent, pop, stay at line-start (multi-pop).
             (< width (peek stack))
             (recur pos (pop stack) true depth
                    (conj out {:type :dedent :from pos :to pos :text ""}))
@@ -347,9 +305,6 @@
           (cond
             (= "\n" c)
             (if (pos? depth)
-              ;; Inside parens: the newline is just whitespace. Stay
-              ;; mid-line so the continuation line's indentation never
-              ;; reaches the indent stack.
               (recur (inc pos) stack false depth out)
               (recur (inc pos) stack true depth
                      (conj out {:type :newline :from pos :to (inc pos) :text "\n"})))

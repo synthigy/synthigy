@@ -49,8 +49,7 @@
   (if (= token-key :access_token) :access_tokens :refresh_tokens))
 
 (defn live-token-row
-  "Row for a non-revoked token value, with its session id; nil when the token is
-   unknown or revoked."
+  "Live (non-revoked) token row with its session id, or nil."
   [token-key token]
   (when token
     (let [row (dataset/get-entity (token-entity token-key) {:value token}
@@ -60,8 +59,7 @@
         row))))
 
 (defn find-token
-  "Locate a live token trying `token-key` hint first, then both kinds; returns
-   [token-key session-id] or nil."
+  "Live token as [token-key session-id], trying the `token-key` hint first."
   [token-key token]
   (some (fn [tk]
           (when-some [row (live-token-row tk token)]
@@ -69,8 +67,7 @@
         (distinct (filter some? [token-key :access_token :refresh_token]))))
 
 (defn token-revoked?
-  "True only when a row for this value exists AND is flagged revoked; row-less
-   tokens (client_credentials) stay acceptable on a valid signature."
+  "True only when a row exists AND is flagged revoked; row-less tokens pass."
   [token-key token]
   (boolean
    (when token
@@ -89,8 +86,7 @@
                                             (conj description code)))})})
 
 (defn set-session-tokens
-  "Persist freshly signed tokens as rows nested under the session in one stack
-   write."
+  "Persist signed tokens as rows under the session in one stack write."
   [session audience {access-token :access_token
                      refresh-token :refresh_token}]
   (letfn [(token-doc [signed]
@@ -114,8 +110,7 @@
   (:audience (live-token-row token-key token)))
 
 (defn session-token-values
-  "Values of live tokens of one kind for a session, newest first; audience nil
-   matches NULL audience, :any skips the filter."
+  "Live token values of one kind for a session, newest first; nil audience matches NULL, :any skips the filter."
   [session token-key audience]
   (let [rel (token-relation token-key)
         audience-where (case audience
@@ -229,21 +224,13 @@
 
 (defmethod grant-token :default [_] unsupported)
 
-;; =============================================================================
-;; Client Credentials Token Generation
-;; =============================================================================
-
-;; Probes the deployed Scope entity for the `Confidential Only` attribute
-;; before querying it — querying an unknown attribute throws, and older
-;; deployments (no flag column) must keep issuing tokens.
 (defn confidential-only-live?
   []
   (boolean
    (some #(and (:active %) (= "Confidential Only" (:name %)))
          (:attributes (dataset/deployed-entity (id/entity :iam/scope))))))
 
-;; Deliberately uncached — issuance is low-rate and staleness here would be a
-;; security bug.
+;; Never cache — a stale flag set leaks privileged scopes to public clients.
 (defn confidential-only-scope-names
   []
   (if-not (confidential-only-live?)
@@ -257,10 +244,7 @@
   [client]
   (boolean (#{:confidential "confidential"} (:type client))))
 
-;; A confidential-only scope never enters a token issued to a PUBLIC client —
-;; a browser-held token is one XSS away from exfiltration, and privileged
-;; scopes in a stolen token are tenant takeover. Silently narrowed, not an
-;; error (OAuth convention).
+;; Confidential-only scopes never enter a PUBLIC client's token — silently narrowed, not an error.
 (defn filter-public-client-scopes
   [client scopes]
   (if (confidential-client? client)
@@ -277,8 +261,7 @@
       (set/difference (set scopes) privileged))))
 
 (defn resolve-client-api-scopes
-  "{scope-id scope-name} for the client's API at `audience`, or nil if not
-   linked; keyed by id since Scope.name isn't unique across APIs."
+  "{scope-id scope-name} for the client's API at `audience` (by id — names aren't unique), or nil."
   [client-id audience]
   (let [{[api] :apis} (dataset/get-entity
                        :iam/app
@@ -291,9 +274,7 @@
       (into {} (map (juxt id/extract :name)) (:scopes api)))))
 
 (defn client-linked-audiences
-  "Every audience the client (by OAuth client_id) is linked to via its
-   :apis relation, as a vector — [] if none. See
-   docs/plans/PLAN-AUDIENCE-BINDING.md."
+  "Audiences the client is linked to via :apis, as a vector."
   [client-id]
   (let [{:keys [apis]} (dataset/get-entity
                         :iam/app
@@ -302,17 +283,7 @@
     (mapv :audience apis)))
 
 (defn resolve-audience
-  "The EFFECTIVE audience for a token request, or nil when the request
-   must be rejected (caller renders `invalid-target-error`). `requested`
-   nil, OR equal to `core/oidc-audience`: resolves to `core/oidc-audience`
-   unconditionally — the universal identity audience needs no
-   `:iam/app`→`:apis` link (Robert, 2026-09-09: '/id could be default for
-   OIDC requiring only info about user, not access to data endpoint').
-   Any OTHER requested audience: must resolve via `resolve-client-api-scopes`
-   (the client is linked to that API) or nil. Every non-nil return is an
-   audience a real token may carry — /data access is opt-in via an
-   EXPLICIT, entitled audience, never a default. See
-   docs/plans/PLAN-AUDIENCE-BINDING.md decisions 1-2."
+  "Effective token audience: nil or oidc-audience → oidc-audience, else a linked API's audience, else nil (reject)."
   [client-id requested]
   (cond
     (or (nil? requested) (= requested core/oidc-audience)) core/oidc-audience
@@ -320,9 +291,7 @@
     :else nil))
 
 (defn invalid-target-error
-  "The `invalid_target` (RFC 8707 §2) response for a `resolve-audience`
-   rejection — names what was requested and, when the client has other
-   links, what it IS entitled to."
+  "RFC 8707 `invalid_target` response naming the client's links and how to add one."
   [client-id requested]
   (token-error
    400
@@ -338,17 +307,10 @@
                 "or the console Apps page")))))
 
 (defn generate-client-token
-  "Generate a token for client_credentials grant — stateless, no session, no
-   refresh token. `audience` MUST already be resolved (see
-   synthigy.oauth.token/resolve-audience) — nil is never a valid audience
-   here."
+  "Stateless client_credentials token; `audience` must already be resolved, never nil."
   [client service-user {:keys [audience scope client_id]}]
   (let [roles (:roles service-user)
-        ;; `{}` when unresolved (the audience carries no capability scopes —
-        ;; oidc-audience, or somehow an unlinked one slipped through), NEVER
-        ;; a bare-role fallback: an id->name of nil used to mean "grant every
-        ;; role scope unfiltered" — the exact leak this whole plan exists to
-        ;; close. See docs/plans/PLAN-AUDIENCE-BINDING.md.
+        ;; `{}` never nil — a nil id->name would grant every role scope unfiltered.
         id->name (or (resolve-client-api-scopes client_id audience) {})
         user-scopes (into #{} (keep id->name) (access/roles-scope-ids roles))
         granted-scopes (cond-> user-scopes
@@ -384,21 +346,13 @@
      :expires_in (access-token-expiry client)}))
 
 (defn generate
-  "`audience` may be nil, `core/oidc-audience`, or an explicit request —
-   resolved here via `resolve-audience` (never nil past this point;
-   defaults to the universal identity audience). A caller-controlled
-   audience this client isn't linked to throws rather than mint the
-   nil-audience token this whole plan exists to stop — the PROPER 400
-   `invalid_target` response belongs at the front door (authorization_code/
-   device_code, BEFORE user interaction), not built yet; this is the
-   stopgap until then. See docs/plans/PLAN-AUDIENCE-BINDING.md steps 1/3."
+  "Mint session tokens; throws ex-info with :requested-audience when the client isn't linked to the audience."
   [{{allowed-grants "allowed-grants"} :settings
     :as client} session {:keys [audience scope client_id sub nonce]}]
   (let [audience (or (resolve-audience client_id audience)
                      (throw (ex-info "invalid_target: client not authorized for requested audience"
                                       {:client_id client_id :requested-audience audience})))
-        ;; Applied before ANY use of scope, so every downstream use sees the
-        ;; narrowed set — see filter-public-client-scopes.
+        ;; Narrow before ANY use of scope.
         scope (filter-public-client-scopes client scope)
         access-exp (->
                     (System/currentTimeMillis)
@@ -406,11 +360,7 @@
                     (+ (access-token-expiry client)))
         resource-owner (core/get-session-resource-owner session)
         user-name (or sub (:name resource-owner))
-        ;; Resolved ONCE and threaded through every process-scope call below.
-        ;; `{}` (never nil) when the audience carries no capability scopes
-        ;; (oidc-audience) — process-scope :default's `(contains? api-scopes
-        ;; scope)` then correctly grants NOTHING capability-shaped, instead
-        ;; of nil being misread as "no filter, grant everything".
+        ;; api-scopes is #{} when unlinked, never nil — nil reads as "no filter, grant everything".
         ctx {:session session
              :client client
              :audience audience
@@ -426,8 +376,7 @@
                       :jti (gen-token)
                       :client_id client_id
                       :sid session
-                      ;; Seeded empty — process-scope is the SOLE writer
-                      ;; (a string seed here breaks :default's `conj`).
+                      ;; Seeded empty — process-scope is the sole writer; a string seed breaks `conj`.
                       :scope []}
         refresh? (some #(= "refresh_token" %) allowed-grants)]
     (log/info {:id ::generated-access-token
@@ -470,8 +419,7 @@
         (when session
           (revoke-session-tokens session audience)
           (set-session-tokens session audience signed-tokens)
-          ;; GRANTED, not requested — a refresh must not be able to widen
-          ;; scope beyond what actually cleared process-scope this time.
+          ;; GRANTED, not requested — a refresh must never widen past what cleared process-scope.
           (core/set-session-audience-scope session audience granted))
         (iam/publish
          :oauth.grant/tokens
@@ -542,9 +490,7 @@
             audience (or
                       audience
                       (get-token-audience :refresh_token refresh_token))
-            ;; A client MAY narrow via `scope` (RFC 6749 §6) but can never
-            ;; widen past the session's stored (GRANTED) scope — intersect,
-            ;; never trust the request verbatim.
+            ;; Narrow only (RFC 6749 §6) — never widen past the stored granted scope.
             original-scope (core/get-session-audience-scope session audience)
             scope (if scope
                     (set/intersection (set scope) (set original-scope))
@@ -572,10 +518,7 @@
            "Provided token doesn't match session refresh token"
            "Your request will be logged and processed")
 
-          ;; Validated — NOW rotate. Revoking any earlier (before every
-          ;; predicate above passed) would burn the caller's still-valid
-          ;; refresh token as a side effect of a request that merely failed
-          ;; validation.
+          ;; Rotate only after every check passed — earlier burns a valid token on a rejected request.
           :else
           (let [resource-owner (core/get-session-resource-owner session)]
             (when current-refresh-token (revoke-token :refresh_token current-refresh-token))
@@ -611,8 +554,7 @@
          "was provided")))))
 
 (defn validate-client-credentials
-  "Validate client credentials for client_credentials grant; public clients are
-   explicitly blocked."
+  "Validate client_credentials auth; public clients are always refused."
   [{:keys [client_id client_secret]}]
   (when-let [client (get-client client_id)]
     (let [{client-secret :secret
@@ -691,9 +633,6 @@
                                (as-> x (iam.context/get-user-details {(id/key) x}))
                                (update :roles #(set (keys %)))
                                (update :groups #(set (keys %))))
-          ;; Resolved ONCE — defaults an omitted audience to the client's
-          ;; sole linked API (see resolve-audience), never nil past this
-          ;; point. docs/plans/PLAN-AUDIENCE-BINDING.md decisions 1-2.
           resolved-audience (resolve-audience client_id audience)]
       (cond
         (nil? service-user)
@@ -788,10 +727,6 @@
       ("authorization_code" "refresh_token" "urn:ietf:params:oauth:grant-type:device_code" "client_credentials")
       (try
         (grant-token oauth-request)
-        ;; `generate`/`generate-client-token` throw rather than return a
-        ;; response (they're also called from the authorize/device code
-        ;; paths, which expect a token map) — this is the one choke point
-        ;; every grant passes through, so the RFC 8707 rendering happens here.
         (catch clojure.lang.ExceptionInfo ex
           (let [{:keys [client_id requested-audience]} (ex-data ex)]
             (if-not requested-audience
@@ -810,18 +745,13 @@
        {:type "unsupported_grant_type"
         :grant_type grant_type}))))
 
-;; =============================================================================
-;; Ring Handlers (Pure Ring, no Pedestal dependencies)
-;; =============================================================================
-
 (defn token-handler
   "OAuth 2.0 token endpoint handler for all grant types."
   [request]
   (token-endpoint request))
 
 (defn revoke-token-handler
-  "OAuth 2.0 token revocation endpoint (RFC 7009); 200 for successful revocation
-   OR unknown/invalid tokens, 400 for missing params or client auth failure."
+  "OAuth 2.0 token revocation endpoint (RFC 7009)."
   [request]
   (let [invalid-client (core/json-error "invalid_client" "Client ID is not valid")
         invalid-request (core/json-error "invalid_request" "Missing required parameter: token")
@@ -875,10 +805,6 @@
             (revoke-token token-key token)
             ok-response))))))
 
-;; =============================================================================
-;; Custom Scopes (access_token)
-;; =============================================================================
-
 (defscope roles [:roles]
   :token :access_token
   :description "Your assigned roles"
@@ -914,13 +840,6 @@
   :resolve (fn [session]
              (let [{:keys [roles]} (core/get-session-resource-owner session)]
                {:super (access/superuser? roles)})))
-
-;; =============================================================================
-;; Identifier scopes — resolve roles and groups to XIDs (the canonical
-;; Synthigy id). Registered under both `*:xid` names and legacy `*:uuid`
-;; aliases (predate the euuid→xid convergence); both forms return XIDs.
-;; The owner's own id is NOT here — `:xid` rides every token unconditionally.
-;; =============================================================================
 
 (defn scope-roles-xid
   "Resolve the session's roles to user-role entities and emit their XIDs."

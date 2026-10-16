@@ -50,21 +50,15 @@
    [org.postgresql.util PSQLException]))
 
 (extend-protocol p/SettableParameter
-  ;; Java Time type conversion:
   clojure.lang.Keyword
   (set-parameter [^clojure.lang.Keyword v ^PreparedStatement s ^long i]
     (.setString s i (name v))))
 
 (def ^:dynamic *write-retries*
-  "Max retries on transient Postgres errors (40P01 deadlock, 40001
-   serialization failure) for the sync/stack write path. Each retry
-   re-opens the transaction from scratch. Set to 0 to surface the error
-   directly — used by tests that want to observe a deadlock."
+  "Max sync/stack retries on 40P01/40001; 0 surfaces the error."
   3)
 
-(defn- transient-write-error?
-  "True if `t` or its cause is a Postgres deadlock / serialization
-   failure — safe to retry by re-running the whole transaction."
+(defn transient-write-error?
   [^Throwable t]
   (let [e (cond
             (instance? PSQLException t) t
@@ -73,12 +67,8 @@
      (when e
        (#{"40P01" "40001"} (.getSQLState ^PSQLException e))))))
 
-(defn- with-write-retry
-  "Run `thunk`, retrying on transient Postgres errors up to
-   *write-retries* times with exponential backoff + jitter. `thunk` must
-   open and own its transaction — on retry it is re-invoked from scratch.
-   Safe for sync/stack: a deadlocked transaction rolls back completely,
-   so the retry runs against the same pre-attempt state."
+(defn with-write-retry
+  "Runs `thunk`, which must own its transaction, retrying transient errors with backoff."
   [thunk]
   (loop [attempt 0]
     (let [outcome (try
@@ -98,33 +88,17 @@
           (Thread/sleep backoff)
           (recur (inc attempt)))))))
 
-(defn- write-entity
-  "Postgres write path for the sync/stack protocol methods. Opens a fresh
-   transaction, binds the tx-local audit GUCs so the relation-audit
-   triggers can attribute the mutation, then runs the shared
-   `sql-query/set-entity`. `stack?` picks sync (false) vs stack (true).
-   Callers wrap this in `with-write-retry` so a transient deadlock /
-   serialization failure re-runs the whole transaction."
+(defn write-entity
   [entity-id data stack?]
   (let [result (with-open [connection (jdbc/get-connection (:datasource *db*))]
                  (jdbc/with-transaction [tx connection]
                    (plug/set-context! *db* tx)
                    (sql-query/set-entity tx (id/entity entity-id) data stack?)))]
-    ;; CRDB has no LISTEN/NOTIFY, so the trigger queues a row but doesn't
-    ;; wake the drainer. Nudge it now (post-commit). No-op when the active
-    ;; WakeSource is push-driven (PostgresNotify-style).
     (plug/wake-drainer!)
     result))
 
 (defn search-entity-roots
-  "Find root-entity `_eid`s matching the schema's filters.
-
-  Roots are filtered by the root entity's own predicates plus a correlated
-  `EXISTS (...)` per INNER relation (`inner-exists`) — never by JOINing
-  through relation tables. A JOIN multiplies root rows (one per matching
-  child), so `_limit` would slice the *joined* set and under-count roots;
-  `EXISTS` keeps one row per root, so `_limit`/`_order_by` are exact and no
-  DISTINCT dedup is needed."
+  "Root `_eid`s matching the schema's filters; INNER relations scope via correlated EXISTS, never JOIN."
   ([schema]
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (search-entity-roots connection schema)))
@@ -132,11 +106,8 @@
    (let [focused-schema (focus-order schema)
          root-as  (:entity/as focused-schema)
          root-tbl (:entity/table focused-schema)
-         ;; Root's OWN field predicates only — dissoc :relations so
-         ;; search-stack-args never emits predicates against relation
-         ;; aliases that the EXISTS rewrite does not join into FROM.
+         ;; never keep :relations here — EXISTS does not join relation aliases into FROM
          [where where-data] (search-stack-args (dissoc focused-schema :relations))
-         ;; INNER relations scope the root via correlated EXISTS.
          [exists-sql exists-data] (inner-exists focused-schema root-as)
          where-all (clojure.string/join
                     " and " (remove clojure.string/blank? [where exists-sql]))
@@ -153,8 +124,6 @@
                               (nil? distinct-on)
                               (not (some #{:_limit :_offset :_order_by}
                                          (keys (:args schema)))))
-                       ;; Whole-table query — no filter / paging / ordering.
-                       ;; nil signals the caller to pull the whole table.
                        nil
                        (do
                          (log/trace {:id :synthigy.dataset.sql/roots-query
@@ -178,17 +147,9 @@
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (search-entity connection entity-id args selection operations)))
   ([connection entity-id args selection operations]
-   ; (def entity-id entity-id)
-   ; (def args args)
-   ; (def selection selection)
-   ; (def operations operations)
    (entity-accessible? entity-id operations)
    (binding [*operation-rules* operations]
      (let [schema (selection->schema entity-id selection args)
-           ; _ (do
-           ;     (def schema schema)
-           ;     (def selection selection)
-           ;     (def args args))
            _ (log/trace {:id :synthigy.dataset.sql/searching-entity :data {:schema schema}}
                         "Searching for entity")
            roots (search-entity-roots connection schema)]
@@ -199,12 +160,6 @@
          (pull-roots connection schema roots))))))
 
 (defn purge-entity
-  ;; CRDB-side: trigger queues but doesn't wake. wake-drainer! at the
-  ;; bottom of this arm nudges the drainer post-commit.
-  ;;
-  ;; See PG purge-entity for the rationale on dropping the previous
-  ;; `enforce-purge` gate (2026-06-02). RLS via search-entity-roots is
-  ;; the per-row protection.
   ([entity-id args selection]
    (let [result
          (with-open [connection (jdbc/get-connection (:datasource *db*))]
@@ -237,7 +192,7 @@
      result)))
 
 (defn get-entity
-  "See PG get-entity for the IDENTITY_REQUIRED rationale (2026-06-03)."
+  "Single entity by identity; empty args throws IDENTITY_REQUIRED."
   ([entity-id args selection]
    (get-entity entity-id args selection #{:read :get}))
   ([entity-id args selection operations]
@@ -309,9 +264,6 @@
         (when (not-empty roots)
           (pull-roots connection schema {(keyword as) roots}))))))
 
-;; Note: shave-schema-relations moved to synthigy.dataset.sql.query
-;; Note: shave-schema-aggregates moved to synthigy.dataset.sql.query
-
 (defn search-entity-tree
   "Function searches entity tree and returns results by requested selection."
   [entity-id on {order-by :_order_by
@@ -353,17 +305,9 @@
                                     (update schema :args dissoc :_distinct :_limit :_offset))]
                           (not-empty (get found-roots (keyword as)))))]
           (cond
-            ;; If there some targets are found with search-entity-roots
             (not-empty targets)
             (let [sql (format
-                       ;; CRDB-portable variant: `select distinct _eid, link`
-                       ;; instead of `select distinct on (_eid) *`. CRDB
-                       ;; v25.2 returns extra duplicate rows under DISTINCT
-                       ;; ON for some recursive-CTE shapes (see
-                       ;; aggregate-entity-tree note). Within a single
-                       ;; entity, `link` (manager) is invariant, so
-                       ;; `DISTINCT _eid, link` is equivalent — same row
-                       ;; per unique _eid — without the DISTINCT-ON quirk.
+                       ;; never DISTINCT ON here — CRDB returns duplicate rows for recursive CTEs
                        "with recursive tree(_eid,link,path,cycle) as (
                         select
                         g._eid, g.%s, array[g._eid], false
@@ -409,11 +353,9 @@
                    (map
                     :_eid
                     (sql/execute! connection sql-final core/*return-type*)))})))
-            ;; If schema is targeted but no results are found
             (and targeting? (empty? targets))
             nil
             :else
-            ;; If targets aren't found
             (let [ranked-init-selection (if (not-empty order-by)
                                           (format
                                            "(select _eid, %s, row_number() over (%s) as _rank from %s where %s is null)"
@@ -448,20 +390,10 @@
                   :_eid
                   (sql/execute! connection sql-final core/*return-type*)))}))))))))
 
-;; aggregate-entity and aggregate-entity-tree are deleted on the Cockroach
-;; backend per the "aggregate ops are deprecated — use sql-template"
-;; direction (see [[feedback-aggregate-uses-wire-selection]]). The
-;; protocol methods at the bottom of this file throw on call so any
-;; remaining caller fails loudly instead of silently degrading.
-
 (declare delete-entity-batch)
 
 (defn delete-entity
-  "See PG delete-entity for the RLS-injection rationale and RLS-denied vs
-   nonexistent disambiguation. `args` is filtered to unique-constraint keys
-   (+ id-key); no unique key surviving the filter throws
-   UNIQUE_KEY_REQUIRED, a matched-row count above 1 throws NON_UNIQUE_MATCH.
-   A vector `args` is multirow delete by id-key — see `delete-entity-batch`."
+  "RLS-scoped unique-key delete: true when deleted or missing, DELETE_FORBIDDEN when hidden."
   ([entity-id args]
    (let [result (with-open [connection (jdbc/get-connection (:datasource *db*))]
                   (jdbc/with-transaction [tx connection]
@@ -516,8 +448,7 @@
                   true))))))))))
 
 (defn delete-entity-batch
-  "Multirow delete by a vector of id-key values. See PG's
-   `delete-entity-batch` for the rationale — same shape."
+  "Multirow delete by id-key values; returns the deleted count, any hidden id throws DELETE_FORBIDDEN."
   [connection entity-id xids]
   (binding [*operation-rules* #{:delete}]
     (let [xids (sql-query/check-delete-batch! xids)
@@ -558,8 +489,6 @@
 
 ;; FIXME
 (defn slice-entity
-  ;; CRDB-side: trigger queues but doesn't wake. wake-drainer! after the
-  ;; tx commits nudges the drainer.
   ([entity-id args selection]
    (let [result (with-open [connection (jdbc/get-connection (:datasource *db*))]
                   (jdbc/with-transaction [tx connection]
@@ -572,14 +501,7 @@
              (when args
                (if (vector? args)
                  (some targeting-args? args)
-                 ;; SLICE IS ALWAYS INNER. It removes exactly the links the
-                 ;; caller named — join mode is a READ concern (how to project
-                 ;; parents), never a write one, so `:_join` must not influence
-                 ;; which link rows get deleted. Same for :_order_by /
-                 ;; :_distinct / :_on: all query metadata, not row constraints.
-                 ;; Counting `:_join` here made a bare relation look "targeted",
-                 ;; which built a target subselect carrying no real predicate
-                 ;; and slice silently stopped cutting links.
+                 ;; SLICE IS ALWAYS INNER — never count :_join or other read metadata as a row constraint
                  (let [args' (dissoc args :_offset :_limit :_join :_order_by :_distinct :_on)
                        some-constraint? (not-empty (dissoc args' :_and :_or :_where :_maybe))]
                    (if some-constraint?

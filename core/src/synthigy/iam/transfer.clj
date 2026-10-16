@@ -9,10 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.iam.transfer
-  "Export/import portable IAM configuration as id-keyed JSON. `export` runs in
-   SYSTEM context and produces an unfiltered file — anything exposing it over
-   HTTP must gate on ROOT (synthigy.iam.access/superuser?), never RBAC-project
-   it, see synthigy.server.data/iam-export-handler."
+  "Export/import portable IAM configuration as id-keyed JSON; `export` is unfiltered, so HTTP exposure must gate on ROOT."
   (:require
    [clojure.java.io :as io]
    [clojure.set :as set]
@@ -40,29 +37,25 @@
            :prefix  "role_"
            :scalars #{:name :description :active :avatar}
            :refs    (zipmap [:scopes
-                             ;; CRUDOB — dropping :browse_entities strips B from
-                             ;; every exported role on import
+                             ;; CRUDOB — dropping :browse_entities strips B on import
                              :create_entities :read_entities :update_entities
                              :delete_entities :owned_entities :browse_entities
                              :from_read_relations :to_read_relations
                              :from_write_relations :to_write_relations
                              :from_delete_relations :to_delete_relations
-                             ;; dropping the deny-lists would SILENTLY WIDEN
-                             ;; access on import
+                             ;; dropping the deny-lists would SILENTLY WIDEN access on import
                              :deny_read_attributes :deny_write_attributes]
                             (repeat :ref))}
 
    :group {:entity  :iam/user-group
            :prefix  "group_"
            :scalars #{:name :description :active :type :avatar}
-           ;; dropping :datasets strips the RLS dataset scope from every
-           ;; exported group on import
+           ;; dropping :datasets strips the RLS dataset scope on import
            :refs    {:datasets :ref}}
 
    :user  {:entity  :iam/user
            :prefix  "user_"
-           ;; NO :password (hashed), NO :person_info/:public_profile (own opt-in
-           ;; export)
+           ;; NO :password (hashed), NO :person_info/:public_profile
            :scalars #{:name :active :type :avatar :priority :settings}
            :refs    {:roles :ref :groups :ref}}
 
@@ -84,8 +77,7 @@
       (throw (ex-info (str "Not a transferable IAM type: " type)
                       {:type type :known (vec (sort (keys transferable)))}))))
 
-;; An unknown selection key THROWS, so every key below is intersected against
-;; the live deployed model before use — narrowing never widens the allowlist.
+;; Unknown selection keys THROW: intersect with the live model — narrowing never widens the allowlist.
 
 (defn live-attributes
   "ACTIVE attribute key -> type string for a deployed entity, by resolved id."
@@ -103,8 +95,7 @@
           (sql.query/model->schema (dataset/deployed-model)))))
 
 (defn assert-no-secrets!
-  "Throw if the allowlist names an attribute the model stores as `hashed` or
-   `encrypted` — never trust a hardcoded field-name denylist here."
+  "Throw if the allowlist names an attribute the model stores as `hashed` or `encrypted`."
   [type entity attrs scalars]
   (when-let [leaks (seq (filter #(#{"hashed" "encrypted"} (get attrs %)) scalars))]
     (throw (ex-info (str "Refusing to export credential fields from " entity)
@@ -131,8 +122,7 @@
                         :selections
                         (if (= :ref rel-spec)
                           {(id/key) nil}
-                          ;; `:to` IS the target entity id — narrow against ITS
-                          ;; attributes, not the parent's
+                          ;; `:to` IS the target entity id — narrow against ITS attributes
                           (let [target-attrs (live-attributes (:to rel))]
                             (into {(id/key) nil}
                                   (map (fn [k] [k nil]))
@@ -166,8 +156,7 @@
 ;; ============================================================================
 
 (defn portable
-  "Drop `_eid` and nil-valued keys at every depth; sort keys and sort
-   collections of records by id (scalar collections keep their stored order)."
+  "Drop `_eid` and nil-valued keys at every depth; sort keys and record collections by id."
   [x]
   (cond
     (map? x)
@@ -184,9 +173,7 @@
     :else x))
 
 (defn export
-  "Portable records for `type`, deterministically ordered. `args` is an optional
-   `/data` predicate in OPERATOR form (`{:name {:_eq \"IAM Admin\"}}`) — a bare
-   `{:name \"IAM Admin\"}` fails deep in the SQL builder."
+  "Portable records for `type`, deterministically ordered; `args` is an operator-form `/data` predicate."
   ([type] (export type nil))
   ([type args]
    (let [{:keys [entity]} (spec type)
@@ -205,8 +192,7 @@
                     :encode-key-fn (fn [k] (if (keyword? k) (name k) (str k)))}))
 
 (defn export-file
-  "Write `type` to `path` as deterministic JSON; a single-record export writes
-   the bare record (the shape `import!` expects), else an array."
+  "Write `type` to `path` as deterministic JSON; a single record is written bare."
   ([type path] (export-file type path nil))
   ([type path args]
    (let [records (export type args)
@@ -260,9 +246,7 @@
              (select-keys target-rels (keys via-refs))))))
 
 (defn validate-records
-  "Dry run over already-parsed records; catches a payload granting access to an
-   id no deployed model has (the write path would otherwise mint a silent stub
-   row). Writes nothing."
+  "Dry run reporting ids the payload references that do not exist; writes nothing."
   [type payload]
   (let [records (records-of payload)
         rels    (ref-relations type)
@@ -315,9 +299,7 @@
                     "No service user to carry roles/groups (public client?) — skipped"))))))
 
 (defn import-records!
-  "Write already-parsed records; `:mode :sync` (default) matches each relation
-   the payload MENTIONS exactly (dropping a grant drops it), `:stack` is
-   additive-only. `:validate?` defaults true."
+  "Write already-parsed records in `:sync` (default) or additive `:stack` mode."
   [type payload & {:keys [mode validate? source] :or {mode :sync validate? true}}]
   (let [{:keys [entity]} (spec type)]
     (when validate?
@@ -362,9 +344,6 @@
 ;; ============================================================================
 ;; Per-type sugar
 ;; ============================================================================
-;; :stack + no validation, matching legacy synthigy.iam.util semantics —
-;; bootstrap
-;; re-runs against live DBs and shipped files may carry legacy ids.
 
 (defn import-role [path] (import! :role path :mode :stack :validate? false))
 ;; validated, unlike the others — an unknown :datasets id would mint a stub Dataset row

@@ -60,8 +60,7 @@
   [d]
   (cond
     (nil? d) nil
-    ;; SQLite hands timestamps back as strings — see
-    ;; docs/core/synthigy/dataset/timestamp notes; never cast blindly.
+    ;; SQLite hands timestamps back as strings — never cast blindly.
     (string? d) (-> ^String d (str/replace "T" " ") (subs 0 (min 16 (count ^String d))))
     (instance? java.util.Date d)
     (.format (java.time.LocalDateTime/ofInstant (.toInstant ^java.util.Date d)

@@ -9,10 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.federated
-  "Identity brokering — Synthigy as an OAuth Relying Party to upstream IdPs;
-   federation is an alternate credential collector inside the existing
-   authorization_code flow, and downstream clients only ever see Synthigy
-   tokens, never an upstream IdP token. See docs/core/synthigy/oauth/federated.md."
+  "Identity brokering — Synthigy as an OAuth Relying Party; downstream clients only ever see Synthigy tokens."
   (:require
    [buddy.core.hash :as hash]
    [buddy.core.nonce :as nonce]
@@ -33,17 +30,8 @@
    [java.time Duration]
    [java.util Base64]))
 
-;; =============================================================================
-;; Data-model seams (PLUG these into datasets later)
-;; =============================================================================
-;;
-;; Provider config (entity pins, `resolve-provider`, `list-providers`) lives in
-;; `synthigy.oauth.federated.registry` — below this ns so the login page and
-;; onboarding can read it without cycling back through the broker.
-
 (defn default-resolve-identity
-  "(iss, sub, claims) -> Synthigy resource-owner via the linked External
-   Identity row, or nil if unlinked (fails closed, never auto-provisions)."
+  "(iss, sub) -> resource-owner via the linked External Identity, or nil — fails closed, never auto-provisions."
   [iss sub _claims]
   (when (and iss sub)
     (some-> (dataset/get-entity
@@ -55,8 +43,7 @@
 
 (defonce ^:dynamic *resolve-identity* default-resolve-identity)
 
-;; Session must be freshly authenticated within this window to link a new
-;; identity — closes the silent-link-via-stolen-session hole. Nil disables.
+;; Linking needs auth within this window — closes silent-link-via-stolen-session; nil disables.
 (defonce ^:dynamic *link-max-age-ms*
   (* 5 60 1000))
 
@@ -70,8 +57,7 @@
     true))
 
 (defn provision-user!
-  "First-time federated identity -> a fresh Synthigy user + External Identity
-   link; refuses ({:error \"email_exists\"}) if the email is already owned."
+  "New user + External Identity link for a first-time identity; refuses `email_exists` when the email is owned."
   [provider iss sub claims]
   (let [email    (:email claims)
         username (or email sub)]
@@ -116,18 +102,13 @@
             {:error "provision_failed"}))
         {:error "provision_failed"}))))
 
-;; =============================================================================
-;; Shared low-level HTTP (used by both provider families)
-;; =============================================================================
-
 (def ^:private http-client
   (delay (-> (HttpClient/newBuilder)
              (.connectTimeout (Duration/ofSeconds 5))
              .build)))
 
 (defn send-json
-  "Send an HttpRequest, parse JSON body; throws on >=400 (callers fail closed to
-   an error redirect)."
+  "Send an HttpRequest and parse the JSON body; throws on >=400."
   [^HttpRequest req]
   (let [resp (.send ^HttpClient @http-client req (HttpResponse$BodyHandlers/ofString))]
     (when (>= (.statusCode resp) 400)
@@ -142,10 +123,6 @@
                  .GET
                  .build)))
 
-;; =============================================================================
-;; PKCE + signed state + base64url
-;; =============================================================================
-
 (defn b64url [^bytes bs]
   (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bs))
 
@@ -156,13 +133,11 @@
      :challenge (b64url (hash/sha256 verifier))}))
 
 (defn callback-uri []
-  ;; Exact, stable redirect_uri — identical on start + callback, registered at
-  ;; the IdP.
+  ;; Exact redirect_uri — must be identical on start + callback and registered at the IdP.
   (str (core/domain+) "/oauth/federated/callback"))
 
 (defn error-redirect
-  "302 to /oauth/status, or to `target` (+ `params`) when the caller has a page
-   the person can actually retry from."
+  "302 to /oauth/status, or to a retryable `target` page."
   ([err] (error-redirect err nil nil))
   ([err target] (error-redirect err target nil))
   ([err target params]
@@ -179,16 +154,11 @@
                                       params)))}}))
 
 (defn login-retry
-  "Send a still-recoverable login failure back to the client's own login page,
-   carrying the flow's own state."
+  "Send a recoverable login failure back to the client's own login page with the flow's state."
   [err-code ac-code]
   (error-redirect err-code (core/get-client-login-url (ac/get-code-client ac-code))
                   {:state (core/encrypt {:authorization-code ac-code
                                          :flow "authorization_code"})}))
-
-;; =============================================================================
-;; Provider dispatch (per-provider, families share one implementation)
-;; =============================================================================
 
 (def ^:private provider-families
   (-> (make-hierarchy)
@@ -203,36 +173,26 @@
       (derive :discord   :oauth2)))
 
 (defmulti authorize-url
-  "Upstream authorize-redirect URL; ctx: {:redirect-uri :state :nonce
-   :challenge}."
+  "Upstream authorize-redirect URL; ctx {:redirect-uri :state :nonce :challenge}."
   (fn [cfg _ctx] (:provider cfg))
   :hierarchy #'provider-families)
 
 (defmulti fetch-identity
-  "Exchange the callback code for {:iss :sub :claims}, or nil on failure; ctx:
-   {:code :redirect-uri :verifier :nonce :iss}."
+  "Exchange the callback code for {:iss :sub :claims} or nil; ctx {:code :redirect-uri :verifier :nonce :iss}."
   (fn [cfg _ctx] (:provider cfg))
   :hierarchy #'provider-families)
-
-;; --- Unknown provider --------------------------------------------------------
 
 (defmethod authorize-url :default [cfg _]
   (throw (ex-info "Unsupported federation provider" {:provider (:provider cfg)})))
 (defmethod fetch-identity :default [cfg _]
   (throw (ex-info "Unsupported federation provider" {:provider (:provider cfg)})))
 
-;; Plain `require` (not a static :require) avoids a load cycle: the families
-;; require this ns for the multimethod declarations above.
+;; Runtime require — a static :require cycles (the families require this ns).
 (require 'synthigy.oauth.federated.oidc)
 (require 'synthigy.oauth.federated.oauth2)
 
-;; =============================================================================
-;; Ring handlers + mode helpers (login vs link)
-;; =============================================================================
-
 (defn begin-upstream
-  "Build PKCE + nonce, sign `extra` (the mode payload) into state, 302 to the
-   IdP."
+  "PKCE + nonce, sign `extra` into state, 302 to the IdP."
   ([cfg provider extra] (begin-upstream cfg provider extra nil))
   ([cfg provider extra prompt]
    (let [n (b64url (nonce/random-bytes 16))
@@ -246,8 +206,7 @@
                                                 prompt (assoc :prompt prompt)))}})))
 
 (defn handle-login
-  "Login mode: resolve or provision (if the client allows signup) the user, then
-   finish the downstream authorization_code flow."
+  "Login mode: resolve or provision the user, then finish the downstream authorization_code flow."
   [id provider ac-code client-info]
   (if (nil? (ac/get-code ac-code))
     (error-redirect "expired_code")
@@ -297,8 +256,7 @@
   (some-> (console-return r) (str/replace #"[?#].*" "") not-empty))
 
 (defn handle-console-login
-  "Console mode: mint a console session directly for an already-linked identity;
-   deliberately no provisioning branch."
+  "Console mode: mint a console session for an already-linked identity; never provisions."
   [id provider return client-info]
   (let [resolved (*resolve-identity* (:iss id) (:sub id) (:claims id))]
     (cond
@@ -322,8 +280,7 @@
          :cookies (login/session-cookie sid)}))))
 
 (defn handle-reauth
-  "Step-up through an ALREADY-LINKED identity: stamp the current session as
-   freshly authenticated rather than minting a second one."
+  "Step-up via an already-linked identity: re-stamp the current session, never mint one."
   [request id provider reauth-session return]
   (let [current (get-in request [:cookies "idsrv.session" :value])
         owner   (some-> current core/live-session-owner)
@@ -375,8 +332,7 @@
                                           :provider (name provider)})))}})
 
 (defn handle-link
-  "Link mode: attach (iss,sub) to the currently authenticated account, with
-   CSRF/hijack guards."
+  "Link mode: attach (iss,sub) to the currently authenticated account."
   [request id provider link-session return]
   (let [current (get-in request [:cookies "idsrv.session" :value])
         owner   (some-> current core/live-session-owner)
@@ -389,8 +345,7 @@
       (nil? owner)
       (err "link_requires_login")
 
-      ;; step-up: the session must have authenticated recently to add a login
-      ;; method
+      ;; step-up: the session must have authenticated recently to add a login method
       (not (session-fresh? current))
       (err "link_reauth_required")
 
@@ -409,16 +364,11 @@
           (do (create-link! provider (:iss id) (:sub id) (:claims id) owner)
               (link-success provider return)))))))
 
-;; -----------------------------------------------------------------------------
-;; Admin onboarding — Auth0 "tickets" pattern: a confidential client mints a
-;; one-time claim link, Synthigy owns the token, the client owns delivery.
-
 (defn json-response [status body]
   {:status status :headers {"Content-Type" "application/json"} :body (json/write-str body)})
 
 (defn handle-claim
-  "Claim callback: staple the just-authenticated (iss,sub) to the token's target
-   user by stable xid, activate the account, and burn the nonce."
+  "Claim callback: link (iss,sub) to the token's target user by xid, activate it, burn the nonce."
   [id provider {:keys [u n r]}]
   (let [target (onboarding/claim-target u)]
     (cond
@@ -429,10 +379,7 @@
       (some-> (*resolve-identity* (:iss id) (:sub id) (:claims id)) :xid (not= u))
       (error-redirect "identity_already_linked")
 
-      ;; CAS gate FIRST (see onboarding/finish-claim!): only a request that
-      ;; actually wins the claim may link the identity — a losing concurrent
-      ;; request (nonce already burned by whoever won first) must not
-      ;; mutate the account at all.
+      ;; CAS gate FIRST — a request that lost the claim must not mutate the account.
       (onboarding/finish-claim! target n)
       (do
         (create-link! provider (:iss id) (:sub id) (:claims id) target)
@@ -446,8 +393,7 @@
       (error-redirect "claim_invalid"))))
 
 (defn start-handler
-  "GET /oauth/federated/start?provider=<type>&mode=<login|link|console|claim> —
-   bounce to the upstream IdP for the given mode."
+  "GET /oauth/federated/start — bounce to the upstream IdP for the given mode."
   [request]
   (binding [core/*domain* (core/original-uri request)]
     (let [{:keys [provider state mode return]} (:params request)
@@ -507,8 +453,7 @@
                              "Federated link start failed")
                    (err "provider_unsupported")))))
 
-        ;; claim mode: `state` here IS the onboarding token (not a downstream
-        ;; flow)
+        ;; claim mode: `state` IS the onboarding token, not a downstream flow
         (= mode "claim")
         (if-let [{:keys [u n m r]} (onboarding/valid-claim state)]
           ;; `m` is keyed by dispatch FAMILY ("google"), not the row's URL slug.
@@ -532,8 +477,7 @@
                    (err "provider_unsupported")))))))))
 
 (defn callback-handler
-  "GET /oauth/federated/callback — upstream redirect target; branches on the
-   signed state to link/console/login mode."
+  "GET /oauth/federated/callback — branches on the signed state to the mode handler."
   [request]
   (binding [core/*domain* (core/original-uri request)]
     (let [{:keys [code state iss error]} (:params request)
@@ -572,21 +516,14 @@
             (err "callback_error")))))))
 
 (defn providers-handler
-  "GET /oauth/federated/providers — public JSON list of active providers (never
-   secrets)."
+  "GET /oauth/federated/providers — public JSON list of active providers, never secrets."
   [_request]
   {:status 200
    :headers {"Content-Type" "application/json"}
    :body (json/write-str (registry/list-providers))})
 
-;; -----------------------------------------------------------------------------
-;; Authenticated account-management: list + unlink the current user's
-;; identities.
-;; (Add is the existing link-mode: start?provider=X&mode=link.)
-
 (defn session-user
-  "Current user (name + password + linked identities) from the idsrv.session
-   cookie, or nil."
+  "Current user with password and linked identities from the idsrv.session cookie, or nil."
   [request]
   (when-let [owner (some-> (get-in request [:cookies "idsrv.session" :value])
                            core/live-session-owner)]
@@ -605,8 +542,7 @@
     (json-response 401 {:error "link_requires_login"})))
 
 (defn unlink-identity!
-  "Shared unlink logic for session- and client-scoped routes; refuses if `xid`
-   is the user's last login method."
+  "Unlink `xid` from the user; refuses the last login method."
   [user xid]
   (cond
     (nil? xid)
@@ -633,8 +569,7 @@
             (json-response 200 {:ok true}))))))
 
 (defn unlink-handler
-  "POST /oauth/federated/unlink {xid} — remove one of the current user's linked
-   identities; requires fresh auth."
+  "POST /oauth/federated/unlink {xid} — remove a linked identity; requires fresh auth."
   [request]
   (let [session (get-in request [:cookies "idsrv.session" :value])
         xid     (get-in request [:params :xid])
@@ -643,10 +578,6 @@
       (nil? user)                    (json-response 401 {:error "link_requires_login"})
       (not (session-fresh? session)) (json-response 403 {:error "link_reauth_required"})
       :else                          (unlink-identity! user xid))))
-
-;; -----------------------------------------------------------------------------
-;; Client-scoped identity management (P5) — the BFF/support-desk face, a
-;; separate route from the session-scoped handlers above (P0 two-faces rule).
 
 (defn target-user
   "Resolve an explicit target user by xid — same shape `session-user` returns."
@@ -659,8 +590,7 @@
                            :selections {:xid nil :provider nil :email nil :linked_at nil}}]})))
 
 (defn client-identities-handler
-  "GET /oauth/federated/client/identities?user=<xid> — a provisioning
-   principal lists the linked sign-in methods of a user it administers."
+  "GET /oauth/federated/client/identities?user=<xid> — linked identities of a user the provisioner administers."
   [request]
   (if-let [{:keys [principal]} (onboarding/provisioner request)]
     (if-let [user (target-user (get-in request [:params :user]))]
@@ -672,8 +602,7 @@
     (json-response 403 {:error "provision_forbidden"})))
 
 (defn client-unlink-handler
-  "POST /oauth/federated/client/unlink {user, xid} — a provisioning principal
-   unlinks an identity of a user it administers."
+  "POST /oauth/federated/client/unlink {user, xid} — unlink an identity of a user the provisioner administers."
   [request]
   (if-let [{:keys [principal]} (onboarding/provisioner request)]
     (let [{:keys [user xid]} (:params request)]

@@ -66,7 +66,7 @@
 ;; =============================================================================
 
 (defn seed-webhook!
-  "Insert a webhook connector with sensible defaults. Returns the persisted row."
+  "Insert a webhook connector with sensible defaults."
   ([url secret] (seed-webhook! url secret 100))
   ([url secret priority]
    (c/save-connector!
@@ -99,7 +99,7 @@
     (c/save-connector! (assoc conn :enabled true))))
 
 (defn set-priority!
-  "Reorder a connector. Lower priority runs first in the chain."
+  "Reorder a connector; lower priority runs first."
   [xid priority]
   (when-let [conn (c/find-connector xid)]
     (c/save-connector! (assoc conn :priority priority))))

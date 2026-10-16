@@ -9,12 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.xsql.sql-params
-  "Shared grammar for named SQL-template parameters: `?name[:type][[]]`,
-   with `?name?` optional, `(a,b)` restriction sets, and `=default`.
-   Server's `rewrite` compiles to positional `?` for JDBC; console's
-   `analyze` builds a typed form from the template text. Pure, no deps —
-   safe on JVM and CLJS. Mixing named and bare `?` in one template is an
-   error."
+  "Shared grammar for named SQL-template parameters: `rewrite` for the server, `analyze` for the console."
   (:require [clojure.string :as str]
             [synthigy.timestamp :as ts]
             [clojure.edn :as edn]))
@@ -37,10 +32,7 @@
    "timestamp" :timestamp
    "datetime"  :timestamp
    "uuid"      :uuid
-   ;; SECURITY: `order` is the ONE token that INTERPOLATES into SQL text
-   ;; instead of binding — safe only because normalize-order-specs
-   ;; enforces a closed, author-declared allowlist. No other type may
-   ;; ever take this path.
+   ;; SECURITY: the ONE interpolating type — safe only via normalize-order-specs' allowlist; no other type may take this path
    "order"     :order})
 
 (def canonical-types
@@ -60,7 +52,6 @@
 (def ^:private re-ident-continue #"[A-Za-z0-9_]")
 
 (defn char-at
-  "1-char string at index `i`, or nil if out of bounds."
   [s i]
   (when (and (>= i 0) (< i (count s)))
     (subs s i (inc i))))
@@ -82,8 +73,7 @@
 ;;; ============================================================================
 
 (defn prettify
-  "Turn a snake/space identifier into a human label: `from_year` →
-   \"From year\", `ratings` → \"Ratings\"."
+  "Turn a snake/space identifier into a human label: `from_year` → \"From year\"."
   [nm]
   (let [words (->> (str/split (str nm) #"[_\s]+")
                    (remove str/blank?))]
@@ -97,9 +87,7 @@
 ;;; ============================================================================
 
 (defn strip-comments
-  "Remove `-- …` line comments and `/* … */` block comments, leaving
-   single-quoted string literals intact (comments collapse to whitespace
-   so tokens never merge). Portable variant of the server's StringBuilder version."
+  "Remove `--` and `/* */` comments (collapsed to whitespace), leaving single-quoted literals intact."
   [sql]
   (let [n (count sql)]
     (loop [i 0 out []]
@@ -140,11 +128,7 @@
 ;;; ============================================================================
 
 (defn scan-placeholders
-  "Scan `sql` for `?` placeholders, skipping string literals and
-   comments, returning occurrences in document order:
-     {:kind :named  :name str  :raw-type str-or-nil  :type kw-or-nil
-      :array? bool  :from int  :to int}
-     {:kind :positional        :from int  :to int}"
+  "Scan `sql` for `?` placeholders in document order, skipping string literals and comments."
   [sql]
   (let [n (count sql)]
     (loop [i 0 mode :normal out []]
@@ -179,13 +163,8 @@
               (if (ident-start? c2)
                 (let [name-end (scan-while sql (+ i 2) ident-continue?)
                       nm       (subs sql (inc i) name-end)
-                      ;; `?name?` — optional marker, tight after the name,
-                      ;; before `:type`. Absent param ⇒ the containing
-                      ;; conjunct is dropped by `rewrite` instead of erroring.
                       opt?     (= "?" (char-at sql name-end))
                       mark-end (if opt? (inc name-end) name-end)
-                      ;; optional `:type` — a single `:` (not `::`)
-                      ;; directly followed by an identifier.
                       typed?   (and (= ":" (char-at sql mark-end))
                                     (ident-start? (char-at sql (inc mark-end))))
                       type-end (if typed?
@@ -193,9 +172,6 @@
                                  mark-end)
                       type-str (when typed?
                                  (subs sql (inc mark-end) type-end))
-                      ;; optional `(a, b, c)` restriction set — tight after
-                      ;; the type OR the bare name (XSQL order params; see
-                      ;; tokens.cljc).
                       paren-at (cond
                                  (and typed? (= "(" (char-at sql type-end))) type-end
                                  (and (not typed?) (= "(" (char-at sql mark-end))) mark-end)
@@ -264,12 +240,7 @@
     (str "?" nm " is used as both a scalar and an array — pick one")))
 
 (defn normalize-order-specs
-  "Normalize an `order`-typed param VALUE to `[[col dir] …]` — a string,
-   a sequence of strings, or `[col dir]` pairs; direction defaults asc.
-   `type-args` is the author-declared restriction set. SECURITY: every
-   column/direction is re-validated here (`[a-z_][a-z0-9_]*`, membership
-   in the restriction set) — this is what makes it safe for the caller
-   below to interpolate the result straight into SQL text."
+  "SECURITY: normalize an `order` param value to `[[col dir] …]`, re-validating every token against the allowlist so it is safe to interpolate."
   [v {:keys [name span type-args]}]
   (let [fail (fn [msg]
                (throw (ex-info (str "Parameter ?" name " " msg)
@@ -307,19 +278,11 @@
     pairs))
 
 (def re-identifier-position
-  "Matches text ENDING at a placeholder that sits in an identifier position —
-   `ORDER BY ?x`, `GROUP BY a, ?x`. Public: also used by
-   `synthigy.xsql.program`'s completion, so the two can never drift."
+  "Matches text ending at a placeholder in an identifier position (`ORDER BY ?x`); shared with program completion."
   #"(?is)\b(ORDER|GROUP)\s+BY\s+(?:[^,()]*,\s*)*$")
 
 (defn identifier-position-errors
-  "SECURITY: a bind param in ORDER BY/GROUP BY is a SILENT no-op — the
-   plan is fixed before values bind, so `ORDER BY ?'name'` sorts by a
-   constant, every row ties, and no error is ever raised (this is legal
-   SQL). Hence error, not warning. `:order`-typed params are the one
-   sanctioned exception, and ONLY when they carry a restriction set — an
-   unrestricted `:order` param would let caller text reach the
-   identifier regex unchecked, which is not an allowlist."
+  "SECURITY: a bind param in ORDER BY/GROUP BY silently sorts by a constant — error unless a restricted `:order` param."
   [sql named]
   (vec (for [{:keys [from to name type type-args]} named
              :when (re-find re-identifier-position (subs sql 0 from))
@@ -337,18 +300,7 @@
           :from from :to to})))
 
 (defn analyze
-  "Analyze a **raw** SQL template for parameter use. Returns:
-
-     {:mode  :named | :positional | :none
-      :params [{:name :array? :type :label :typed?
-                :type-conflict? :unknown-types} …]
-      :positional-count int
-      :errors   [{:message str :from int :to int} …]
-      :warnings [{:message str :from int :to int} …]}
-
-   `:params` (named mode only) is in document order, one entry per
-   distinct name. Each error/warning carries the `:from`/`:to` span of
-   the offending placeholder token so the editor can underline it."
+  "Analyze a raw SQL template's parameter use into `{:mode :params :positional-count :errors :warnings}`."
   [raw]
   (let [occ        (scan-placeholders (or raw ""))
         named      (filterv #(= :named (:kind %)) occ)
@@ -385,9 +337,6 @@
                         (some :default occs)
                         (assoc :default (some :default occs)))))
                   distinct-names)
-            ;; Each diagnostic is pinned to the span of the offending
-            ;; token(s) — `analyze` runs on the raw template, so `:from`/
-            ;; `:to` are real document offsets.
             errors
             (-> []
                 (into (for [nm distinct-names
@@ -424,9 +373,7 @@
 ;;; ============================================================================
 
 (defn validate-value
-  "Validate an already-parsed `value` against a declared `type`. Returns
-   an error string, or nil when valid. A nil value is always allowed —
-   it binds SQL NULL. For array params every element is checked."
+  "Error string for a parsed `value` invalid against `type`, else nil; nil values always pass."
   [type array? value]
   (letfn [(scalar-err [t v]
             (when (some? v)
@@ -448,9 +395,7 @@
       (scalar-err type value))))
 
 (defn validate-params
-  "Given the `analyze` `:params` spec and a `{name value}` map, return a
-   vector of `[name error-string]` for every invalid entry. A name that
-   is absent from `values` is reported as \"required\"."
+  "`[name error]` for every invalid or missing required entry of `values`."
   [param-specs values]
   (vec
    (for [{:keys [name array? type optional]} param-specs
@@ -465,9 +410,7 @@
 ;;; ============================================================================
 
 (defn clause-tokens
-  "Light scan of comment-free `sql`: word tokens `{:kind :word :word lc
-   :from :to :depth}` and closing parens `{:kind :close :from :depth}`
-   — enough to find clause/conjunct boundaries without parsing SQL."
+  "Word and close-paren tokens of comment-free `sql`, enough for clause/conjunct boundaries."
   [sql]
   (let [n (count sql)]
     (loop [i 0 depth 0 quote nil out []]
@@ -486,8 +429,7 @@
             (= "(" c)  (recur (inc i) (inc depth) nil out)
             (= ")" c)  (recur (inc i) (dec depth) nil
                               (conj out {:kind :close :from i :depth (dec depth)}))
-            ;; skip a `?name…` placeholder head so a param named `and`
-            ;; can never read as a connective
+            ;; skip `?name…` heads so a param named `and` never reads as a connective
             (= "?" c)  (recur (scan-while sql (inc i)
                                           #(or (ident-continue? %) (= "?" %)))
                               depth nil out)
@@ -503,10 +445,7 @@
     "window" "having" "returning" "fetch" "for"})
 
 (defn drop-optional-conjuncts
-  "Remove the containing top-level WHERE/HAVING conjunct for each
-   unsupplied optional `?name?` in `dropped`. Returns `{:sql new-sql}`
-   or `{:errors [str …]}` (occurrence outside WHERE/HAVING, or under a
-   top-level OR where dropping an AND-conjunct is ambiguous)."
+  "Drop the top-level WHERE/HAVING conjunct holding each unsupplied optional param; `{:sql}` or `{:errors}`."
   [sql dropped]
   (let [toks    (clause-tokens sql)
         clauses (->> toks
@@ -578,10 +517,7 @@
 ;;; ============================================================================
 
 (defn coerce-default
-  "Coerce a `?name:type=default` literal (a raw string) to its typed value:
-   array literals `[…]` and numbers/booleans/quoted-strings via EDN (commas
-   read as whitespace, so `[\"a\",\"b\"]` works); otherwise the bare string.
-   Shared by the XSQL compiler and the sql-template rewrite."
+  "Coerce a raw `=default` literal to its typed value."
   [raw type]
   (cond
     (nil? raw) nil
@@ -594,8 +530,7 @@
       raw)))
 
 (defn apply-defaults
-  "Fill `pmap` with each named placeholder's inline `=default` for params
-   the caller did not supply. Caller value always wins."
+  "Fill `pmap` with inline defaults for unsupplied params; caller value always wins."
   [named pmap]
   (reduce (fn [m {:keys [name type default]}]
             (if (and (some? default) (not (contains? m name)))
@@ -623,9 +558,7 @@
                 (str "Parameter ?" nm "[] expects an array value"))))))
 
 (defn split-select-items
-  "Top-level SELECT-list items of `sql` as trimmed strings, or nil when no
-   depth-0 SELECT is found. Splits on depth-0 commas, skipping quotes and
-   `{…}` placeholders; strips a leading DISTINCT."
+  "Top-level SELECT-list items of `sql`, or nil when there is no depth-0 SELECT."
   [sql]
   (let [toks   (clause-tokens sql)
         sel    (first (filter #(and (= :word (:kind %)) (zero? (:depth %))
@@ -669,17 +602,11 @@
              vec)))))
 
 (def re-simple-column
-  "A SELECT item that names one column: a `{…}` placeholder or a dotted
-   (optionally quoted) identifier chain."
+  "A SELECT item naming one column: a `{…}` placeholder or a dotted identifier chain."
   #"(?:\{[^{}]+\})|(?:[A-Za-z_][A-Za-z0-9_]*(?:\.\"?[A-Za-z_][A-Za-z0-9_]*\"?)+)")
 
 (defn select-order-exprs
-  "Map ORDER-BY key → the SELECT list's own expression for it. A bare
-   `{entity.field}` (or `tbl.col`) item maps its output name to the item
-   itself, so an `:order` interpolation emits the qualified expression —
-   a bare column name is ambiguous on SQLite once auto-joins share the
-   name. Explicitly aliased items keep the bare alias (both engines
-   resolve output aliases in ORDER BY). Duplicate output names drop out."
+  "Map ORDER-BY key → the SELECT list's own simple-column expression for it."
   [sql]
   (let [entries
         (keep (fn [item]
@@ -699,10 +626,7 @@
     (into {} (remove (comp dups first)) entries)))
 
 (defn build-positional
-  "Splice named placeholders out of `sql`, returning `[new-sql params types]`.
-   A scalar param emits `?`; an array emits `(?,?,…)`, or `(NULL)` when
-   empty (the standard empty-IN workaround); portable across PG+SQLite —
-   PG callers wanting `ANY` write `ANY(ARRAY[?names[]])` instead."
+  "Splice named placeholders out of `sql`, returning `[new-sql params types]`."
   [sql named pmap]
   (let [order-exprs (delay (select-order-exprs sql))
         declared    (reduce (fn [m {:keys [name type]}]
@@ -719,10 +643,7 @@
               v (get pmap name)
               [placeholder add-vals]
               (cond
-                ;; SECURITY: the ONE interpolating type. normalize-order-specs
-                ;; enforces a closed, author-declared column allowlist, so this
-                ;; never carries caller text. No bind values — a bound `?`
-                ;; here would silently sort by a constant instead.
+                ;; SECURITY: only interpolation — normalize-order-specs' allowlist keeps caller text out; never bind here (sorts by a constant)
                 (= :order type)
                 [(->> (normalize-order-specs v {:name name :type-args type-args})
                       (map (fn [[col dir]]
@@ -745,15 +666,7 @@
                  (into types (repeat (count add-vals) (get declared name)))))))))
 
 (defn rewrite
-  "Compile named placeholders in **comment-free** `sql` down to positional
-   `?`. `params` is a `{name value}` map (named mode) or a vector/seq
-   (positional mode). Returns `{:sql str :params vector :types vector}` on success
-   (`:types` parallel to `:params`, named mode only), or
-   `{:errors [str …]}` on a validation failure.
-
-   A template with no `?name` placeholder is passed through unchanged
-   (legacy positional path). Inline `:type` annotations and `[]` markers
-   are stripped — the rewritten SQL carries only positional `?`."
+  "Compile named placeholders in comment-free `sql` to positional `?`: `{:sql :params :types}` or `{:errors}`."
   [sql params]
   (let [occ        (scan-placeholders sql)
         named      (filterv #(= :named (:kind %)) occ)
@@ -782,10 +695,6 @@
       (let [pmap    (->> params
                          (into {} (map (fn [[k v]] [(name k) v])))
                          (apply-defaults named))
-            ;; `?name?` occurrences with no value (and no default): their
-            ;; containing conjunct is dropped, then the reduced text is
-            ;; rewritten from scratch. Terminates — dropped occurrences
-            ;; leave the text with the conjunct.
             dropped (filterv #(and (:optional? %)
                                    (not (contains? pmap (:name %))))
                              named)]

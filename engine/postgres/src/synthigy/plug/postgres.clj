@@ -9,25 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.plug.postgres
-  "PG-side delta plug — DDL, trigger generation, drainer thread.
-
-   Owned by `:synthigy/subscriptions.postgres` (OSS). The plug captures
-   every entity/relation mutation into queue tables, fans them out via a
-   drainer thread, and provides `set-context!` to stamp request provenance
-   on tx-local GUCs.
-
-   Consumers:
-     - SSE subscriptions (OSS) — live notifications over `/data/events`
-     - observability plug (`:synthigy/observability` — DuckDB OSS,
-       ClickHouse Pro) — persists envelopes for `/history` queries
-
-   PG-specific deltas vs SQLite:
-     - LISTEN/NOTIFY → drainer parks on `getNotifications`
-     - GUC (`current_setting` / `set_config`) → no `_ctx` table
-     - SKIP LOCKED → multi-drainer-safe
-     - `plpgsql` trigger functions → one function per entity table, shared
-       across INSERT/UPDATE/DELETE via TG_OP switch
-     - `txid_current()` is native → no UUIDv7 synthesis needed"
+  "PG-side delta plug — queue and trigger DDL, drainer threads, provenance GUCs."
   (:require
    [clojure.string :as str]
    [next.jdbc :as jdbc]
@@ -43,28 +25,12 @@
    [synthigy.supervisor :as supervisor]
    [synthigy.plug.values :as values]
    [synthigy.plug.wake :as wake]
-       ;; Include to extend wake source
+   ;; loaded to extend the wake source
    synthigy.plug.wake.postgres))
 
-;; ============================================================================
-;; Wake source — delegate to shared `synthigy.plug.wake/*wake-source*`.
-;;
-;; The PG default (PostgresNotify on `synthigy_delta_ready`) is installed
-;; by `:synthigy/subscriptions.postgres` :start. Operators wanting
-;; cross-cluster fanout can alter-var-root `wake/*wake-source*` to a
-;; Composite of PostgresNotify + NATS / Kafka / changefeed before :start.
-;; ============================================================================
-
 (defn wake-drainer!
-  "Backend-named alias for `synthigy.plug.wake/signal-drainer!`.
-   For the default PostgresNotify source, `signal!` is a no-op (the
-   trigger fires pg_notify), so this is essentially free."
   []
   (wake/signal-drainer!))
-
-;; ============================================================================
-;; Queue + trigger function DDL
-;; ============================================================================
 
 (def ^:private delta-queue-ddl
   "CREATE UNLOGGED TABLE IF NOT EXISTS __relation_delta_queue (
@@ -81,19 +47,8 @@
      payload JSONB NOT NULL
    )")
 
-;; STATEMENT-level audit trigger function — fires once per INSERT/DELETE on
-;; a link table and bulk-enqueues one queue row per affected link row from
-;; the new_rows/old_rows transition tables (set-based, not per-row). Generic
-;; across link tables: the from/to column names arrive via TG_ARGV and the
-;; INSERT…SELECT is built with format(). The format template is dollar-quoted
-;; ($fmt$…$fmt$) so the SQL's own single quotes need no escaping. Does NOT
-;; pg_notify — that's the separate statement-level notify trigger's job.
 (def ^:private relation-emit-fn-ddl
-  "Shared relation-delta emit function. TG_ARGV[0]=relation-xid, [1]/[2]=from/to
-   columns, [3]='true'/'false' audit flag. The `'audit'` flag is frozen into the
-   payload at enqueue time (decided by the model at trigger-install) so the
-   drainer never re-evaluates the mutable policy at drain time — same
-   freeze-at-write contract as the entity emit function."
+  "Shared relation emit fn; TG_ARGV = relation xid, from col, to col, frozen audit flag."
   "CREATE OR REPLACE FUNCTION synthigy_emit_relation_delta()
    RETURNS TRIGGER AS $$
    BEGIN
@@ -141,9 +96,6 @@
      RETURN NULL;
    END $$ LANGUAGE plpgsql")
 
-;; Statement-level notify trigger function — fires ONCE per mutation
-;; statement (regardless of row count). Single pg_notify per statement
-;; means a 100k-row slice produces 1 wakeup instead of 100k.
 (def ^:private notify-fn-ddl
   "CREATE OR REPLACE FUNCTION synthigy_notify_delta_ready()
    RETURNS TRIGGER AS $$
@@ -152,15 +104,6 @@
      RETURN NULL;
    END $$ LANGUAGE plpgsql")
 
-;; BEFORE INSERT populate trigger — fills NEW.from_xid / NEW.to_xid when the
-;; caller didn't supply them (raw SQL inserts that bypass link-relations).
-;;
-;; Fast path: link-relations always populates both xids in xid mode (see
-;; project-saved-entities / link-relations 2026-05-20). For that hot path
-;; the trigger should be ~free. The dynamic-SQL field extraction + lookup
-;; is only needed when a row arrives missing one or both xids (raw
-;; back-channel writes). We early-return when both are present to skip
-;; ~100k EXECUTEs on a 100k-rating import.
 (def ^:private relation-xid-populate-fn-ddl
   "CREATE OR REPLACE FUNCTION synthigy_relation_xid_populate()
    RETURNS TRIGGER AS $$
@@ -184,14 +127,8 @@
      RETURN NEW;
    END $$ LANGUAGE plpgsql")
 
-;; ============================================================================
-;; Helpers
-;; ============================================================================
-
-(defn- migrate-legacy-queue!
-  "Idempotent reconciler from the 1.2.0/1.3.0 schema (`__delta_queue` with
-   column `seq`) to the 1.4.0+ schema (`__relation_delta_queue` with column
-   `id`). Safe to call on every deploy."
+(defn migrate-legacy-queue!
+  "Idempotently moves `__delta_queue` (column seq) to `__relation_delta_queue` (column id)."
   [tx]
   (let [has-old? (seq (jdbc/execute! tx
                                      ["SELECT 1 FROM information_schema.tables
@@ -222,18 +159,15 @@
     (jdbc/execute! tx
                    ["ALTER TABLE __relation_delta_queue RENAME COLUMN seq TO id"])))
 
-(defn- ensure-xid-columns!
-  "Idempotently add from_xid / to_xid columns to a relation link table."
+(defn ensure-xid-columns!
   [tx table]
   (jdbc/execute! tx
                  [(format "ALTER TABLE \"%s\" ADD COLUMN IF NOT EXISTS from_xid TEXT" table)])
   (jdbc/execute! tx
                  [(format "ALTER TABLE \"%s\" ADD COLUMN IF NOT EXISTS to_xid TEXT" table)]))
 
-(defn- ensure-entity-xid-columns!
-  "Per the `xid_structural` invariant every entity row should carry an `xid`.
-   Walks the parent tables of every relation in the schema and adds the
-   column where missing."
+(defn ensure-entity-xid-columns!
+  "Adds a missing `xid` column to every relation parent table."
   [_tx relations]
   (let [parent-tables (->> relations
                            (mapcat (juxt :from/table :to/table))
@@ -248,11 +182,8 @@
                      :data {:table t}}
                     (.getMessage e)))))))
 
-(defn- relation-missing?
-  "True when `e` is Postgres' 'relation \"x\" does not exist' (SQLSTATE 42P01).
-   Means the deployed model references a table that isn't physically present —
-   expected drift (deploy hasn't created it yet, or it was dropped externally),
-   not an actionable plug error. Reconcile skips & warns rather than errors."
+(defn relation-missing?
+  "True for SQLSTATE 42P01 (relation does not exist) — model/schema drift, not a plug error."
   [^Throwable e]
   (or (and (instance? java.sql.SQLException e)
            (= "42P01" (.getSQLState ^java.sql.SQLException e)))
@@ -260,9 +191,8 @@
 
 (def relation-backfill-batch-size 50000)
 
-(defn- backfill-xid-columns!
-  "Backfill from_xid / to_xid from the entity tables. Only updates rows
-   where a column is still NULL. No-op in :euuid mode."
+(defn backfill-xid-columns!
+  "Fills NULL from_xid/to_xid from the entity tables in strides; no-op in :euuid mode."
   [tx {table      :table
        from-table :from/table
        to-table   :to/table
@@ -296,10 +226,8 @@
                 (supervisor/progress-update! {:done (min (- end lo) span) :total span})
                 (recur end)))))))))
 
-(defn- install-relation-trigger!
-  "Attach the relation-plug triggers to one link table. Idempotent.
-   `audit?` is frozen into the emit trigger's TG_ARGV so the drainer's
-   persistence decision is made at enqueue time, not drain time."
+(defn install-relation-trigger!
+  "Idempotently attaches the relation-plug triggers to one link table, freezing `audit?` into TG_ARGV."
   [tx {rel-id      :relation
        table       :table
        from        :from/field
@@ -319,8 +247,6 @@
                             table from-table to-table (name from) (name to))]))
   (doseq [trg ["trg_relation_audit" "trg_relation_audit_ins" "trg_relation_audit_del"]]
     (jdbc/execute! tx [(format "DROP TRIGGER IF EXISTS %s ON \"%s\"" trg table)]))
-  ;; STATEMENT-level — one trigger per op so each carries exactly the
-  ;; transition table its event provides; the shared function bulk-enqueues.
   (jdbc/execute! tx
                  [(format "CREATE TRIGGER trg_relation_audit_ins
               AFTER INSERT ON \"%s\"
@@ -344,70 +270,41 @@
               EXECUTE FUNCTION synthigy_notify_delta_ready()"
                           table)]))
 
-;; ============================================================================
-;; Entity plug — xid-keyed function + trigger names
-;; ============================================================================
-
-(defn- entity-emit-fn-name
-  "Xid-keyed emit-function name. Stable across table renames; prevents
-   orphan accumulation in pg_proc."
+(defn entity-emit-fn-name
   [entity-xid]
   (str "synthigy_emit_" entity-xid "_delta"))
 
-(defn- entity-trigger-name
-  "Xid-keyed trigger names per (entity-xid, kind). Same stability story
-   as the function name."
+(defn entity-trigger-name
   [entity-xid kind]
   (str "trg_" entity-xid "_entity_" (name kind)))
 
-(defn- entity-user-fields
-  "Walk an entity schema entry's :field->attribute and return
-   {column-name attribute-xid ...} for user-defined fields only."
+(defn entity-user-fields
+  "Sorted {column attribute-xid} of the user-defined fields of a schema entity."
   [entity]
   (->> (:field->attribute entity)
        (filter (fn [[_col attr-xid]] (string? attr-xid)))
        (into (sorted-map))))
 
-(defn- jsonb-build-pairs
-  "Emit a sequence of `'<attr-xid>', <ref>.<col>` arg pairs suitable for
-   jsonb_build_object(...)."
+(defn jsonb-build-pairs
   [field-map ref]
   (->> field-map
        (mapv (fn [[col attr-xid]]
-               ;; Quote the column identifier — entity attributes can map to
-               ;; columns whose names are SQL reserved words (e.g. "from" on
-               ;; the meta "Dataset Relation" entity); unquoted `NEW.from`
-               ;; fails to parse in the plpgsql trigger body.
+               ;; never unquote the column — reserved-word columns ("from") fail to parse in plpgsql
                (format "'%s', %s.\"%s\"" attr-xid ref (name col))))
        (str/join ", ")))
 
-(defn- attribute-when-distinct
-  "OR'd chain of `<old>.col IS DISTINCT FROM <new>.col` predicates — the
-   phantom-UPDATE filter. A statement-trigger UPDATE that rewrites every
-   attribute unchanged then produces no queue row."
+(defn attribute-when-distinct
+  "Phantom-UPDATE filter: OR'd `IS DISTINCT FROM` over every user column."
   [field-map old-ref new-ref]
   (->> field-map
        (map (fn [[col _attr-xid]]
-              ;; Quote — see jsonb-build-pairs (reserved-word column names).
+              ;; never unquote — see jsonb-build-pairs
               (format "%s.\"%s\" IS DISTINCT FROM %s.\"%s\""
                       old-ref (name col) new-ref (name col))))
        (str/join " OR ")))
 
-(defn- entity-emit-fn-ddl
-  "Per-entity-table STATEMENT-level trigger function. Fires once per
-   INSERT/UPDATE/DELETE statement and bulk-enqueues one delta row per
-   affected row via the `new_rows`/`old_rows` transition tables — set-based,
-   replacing the old FOR EACH ROW trigger (which did one INSERT per row).
-   The column → attribute_xid mapping is baked at deploy; the function name
-   is xid-keyed so renames don't accumulate orphans in pg_proc.
-
-   `audit?` stamps a frozen `'audit'` flag into every payload: the
-   audit-persistence decision is made HERE, at enqueue time, from the model
-   being deployed — not re-evaluated at drain time against the mutable policy
-   atom, which could change between a write committing and the async drainer
-   waking (silently dropping already-committed records). The drainer trusts
-   this flag; live dispatch ignores it. Re-baked on every reconcile, so a
-   model audit-config change reinstalls the trigger with the new decision."
+(defn entity-emit-fn-ddl
+  "Per-entity STATEMENT-level emit fn DDL; `audit?` is frozen into every payload at enqueue time."
   [entity-xid entity audit?]
   (let [fields  (entity-user-fields entity)
         n-pairs (jsonb-build-pairs fields "n")
@@ -473,12 +370,8 @@
      entity-xid al o-pairs n-pairs changed
      entity-xid al o-pairs)))
 
-(defn- drop-stale-plug-triggers-on-table!
-  "Drop every plug-track trigger attached to `table`, regardless of
-   name shape. Pattern-matches the legacy table-name-keyed form
-   (`trg_<table>_…`) AND the xid-keyed form (`trg_<entity_xid>_entity_…`).
-   Idempotent — runs on every deploy and is what makes the
-   table-name → xid-name rename side-effect-free."
+(defn drop-stale-plug-triggers-on-table!
+  "Drops every plug trigger on `table`, legacy table-name-keyed and xid-keyed alike."
   [tx table]
   (let [stale (jdbc/execute! tx
                              ["SELECT tgname AS trigger_name
@@ -494,12 +387,8 @@
       (jdbc/execute! tx
                      [(format "DROP TRIGGER IF EXISTS %s ON \"%s\"" trigger table)]))))
 
-(defn- install-entity-triggers!
-  "(Re-)create the per-table trigger function and attach AFTER row-level
-   + STATEMENT-level NOTIFY triggers. Idempotent — pattern-drops every
-   plug trigger on the table first so renames + table-name → xid-name
-   migrations leave no orphans. Skips entities with no user-defined
-   attributes."
+(defn install-entity-triggers!
+  "Idempotently (re)installs an entity's emit fn plus its per-op and notify triggers."
   [tx entity-xid {table :table :as entity} audit?]
   (when (seq (entity-user-fields entity))
     (let [fn-name         (entity-emit-fn-name entity-xid)
@@ -507,9 +396,6 @@
           notify-trg-name (entity-trigger-name entity-xid :notify)]
       (drop-stale-plug-triggers-on-table! tx table)
       (jdbc/execute! tx [(entity-emit-fn-ddl entity-xid entity audit?)])
-      ;; STATEMENT-level audit triggers — one per op so each carries exactly
-      ;; the transition tables its event provides; the shared function
-      ;; branches on TG_OP and bulk-enqueues from new_rows / old_rows.
       (jdbc/execute! tx
                      [(format "CREATE TRIGGER %s_ins AFTER INSERT ON \"%s\"
                   REFERENCING NEW TABLE AS new_rows
@@ -532,20 +418,9 @@
                   EXECUTE FUNCTION synthigy_notify_delta_ready()"
                               notify-trg-name table)]))))
 
-;; ============================================================================
-;; Drainer — LISTEN/NOTIFY loop, multi-instance via SKIP LOCKED
-;; ============================================================================
-
 (def ^:private drain-batch-size 2000)  ; ponytail: claim window; 500→2000 cuts lock cycles ~4x under burst
 (def ^:private listen-poll-ms 10000)
 
-;; Single-sequencer election. Only the transaction holding this advisory lock
-;; drains a batch, so `nextval('delta_seq')` is assigned by one drainer at a
-;; time — gap-free in drain order, immune to the MVCC commit-order-vs-serial
-;; drift that bit a trigger-assigned id. The lock is transaction-scoped
-;; (`pg_try_advisory_xact_lock`): it auto-releases at commit, and a crashed
-;; leader's lock vanishes instantly, so a standby's next tick takes over with
-;; no heartbeat/lease machinery. Key is an arbitrary fixed bigint ("DELTA").
 (def ^:private delta-drainer-lock-key 0x44454C5441)
 
 (defonce ^:private drainer-state (atom nil))
@@ -603,14 +478,14 @@
      ts      TIMESTAMPTZ NOT NULL,
      payload JSONB NOT NULL)"])
 
-(defn- acquire-drainer-lock!
+(defn acquire-drainer-lock!
   "Take the transaction-scoped sequencer lock; false when another drainer holds it."
   [tx]
   (boolean (:locked (jdbc/execute-one! tx
                                        ["SELECT pg_try_advisory_xact_lock(?) AS locked"
                                         delta-drainer-lock-key]))))
 
-(defn- next-seqs!
+(defn next-seqs!
   "Allocate `n` ascending `delta_seq` values while holding the sequencer lock."
   [tx n]
   (mapv :seq
@@ -678,8 +553,7 @@
     {:held   (reduce + (map :n rows))
      :oldest (some->> (keep :oldest rows) seq (apply min-key #(.getTime ^java.util.Date %)) .toInstant)}))
 
-(defn- publish-envelopes!
-  "Fan a sequenced batch out to live subscribers after its transaction committed."
+(defn publish-envelopes!
   [envelopes]
   (when (seq envelopes)
     (try
@@ -690,12 +564,11 @@
                      :data {:action :publishing :subject :delta}}
                     e)))))
 
-(defn- drainer-datasource
-  "The dedicated drainer pool when configured, else the shared writer pool."
+(defn drainer-datasource
   [db]
   (or (:drainer-datasource db) (:datasource db)))
 
-(defn- drainer-tick!
+(defn drainer-tick!
   "Sequence and publish until both queues are empty; returns true when audited rows went to pending."
   [db]
   (loop [audited? false]
@@ -759,13 +632,7 @@
                 (min 30000 (max 1000 (* 2 backoff-ms)))))]
         (recur next-backoff)))))
 
-(defn- drainer-loop!
-  "Worker body. Parks on the registered WakeSource (default
-   PostgresNotify, with `signal!` driven by the trigger's pg_notify).
-   `wait!` returns :wakeup or :poll; in either case we drain. The
-   PostgresNotify implementation translates `timeout-ms` into a
-   blocking `getNotifications(timeout-ms)`, preserving the prior
-   listen-poll latency."
+(defn drainer-loop!
   [db wake-source ^java.util.concurrent.BlockingQueue signal stop?]
   (try
     (log/info {:id ::drainer-listening
@@ -799,9 +666,7 @@
                  :data {:action :stopped :subject :relation-drainer}}
                 "Relation drainer loop exited"))))
 
-(defn- drop-stale-relation-triggers!
-  "Drop every relation plug/notify/populate trigger across the whole
-   public schema before re-installing on the current schema's relations."
+(defn drop-stale-relation-triggers!
   [tx]
   (let [staleish
         (jdbc/execute! tx
@@ -818,10 +683,8 @@
       (jdbc/execute! tx
                      [(format "DROP TRIGGER IF EXISTS %s ON \"%s\"" trigger table)]))))
 
-(defn- drop-stale-entity-fns!
-  "Drop every legacy `synthigy_emit_<table>_delta()` function from pg_proc
-   so a re-install picks up the xid-keyed naming cleanly. Idempotent —
-   functions still in use are recreated as part of the deploy."
+(defn drop-stale-entity-fns!
+  "Drops every per-entity emit fn; the reconcile recreates the live ones."
   [tx]
   (let [staleish
         (jdbc/execute! tx
@@ -838,23 +701,8 @@
                      :data {:proname p}}
                     (.getMessage e)))))))
 
-;; ============================================================================
-;; Public API — plug reconcile + drainer + context
-;; ============================================================================
-
 (defn reconcile-relations!
-  "Deploy relation-plug infrastructure: idempotent prelude (queue table +
-   plpgsql trigger functions) followed by per-relation triggers on every
-   relation in the deployed schema.
-
-   Args:
-     _db               - Postgres backend instance (unused; kept for symmetry)
-     tx                - JDBC-executable target (connection / datasource)
-     schema-relations  - Relations map or seq from (query/model->schema model),
-                         each value carrying :relation, :relation/table,
-                         :from/field, :to/field pre-resolved.
-
-   Idempotent. Side effects only. Returns nil."
+  "Idempotently installs the relation queue, emit fns and per-relation triggers, then backfills xids."
   [_db tx schema-relations]
   (migrate-legacy-queue! tx)
   (drop-stale-relation-triggers! tx)
@@ -900,19 +748,7 @@
   nil)
 
 (defn reconcile-entities!
-  "Deploy entity-plug infrastructure: idempotent prelude (entity queue
-   table) followed by per-entity triggers across every entity in the
-   deployed schema.
-
-   Args:
-     _db               - Postgres backend instance (unused; kept for symmetry)
-     tx                - JDBC-executable target (connection / datasource)
-     schema-entities   - Entities map from (query/model->schema model),
-                         each value carrying :table, :fields,
-                         :field->attribute pre-resolved.
-
-   Idempotent. Side effects only. Returns nil. Skipped in :euuid mode
-   because entity tables don't carry an `xid` column then."
+  "Idempotently installs the entity queue and per-entity triggers; skipped in :euuid mode."
   [_db tx schema-entities]
   (if (not= :xid (id/key))
     (log/info {:id ::entity-plug-skipped-legacy-id
@@ -952,12 +788,10 @@
     (jdbc/execute! tx
                    [(str "SELECT set_config('synthigy.actor_xid', ?, true),"
                          " set_config('synthigy.request_id', ?, true),"
-                         " set_config('synthigy.scope_xid', ?, true),"
-                         " set_config('synthigy.tenant_xid', ?, true)")
+                         " set_config('synthigy.scope_xid', ?, true)")
                     (some-> principal :xid str)
                     (log/request-id)
-                    (some-> principal :scope-xid str)
-                    (str (id/data :dataset/id))]))
+                    (some-> principal :scope-xid str)]))
   nil)
 
 (defn start-drainer!
@@ -998,32 +832,11 @@
     (reset! drainer-state nil)
     nil))
 
-;; ============================================================================
-;; Unified entry points
-;; ============================================================================
-
 (defn reconcile-plug!
-  "Idempotent full resync of the PG delta plug against `model`.
-
-   Walks the deployed schema, then reconciles entity-side and relation-side
-   triggers + emit functions in a single pass. Called by
-   `:synthigy/subscriptions.postgres` on lifecycle :start and on every
-   `save-model!` via `dataset/add-model-watch!`. No-op when `model` is nil.
-
-   Cost: ~30 ms for a small model (Movies), scales linearly with
-   entity + relation count (~0.5–1 ms per DDL op). Wraps both reconcile
-   passes in one Postgres connection.
-
-   Idempotent: `CREATE OR REPLACE FUNCTION` + `DROP TRIGGER IF EXISTS …;
-   CREATE TRIGGER …`. Partial-failure recovery is 'next call reconciles
-   again.'"
+  "Idempotent full resync of the PG delta plug against `model`; no-op when nil."
   [db model]
   (when model
-    ;; Freshen the audit policy from THIS model before baking trigger flags, so
-    ;; the per-entity `audit?` decision install reads is derived from the model
-    ;; being deployed — not whatever the atom happens to hold. Idempotent;
-    ;; observability's model-watch recompiles too. Makes the frozen-at-enqueue
-    ;; audit decision order-independent of watch firing.
+    ;; must run BEFORE baking trigger audit flags — they come from this model, not the atom
     (policy/recompile-policy! model)
     (let [schema (sql-query/model->schema model)
           relations (mapcat (fn [[_eid ent]] (vals (:relations ent))) schema)]
@@ -1032,18 +845,8 @@
   nil)
 
 (defn strip-all!
-  "Drop every plug trigger + emit function across the public schema.
-   Used on `:synthigy/subscriptions.postgres` :stop (clean removal — see
-   plan decision 1) and as the bare-server upgrader helper.
-
-   Leaves the queue tables in place — they're empty UNLOGGED tables, cheap
-   to keep, and not user-visible. Re-:start reconciles triggers back; they
-   re-enqueue against the existing tables.
-
-   Idempotent. Safe to call multiple times."
+  "Idempotently drops every plug trigger and emit fn in the public schema; queue tables stay."
   [_db tx]
-  ;; Triggers first (CASCADE on function drop would also do it but explicit
-  ;; is friendlier on shared schemas).
   (let [plug-trgs
         (jdbc/execute! tx
                        ["SELECT tgname AS trigger_name, c.relname AS table_name
@@ -1063,7 +866,6 @@
              table   :pg_class/table_name} plug-trgs]
       (jdbc/execute! tx
                      [(format "DROP TRIGGER IF EXISTS %s ON \"%s\"" trigger table)])))
-  ;; Per-entity emit functions (xid-keyed) and the shared helpers.
   (let [plug-fns
         (jdbc/execute! tx
                        ["SELECT proname FROM pg_proc

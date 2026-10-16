@@ -20,8 +20,7 @@
     [synthigy.transit :refer [<-transit ->transit]]))
 
 (defn ->iso
-  "Best-effort ISO-8601 string for a deployed_on value across backends. Isolated
-   so a coercion hiccup never nulls the surrounding version info."
+  "Best-effort ISO-8601 string for a deployed_on value across backends."
   [v]
   (try
     (if (instance? java.util.Date v)
@@ -40,8 +39,7 @@
         id-key))))
 
 (defn deployed-versions
-  "Drift stamp — {dataset-id {:version :deployed-at}} for every dataset's latest
-   deployed version. Cheap: reads the meta tables directly, no model rebuild."
+  "Drift stamp — {dataset-id {:version :deployed-at}} for every dataset's latest deployed version."
   []
   (try
     (let [id-col (clojure.core/name (id/key))
@@ -78,18 +76,12 @@
                   :euuid (comp id/nanoid->uuid :xid))
                 data))
              (->new-bare-id
-               ;; translates a raw id (no surrounding record); pass-through if
-               ;; already target form or nil
                [id]
                (cond
                  (nil? id) id
                  (= ->to :xid) (if (uuid? id) (id/uuid->nanoid id) id)
                  (= ->to :euuid) (if (string? id) (id/nanoid->uuid id) id)))
              (transform-rls-condition
-               ;; bare ids, no surrounding record — translate field-by-field;
-               ;; also the
-               ;; forward-migration seam for legacy
-               ;; :relation-euuid/:entity-euuid step keys
                [condition]
                (cond-> condition
                  (contains? condition :attribute)
@@ -219,8 +211,7 @@
            (:relations original-model))
          (second data))))))
 
-;; WARNING: functions below MODIFY THE DATABASE — call only from patcho patch
-;; definitions
+;; WARNING: functions below MODIFY THE DATABASE — call only from patcho patch definitions
 
 (comment
   (def version-id #uuid "d908a70f-a1fb-46bd-ac76-801bebe6ceed")
@@ -237,8 +228,7 @@
       (<-transit m))))
 
 (defn transform-stored-model!
-  "Transforms a single stored model and saves it back to the database. MODIFIES
-   THE DATABASE."
+  "Transforms a single stored model and saves it back — MODIFIES THE DATABASE."
   [version-id direction]
   (log/info {:id ::transforming-model
              :data {:version-id version-id :direction direction}}
@@ -273,8 +263,7 @@
          :direction direction}))))
 
 (defn transform-stored-models!
-  "Transforms ALL deployed models, oldest-first to preserve rebuild-logic
-   consistency. MODIFIES THE DATABASE."
+  "Transforms ALL deployed models, oldest-first — MODIFIES THE DATABASE."
   [direction]
   (log/info {:id ::transforming-all-models
              :data {:direction direction}}

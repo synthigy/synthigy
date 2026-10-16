@@ -9,9 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.federated.oidc
-  "The `:oidc` provider family — discovery, JWKS, and ID-token validation shared
-   by every OIDC-discovery-compliant IdP. See
-   docs/core/synthigy/oauth/federated/oidc.md."
+  "The `:oidc` provider family: discovery, JWKS and ID-token validation."
   (:require
    [buddy.core.keys :as keys]
    [buddy.sign.jws :as jws]

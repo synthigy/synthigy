@@ -9,20 +9,16 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.introspect
-  "RFC 7662 Token Introspection endpoint. See
-   docs/core/synthigy/oauth/introspect.md."
+  "RFC 7662 Token Introspection endpoint."
   (:require
    [buddy.hashers :as hashers]
    [synthigy.json :as json]
    [clojure.string :as str]
    [synthigy.log :as log]
    [synthigy.iam.encryption :as encryption]
+   [synthigy.oauth.authentication :as authentication]
    [synthigy.oauth.core :as core]
    [synthigy.oauth.token :as token]))
-
-;; =============================================================================
-;; Introspection Logic
-;; =============================================================================
 
 (defn inactive-response
   []
@@ -41,9 +37,32 @@
   (when-let [exp (:exp claims)]
     (< (* 1000 exp) (System/currentTimeMillis))))
 
+(defn active-response
+  [{:keys [scope aud iss sub xid exp iat jti client_id sid]} username]
+  {:active true
+   :scope (or scope "")
+   :client_id (or client_id aud)
+   :username (or username sub)
+   :token_type "Bearer"
+   :exp exp
+   :iat iat
+   :sub (or sub username)
+   :xid xid
+   :iss (or iss (core/domain+))
+   :aud (or aud client_id)
+   :jti jti
+   :sid sid})
+
+(defn stateless-claims
+  "Claims of a valid row-less token without a `sid` (client_credentials), else nil."
+  [token]
+  (when-let [claims (extract-token-claims token)]
+    (when (nil? (:sid claims))
+      (let [{:keys [rejected]} (authentication/verdict token (:aud claims))]
+        (when-not rejected claims)))))
+
 (defn introspect-token
-  "Introspect an access or refresh token; returns {:active false} or {:active
-   true ...metadata}."
+  "Introspect an access or refresh token: {:active false} or {:active true ...metadata}."
   [token token-type-hint]
   (log/debug {:id ::introspect-start
               :data {:action :introspecting
@@ -65,9 +84,21 @@
     :else
     (let [[found-key session] (token/find-token
                                (when token-type-hint (keyword token-type-hint))
-                               token)]
+                               token)
+          stateless (when (nil? session) (stateless-claims token))]
 
       (cond
+        stateless
+        (let [{:keys [sub client_id]} stateless]
+          (log/info {:id ::introspect-active
+                     :data {:action :introspected
+                            :subject :access-token
+                            :status :active
+                            :user sub
+                            :client client_id}}
+                    "Stateless token is active")
+          (active-response stateless sub))
+
         (nil? session)
         (do
           (log/info {:id ::introspect-not-in-store
@@ -107,7 +138,7 @@
               (inactive-response))
 
             :else
-            (let [{:keys [scope aud iss sub xid exp iat jti client_id sid]} claims
+            (let [{:keys [sub client_id]} claims
                   {:keys [name]} (core/get-session-resource-owner session)]
               (log/info {:id ::introspect-active
                          :data {:action :introspected
@@ -118,40 +149,17 @@
                                 :client client_id
                                 :session (core/short-id session)}}
                         "Token is active")
-              {:active true
-               :scope (or scope "")
-               :client_id (or client_id aud)
-               :username (or name sub)
-               :token_type "Bearer"
-               :exp exp
-               :iat iat
-               :sub (or sub name)
-               :xid xid
-               :iss (or iss (core/domain+))
-               :aud (or aud client_id)
-               :jti jti
-               :sid sid})))))))
+              (active-response claims name))))))))
 
-;; =============================================================================
-;; Client Authentication (RFC 7662 §2.1)
-;; =============================================================================
-
-;; client_id alone is NOT authentication — it's echoed on every authorization
-;; redirect, so it's public by design; a real client_secret match is required
-;; (public clients, which have no secret, are rejected outright).
+;; client_id alone is NOT authentication (it's public) — require a real secret match.
 (defn authenticated-client
   [client_id client_secret]
   (when-let [{:keys [secret] :as client} (core/get-client client_id)]
     (when (and secret client_secret (hashers/check client_secret secret))
       client)))
 
-;; =============================================================================
-;; Ring Handler
-;; =============================================================================
-
 (defn introspect-handler
-  "OAuth 2.0 Token Introspection endpoint handler (RFC 7662); client
-   authentication is required."
+  "OAuth 2.0 Token Introspection endpoint (RFC 7662); client authentication required."
   [request]
   (let [{:keys [token token_type_hint client_id client_secret]} (:params request)]
 
@@ -178,8 +186,7 @@
          :body (json/write-str {:error "invalid_client"
                                 :error_description "Client authentication required"})})
 
-      ;; Same 401 for unknown client and wrong secret — distinguishing them
-      ;; would let a caller enumerate valid client_ids.
+      ;; Same 401 for unknown client and wrong secret — never let a caller enumerate client_ids.
       (nil? (authenticated-client client_id client_secret))
       (do
         (log/warn {:id ::introspect-client-auth-failed

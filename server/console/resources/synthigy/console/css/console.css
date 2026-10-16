@@ -2000,3 +2000,8 @@ ty-tabs:not(:defined) { display: none; }
   font-size: 11.5px; line-height: 1.5;
   background: var(--sy-glass-hover); border: 1px solid var(--sy-divider); border-radius: 8px;
 }
+
+/* Users → Sign-in link: app picker and Generate share one row. */
+.console-claim-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.console-claim-row ty-select { flex: 1 1 240px; max-width: 360px; }
+.console-claim-row ty-button { flex: none; }

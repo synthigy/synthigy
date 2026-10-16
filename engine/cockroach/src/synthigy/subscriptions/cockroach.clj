@@ -9,20 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.subscriptions.cockroach
-  "Patcho lifecycle module — `:synthigy/subscriptions (cockroach impl)`.
-
-   CRDB owner of the delta plug. Lifecycle shape mirrors
-   `synthigy.subscriptions.sqlite` because CRDB and SQLite share the
-   polling-drainer + in-process `*drain-wakeup*` pattern (no LISTEN/NOTIFY
-   on either side). Backend-specific differences (jsonb_build_object vs
-   json_object, GUC propagation vs `_ctx` table, plpgsql functions vs
-   inline trigger bodies) live in `synthigy.plug.cockroach`.
-
-   On :start, reconciles plug triggers against the currently-deployed
-   model, registers a `dataset/add-model-watch!` so every `save-model!`
-   re-reconciles, and starts the drainer thread. On :stop, removes the
-   watch, stops the drainer, and drops every plug trigger + function
-   via `plug/strip-all!`."
+  "The :synthigy/plug lifecycle module for CockroachDB: owns the delta plug and its drainer."
   (:require
     [next.jdbc :as jdbc]
     [patcho.lifecycle :as lifecycle]
@@ -35,16 +22,11 @@
 (def ^:private model-watch-key ::plug-reconcile)
 
 (defn start
-  "Public so dataset/start can autostart us without going through Patcho
-   (which would re-enter dataset/start via the dep check and loop)."
+  "Starts the plug; public because dataset's :start calls it directly (patcho would loop)."
   []
   (when-not (= "synthigy.db.Cockroach" (.getName (class db/*db*)))
     (throw (ex-info ":synthigy/subscriptions (cockroach impl) requires Cockroach backend"
                     {:db-class (class db/*db*)})))
-  ;; Install the CRDB-appropriate default wake source unless an operator
-  ;; has already plugged in something else (NATS, Composite, …). Mirrors
-  ;; the `audit/*audit-provider*` pattern: DB-natural default, override
-  ;; by alter-var-root.
   (when (instance? synthigy.plug.wake.Noop wake/*wake-source*)
     (alter-var-root #'wake/*wake-source* (constantly (wake/local-channel)))
     (log/info {:id ::wake-source-defaulted
@@ -52,15 +34,6 @@
                       :impl "LocalChannel"}}
               "Default CRDB wake source installed"))
   (plug/reconcile-plug! db/*db* (dataset/deployed-model))
-  ;; Diff reconcile (CRDB-only): on every save-model! the watch compares
-  ;; the previous trigger-fingerprint against the new model and only
-  ;; (re)installs triggers for entities/relations whose trigger-relevant
-  ;; shape actually changed; removed ones get their triggers + emit
-  ;; functions explicitly dropped. A v2 deploy that adds one entity
-  ;; reinstalls one entity's triggers, not all N. Sqlite/postgres still
-  ;; do the full O(N) reconcile because their per-trigger DDL is cheap;
-  ;; CRDB pays ~100ms per CREATE TRIGGER through the declarative schema
-  ;; changer, so the diff matters here.
   (let [last-fp (atom (plug/trigger-fingerprint (dataset/deployed-model)))]
     (dataset/add-model-watch!
       model-watch-key
@@ -77,7 +50,7 @@
              :data {:action :started :subject :plug :backend :cockroach}}
             "CockroachDB plug started"))
 
-(defn- stop []
+(defn stop []
   (dataset/remove-model-watch! model-watch-key)
   (plug/stop-drainer! db/*db*)
   (try

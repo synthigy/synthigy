@@ -14,6 +14,7 @@
     [hiccup2.core :refer [html]]
     [ring.util.codec :as codec]
     [synthigy.oauth.authorization-code :as ac]
+    [synthigy.oauth.core :as core]
     [synthigy.oauth.device-code :as dc]
     [synthigy.oauth.federated.registry :as registry]
     [synthigy.oauth.page.assets :as assets]))
@@ -42,6 +43,25 @@
     :stroke-linejoin "round"}
    [:path {:d "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"}]
    [:circle {:cx "12" :cy "7" :r "4"}]])
+
+(def alert-icon
+  [:svg.ficon
+   {:viewBox "0 0 24 24"
+    :fill "none"
+    :stroke "currentColor"
+    :stroke-width "2"
+    :stroke-linecap "round"
+    :stroke-linejoin "round"}
+   [:circle {:cx "12" :cy "12" :r "10"}]
+   [:line {:x1 "12" :x2 "12" :y1 "8" :y2 "12"}]
+   [:line {:x1 "12" :x2 "12.01" :y1 "16" :y2 "16"}]])
+
+(defn error-slot
+  "Fixed-height slot under the fields, so a message never moves the form."
+  [msg]
+  [:div.sy-error-slot
+   (when-not (str/blank? msg)
+     [:div.sy-error {:role "alert"} alert-icon [:span msg]])])
 
 (defn federated-buttons
   "Render a \"Continue with X\" link per active federation provider, carrying
@@ -84,9 +104,9 @@
   (cond
     (nil? error) ""
     (keyword? error) (case error
-                       :credentials "Wrong credentials. Check your username and password"
-                       :already-authorized "User has already authorized this device"
-                       "Unknown error... Contact support")
+                       :credentials "Wrong username or password."
+                       :already-authorized "This device is already authorized."
+                       "Something went wrong. Try again.")
     :else (or (federated-errors (str error))
               (when (str/starts-with? (str error) "idp_")
                 (str "The provider refused: "
@@ -95,6 +115,7 @@
 
 (defn login-html
   [{error     :synthigy.oauth.login/error
+    username  :synthigy.oauth.login/username
     raw-state :synthigy.oauth.login/raw-state
     {:keys [authorization-code device-code]} :synthigy.oauth.login/state}]
   (let [client (cond
@@ -134,7 +155,12 @@
            {:id "username"
             :name "username"
             :placeholder "Username"
-            :autoComplete "new-password"}]]
+            :value (or username
+                       (some-> authorization-code ac/get-code-request :login_hint core/login-hint)
+                       "")
+            :autocomplete "username"
+            :autocapitalize "off"
+            :spellcheck false}]]
          [:div.row
           password-icon
           [:input
@@ -142,11 +168,10 @@
             :name "password"
             :type "password"
             :placeholder "Password"
-            :autocomplete "new-password"
+            :autocomplete "current-password"
             :autocorrect "off"
             :spellcheck false}]]
-         [:div.row
-          [:span.error (error-text error)]]
+         (error-slot (error-text error))
          [:button
           [:h4 "SIGN IN"]]]
         (federated-buttons raw-state)
@@ -197,7 +222,7 @@
             [:input {:id "claim-password-confirm" :type "password"
                      :placeholder "Confirm password" :autocomplete "new-password"
                      :autocorrect "off" :spellcheck false}]]
-           [:div.row [:span.error (or error "")]]
+           (error-slot error)
            [:button [:h4 "SET PASSWORD"]]]
           ;; ponytail: match-check only — the real one-time/target guard is
           ;; server-side.

@@ -12,12 +12,9 @@
   (:require
    [buddy.hashers :as hashers]
    clojure.data
-    ;; JSON via synthigy.json (jsonista)
-   [clojure.java.io :as io]
    clojure.set
    [clojure.string :as str]
    [next.jdbc :as jdbc]
-    ; [clojure.pprint :refer [pprint]]
    next.jdbc.date-time
    [patcho.lifecycle :as lifecycle]
    [synthigy.dataset :as dataset]
@@ -47,8 +44,7 @@
    [synthigy.db.sql :refer [execute! execute-one!]]
    [synthigy.json :refer [<-json ->json]]
    [synthigy.log :as log]
-   ;; loaded for its lifecycle registration — :synthigy/dataset depends on
-   ;; :synthigy/log.config so the data plane always carries DB-backed log routing
+   ;; loaded for its lifecycle registration — :synthigy/dataset depends on :synthigy/log.config
    [synthigy.log.config]
    [synthigy.timestamp :as ts]
    [synthigy.transit
@@ -58,8 +54,7 @@
    [synthigy.db Postgres]))
 
 (defn reference-table
-  "Returns table name for a reference type, or nil if not registered.
-   Logs a warning when reference type is not registered."
+  "Table name for a reference type, or nil (with a warning) when unregistered."
   [type-name]
   (if-let [table-fn (core/reference-table-fn type-name)]
     (table-fn)
@@ -68,13 +63,8 @@
                 "No table-fn registered for reference type")
       nil)))
 
-;;; Type Conversion Validation (Backend-specific wrapper)
-;;; The core validation logic is in synthigy.dataset.core (shared with frontend)
-
 (defn check-type-conversion!
-  "Backend-specific wrapper that validates type conversion and throws exception if forbidden.
-   The actual validation logic is in synthigy.dataset.core/validate-type-conversion
-   which is shared between frontend and backend."
+  "Throws when core/validate-type-conversion forbids the type change; logs warnings."
   [entity attribute old-type new-type]
   (let [validation (core/validate-type-conversion old-type new-type)]
     (cond
@@ -120,14 +110,11 @@
                 new-type)
         {:validation validation})))))
 
-;;; End Type Conversion Validation
-
 (defn type->ddl
   "Converts type to DDL syntax"
   [t]
   (try
     (if (core/reference-type? t)
-      ;; Dynamic reference type - look up table from *reference-mapping*
       (if-let [table (reference-table t)]
         (str "bigint references \"" table "\"(_eid) on delete set null")
         (throw (ex-info
@@ -136,14 +123,12 @@
                  :phase :ddl-generation
                  :reference-type t})))
       (if (core/reference-type-names t)
-        ;; never fall through to the case — an unregistered reference type
-        ;; emits a bare `user` column type, which SQLite accepts silently
+        ;; never fall through to the case — it emits a bare `user` column type
         (throw (ex-info
                 (format "Reference type '%s' is not registered; register IAM reference types before mounting a model that uses them" t)
                 {:type ::unregistered-reference-type
                  :phase :ddl-generation
                  :reference-type t}))
-        ;; Standard types
         (case t
         "currency" "jsonb"
         ("avatar" "string" "hashed") "text"
@@ -151,10 +136,6 @@
         ("json" "encrypted" "timeperiod") "jsonb"
         "transit" "text"
         "int" "bigint"
-        ;; enum - stored as TEXT since dataset 1.4.0. The value list is model
-        ;; metadata enforced at the write path, not a database type. This keeps
-        ;; enum semantics identical across PostgreSQL/SQLite/CockroachDB and
-        ;; makes value add/rename/remove pure data operations.
         "enum" "text"
         t)))
     (catch Throwable e
@@ -166,7 +147,6 @@
               e)))))
 
 (defn attribute->ddl
-  "Function converts attribute to DDL syntax"
   [_entity {n :name
             t :type}]
   (clojure.string/join
@@ -189,9 +169,6 @@
     (let [table (entity->table-name entity)
           as' (keep #(attribute->ddl entity %) as)
           pk ["_eid bigserial not null primary key"
-              ;; Fresh installs are xid-only. euuid exists solely as a legacy
-              ;; legacy source format, brought in via import — never freshly
-              ;; created — so we only ever emit the xid id column here.
               (str (id/field) " varchar(64) not null unique")]
           cs' (keep-indexed
                (fn [idx ids]
@@ -212,16 +189,6 @@
                          column-name))
                       ids)))))
                (:unique cs))
-          ;; Pre-create the timestamp audit columns at CREATE TABLE time.
-          ;; Timestamps are the bare-mode-safe subset that the dataset
-          ;; module can guarantee regardless of which AuditEnhancement
-          ;; impl is active (timestamp-only default vs principal-aware
-          ;; when IAM is loaded). The `_by` columns are added via the
-          ;; ALTER TABLE path by the principal-aware enhancer — they're
-          ;; not pre-created here because they depend on IAM state.
-          ;; Pre-creating timestamps avoids the post-creation read race
-          ;; documented previously (readers needing the columns before
-          ;; the enhancer's reconcile pass runs).
           audit-cols (cond-> []
                        (core/audit-modified? entity)
                        (conj "modified_on timestamp not null default localtimestamp")
@@ -245,11 +212,7 @@
               e)))))
 
 (defn generate-relation-ddl
-  "Returns relation table DDL for given model and target relation.
-   Includes from_xid / to_xid TEXT columns for the relation-audit
-   plug (denormalized at link time; survives entity cascade
-   deletes for audit purposes). Populated by the BEFORE INSERT trigger
-   installed in transform-relation-audit."
+  "Relation table DDL, including the from_xid/to_xid audit columns."
   [_ {f :from
       t :to
       :as relation}]
@@ -262,7 +225,6 @@
       (format
        "create table if not exists \"%s\"(\n %s\n)"
        table
-        ;; Create table
        (if (= f t)
          (clojure.string/join
           ",\n "
@@ -292,7 +254,6 @@
               e)))))
 
 (defn generate-relation-indexes-ddl
-  "Returns relation table DDL for given model and target relation"
   [_ {f :from
       t :to
       :as relation}]
@@ -308,63 +269,52 @@
         (filter
          core/added?
          (core/get-entities projection))
-        ;;
-        ;; NEW: Detect reactivated entities (exist but were inactive)
         reactivated-entities
         (filter
          (fn [entity]
            (and (not (core/added? entity))
-                (false? (:active (core/suppress entity))) ; Was inactive
-                (true? (:active entity)))) ; Now active
+                (false? (:active (core/suppress entity)))
+                (true? (:active entity))))
          (core/get-entities projection))
-        ;;
         changed-enties
         (filter
          core/diff?
          (core/get-entities projection))
-        ;;
         new-relations
         (filter
          (fn [relation]
            (core/added? relation))
          (core/get-relations projection))
-        ;;
         changed-relations
         (filter
          (fn [relation]
            (core/diff? relation))
          (core/get-relations projection))
-        ;;
         {nrr true
          nr false} (group-by core/recursive-relation? new-relations)
-        ;;
         {crr true
          cr false} (group-by core/recursive-relation? changed-relations)]
     {:new/entities new-entities
-     :reactivated/entities reactivated-entities ; NEW
+     :reactivated/entities reactivated-entities
      :changed/entities changed-enties
      :new/relations nr
      :new/recursive-relations nrr
      :changed/relations cr
      :changed/recursive-relations crr}))
 
-;;
 (defn attribute-delta->ddl
   [entity
    {:keys [name type]
     {:keys [values]} :configuration
     :as attribute}]
-  ;; Don't look at primary key since that is a legacy-layout problem
   (let [oentity (core/suppress entity)
         old-table (entity->table-name oentity)
         diff (core/diff attribute)]
     (if (core/new-attribute? attribute)
-      ;;
       (do
         (log/debug {:id ::attribute-added :data {:attribute name :table old-table}}
                    "Adding attribute to table")
         [(str "alter table \"" old-table "\" add column if not exists " (column-name name) " " (type->ddl type))])
-      ;;
       (when (not-empty (dissoc diff :pk))
         (let [{dn :name
                dt :type
@@ -373,7 +323,6 @@
               column (column-name name)]
           (when dt (check-type-conversion! entity attribute dt type))
           (cond-> []
-            ;; Change attribute name
             (not= old-column column)
             (conj
              (do
@@ -383,8 +332,6 @@
                (format
                 "alter table \"%s\" rename column %s to %s"
                 old-table old-column column)))
-            ;; Type has changed so you better cast to target type. Reference
-            ;; conversions rejected upstream (check-type-conversion!).
             dt
             (as-> statements
                   (do
@@ -404,10 +351,6 @@
                                                   (str " using(trim(" column "::text)::bigint)")))
                              (= "float" type) (str " using(trim(" column "::text)::double precision)")
                              (= "string" type) (str " using(" column "::text)")
-                          ;; String to JSON conversion:
-                          ;; - JSON objects/arrays: cast directly
-                          ;; - Plain strings: wrap in quotes to make valid JSON string
-                          ;; - NULL: keep as NULL
                              (= "json" type) (str " using\n case"
                                                   "\n  when " column " is null then null"
                                                   "\n  when " column " ~ '^\\s*[\\{\\[]' then " column "::jsonb"
@@ -418,10 +361,8 @@
                              (= "encrypted" type) (str " using(" column "::text)")
                              (= "hashed" type) (str " using(" column "::text)")
                              (= "boolean" type) (str " using(trim(" column "::text)::boolean)")
-                         ;; enum is stored as TEXT - any type converts via text cast
                              (= "enum" type) (str " using(" column "::text)"))]
-                   ;; never run the json USING guard on an already-jsonb column
-                   ;; (legacy dumps) — jsonb ~ text has no operator
+                   ;; never run the json USING guard on an already-jsonb column — jsonb ~ text has no operator
                        (if (= "json" type)
                          (format
                           (str "do $$ begin\n"
@@ -434,14 +375,6 @@
                           (str/replace column "\"" "")
                           (str/replace alter-stmt "'" "''"))
                          alter-stmt)))))
-            ;; Enum is TEXT with model-enforced values (dataset 1.4.0) - value
-            ;; changes are pure data operations:
-            ;;   add    - no statement at all
-            ;;   rename - UPDATE rewriting old label to new
-            ;;   remove - allowed only when no rows reference the label; the
-            ;;            guard runs inside the deploy transaction so the check
-            ;;            and the deploy are atomic. Rows present -> deploy
-            ;;            fails; deactivate (:active false) instead.
             (and (= type "enum") (nil? dt) (not-empty dconfig))
             (as-> statements
                   (let [[ov nv _] (clojure.data/diff
@@ -490,42 +423,22 @@
                             renames)))))))))))
 
 (defn orphaned-attribute->drop-ddl
-  "Generates DROP COLUMN DDL for an orphaned attribute.
-   An orphaned attribute exists only in a recalled/destroyed version,
-   not in any remaining deployed versions.
-
-   The DROP uses CASCADE because audit-tracked entities have a per-row
-   trigger function whose body references every user column by name
-   (see synthigy.dataset.postgres.audit/entity-emit-fn-ddl). Without
-   CASCADE, Postgres refuses the drop with
-   `cannot drop column X of table Y because other objects depend on it`.
-   The cascaded trigger function gets reinstalled by
-   `core/recall!`'s post-drop reconcile pass against the rebuilt model.
-
-   Returns a vector of DDL statements to execute."
+  "DROP COLUMN ... CASCADE for an attribute no remaining deployed version references."
   [{:keys [entity attribute]}]
   (let [table-name (entity->table-name entity)
         column-name (column-name (:name attribute))]
     [(format "ALTER TABLE \"%s\" DROP COLUMN IF EXISTS %s CASCADE"
              table-name column-name)]))
 
-;; 1. Change attributes by calling attribute-delta->ddl
-;; 2. Rename table if needed
-;; 3. Change constraints
 (defn entity-delta->ddl
   [{:keys [attributes]
     :as entity}]
-  ;; (def attributes attributes)
   (assert (core/diff? entity) "This entity is already synced with DB")
   (let [diff (core/diff entity)
         old-entity (core/suppress entity)
         old-table (entity->table-name old-entity)
         old-constraints (get-in old-entity [:configuration :constraints :unique])
-        ;; DESIRED unique groups only — index-stable, active-aware (a group whose
-        ;; attribute was deactivated nils out at its position). The old side is
-        ;; deliberately NOT compared: `suppress` carries the NEW :active flags, so
-        ;; it cannot describe what is actually in the database. See
-        ;; docs/core/synthigy/dataset/postgres.md.
+        ;; never diff against the old side — `suppress` carries the NEW :active flags
         new-unique (core/unique-constraints-indexed entity)
         raw-groups (max (count (get-in entity [:configuration :constraints :unique]))
                         (count old-constraints))
@@ -544,12 +457,10 @@
         (def old-table old-table)
         (def table table)
         (def old-constraints old-constraints))
-    ;; Filter out nil and empty string statements from attribute DDL
     (cond-> (->> attributes'
                  (reduce into [])
                  (remove #(or (nil? %) (and (string? %) (str/blank? %))))
                  vec)
-      ;; Renaming occured
       (:name diff)
       (into
        (cond->
@@ -557,7 +468,6 @@
          (format "alter table \"%s\" rename constraint \"%s_pkey\" to \"%s_pkey\"" table old-table table)
          (format "alter table \"%s\" rename constraint \"%s_%s_key\" to \"%s_%s_key\"" table old-table (id/field) table (id/field))
          (format "alter sequence \"%s__eid_seq\" rename to \"%s__eid_seq\"" old-table table)]
-          ;;
          (some? old-constraints)
          (into
           (map-indexed
@@ -568,10 +478,7 @@
                 table old-table constraint
                 table constraint)))
            old-constraints))))
-      ;; Reconcile unique constraints whenever the constraints config changed OR
-      ;; an attribute participating in any group did — deactivating an attribute
-      ;; leaves the config untouched, and its column is KEPT (deactivation is
-      ;; reversible), so nothing else would ever drop the dependent constraint.
+      ;; second arm is load-bearing: deactivation leaves the constraints config untouched
       (or (-> diff :configuration :constraints)
           (some #(group-members (id/extract %)) (:attributes diff)))
       (into
@@ -579,10 +486,6 @@
         (fn [statements idx]
           (let [n (get new-unique idx)
                 constraint (str table "_eucg_" idx)
-                ;; Declarative, not a diff: drop unconditionally, re-add what is
-                ;; desired. The old side cannot be trusted (see the binding
-                ;; above), and this is idempotent — it also heals a database
-                ;; left inconsistent by an earlier deploy.
                 statements (conj statements
                                  (format "alter table \"%s\" drop constraint if exists %s"
                                          table constraint))]
@@ -611,13 +514,9 @@
           old-to (core/suppress to)
           old-relation (core/suppress relation)
           old-name (relation->table-name old-relation)
-          ;; Assoc old from and to entities
-          ;; This will be handled latter
           new-name (relation->table-name relation)]
 
-      ;; When name has changed
       (when (not= old-name new-name)
-        ;; Rename table
         (let [sql (format
                    "alter table \"%s\" rename to \"%s\""
                    old-name new-name)]
@@ -642,12 +541,10 @@
                        :new-table-name new-name
                        :sql sql}
                       e)))))
-        ;; Rename indexes (fidx and tidx) to match new table name
         (let [old-fidx (str old-name "_fidx")
               new-fidx (str new-name "_fidx")
               old-tidx (str old-name "_tidx")
               new-tidx (str new-name "_tidx")]
-          ;; Rename from-index
           (let [sql (format "alter index if exists \"%s\" rename to \"%s\"" old-fidx new-fidx)]
             (log/debug {:id ::relation-from-index-renamed
                         :data {:from-index old-fidx :to-index new-fidx :sql sql}}
@@ -665,7 +562,6 @@
                          :new-index-name new-fidx
                          :sql sql}
                         e)))))
-          ;; Rename to-index
           (let [sql (format "alter index if exists \"%s\" rename to \"%s\"" old-tidx new-tidx)]
             (log/debug {:id ::relation-to-index-renamed
                         :data {:from-index old-tidx :to-index new-tidx :sql sql}}
@@ -683,7 +579,6 @@
                          :new-index-name new-tidx
                          :sql sql}
                         e)))))))
-      ;; when to name has changed than change table column
       (when (:name to-diff)
         (let [o (entity->relation-field old-to)
               n (entity->relation-field to)
@@ -712,7 +607,6 @@
                        :new-column-name n
                        :sql sql}
                       e))))))
-      ;; when from name has changed than change table column
       (when (:name from-diff)
         (let [o (entity->relation-field old-from)
               n (entity->relation-field from)
@@ -742,10 +636,8 @@
                        :sql sql}
                       e)))))))
     (catch clojure.lang.ExceptionInfo e
-      ;; Re-throw ex-info with preserved context
       (throw e))
     (catch Throwable e
-      ;; Catch any other errors during relation transformation
       (throw (ex-info
               (format "Failed to transform relation: %s → %s"
                       (:name from) (:name to))
@@ -769,26 +661,16 @@
              ");")]
     (:exists (execute-one! tx [sql]))))
 
-;; 1. Generate new entities by creating tables
-;;  - Create new types if needed by enum attributes
-;; 2. Add audit attributes if present (modified_by,modified_on)
-;; 3. Check if model has changed attributes
-;;  - If so try to resolve changes by calling entity-delta->ddl
-;; 4. Check if model has changed relations
-;;  - If so try to resolve changes by calling transform-relation
-;; 5. Generate new relations by connecting entities
 (defn transform-database [ds projection configuration]
-  ; (throw (Exception. "HHH"))
   (log/debug {:id ::database-transforming :data {:config configuration}}
              "Transforming database")
   (let [{ne :new/entities
-         re :reactivated/entities ; NEW
+         re :reactivated/entities
          nr :new/relations
          nrr :new/recursive-relations
          ce :changed/entities
          cr :changed/relations
          crr :changed/recursive-relations} (analyze-projection projection)]
-    ; (-> projection analyze-projection :changed/entities first core/diff)
     (log/trace {:id ::projection-analyzed
                 :data {:new {:entities (map :name ne)
                              :relations (map (juxt :from-label :to-label) nr)
@@ -799,19 +681,13 @@
                                  :recursive (map (juxt :from-label :to-label) crr)}}}
                "Transform projection analysis")
     (jdbc/with-transaction [tx ds]
-      ;; Handle reactivated entities (table exists, just mark active)
       (when (not-empty re)
         (log/info {:id ::entities-reactivating :data {:count (count re)}}
                   "Reactivating entities (tables already exist)")
         (doseq [{:keys [name]} re]
           (log/debug {:id ::entity-reactivated :data {:entity name}}
                      "Reactivated entity")))
-      ;; Generate new entities
-      (let [entity-priority {:iam/user -100}
-            ne (sort-by
-                (fn [e]
-                  (get entity-priority (id/extract e) 0))
-                ne)]
+      (let [ne (core/creation-order ne)]
         (when (not-empty ne)
           (log/info {:id ::entities-generating
                      :data {:entities (mapv :name ne)}}
@@ -826,8 +702,6 @@
                        "Adding entity to DB")
             (try
               (execute-one! tx [table-sql])
-              ;; Install the xid immutability trigger — the id is immutable at
-              ;; the DB layer (any UPDATE to the xid column is silently reverted).
               (execute! tx [(xid/postgres-xid-trigger table)])
               (log/debug {:id ::id-immutability-trigger-created
                           :data {:table table :id-key (id/key)}}
@@ -844,10 +718,8 @@
                          :sql table-sql}
                         entity nil e))))
             (catch clojure.lang.ExceptionInfo e
-              ;; Re-throw ex-info with preserved context
               (throw e))
             (catch Throwable e
-              ;; Catch any other unexpected errors during entity creation
               (throw (ex-info
                       (format "Unexpected error while creating entity '%s'" n)
                       {:type ::entity-creation-error
@@ -857,11 +729,9 @@
                        :table-name table}
                       e))))))
 
-      ;; Apply audit columns to new entity tables (via protocol)
       (when (not-empty ne)
         (enhance/transform-audit *db* tx ne))
 
-      ;; Change entities
       (when (not-empty ce)
         (log/info {:id ::changed-entities-checking :data {:count (count ce)}}
                   "Checking changed entities"))
@@ -874,7 +744,6 @@
           (log/debug {:id ::entity-statement-executing
                       :data {:entity n :sql statement}}
                      "Executing statement")
-          ;; (def sql sql)
           (try
             (execute-one! tx [statement])
             (catch Throwable e
@@ -888,12 +757,10 @@
                        :table-name (entity->table-name entity)
                        :sql statement}
                       entity statement e))))))
-      ;; Change relations
       (when (not-empty cr)
         (log/info {:id ::changed-relations-checking :data {:count (count cr)}}
                   "Checking changed trans entity relations"))
       (doseq [r cr] (transform-relation tx r))
-      ;; Change recursive relation
       (when (not-empty crr)
         (log/info {:id ::changed-recursive-relations-checking :data {:count (count crr)}}
                   "Checking changed recursive relations"))
@@ -904,7 +771,6 @@
                :as r} crr
               :let [id (id/extract r)
                     table (entity->table-name e)
-                    ; _ (log/debug "RECURSIVE RELATION" diff)
                     previous-column (when-some [label (not-empty (:to-label diff))]
                                       (column-name label))]]
         (when-not (and (some? tl) (not-empty tl))
@@ -943,7 +809,6 @@
                                :column-name tl
                                :sql sql}
                               ex))))))))
-          ;; Apply changes
           (when diff
             (let [sql (format
                        "alter table %s rename column %s to %s"
@@ -967,7 +832,6 @@
                            :new-column-name (column-name tl)
                            :sql sql}
                           ex))))))))
-      ;; Generate new relations
       (when (not-empty nr)
         (log/info {:id ::new-relations-generating :data {:count (count nr)}}
                   "Generating new relations"))
@@ -1039,10 +903,8 @@
                          :sql to-idx}
                         e)))))
           (catch clojure.lang.ExceptionInfo e
-            ;; Re-throw ex-info with preserved context
             (throw e))
           (catch Throwable e
-            ;; Catch any other unexpected errors during relation creation
             (throw (ex-info
                     (format "Unexpected error while creating relation between '%s' and '%s'" fname tname)
                     {:type ::relation-creation-error
@@ -1053,7 +915,6 @@
                      :to-entity-id (id/extract to-entity)
                      :relation-id (id/extract relation)}
                     e)))))
-      ;; Add new recursive relations
       (when (not-empty nrr)
         (log/info {:id ::new-recursive-relations-adding :data {:count (count nrr)}}
                   "Adding new recursive relations"))
@@ -1086,8 +947,8 @@
                      :sql sql}
                     ex))))))))
 
-(defn- get-dataset-versions
-  "Gets all versions for a dataset by its id or :name, ordered by deployed_on desc"
+(defn get-dataset-versions
+  "All versions of a dataset by id or :name, newest deployed_on first."
   [{:keys [name]
     :as dataset-version}]
   (let [id (id/extract dataset-version)]
@@ -1108,21 +969,17 @@
           :deployed_on nil}
          :args {:_order_by {:deployed_on :desc}}}]}))))
 
-(defn- decode-version-model
-  "Decode the :model field from transit string to ERDModel record."
+(defn decode-version-model
   [version]
   (update version :model (fn [m] (if (string? m) (<-transit m) m))))
 
-(defn- encode-version-model
-  "Encode the :model field to transit string for DB storage."
+(defn encode-version-model
   [version]
   (update version :model (fn [m] (if (string? m) m (->transit m)))))
 
 (defn deployed-versions
   []
-  ;; Order by `deployed_on` — it is part of the meta-schema and the correct
-  ;; cursor for deployment recency. (`modified_on` is a row-stamp audit
-  ;; column the meta-model entities don't carry, so it must not be used.)
+  ;; never order by modified_on — meta-model entities don't carry it
   (mapv decode-version-model
         (dataset/search-entity
          :dataset/version
@@ -1221,15 +1078,7 @@
             deployed-versions))))))))
 
 (defn rebuild-global-model
-  "Utility function to rebuild the global model from ALL deployed dataset versions.
-   Use this as a backup/recovery mechanism if __deploy_history is corrupted.
-
-   Algorithm:
-   1. Get ALL deployed versions (not just latest) in ascending order
-   2. Build global model with claims via reduce + join-models
-   3. Determine which entities/relations are in LATEST version per dataset
-   4. Compute :active flags based on step 3
-   5. Return global model (does NOT save to __deploy_history)"
+  "Rebuilds the global model, with :active flags, from ALL deployed versions; does not save."
   ([] (rebuild-global-model (deployed-versions)))
   ([all-versions]
    (comment
@@ -1242,9 +1091,7 @@
         all-versions))
      (def model (:model version))
      (def x (rebuild-global-model)))
-   (let [;; Build global model with ALL claims
-         ;; join-models handles active flags via "last deployment wins"
-         initial-model (core/map->ERDModel {:entities {}
+   (let [initial-model (core/map->ERDModel {:entities {}
                                             :relations {}})
          final-model
          (reduce
@@ -1261,7 +1108,6 @@
          (core/reconcile-rls-guards (latest-version-models))
          (core/activate-model (gen-activation-filter))))))
 
-;; Helper functions for claims-based deployment
 (defn check-entity-name-conflicts!
   "Throws exception if new-model contains entities with conflicting names"
   [global new-model]
@@ -1284,13 +1130,7 @@
            :existing-entity (get entities-by-table table)
            :table-name (entity->table-name new-entity)}))))))
 
-;;; ============================================================================
-;;; Private Helper Functions
-;;; ============================================================================
-
-(defn- create-deploy-history!
-  "Creates __deploy_history table for tracking model deployments.
-   Private helper used during lifecycle setup. Idempotent."
+(defn create-deploy-history!
   []
   (execute-one!
    [(format
@@ -1298,9 +1138,7 @@
            \"deployed_on\" timestamp not null default localtimestamp,
            \"model\" text)")]))
 
-(defn- add-to-deploy-history!
-  "Records a model version in __deploy_history.
-   Private helper used during lifecycle setup."
+(defn add-to-deploy-history!
   [model]
   (execute-one!
    ["insert into __deploy_history (model) values (?)"
@@ -1321,58 +1159,30 @@
     (let [version (decode-version-model version)
           {:keys [model]} version]
       (try
-        (let [;; Get current global model WITH CLAIMS (or empty if first deployment)
-            ;; MUST use last-deployed-model (not fallback) because we need claims
-              model (dataset/adapt-model-to-provider model)
-            ;; Thread the adapted model back into the version so mount/DDL see
-            ;; the SAME id form as the active provider. Callers that load via
-            ;; `<-resource` already adapt up-front (making this a no-op), but a
-            ;; direct cross-format deploy (e.g. an xid-authored model under a
-            ;; euuid provider) would otherwise mount the raw model and feed
-            ;; xid constraint refs into a euuid-keyed `get-attribute`.
+        (let [model (dataset/adapt-model-to-provider model)
               version (assoc version :model model)
               global (or (dataset/deployed-model)
                          (core/map->ERDModel {:entities {}
                                               :relations {}}))
 
-            ;; 1. Check for entity name conflicts (throws on conflict)
               _ (check-entity-name-conflicts! global model)
 
-            ;; 2. Refuse before any DDL runs if the resulting model would drop a
-            ;;    guard — the dropped op fail-closes with no other signal
+            ;; refuse before any DDL if the result would drop a guard — the op fail-closes silently
               _ (rls/assert-guards-compile! (core/preview-model this version) model)
 
-            ;; 3. Call mount to transform database with updated global model
               _ (core/mount this (update version :model #(core/with-merged-config global %)))
 
-            ;; 4. Prepare version metadata for saving (with original model v1, not global)
               version'' (encode-version-model
                          (assoc version
                                 :model (assoc model :version 1)
                                 :deployed_on (java.util.Date.)
                                 :deployed true))]
-        ;; Mark version as deployed in database
           (sync-entity this :dataset/version version'')
-        ;; Reload current projection so that you can sync data for new model
           (core/reload this version'')
 
-        ;; Rebuild global model from ALL deployed versions to compute correct :active flags
-        ;; This ensures entities not in latest versions are marked as inactive
           (let [updated-model (assoc (rebuild-global-model) :version 1)]
             (dataset/save-model! updated-model)
             (add-to-deploy-history! updated-model)
-            ;; IAM-audit columns (created_by/modified_by/_on) — reconcile
-            ;; against EVERY current entity. Flipping :audit ON for an existing
-            ;; entity now adds the columns + triggers instead of silently
-            ;; no-op'ing. transform-audit is idempotent on both backends.
-            ;;
-            ;; Plug trigger reconcile (entity + relation delta queues) is
-            ;; owned by :synthigy/subscriptions.postgres (via add-model-watch!
-            ;; on *deployed-model*). When that module is started, save-model!
-            ;; above fires the watch synchronously and the plug is
-            ;; installed/refreshed against the new schema. Bare-server config
-            ;; doesn't start that module — plug stays uninstalled — which
-            ;; is the recovered fast-path (no audit-plug trigger tax).
             (let [all-entities (vec (core/get-entities updated-model))]
               (enhance/transform-audit *db* (:datasource *db*) all-entities))
             updated-model))
@@ -1383,18 +1193,11 @@
                               :dataset (:name (:dataset version))}}
                       e)
           (throw e)))))
-  ;;
   (core/recall!
     [this record]
     (assert (id/extract record) "Version id is required")
 
-    ;; 1. Query the version to get its information.
-    ;;    `:model` comes back from the DB as a transit string — must be
-    ;;    decoded before it's handed to anything model-shaped (project,
-    ;;    get-entities, etc.), otherwise dispatch fails with
-    ;;    "No implementation of method :get-entities for class String".
-    ;;    The sqlite impl does this at the equivalent point; postgres
-    ;;    was missing the call entirely. Mirror sqlite/dataset.clj:1248.
+    ;; never skip decode-version-model — :model comes back as a transit string
     (let [id (id/extract record)
           version (decode-version-model
                    (dataset/get-entity
@@ -1411,7 +1214,6 @@
               (throw (ex-info (format "Version %s not found" id)
                               {:type :version-not-found
                                (id/key) id})))
-          ;; 2. Check if version was deployed
           _ (when-not (:deployed version)
               (throw (ex-info (format "Version %s was never deployed, cannot recall" id)
                               {:type :version-not-deployed
@@ -1422,21 +1224,16 @@
           dataset-name (:name dataset)
           dataset-id (id/extract dataset)
 
-          ;; 3. Get all deployed versions for this dataset
           all-deployed-versions (filter :deployed (get-dataset-versions dataset))
 
-          ;; 4. Determine if this is the only deployed version
           only-version? (= 1 (count all-deployed-versions))
 
-          ;; 5. Determine if this is the most recent version
           most-recent-version (first all-deployed-versions)
           is-most-recent? (= id (id/extract most-recent-version))
 
-          ;; 6. Get global model with claims
           global (dataset/deployed-model)
           version-uuids #{id}
 
-          ;; 7. Find exclusive entities/relations for this version
           exclusive-entities (core/find-exclusive-entities global version-uuids)
           exclusive-relations (core/find-exclusive-relations global version-uuids)]
 
@@ -1454,8 +1251,6 @@
           (def is-most-recent? (= id (id/extract most-recent-version)))
           (def updated-model (rebuild-global-model (remove #(= (id/extract%) id) (deployed-versions)))))
 
-      ; (throw (Exception. "WTF!"))
-
       (log/info {:id ::version-recalling
                  :data {:dataset dataset-name
                         :version (:name version)
@@ -1463,14 +1258,12 @@
                         :most-recent? is-most-recent?}}
                 "Recalling version")
 
-      ;; 8. Unmount ONLY exclusive entities/relations
       (when (or (not-empty exclusive-entities) (not-empty exclusive-relations))
         (log/info {:id ::exclusive-pruning
                    :data {:entity-count (count exclusive-entities)
                           :relation-count (count exclusive-relations)}}
                   "Pruning exclusive entities and relations")
         (with-open [con (jdbc/get-connection (:datasource *db*))]
-          ;; Drop relation tables
           (doseq [relation exclusive-relations
                   :let [{:keys [from to]
                          :as relation} (core/get-relation global (id/extract relation))
@@ -1481,7 +1274,6 @@
                         :data {:from (:name from) :to (:name to) :table table-name}}
                        "Removed relation table")
             (dataset/delete-entity :dataset/relation relation))
-          ;; Drop entity tables
           (doseq [entity exclusive-entities
                   :let [entity (core/get-entity global (id/extract entity))]
                   :when (some? entity)]
@@ -1493,22 +1285,13 @@
               (execute-one! con [sql])
               (dataset/delete-entity :dataset/relation entity)))))
 
-      ;; 9. Drop orphaned attribute columns and rebuild model
-      ;; After deleting the version, find attributes that exist ONLY in the recalled version
-      ;; and drop their database columns
-      (let [;; Rebuild global model from remaining deployed versions
-            updated-model (rebuild-global-model (remove #(= (id/extract %) id) (deployed-versions)))
+      (let [updated-model (rebuild-global-model (remove #(= (id/extract %) id) (deployed-versions)))
             recalled-model (:model version)
 
-            ;; Project to find what recalled version would ADD to updated global
-            ;; Attributes marked :added? don't exist in updated-model → orphaned
             projection (core/project updated-model recalled-model)
 
-            ;; Create set of exclusive entity euuids for efficient lookup
             exclusive-entity-ids (set (map id/extract exclusive-entities))
 
-            ;; Find all orphaned attributes, excluding those from exclusive entities
-            ;; (exclusive entities have their entire tables dropped, so no need to drop individual columns)
             orphaned-attrs (for [entity (core/get-entities projection)
                                  :when (not (contains? exclusive-entity-ids (id/extract entity)))
                                  attr (:attributes entity)
@@ -1516,7 +1299,6 @@
                              {:entity entity
                               :attribute attr})]
 
-        ;; Drop orphaned columns from database
         (when (not-empty orphaned-attrs)
           (log/info {:id ::orphaned-columns-dropping
                      :data {:count (count orphaned-attrs)}}
@@ -1529,10 +1311,7 @@
                   (log/debug {:id ::orphaned-column-dropped :data {:sql sql}}
                              "Dropped orphaned column"))))))
 
-        ;; 10. Handle three cases: only version, most recent, or older version
-        ;; All cases rebuild from updated-model (from step 9.5)
         (cond
-            ;; Case 1: Only deployed version - delete the dataset itself
           only-version?
           (do
             (log/info {:id ::version-recalled-rebuilding}
@@ -1545,7 +1324,6 @@
             (log/info {:id ::dataset-removing :data {:dataset dataset-name}}
                       "Last version deleted, removing dataset")
             (dataset/delete-entity :dataset/dataset {(id/key) dataset-id}))
-            ;; Case 2: Most recent version - SIMPLIFIED (no redeploy!)
           is-most-recent?
           (do
             (log/info {:id ::version-recalled-rebuilding}
@@ -1555,7 +1333,6 @@
                        :data {:dataset dataset-name :version (:name version)}}
                       "Deleting version record")
             (delete-entity this :dataset/version {(id/key) id}))
-            ;; Case 3: Older version - just reload model without this version
           :else
           (log/info {:id ::older-version-recalled
                      :data {:dataset dataset-name :version (:name version)}}
@@ -1566,23 +1343,11 @@
           (dataset/save-model! final-model)
           (query/deploy-schema final-schema)
           (add-to-deploy-history! final-model)
-          ;; Reinstall IAM-audit columns against the post-recall schema.
-          ;; The orphan-column DROPs above used CASCADE, which removed
-          ;; per-row trigger fns that referenced the dropped columns.
-          ;; transform-audit is idempotent.
-          ;;
-          ;; Plug delta-queue triggers are owned by
-          ;; :synthigy/subscriptions.postgres via add-model-watch! on
-          ;; *deployed-model*. save-model! above fires the watch
-          ;; synchronously when the module is started; bare-server
-          ;; skips both.
           (let [all-entities (vec (core/get-entities final-model))]
             (enhance/transform-audit *db* (:datasource *db*) all-entities))))))
-  ;;
   (core/destroy! [this {:keys [name]
                         :as record}]
     (assert (or name (id/extract record)) "Specify dataset name or id!")
-    ;; Get all versions for this dataset
     (comment
       (def id #uuid "ffffffff-0000-0000-0000-000000000000")
       (dataset/search-entity
@@ -1606,8 +1371,6 @@
       (log/info {:id ::dataset-destroying
                  :data {:dataset (or name id) :version-count (count all-versions)}}
                 "Destroying dataset: recalling versions in reverse order")
-        ;; Recall each version in reverse chronological order (most recent first)
-        ;; This ensures proper cleanup and rollback behavior
       (doseq [version all-versions]
         (core/recall! this {(id/key) (id/extract version)}))))
   (core/get-model
@@ -1618,13 +1381,11 @@
 
      (when-not (dataset/deployed-model)
        (let [{:keys [model]
-              :as dataset-version} (dataset/<-resource "dataset/dataset.json")]
+              :as dataset-version} (dataset/bootstrap-version)]
          (core/reload this dataset-version)
          (query/deploy-schema (query/model->schema model))
          model))
      (let [model (rebuild-global-model)
-           ;; Convert claims to :active flags
-           ;; Ensure we always have an ERDModel, even if database is empty
            model' (-> (or model (core/map->ERDModel {:entities {}
                                                      :relations {}}))
                       (assoc :version 1))
@@ -1635,12 +1396,8 @@
        model''))
     ([this record]
      (let [{:keys [model] :as record} (decode-version-model record)
-           ;; Adapt to the active id form (idempotent) before building the
-           ;; schema + saving — same rationale as `mount`.
            model (dataset/adapt-model-to-provider model)
            record (assoc record :model model)
-           ;; Use id/extract to get the version ID in the current provider format
-           ;; This ensures claims match deployed-version-per-dataset-ids which also uses id/extract
            version-id (id/extract record)
            global (or
                    (core/get-model this)
@@ -1655,10 +1412,6 @@
   (core/mount
     [this version]
     (let [{model :model :as version} (decode-version-model version)
-          ;; Adapt to the active id form so the projection + DDL never feed a
-          ;; foreign-format model (e.g. xid-authored resource under a euuid
-          ;; provider) into the id-keyed `get-attribute`. Idempotent: an
-          ;; already-active model detects as a no-op transform.
           model (dataset/adapt-model-to-provider model)
           version (assoc version :model model)]
       (log/debug {:id ::version-mounting
@@ -1675,7 +1428,6 @@
   (core/unmount
     [this version]
     (let [{:keys [model]} (decode-version-model version)
-          ;; USE Global model to reference true DB state
           global (core/get-model this)]
       (with-open [con (jdbc/get-connection (:datasource *db*))]
         (doseq [relation (core/get-relations model)
@@ -1712,8 +1464,7 @@
     (core/reload this))
   (core/get-last-deployed
     ([this]
-     ;; ⚠️ MANUAL RECOVERY ONLY - Read from __deploy_history audit table
-     ;; This is NOT part of normal bootstrap flow - reload handles that
+     ;; manual recovery only — never part of bootstrap (reload handles that)
      (log/warn {:id ::manual-recovery-invoked}
                "get-last-deployed called - this is for manual recovery only")
      (core/get-last-deployed this 0))
@@ -1733,62 +1484,49 @@
              clean-schema (query/model->schema clean-model)]
          (with-meta clean-model {:dataset/schema clean-schema}))))))
 
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
-
 (lifecycle/register-module!
  :synthigy/dataset
  {:depends-on [:synthigy/log :synthigy/database :synthigy.dataset/encryption :synthigy/log.config]
   :headline true
   :doc "ERD model — schema deploy, /data query engine"
   :setup (fn []
-            ;; Note: Database and *db* are already set up by :synthigy/database
-            ;; Check for legacy BEFORE detect-and-set-provider! (which stores format)
+            ;; legacy check BEFORE detect-and-set-provider! — it stores the format
            (let [legacy? (xid/legacy-deployment?)]
 
-              ;; Detect and set ID provider BEFORE loading model
              (xid/detect-and-set-provider!)
+             (dataset/register-reference-types!)
 
              (if legacy?
-                ;; Legacy Postgres: just load existing schema, don't redeploy
                (do
                  (log/info {:id ::legacy-setup-starting}
                            "Legacy Postgres deployment detected, loading existing schema")
-                 ;; Forward-reconcile meta-schema columns newer versions expect,
-                 ;; BEFORE any version-detection reads them.
+                 ;; must run BEFORE any version-detection reads the meta columns
                  (xid/reconcile-legacy-meta-columns!)
-                 (create-deploy-history!)  ;; Ensure exists for old deployments
+                 (create-deploy-history!)
                  (core/reload *db*)
                  (log/info {:id ::legacy-setup-complete}
                            "Legacy setup complete"))
 
-                ;; Fresh Postgres: full setup with deploy
                (do
                  (log/info {:id ::fresh-setup-starting}
-                           "Fresh Postgres, deploying dataset meta-model")
+                           "Fresh Postgres, deploying Synthigy model")
                  (dataset/save-model! (core/map->ERDModel nil))
                  (log/info {:id ::fresh-setup-database
                             :data {:database (dissoc *db* :password :datasource)}}
                            "Using database")
 
-                  ;; Create deployment history table
                  (create-deploy-history!)
                  (log/info {:id ::deploy-history-created :data {:action :created :subject :deploy-history}}
                            "Created __deploy_history")
 
-                  ;; Load and deploy the Dataset schema (meta-model)
-                 (log/info {:id ::dataset-schema-loading :data {:action :loading :subject :dataset-schema}}
-                           "Loading Dataset schema from dataset/dataset.json")
-                 (let [model (<-transit (slurp (io/resource "dataset/dataset.json")))]
-                   (core/mount *db* model)
-                   (core/reload *db* model))
-                 (log/info {:id ::dataset-schema-mounted :data {:action :mounted :subject :dataset-schema}}
-                           "Mounted dataset.json schema")
-
-                 (log/info {:id ::dataset-schema-deploying :data {:action :deploying :subject :dataset-schema}}
-                           "Deploying Dataset schema to history")
-                 (core/deploy! *db* (<-transit (slurp (io/resource "dataset/dataset.json"))))
+                 (log/info {:id ::synthigy-model-loading :data {:action :loading :subject :dataset-model}}
+                           "Loading Synthigy model from dataset/synthigy.json")
+                 (let [version (dataset/current-synthigy-version)]
+                   (core/mount *db* version)
+                   (core/reload *db* version)
+                   (log/info {:id ::synthigy-model-mounted :data {:action :mounted :subject :dataset-model}}
+                             "Mounted Synthigy model")
+                   (dataset/deploy! version))
 
                  (log/info {:id ::model-reloading :data {:action :reloading :subject :model}}
                            "Reloading model")
@@ -1802,7 +1540,6 @@
                            "Setup complete")))))
 
   :cleanup (fn []
-              ;; One-time: Clean up dataset tables (database cleanup handled by :synthigy/database)
              (log/info {:id ::cleanup-starting}
                        "Cleaning up dataset tables")
               ;; TODO: Drop dataset-specific tables if needed
@@ -1810,14 +1547,10 @@
                        "Dataset cleanup complete"))
 
   :start (fn []
-           ;; Runtime: Initialize delta channels, apply patches, load model
            (log/info {:id ::lifecycle-starting :data {:action :starting}}
                      "Starting dataset system")
-            ;; Detect and set ID provider BEFORE loading model
            (xid/detect-and-set-provider!)
-           ;; First-class legacy awareness: Synthigy is xid-native. A legacy
-           ;; (euuid) layout is loudly flagged and requires an EXPLICIT,
-           ;; operator-run one-time import — we never auto-migrate on boot.
+           ;; never auto-migrate on boot — legacy import is operator-run
            (when (xid/legacy-euuid-layout?)
              (log/warn {:id ::legacy-euuid-detected
                         :data {:action :not-initialized :subject :id-format :format "euuid"}}
@@ -1825,27 +1558,11 @@
                             "run (synthigy.dataset.postgres.xid/migrate->synthigy!) to convert "
                             "this database to the Synthigy xid layout. Until then the system "
                             "runs against the legacy euuid layout.")))
-           ;; NB: the per-boot reconcile band-aid is gone from the normal start.
-           ;; The migration (`migrate->synthigy!`) owns the proactive reconcile
-           ;; (step 0); a native/modern boot already has `deployed_on`/`active`,
-           ;; and an un-imported legacy boot self-heals via the
-           ;; `latest-deployed-version` nil-catch + the model patch that adds them.
            (dataset/start)
-           ;; Plug delta-queue triggers + drainer are owned by
-           ;; :synthigy/plug. Both server profiles now start it
-           ;; (bare-server included), so writes carry the plug trigger
-           ;; tax. To skip it — a trigger-free fast write path — start
-           ;; :synthigy/dataset alone (no server profile).
-           ;; Audit persistence is owned by the observability plug
-           ;; (`:synthigy/observability`, DuckDB or ClickHouse), started
-           ;; separately by the operator/test fixture — not auto-bound
-           ;; here. Without it, deltas still dispatch live to subscribers;
-           ;; only `/history` is unavailable.
            (log/info {:id ::lifecycle-started :data {:action :started}}
                      "Dataset system started"))
 
   :stop (fn []
-          ;; Runtime: Close delta channels, clear state
           (log/info {:id ::lifecycle-stopping :data {:action :stopping}}
                     "Stopping dataset system")
           (dataset/stop)
@@ -1894,11 +1611,7 @@
              field))
          relations)))))
 
-;;; Database Healthcheck
-;;; Verifies that the deployed dataset schema matches the actual PostgreSQL database state
-
 (defn get-pg-tables
-  "Returns a set of all table names in the public schema (excluding system tables)"
   []
   (let [system-tables #{"__deks" "__version_history"}]
     (set (remove system-tables
@@ -1909,7 +1622,6 @@
                 AND table_name NOT LIKE '__deploy%'"]))))))
 
 (defn get-pg-columns
-  "Returns a set of column names for a given table"
   [table-name]
   (set (map (comp keyword :column_name)
             (execute! ["SELECT column_name FROM information_schema.columns
@@ -1917,33 +1629,22 @@
                        table-name]))))
 
 (defn get-pg-enum-types
-  "Returns a set of all enum type names in the database"
   []
   (set (map :typname
             (execute! ["SELECT typname FROM pg_type
             WHERE typtype = 'e'"]))))
 
 (defn healthcheck-database
-  "Checks if deployed dataset schema matches actual PostgreSQL database state.
-
-   Returns a structured map with namespaced keywords:
-   - :healthy? - true if everything matches
-   - :expected/* - expected counts from schema
-   - :actual/* - actual counts from database
-   - :missing/* - {:count N :items [...]} missing items (in schema but not in DB)
-   - :extra/* - {:count N :items [...]} extra items (in DB but not in schema)"
+  "Compares the deployed schema with the live database: :healthy?, :expected/*, :actual/*, :missing/*, :extra/*."
   []
   (let [schema (query/deployed-schema)
 
-        ;; Get all actual tables from PostgreSQL
         pg-tables (get-pg-tables)
 
-        ;; Get all expected entity tables from schema
         expected-entity-tables (set (keep (fn [[_ entity-data]]
                                             (:table entity-data))
                                           schema))
 
-        ;; Get all expected relation tables from schema
         expected-relation-tables (set (mapcat
                                        (fn [[_ entity-data]]
                                          (map :table (vals (:relations entity-data))))
@@ -1951,13 +1652,10 @@
 
         expected-tables (clojure.set/union expected-entity-tables expected-relation-tables)
 
-        ;; Find missing tables
         missing-tables (clojure.set/difference expected-tables pg-tables)
 
-        ;; Find extra tables (could be inactive/historical)
         extra-tables (clojure.set/difference pg-tables expected-tables)
 
-        ;; Check columns for each entity table
         missing-columns
         (for [[entity-uuid entity-data] schema
               :let [table-name (:table entity-data)
@@ -1974,22 +1672,18 @@
            :table table-name
            :missing-columns missing})
 
-        ;; Check relation tables
         missing-relations (filter #(not (pg-tables %)) expected-relation-tables)]
 
     {:healthy? (and (empty? missing-tables)
                     (empty? missing-columns)
                     (empty? missing-relations))
 
-     ;; Expected counts from schema
      :expected/tables (count expected-tables)
      :expected/entities (count expected-entity-tables)
      :expected/relations (count expected-relation-tables)
 
-     ;; Actual counts from database
      :actual/tables (count pg-tables)
 
-     ;; Missing items (expected but not found in DB)
      :missing/tables {:count (count missing-tables)
                       :items missing-tables}
      :missing/columns {:count (count missing-columns)
@@ -1997,16 +1691,11 @@
      :missing/relations {:count (count missing-relations)
                          :items missing-relations}
 
-     ;; Extra items (in DB but not expected)
      :extra/tables {:count (count extra-tables)
                     :items extra-tables}}))
 
 (defn healthcheck-report
-  "Generates a healthcheck report with human-readable message.
-   Returns a map with:
-   - :healthy? - boolean
-   - :message - human-readable report string
-   - :data - full healthcheck data"
+  "Healthcheck as {:healthy? :message :data}, with a human-readable message."
   ([] (healthcheck-report (healthcheck-database)))
   ([health]
    (let [lines (atom [])
@@ -2017,14 +1706,12 @@
                           (get-in health [:missing/columns :count])
                           (get-in health [:missing/relations :count]))]
 
-     ;; Build report message
      (println! "=== Database Health Check ===")
      (println! "")
      (if (:healthy? health)
        (println! "✅ Database is HEALTHY - schema matches deployed model")
        (println! "❌ Database has ISSUES - schema does not match deployed model"))
 
-     ;; Expected vs Actual Summary
      (println! "")
      (println! "Expected (from schema):")
      (println! (format "  Tables:    %d (%d entities + %d relations)"
@@ -2036,7 +1723,6 @@
      (println! "Actual (in database):")
      (println! (format "  Tables:    %d" (:actual/tables health)))
 
-     ;; Missing items
      (when (pos? missing-count)
        (println! "")
        (println! (format "⚠️  Missing %d item(s):" missing-count)))
@@ -2061,7 +1747,6 @@
          (doseq [col missing-columns]
            (println! (format "      • %s" col)))))
 
-     ;; Extra items (informational)
      (when (pos? (get-in health [:extra/tables :count]))
        (println! "")
        (println! (format "ℹ️  Extra tables in DB (%d) - could be inactive/historical:"
@@ -2074,13 +1759,11 @@
      (println! "")
      (println! "=========================")
 
-     ;; Return structured response
      {:healthy? (:healthy? health)
       :message (clojure.string/join "\n" @lines)
       :data health})))
 
 (defn healthcheck-print
-  "Convenience function that prints the healthcheck report to stdout"
   []
   (let [{:keys [message]} (healthcheck-report)]
     (println message)))
@@ -2117,34 +1800,23 @@
                   {(id/key) nil
                    :name nil}}]})))
 
-;;; ============================================================================
-;;; Protocol Extensions - TypeCodec, SQLDialect, SchemaIntrospector
-;;; ============================================================================
-
-;;; TypeCodec Protocol - Encode/decode ERD types to PostgreSQL types
-
 (extend-type Postgres
   proto/TypeCodec
 
   (encode [_db type value]
     (case type
-      ;; Scalars - pass through (PostgreSQL native types)
       ("string" "int" "float" "boolean" "timeperiod" "currency" "uuid" "avatar")
       value
 
       "timestamp"
       (when (some? value) (ts/->utc-local value))
 
-      ;; json - PGobject jsonb
       "json"
       (when value
         (doto (PGobject.)
           (.setType "jsonb")
           (.setValue (->json value))))
 
-      ;; encrypted - NOT a TypeCodec type. Sealing needs the active DEK and
-      ;; writes a JSON envelope, so it happens at the storage boundary
-      ;; (store-entity-records) instead. See synthigy.dataset.encryption/seal-cell.
       "encrypted"
       (throw (ex-info
               (str "\"encrypted\" cannot be encoded via TypeCodec — it seals "
@@ -2152,36 +1824,25 @@
                    "seal-cell), never here.")
               {:code :encrypted-not-a-codec-type}))
 
-      ;; hashed - bcrypt hash
       "hashed"
       (when value
         (hashers/derive value))
 
-      ;; transit - pass through as string (application handles encoding)
       "transit"
       value
 
-      ;; Default: treat as enum type
-      ;; Use plain string instead of PGobject to avoid JDBC type OID caching issues
-      ;; when enum types are dropped and recreated. PostgreSQL will implicitly cast
-      ;; the string to the enum type.
       (when value
         (name value))))
 
   (decode [_db type value]
     (case type
-      ;; Scalars - pass through
       ("string" "int" "float" "boolean" "timeperiod" "currency" "uuid" "avatar")
       value
 
       "timestamp"
       (when (some? value) (ts/->date value))
 
-      ;; json - opaque user data: decode with NO transformation. `:keyfn
-      ;; identity` keeps object keys as strings (a key like "Key with
-      ;; space" must survive verbatim), and `:valfn nil` disables
-      ;; `synthigy-val-fn`, which would otherwise coerce string values
-      ;; that happen to look like dates/UUIDs into Date/UUID objects.
+      ;; opaque user data — never coerce keys or values
       "json"
       (when value
         (cond
@@ -2190,8 +1851,6 @@
           (string? value) (<-json value {:keyfn identity :valfn nil})
           :else value))
 
-      ;; encrypted - NOT a TypeCodec type; see the encode case above. Decoded
-      ;; via unseal-cell in the fetch decoders.
       "encrypted"
       (throw (ex-info
               (str "\"encrypted\" cannot be decoded via TypeCodec — it unseals "
@@ -2199,23 +1858,18 @@
                    "unseal-cell), never here.")
               {:code :encrypted-not-a-codec-type}))
 
-      ;; hashed - not decoded, only verified
       "hashed"
       value
 
-      ;; transit - pass through as string (application handles decoding)
       "transit"
       value
 
-      ;; Default: treat as enum (keyword)
       (when value
         (cond
           (keyword? value) value
           (instance? PGobject value) (keyword (.getValue ^PGobject value))
           (string? value) (keyword value)
           :else value)))))
-
-;;; SQLDialect Protocol - PostgreSQL-specific SQL syntax
 
 (extend-type Postgres
   proto/SQLDialect
@@ -2224,7 +1878,6 @@
     (if case-sensitive? "LIKE" "ILIKE"))
 
   (limit-offset-clause [_db limit offset]
-    ;; PostgreSQL allows OFFSET without LIMIT, but we use LIMIT ALL for clarity
     (cond
       (and limit offset) (str "LIMIT " limit " OFFSET " offset)
       limit (str "LIMIT " limit)
@@ -2232,23 +1885,16 @@
       :else nil))
 
   (placeholder-for-type [_db _field-type]
-    ;; No casts needed - the only non-native type was enum, stored as TEXT
-    ;; since dataset 1.4.0.
     "?")
 
   (excluded-ref [_db column]
-    ;; PostgreSQL: uppercase 'EXCLUDED'
     (format "EXCLUDED.%s" column))
 
   (max-bind-params [_db]
-    ;; PostgreSQL wire protocol counts Bind parameters in an Int16.
     65535)
 
   (row-lock-clause [_db]
-    ;; NO KEY: other relations' foreign-key checks on the row stay unblocked
     " for no key update"))
-
-;;; SchemaManager Protocol - PostgreSQL schema introspection and maintenance
 
 (extend-type Postgres
   proto/SchemaManager
@@ -2300,8 +1946,6 @@
   (column-exists? [db table column]
     (let [columns (proto/get-columns db table)]
       (some #(= column (:name %)) columns)))
-
-  ;; === Maintenance Operations ===
 
   (list-tables-like [_db pattern]
     (execute!

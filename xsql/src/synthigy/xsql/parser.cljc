@@ -33,13 +33,11 @@
 (defn at-eof? [st] (= :eof (peek-type st)))
 
 (defn id-text=?
-  "True if current token is an :identifier whose text matches."
   [st text]
   (and (= :identifier (peek-type st))
        (= text (peek-text st))))
 
 (defn id-text=at?
-  "True if token at offset k is an :identifier whose text matches."
   [st k text]
   (and (= :identifier (peek-type st k))
        (= text (:text (peek-tok st k)))))
@@ -51,12 +49,9 @@
     {:node :error
      :span [(:from t) (:to t)]
      :text (or (:text t) "")
-     ;; Prefer the lexer's own diagnostic message when present — more
-     ;; specific than the parser's generic fallback.
      :message (or (:message t) msg)}))
 
 (defn skip-to-newline
-  "Advance until :newline / :dedent / :eof; consume the :newline if found."
   [st]
   (loop [st st]
     (case (peek-type st)
@@ -74,14 +69,10 @@
        :eq :neq :lt :le :gt :ge)
       (ast/leaf tag sp (:text t))
 
-      ;; Preserve the lexer's :message so callers (the linter) can
-      ;; surface its specific cause instead of a generic fallback.
       :error
       (cond-> (ast/leaf tag sp (:text t))
         (:message t) (assoc :message (:message t)))
 
-      ;; Param refs carry richer metadata so the compiler doesn't have
-      ;; to re-scan the text.
       :param-ref
       (cond-> (assoc (ast/leaf tag sp (:text t))
                      :param-name     (:param-name t)
@@ -106,7 +97,6 @@
      st]))
 
 (defn skip-silent
-  "Advance past token of given type without adding to children."
   [st t]
   (if (= t (peek-type st))
     (advance st)
@@ -115,15 +105,12 @@
 ;; ── Span helpers ─────────────────────────────────────────────────────────
 
 (defn end-of-children
-  "Last child's :span end, or fallback if no children."
   [children fallback]
   (if (seq children)
     (or (second (:span (last children))) fallback)
     fallback))
 
 (defn container
-  "Build a container node spanning from `start-tok`'s :from to the
-   last child's end (or :from when childless)."
   [tag start-tok children]
   (let [from (:from start-tok)
         to   (end-of-children children from)]
@@ -144,15 +131,11 @@
 
 (def ^:private binary-op-types #{:eq :neq :lt :le :gt :ge})
 
-;; Bare SQL spellings are canonical; legacy `_`-forms still parse (lint
-;; nudges). Position disambiguates bare forms — see docs.
 (def ^:private meta-keys #{"_limit" "_offset" "_order_by" "_distinct" "_join" "_on"})
 (def ^:private bare-meta-keys #{"limit" "offset" "distinct" "join" "on"})
 
 (defn normalize-meta-kw
-  "Canonical `_`-form for either spelling (`limit` and `_limit` → \"_limit\";
-   `order` → \"_order_by\"). Public — the compiler normalizes meta-key AST
-   nodes through this same table so the two can't drift."
+  "Canonical `_`-form of a meta-key spelling; the compiler shares this table."
   [text]
   (case text
     "limit"    "_limit"
@@ -164,7 +147,6 @@
     text))
 
 (defn pred-op-starter?
-  "True if current token can start a PredOp (after a path / scalar id)."
   [st]
   (or (binary-op-types (peek-type st))
       (id-text=? st "in")
@@ -174,10 +156,7 @@
       (id-text=? st "is")))
 
 (defn meta-key-start?
-  "True when the current token begins a meta-key arg-stmt. Legacy
-   `_`-forms are unconditional; bare forms need position: `order` only
-   with a following `by`, the rest only when not followed by a
-   predicate operator (`limit > 10` stays a predicate)."
+  "True when the current token begins a meta-key arg-stmt (bare forms disambiguated by position)."
   [st]
   (and (= :identifier (peek-type st))
        (let [t (peek-text st)]
@@ -187,7 +166,6 @@
                   (not (pred-op-starter? (advance st))))))))
 
 (defn looks-like-alias?
-  "An alias prefix is :identifier directly followed by :colon."
   [st]
   (and (= :identifier (peek-type st))
        (= :colon      (peek-type st 1))))
@@ -196,23 +174,14 @@
 ;;   PRODUCTIONS
 ;; ═══════════════════════════════════════════════════════════════════════
 
-;; Query → RootEntity Newline Indent Body Dedent
-;; Body  → (BlankLine | RootArgs | Statement)*
-;;
-;; Rooted form: the entity identifier lives on the :query node under
-;; :root-entity, NOT as a child, so AST shape stays identical to the
-;; body alone. `compile-query` reads it to emit :entity.
-
 (defn parse-query-body
-  "Parse the body of a rooted query: (BlankLine | Statement)* until
-   :dedent / :eof. Returns `[children st]`."
+  "Parse a rooted query's body until :dedent / :eof; returns `[children st]`."
   [st]
   (loop [st       st
          children []]
     (let [pos-before (:pos st)]
       (cond
-        ;; nil peek = past EOF: an unterminated root paren can swallow
-        ;; the rest of the buffer into its arg-list. Same exit as :eof.
+        ;; nil peek = past EOF (unterminated root paren) — must exit here or skip-to-newline loops forever
         (or (nil? (peek-type st)) (#{:dedent :eof} (peek-type st)))
         [children st]
 
@@ -226,8 +195,7 @@
           (recur st' (conj children n)))
 
         :else
-        ;; Progress watchdog: force-advance if skip-to-newline made no
-        ;; progress (returned at :dedent/:eof) — an editor hang otherwise.
+        ;; Progress watchdog: force-advance on no progress — editor hang otherwise.
         (let [err (error-node (peek-tok st)
                               (str "unexpected token: " (name (or (peek-type st) :eof))))
               st' (skip-to-newline (advance st))]
@@ -238,19 +206,16 @@
 (defn parse-query [st]
   (let [start-tok (peek-tok st)
         start     (:from start-tok 0)
-        ;; Leading blank-lines / comments before the root entity.
         [lead-blanks st]
         (loop [st st acc []]
           (if (= :blank-line (peek-type st))
             (let [[bl st'] (consume-leaf st)]
               (recur st' (conj acc bl)))
             [acc st]))
-        ;; Root entity: a single identifier at col-0.
         [root-entity st]
         (if (= :identifier (peek-type st))
           (consume-leaf st)
           [nil st])
-        ;; Optional root args, same arg-list grammar as a relation header.
         [root-parens st]
         (if (and root-entity (= :lparen (peek-type st)))
           (parse-parens st)
@@ -288,8 +253,6 @@
     [(container :statement start [inner]) st']))
 
 ;; Scalar → Identifier (PredOp | ScalarFilter)? Newline
-;; Scalar aliases were dropped from the language (relation/_count/_agg
-;; aliases remain) — see docs.
 
 (defn parse-scalar [st]
   (let [start (peek-tok st)
@@ -299,10 +262,6 @@
         [tail st]
         (cond
           (= :lparen (peek-type st)) (parse-scalar-filter st)
-          ;; Inline predicates parse through the same or/and machinery as
-          ;; the parens form; a single bare predicate unwraps to a plain
-          ;; :pred-op child, a joiner chain becomes :scalar-filter — same
-          ;; shape either way for compile/lint/complete.
           (pred-op-starter? st)
           (let [tok (peek-tok st)
                 [expr st'] (parse-scalar-or-expr st)
@@ -386,12 +345,7 @@
           (recur st (conj children bl)))
 
         :else
-        ;; Progress watchdog: if `parse-count-child` can't advance
-        ;; (mid-typing produces a token it can't consume — e.g. a
-        ;; double-indent line when the user nested deeper than the
-        ;; grammar allows), force one step forward to break the loop.
-        ;; Without this the editor's per-keystroke parse hangs the
-        ;; browser.
+        ;; Progress watchdog: force-advance on no progress — editor hang otherwise.
         (let [pos-before (:pos st)
               [c st']    (parse-count-child st)]
           (if (= pos-before (:pos st'))
@@ -399,8 +353,6 @@
             (recur st' (conj children c))))))))
 
 ;; CountChild → Alias? Identifier Parens? Newline
-;; `_count` children are always inner joins — a leading `-`/`->` is
-;; consumed and replaced with a specific :error so the line still parses.
 
 (defn parse-count-child [st]
   (let [start (peek-tok st)
@@ -449,18 +401,15 @@
           (recur st (conj children bl)))
 
         :else
-        ;; Progress watchdog — see comment in `parse-count-block`.
+        ;; Progress watchdog: force-advance on no progress — editor hang otherwise.
         (let [pos-before (:pos st)
               [r st']    (parse-agg-relation st)]
           (if (= pos-before (:pos st'))
             [(container :agg-block start (conj children r)) (advance st')]
             (recur st' (conj children r))))))))
 
-;; AggRelation → JoinMarker Alias? Identifier Newline Indent AggAttr+ Dedent
-
 (defn parse-agg-relation [st]
   (let [start (peek-tok st)
-        ;; `_agg` headers are always inner-joined, same as `_count` children.
         [marker-err st]
         (case (peek-type st)
           :dash  (let [[_ st'] (consume-leaf st)]
@@ -477,9 +426,6 @@
         children      (cond-> children alias-n (conj alias-n))
         [field-id st] (expect st :identifier "expected agg-relation name")
         children      (conj children field-id)
-        ;; Optional parens-filter on the agg header — symmetric with
-        ;; `_count` children. `approved:approval_records(approved=true)`
-        ;; restricts the source rows for every fn under this header.
         [parens st]   (if (= :lparen (peek-type st)) (parse-parens st) [nil st])
         children      (cond-> children parens (conj parens))
         [nl st]       (expect st :newline "expected newline after agg-relation header")
@@ -497,7 +443,7 @@
         [(container :agg-relation start children) st]
 
         :else
-        ;; Progress watchdog — see comment in `parse-count-block`.
+        ;; Progress watchdog: force-advance on no progress — editor hang otherwise.
         (let [pos-before (:pos st)
               [a st']    (parse-agg-attr st)]
           (if (= pos-before (:pos st'))
@@ -571,9 +517,7 @@
                 (= :eof    (peek-type st)))
           [nil st]
           (parse-arg-list st))
-        ;; Capture `)` end before consuming: an empty "()" would otherwise
-        ;; get a zero-width span at "(", and completion couldn't detect
-        ;; the cursor is inside the parens.
+        ;; capture `)` end before consuming — else `()` gets a zero-width span and completion misses it
         rparen-to (when (= :rparen (peek-type st)) (:to (peek-tok st)))
         st        (skip-silent st :rparen)
         children  (filterv some? [arg-list])
@@ -597,12 +541,6 @@
               [stmt st'] (parse-arg-stmt st)]
           (recur st' (conj children stmt)))
 
-        ;; Comma-optional: a fresh identifier (field name or `_limit`/
-        ;; `_order_by`/… meta-key) after a complete arg begins the next
-        ;; arg — whitespace separates args just like a comma. `_order_by`
-        ;; stays variadic internally (its specs are comma-separated), so
-        ;; this never over-consumes. The pos guard avoids an infinite loop
-        ;; if parse-arg-stmt makes no progress.
         (= :identifier (peek-type st))
         (let [pos-before (:pos st)
               [stmt st'] (parse-arg-stmt st)]
@@ -691,19 +629,8 @@
           (recur st' (conj children id)))
         [(container :path start children) st]))))
 
-;; PredOp →
-;;     BinaryOp Value
-;;   | "in" (ListLiteral | ParamRef)
-;;   | "not" "in" (ListLiteral | ParamRef)
-;;   | "like" String
-;;   | "ilike" String
-;;   | "is" "null"
-;;   | "is" "not" "null"
-
 (defn parse-in-operand
-  "`in ?xs[]` — a bare array param binds the whole set; wrapped in a
-   ListLiteral so the compiler sees one shape. Anything else parses as
-   a parenthesized list."
+  "`in` operand: a bare array param wrapped as a ListLiteral, else a parenthesized list."
   [st]
   (if (= :param-ref (peek-type st))
     (let [tok    (peek-tok st)
@@ -729,9 +656,7 @@
             children     (conj children null-id)]
         [(container :pred-op start children) st])
 
-      ;; "not in (...)" — only consume the list if `in` actually follows;
-      ;; eager consumption on partial input (`name not <eol>`) used to
-      ;; fabricate a misleading empty-list lint error.
+      ;; "not in (...)"
       (id-text=? st "not")
       (let [[not-id st] (consume-leaf st)
             children    [not-id]]
@@ -762,8 +687,6 @@
       (binary-op-types (peek-type st))
       (let [[bop st]  (parse-binary-op st)
             [val st]  (parse-value st)
-            ;; Missing value: move the error onto the operator so the
-            ;; linter underlines `>` instead of a zero-width marker.
             val (if (= :error (:node val))
                   (assoc val :span (:span bop))
                   val)]
@@ -796,8 +719,7 @@
       (= :lparen (peek-type st))
       (let [[l st] (parse-list-literal st)] [(container :value start [l]) st])
 
-      ;; Reserved meta-key in value position: emit a zero-width error
-      ;; WITHOUT advancing, so `_limit 3` still parses as the next arg.
+      ;; never advance on a meta-key here — `_limit 3` must still parse as the next arg
       (and (= :identifier (peek-type st))
            (meta-keys (peek-text st)))
       [{:node :error :span [(:from start) (:from start)] :text ""
@@ -841,14 +763,7 @@
                                                    "expected , or ) in list")))
              (skip-to-newline st)]))))))
 
-;; MetaKey →
-;;     "_limit" Number
-;;   | "_offset" Number
-;;   | "_order_by" OrderSpec ("," OrderSpec)*
-;;   | "_distinct" Identifier ("," Identifier)*
-
 (defn consume-number-or-param-ref
-  "A :number literal or a :param-ref placeholder, for `_limit`/`_offset`."
   [st label]
   (cond
     (= :number (peek-type st))    (consume-leaf st)
@@ -862,7 +777,6 @@
         kw-text (peek-text st)
         canon (normalize-meta-kw kw-text)
         [kw-id st] (consume-leaf st)
-        ;; `order by` — consume the `by` token into the node too.
         [by-id st] (if (and (= "order" kw-text) (id-text=? st "by"))
                      (consume-leaf st)
                      [nil st])
@@ -876,15 +790,11 @@
       (let [[n st] (consume-number-or-param-ref st "_offset")]
         [(container :meta-key start (conj children n)) st])
 
-      ;; `_join left|inner|right|full` — explicit join type. Overrides the
-      ;; relation's sigil-implied default (e.g. `->rel (_join inner)`).
       "_join"
       (let [[id st] (expect st :identifier
                             "expected join type (left|inner|right|full) after _join")]
         [(container :meta-key start (conj children id)) st])
 
-      ;; `_on <relation>` — the self-relation @search-tree/@get-tree recurse
-      ;; over. Root parens of tree ops only (lint enforces placement).
       "_on"
       (let [[id st] (expect st :identifier
                             "expected a self-relation name after _on")]
@@ -892,16 +802,12 @@
 
       "_order_by"
       (if (= :param-ref (peek-type st))
-        ;; `_order_by ?sort:order(cols…)="col dir"` — a single param-ref
-        ;; replaces the whole spec list; no mixing with static specs.
         (let [[pref st] (consume-leaf st)]
           [(container :meta-key start (conj children pref)) st])
         (let [[first-spec st] (parse-order-spec st)
               children (conj children first-spec)]
         (loop [st       st
                children children]
-          ;; Stop at comma-then-meta-key — `limit` starts a new meta-key,
-          ;; not another sort column (same reserved-word tradeoff as SQL).
           (if (and (= :comma (peek-type st))
                    (not (meta-key-start? (advance st))))
             (let [st (advance st)
@@ -987,9 +893,7 @@
 ;; ── Public entry ─────────────────────────────────────────────────────────
 
 (defn parse
-  "Parse an XSQL source string. Returns the :query AST root node.
-   Errors are embedded as :error nodes in the tree; partial parses
-   still produce a usable AST."
+  "Parse an XSQL source string to its :query AST; errors are embedded as :error nodes."
   [source]
   (let [tokens (tok/tokenize source)
         st     (make-state tokens)

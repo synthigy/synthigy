@@ -9,17 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.plug.wake.postgres
-  "PostgreSQL LISTEN/NOTIFY wake source for the plug drainer.
-
-   Holds a dedicated JDBC connection that LISTENs on a pg_notify
-   channel. The plug's audit triggers emit `pg_notify('<channel>',
-   '')` after every queue insert, so the database itself signals all
-   listeners — `signal!` is a no-op on the app side.
-
-   This is the canonical PG wake source. Operators who want fanout
-   beyond a single Postgres cluster (e.g. cross-region replicas reading
-   off a logical replication slot) should use a different transport
-   (NATS / Kafka)."
+  "PostgreSQL LISTEN/NOTIFY wake source for the plug drainer."
   (:require
     [next.jdbc :as jdbc]
     [synthigy.db.postgres :as db.postgres]
@@ -28,13 +18,6 @@
   (:import
     [java.sql Connection]
     [org.postgresql PGConnection]))
-
-;; State held inside the record as a mutable atom rather than as
-;; record fields. Keeps the record value semantically equal across
-;; start/stop cycles (records compare structurally on field values).
-;;
-;; The atom carries a map {:conn ^Connection :pg-conn ^PGConnection
-;; :stopped? bool}. nil before start, nil after stop.
 
 (defn open-listen!
   "Open a dedicated connection and LISTEN on `channel`; `{:conn :pg-conn}`."
@@ -100,9 +83,6 @@
                         (reconnect! datasource channel state timeout-ms s))))))))
 
   (signal! [_]
-    ;; No-op: the trigger emits pg_notify when a queue row is inserted.
-    ;; The DB delivers the signal to every LISTENing connection in the
-    ;; cluster. App code calling wake-drainer! is a friendly no-op here.
     nil)
 
   (stop-source! [_]
@@ -117,16 +97,7 @@
     nil))
 
 (defn postgres-notify
-  "Construct a PostgresNotify wake source.
-
-   Args:
-     datasource — HikariDataSource. start-source! opens a dedicated raw
-                  connection off-pool (via db.postgres/listen-connection)
-                  using its JDBC coordinates, held until stop-source! — so
-                  the permanent LISTEN never consumes a pool slot.
-     channel    — LISTEN channel name. Must match the channel the
-                  plug trigger fires `pg_notify` on. Defaults to
-                  `synthigy_delta_ready`."
+  "PostgresNotify on `channel` (default synthigy_delta_ready, must match the trigger's pg_notify)."
   ([datasource]
    (postgres-notify datasource "synthigy_delta_ready"))
   ([datasource channel]

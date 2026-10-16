@@ -63,6 +63,7 @@
    :extra-deps {org.xerial/sqlite-jdbc {:mvn/version "3.47.1.0"}
                 com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
 
+  ;; DEPRECATED: unmaintained and untested, ships in no bundle — kept for a possible future onboarding
   :engine-cockroach
   {:extra-paths ["engine/cockroach/src"]
    :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}

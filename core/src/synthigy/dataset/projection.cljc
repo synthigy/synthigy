@@ -63,8 +63,6 @@
                   (focus-attribute that)
                   (focus-attribute this))]
             (if (or (some? n) (not-empty config))
-              ;; wrapped under :configuration so postgres.clj can extract
-              ;; dconfig from the diff
               (dataset/mark-diff that (or n (when config {:configuration config})))
               that))))))
 
@@ -144,9 +142,6 @@
                                     (and
                                       (set? sid)
                                       (sid id))
-                                    ;; entity rename may affect enum spec — mark
-                                    ;; :entity/name diff unless the attribute
-                                    ;; already has one
                                     (as-> a (dataset/project (get-attribute this id) a)
                                       (if (and (:name o) (not (dataset/diff? a)))
                                         (dataset/mark-diff a {:entity/name (:name o)})
@@ -155,10 +150,6 @@
                             (concat
                               that-attributes
                               this-attributes))
-              ;; whole-configuration diff, minus :rls (which has its own
-              ;; dual-base projection) —
-              ;; storing the complete old config, not just the changed key,
-              ;; fixes suppress too
               config-old (dissoc (:configuration this) :rls)
               config-new (dissoc (:configuration that) :rls)
               changed-attributes (vec (filter attribute-changed? attributes'))]
@@ -220,8 +211,6 @@
                                   (:name (:to this))
                                   (:name (:to that)))
                             {:name (:name (:to that))})
-            ;; whole-configuration diff — relation RBAC lives at [:configuration
-            ;; :rbac <direction> :enabled]
             config-old (:configuration this)
             config-new (:configuration that)
             o' (cond-> o
@@ -268,8 +257,6 @@
           (set-relation m (dataset/project (get-relation this (id/extract r)) r)))
         projection
         (get-relations projection))
-      ;; second pass: relations missing in `that` whose endpoint entities
-      ;; changed in `that`
       (let [that-relations (get-relations projection)
             this-relations (distinct
                              (mapcat
@@ -313,3 +300,116 @@
   (mark-added [_] nil)
   (mark-diff [_ _] nil)
   (project [_ that] (when that (dataset/mark-added that))))
+
+;;; Deploy diff — shared by the modeler deploy drawer and server-side deploy logging
+
+(defn has-rls-diff? [entity]
+  (contains? (get-in (meta entity) [:dataset/projection :diff :configuration]) :rls))
+
+(defn has-audit-diff? [entity]
+  (contains? (get-in (meta entity) [:dataset/projection :diff :configuration]) :audit))
+
+(defn removed-attributes
+  "Attributes active in the deployed entity but not active (or absent) in the candidate entity."
+  [deployed-entity candidate-entity]
+  (when deployed-entity
+    (let [active? (fn [a] (not (false? (:active a))))
+          cand-active (set (map id/extract (filter active? (:attributes candidate-entity))))]
+      (->> (:attributes deployed-entity)
+           (filter active?)
+           (remove #(contains? cand-active (id/extract %)))))))
+
+(defn project-models
+  "Project the candidate against the deployed model; dual-base for RLS when `rls-base` is given."
+  [deployed candidate rls-base]
+  (let [deployed (or (dataset/clean-model deployed) (dataset/map->ERDModel {:entities {} :relations {}}))
+        candidate (dataset/with-merged-config deployed (dataset/clean-model candidate))
+        rls-base (dataset/clean-model rls-base)]
+    (when candidate
+      (if rls-base
+        (dataset/project-with-rls-base deployed candidate rls-base)
+        (dataset/project deployed candidate)))))
+
+(defn with-removed
+  "Projected model plus the global entities and relations `version-id` claims that the candidate dropped, marked removed."
+  [projected global candidate version-id]
+  (if (and projected version-id)
+    (let [claimed? #(contains? (:claimed-by %) version-id)
+          entities (filter #(and (claimed? %) (nil? (get-entity candidate (id/extract %))))
+                           (get-entities global))
+          relations (filter #(and (claimed? %) (nil? (get-relation candidate (id/extract %))))
+                            (get-relations global))]
+      (as-> projected p
+        (reduce #(set-entity %1 (dataset/mark-removed %2)) p entities)
+        (reduce #(set-relation %1 (dataset/mark-removed %2)) p relations)))
+    projected))
+
+(defn classify [item]
+  (cond
+    (dataset/added? item) :added
+    (dataset/removed? item) :removed
+    (dataset/diff? item) :modified
+    (has-rls-diff? item) :modified
+    (has-audit-diff? item) :modified
+    :else nil))
+
+(defn compute-projections
+  "{:projections {id :added/:removed/:modified} :summary {:added n :removed n :modified n}} of a projected model."
+  [projected deployed candidate]
+  (when projected
+    (let [removed-attrs? (fn [eid]
+                           (seq (removed-attributes
+                                 (when deployed (get-entity deployed eid))
+                                 (when candidate (get-entity candidate eid)))))
+          entity-projections (into {}
+                                   (keep (fn [e]
+                                           (let [eid (id/extract e)
+                                                 c (classify e)]
+                                             (when (or c (removed-attrs? eid))
+                                               [eid (or c :modified)]))))
+                                   (get-entities projected))
+          relation-projections (into {}
+                                     (keep (fn [r]
+                                             (when-let [c (classify r)]
+                                               [(id/extract r) c])))
+                                     (get-relations projected))
+          all (merge entity-projections relation-projections)]
+      {:projections all
+       :summary (reduce-kv (fn [acc _ v] (update acc v (fnil inc 0)))
+                           {:added 0 :removed 0 :modified 0}
+                           all)})))
+
+(defn deploy-changes
+  "What deploying `candidate` changes against `global`, by name, grouped as the deploy drawer shows it."
+  [global candidate last-deployed-version]
+  (let [projected (-> (project-models global candidate (:model last-deployed-version))
+                      (with-removed global candidate (some-> last-deployed-version id/extract)))
+        {:keys [projections summary]} (compute-projections projected global candidate)
+        relation-label #(str (get-in % [:from :name]) " " (:to-label %) " " (get-in % [:to :name]))
+        attribute-changes
+        (fn [e]
+          (let [attrs (:attributes e)
+                d #(dataset/diff %)]
+            (cond-> {}
+              :always (assoc :added (vec (keep #(when (dataset/added? %) (:name %)) attrs)))
+              :always (assoc :reactivated (vec (keep #(when (and (false? (:active (d %))) (not (false? (:active %))))
+                                                       (:name %))
+                                                    attrs)))
+              :always (assoc :modified (vec (keep #(when (and (dataset/diff? %) (not (false? (:active (d %)))))
+                                                    (:name %))
+                                                 attrs)))
+              :always (assoc :removed (vec (map :name (removed-attributes
+                                                       (get-entity global (id/extract e))
+                                                       (get-entity candidate (id/extract e)))))))))
+        entities (for [e (get-entities projected)
+                       :let [c (get projections (id/extract e))]
+                       :when c]
+                   (cond-> {:name (:name e) :change c}
+                     (= :modified c) (assoc :attributes (into {} (filter (comp seq val)) (attribute-changes e)))))
+        relations (for [r (get-relations projected)
+                        :let [c (get projections (id/extract r))]
+                        :when c]
+                    {:relation (relation-label r) :change c})]
+    {:summary summary
+     :entities (vec entities)
+     :relations (vec relations)}))

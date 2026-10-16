@@ -9,8 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.ring
-  "Ring utilities replacing Pedestal interceptor dependencies, so OAuth/OIDC
-   handlers work with any Ring framework. See docs/core/synthigy/oauth/ring.md."
+  "Ring utilities so the OAuth/OIDC handlers work with any Ring framework."
   (:require
    [clojure.walk :as walk]))
 

@@ -30,12 +30,7 @@
    [synthigy.transit :as transit]))
 
 (defn preserve-body
-  "Stamp :raw-body on a JSON POST and hand back a FRESH :body stream.
-
-   Every adapter must run this before anything that reads the body — an
-   adapter that slurps the InputStream without replacing it leaves /data with
-   nothing to read, and every SDK gets INVALID_BODY. Shared rather than
-   reimplemented per adapter because that is exactly how pedestal drifted."
+  "Stamp :raw-body on a JSON POST and hand back a fresh :body stream."
   [request]
   (if (and (= :post (:request-method request))
            (:body request)
@@ -50,8 +45,7 @@
     request))
 
 (defn wrap-preserve-body
-  "Ring middleware over `preserve-body`; must run BEFORE wrap-params, which
-   consumes the InputStream."
+  "Ring middleware over `preserve-body`."
   [handler]
   (fn [request] (handler (preserve-body request))))
 
@@ -88,7 +82,6 @@
         (case (content-type request)
           "application/transit+json" (transit/<-transit body-str)
           "application/edn" (edn/read-string body-str)
-              ;; Default: JSON
           (json/read-str body-str))))
     (catch Exception e
       (log/debug {:id ::body-parse-failed :error e}
@@ -112,7 +105,6 @@
      :headers {"Content-Type" "application/edn"}
      :body (pr-str body)}
 
-    ;; Default: JSON
     {:status status
      :headers {"Content-Type" "application/json"}
      :body (json/write-str body)})))
@@ -157,8 +149,7 @@
                                       :code    "INTERNAL_ERROR"}}))))))
 
 (defn lint-handler
-  "Ring handler for POST /lint — schema-aware XSQL diagnostics; computation
-   lives in engine/lint-source."
+  "Ring handler for POST /lint — schema-aware XSQL diagnostics."
   [request]
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam         (when iam-active? (auth/authenticate-request request engine/platform-audience))]
@@ -212,17 +203,8 @@
                 (format-response request 500 {:error {:message clean
                                                       :code    "INTERNAL_ERROR"}})))))))))
 
-;;; ============================================================================
-;;; IAM Configuration Transfer (export / import)
-;;; ============================================================================
-;;;
-;;; `synthigy.iam.transfer` runs in SYSTEM context — the export is complete
-;;; rather than RBAC-filtered, so these handlers gate on ROOT (access/superuser?)
-;;; regardless of the caller's own grants, not just on being authenticated.
-
-(defn- transfer-type
-  "Parse and validate the `type` query param shared by /iam/export and
-   /iam/import."
+(defn transfer-type
+  "Parse and validate the `type` query param shared by /iam/export and /iam/import."
   [request]
   (let [raw (get-in request [:query-params "type"])]
     (when (str/blank? raw)
@@ -236,12 +218,12 @@
                          :valid (vec (sort (map name (keys transfer/transferable))))})))
       t)))
 
-(defn- require-root!
+(defn require-root!
   []
   (when-not (access/superuser?)
     (throw (ex-info "IAM configuration transfer requires ROOT" {:code "FORBIDDEN"}))))
 
-(defn- transfer-error-response
+(defn transfer-error-response
   [e]
   (let [data (ex-data e)
         status (case (:code data)
@@ -253,8 +235,7 @@
                             (:valid data) (assoc-in [:error :valid] (:valid data))))))
 
 (defn iam-export-handler
-  "Ring handler for GET /iam/export?type=<role|group|user|app|api>[&name=<name>] —
-   ROOT-only; returns `{:type ... :records [...]}`, all of `type` or just `name`."
+  "Ring handler for GET /iam/export?type=<role|group|user|app|api>[&name=<name>], ROOT-only."
   [request]
   (let [iam (auth/authenticate-request request engine/platform-audience)]
     (if-not iam
@@ -272,10 +253,7 @@
           (json-response 500 {:error {:message (ex-message e) :code "INTERNAL_ERROR"}}))))))
 
 (defn iam-import-handler
-  "Ring handler for POST /iam/import?type=<...>[&mode=sync|stack][&dry-run=true] —
-   ROOT-only. Body is a record or array of records, the same shape /iam/export
-   returns under `:records`. `mode` defaults to `sync` (payload-mentioned
-   relations are matched exactly); `stack` is additive."
+  "Ring handler for POST /iam/import?type=<...>[&mode=sync|stack][&dry-run=true], ROOT-only."
   [request]
   (let [iam (auth/authenticate-request request engine/platform-audience)]
     (if-not iam
@@ -327,9 +305,7 @@
       (vec found))))
 
 (defn iam-add-client-handler
-  "Ring handler for POST /iam/clients — ROOT-only. Body `{:id? :name :type?
-   :secret? :settings? :roles? [name ...] :apis? [name ...]}`. `:secret` is
-   only ever returned here, at creation — export/import never carry it."
+  "Ring handler for POST /iam/clients, ROOT-only — the one place a client secret is returned."
   [request]
   (let [iam (auth/authenticate-request request engine/platform-audience)]
     (if-not iam
@@ -359,19 +335,12 @@
         (catch Throwable e
           (json-response 500 {:error {:message (ex-message e) :code "INTERNAL_ERROR"}}))))))
 
-;;; ============================================================================
-;;; Acting-As Resolution
-;;; ============================================================================
-
 (def ^:private observability-ops
-  "Ops served by /logs, and ONLY /logs — the operator plane is a separate
-   endpoint from the /data plane (Robert, 2026-07-22). The defmethods are
-   shared; only the mounting differs."
+  "Ops served by /logs, and only /logs."
   #{"log-query" "log-histogram" "traffic-stats" "log-config"})
 
 (defn endpoint-op-violation
-  "Error map when one of operations is mounted on the other endpoint; nil when
-   legal."
+  "Error map when one of operations is mounted on the other endpoint; nil when legal."
   [endpoint operations]
   (let [names (map #(str (or (:op %) (get % "op"))) operations)]
     (case endpoint
@@ -448,8 +417,7 @@
                                      {:error {:message (ex-message e)
                                               :code code}})))
                 (catch Throwable e
-                  ;; Last-resort: log raw server-side, return a sanitized
-                  ;; message so Java internals never reach the wire.
+                  ;; never put the raw message on the wire — Java internals leak
                   (let [[clean raw] (engine/safe-error-message e)]
                     (log/error! {:id ::data-handler-uncaught
                                  :msg "Uncaught exception in /data handler"

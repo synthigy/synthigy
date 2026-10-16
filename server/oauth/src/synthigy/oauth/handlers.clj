@@ -9,8 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.handlers
-  "Pre-built OAuth/OIDC Ring handlers with full middleware stacks, zero Pedestal
-   dependencies. See docs/core/synthigy/oauth/handlers.md."
+  "Pre-built OAuth/OIDC Ring handlers with full middleware stacks."
   (:require
    [ring.middleware.cookies :refer [wrap-cookies]]
    [ring.middleware.keyword-params :refer [wrap-keyword-params]]
@@ -26,10 +25,6 @@
    [synthigy.oauth.page.status :as page.status]
    [synthigy.oauth.token :as token-ns]
    [synthigy.oidc :as oidc]))
-
-;; =============================================================================
-;; OAuth 2.0 Core Endpoints
-;; =============================================================================
 
 (def token
   "OAuth 2.0 token endpoint (all grant types), fully wrapped."
@@ -67,10 +62,6 @@
       wrap-params
       wrap-cookies))
 
-;; =============================================================================
-;; OAuth 2.0 Login/Logout
-;; =============================================================================
-
 (def login
   "OAuth login page handler (GET displays the form, POST authenticates and creates a session)."
   (-> #'login/login-handler
@@ -94,10 +85,6 @@
       wrap-params
       wrap-cookies))
 
-;; =============================================================================
-;; OAuth 2.0 Device Code Flow (RFC 8628)
-;; =============================================================================
-
 (def device-authorization
   "OAuth 2.0 Device Authorization handler (RFC 8628); returns device_code/user_code/verification URIs."
   (-> #'device/device-authorization-handler
@@ -112,10 +99,6 @@
       wrap-keyword-params
       wrap-params
       wrap-cookies))
-
-;; =============================================================================
-;; OpenID Connect (OIDC) Endpoints
-;; =============================================================================
 
 (def userinfo
   "OpenID Connect UserInfo endpoint; requires a valid Bearer access token."
@@ -145,10 +128,6 @@
       wrap-keyword-params
       wrap-params
       wrap-cookies))
-
-;; =============================================================================
-;; Federated login (identity brokering — Synthigy as RP to upstream IdPs)
-;; =============================================================================
 
 (def federated-start
   "GET /oauth/federated/start?provider=&state= — bounces to the upstream IdP."
@@ -196,9 +175,6 @@
       wrap-params
       wrap-cookies))
 
-;; Account onboarding/claim — NOT federation-specific (federation is one of the
-;; claim methods, alongside password); lives in synthigy.oauth.onboarding.
-
 (def onboard
   "POST /oauth/onboard — mint a one-time onboarding claim link (confidential client whose principal administers the user)."
   (-> #'onboarding/onboard-handler
@@ -233,10 +209,6 @@
       wrap-keyword-params
       wrap-params
       wrap-cookies))
-
-;; =============================================================================
-;; Convenience Collections
-;; =============================================================================
 
 (def oauth-routes
   "Map of OAuth 2.0 endpoint paths to handlers."

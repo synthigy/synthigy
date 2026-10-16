@@ -31,29 +31,14 @@
     [synthigy.db SQLite])
   (:gen-class))
 
-;;; ============================================================================
-;;; Connection Management
-;;; ============================================================================
-
 (defn connect
-  "Connects to SQLite database file and returns HikariDataSource instance.
-
-  Args:
-    path - File path to SQLite database
-    max-connections - Maximum connection pool size (default: 8, SQLITE_POOL_SIZE)
-
-  Returns:
-    SQLite record with :path and :datasource (HikariDataSource)"
+  "Opens a Hikari pool over the SQLite file at `path`; returns the SQLite record."
   [{:keys [path max-connections]
     :or {max-connections 8}
     :as config}]
   (log/info {:id ::connecting :data {:path path}} "Connecting to SQLite database")
-  ;; SQLite cannot create a database whose parent directory doesn't exist —
-  ;; the zero-config default (~/.synthigy/db/synthigy.db) needs db/ created
-  ;; on first boot.
   (io/make-parents (str path))
-  (let [;; Add JDBC parameters to improve statement handling and concurrency
-        jdbc-url (str "jdbc:sqlite:" path "?journal_mode=WAL&busy_timeout=30000&transaction_mode=IMMEDIATE")
+  (let [jdbc-url (str "jdbc:sqlite:" path "?journal_mode=WAL&busy_timeout=30000&transaction_mode=IMMEDIATE")
         datasource (doto
                      (HikariDataSource.)
                      (.setDriverClassName "org.sqlite.JDBC")
@@ -63,14 +48,9 @@
                      (.setConnectionTimeout 30000)
                      (.setIdleTimeout 600000)
                      (.setMaxLifetime 1800000)
-                     ;; SQLite FK enforcement is per-connection and OFF by
-                     ;; default. The pragmas set in `start` only land on the
-                     ;; one connection used to set them; pool-managed conns
-                     ;; pick this init-sql up on first acquire. Without this,
-                     ;; `ON DELETE CASCADE` is silently inert.
+                     ;; never drop this — FK enforcement is per connection, CASCADE is inert without it
                      (.setConnectionInitSql "PRAGMA foreign_keys = ON"))]
     (try
-      ;; Test connection
       (with-open [conn (jdbc/get-connection datasource)]
         (jdbc/execute-one! conn ["SELECT 1"]))
       (log/info {:id ::connected :data {:path path :pool-size max-connections}}
@@ -117,18 +97,7 @@
     (.executeUpdate st (str "PRAGMA incremental_vacuum(" (long pages) ")"))))
 
 (defn start
-  "Initializes SQLite database connection.
-
-  Args:
-    config - Optional config map with :path key
-
-  Side effects:
-    - Establishes database connection
-    - Binds connection to synthigy.db/*db*
-    - Sets up pragmas for better performance
-
-  Returns:
-    nil"
+  "Connects and binds synthigy.db/*db* unless a SQLite backend is already bound."
   ([] (start (from-env)))
   ([config]
    (when-not (instance? SQLite db/*db*)
@@ -140,13 +109,6 @@
        nil))))
 
 (defn stop
-  "Stops SQLite database connection.
-
-  Side effects:
-    - Clears synthigy.db/*db*
-
-  Returns:
-    nil"
   []
   (log/info {:id ::backend-stopping :data {:action :stopping :subject :db-backend}} "Stopping SQLite backend...")
   ; (alter-var-root #'db/*db* (constantly nil))
@@ -154,16 +116,7 @@
   nil)
 
 (defn cleanup-files!
-  "Deletes SQLite database and all associated files (WAL, SHM, journal).
-
-  Args:
-    path - File path to SQLite database (without suffix)
-
-  Side effects:
-    Deletes files: path, path-wal, path-shm, path-journal
-
-  Returns:
-    Map of {:deleted [...] :missing [...]}"
+  "Deletes the database file and its -wal/-shm/-journal siblings; returns {:deleted :missing}."
   [path]
   (log/info {:id ::cleanup-starting :data {:path path}} "Cleaning up database files")
   (let [suffixes ["" "-wal" "-shm" "-journal"]
@@ -182,18 +135,7 @@
               "Cleanup complete")
     results))
 
-;;; ============================================================================
-;;; Patcho VersionStore Implementation
-;;; ============================================================================
-
-(defn- ensure-version-table!
-  "Creates __component_versions__ table if it doesn't exist.
-
-  Args:
-    db - SQLite database record
-
-  Side effects:
-    Creates table in database"
+(defn ensure-version-table!
   [{:keys [datasource]}]
   (jdbc/execute-one!
     datasource
@@ -230,18 +172,7 @@
        (str topic)
        version])))
 
-;;; ============================================================================
-;;; Patcho LifecycleStore Implementation
-;;; ============================================================================
-
-(defn- ensure-lifecycle-table!
-  "Creates __lifecycle_state__ table if it doesn't exist.
-
-  Args:
-    db - SQLite database record
-
-  Side effects:
-    Creates table in database"
+(defn ensure-lifecycle-table!
   [{:keys [datasource]}]
   (jdbc/execute-one!
     datasource
@@ -255,10 +186,6 @@
 (extend-type SQLite
   lifecycle/LifecycleStore
 
-  ;; NOTE: Only :setup-complete? and :cleanup-complete? are persisted.
-  ;; The :started? flag is RUNTIME-ONLY and must NOT be stored.
-  ;; This ensures :start functions execute fresh on every JVM restart.
-
   (read-lifecycle-state [db topic]
     (ensure-lifecycle-table! db)
     (if-let [row (jdbc/execute-one!
@@ -267,14 +194,13 @@
                      FROM __lifecycle_state__
                      WHERE topic = ?"
                     (name topic)])]
-      ;; Return only persistent state - never include :started?
+      ;; never include :started? — it is runtime-only
       {:setup-complete? (= 1 (:__lifecycle_state__/setup_complete row))
        :cleanup-complete? (= 1 (:__lifecycle_state__/cleanup_complete row))}
       {:setup-complete? false
        :cleanup-complete? false}))
 
   (write-lifecycle-state [db topic state]
-    ;; Only persist setup/cleanup state - :started? is ignored (runtime-only)
     (ensure-lifecycle-table! db)
     (jdbc/execute-one!
       (:datasource db)
@@ -288,10 +214,6 @@
        (name topic)
        (if (:setup-complete? state) 1 0)
        (if (:cleanup-complete? state) 1 0)])))
-
-;;; ============================================================================
-;;; LoginPageStore Implementation
-;;; ============================================================================
 
 (defn ensure-login-page-table!
   [{:keys [datasource]}]
@@ -369,84 +291,51 @@
 (comment
   (lifecycle/setup! :synthigy/iam))
 
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
-
 (lifecycle/register-module!
   :synthigy/database
   {:depends-on [:synthigy/transit]
    :doc "JDBC pool + DB provisioning (SQLite)"
    :setup (fn []
-            ;; One-time: Create database file (SQLite auto-creates on connect)
             (log/info {:id ::will-be-created} "SQLite database will be created on first connection")
             (start)
             (lifecycle/set-store! db/*db*)
             (ensure-lifecycle-table! db/*db*))
    :cleanup (fn []
-              ;; One-time: Delete database file (DESTRUCTIVE - parity with PostgreSQL)
+              ;; DESTRUCTIVE — deletes the database file
               (let [{:keys [path datasource]} db/*db*]
                 (log/info {:id ::lifecycle-cleanup-delete :data {:path path}}
                           "SQLite cleanup - deleting database")
-                ;; Close datasource if open
                 (when datasource
                   (try
                     (.close datasource)
                     (catch Exception e
                       (log/warn {:id ::datasource-close-failed :error e}
                                 "Error closing datasource"))))
-                ;; Delete database file
                 (cleanup-files! path)
                 (alter-var-root #'db/*db* (constantly nil))
-                ;; Reset lifecycle store to fresh in-memory atom
                 (lifecycle/reset-store!)))
    :start (fn []
-            ;; Runtime: Connect to database
             (log/info {:id ::lifecycle-starting :data {:action :starting}} "Starting SQLite connection...")
             (start)
             (patch/set-store! db/*db*)
             (lifecycle/set-store! db/*db*)
             (log/info {:id ::lifecycle-started :data {:action :started}} "SQLite connection started"))
    :stop (fn []
-           ;; Runtime: Close connections
            (log/info {:id ::lifecycle-stopping :data {:action :stopping}} "Stopping SQLite connection...")
-           ;; Release the patcho stores BEFORE closing the pool — see the same
-           ;; comment in synthigy.db.postgres. They hold THIS datasource, and
-           ;; `setup!` reads the lifecycle store before the next `:start` runs,
-           ;; so a stale one wedges restart beyond recovery. nil (not a fresh
-           ;; AtomStore) so `setup-complete?` isn't reported false and setup
-           ;; doesn't re-run.
+           ;; never close the pool before nil-ing the patcho stores — a stale store wedges restart
            (patch/set-store! nil)
            (lifecycle/set-store! nil)
            (stop)
            (log/info {:id ::lifecycle-stopped :data {:action :stopped}} "SQLite connection stopped"))})
 
-;;; ============================================================================
-;;; JDBCBackend Protocol Implementation
-;;; ============================================================================
-
-(defn- sqlite-result-builder
-  "Creates SQLite-specific result set builder function.
-
-  Returns raw values - JSON decoding handled by decoders in sql/query.clj
-
-  Args:
-    _return-type - unused, kept for API consistency
-
-  Returns:
-    next.jdbc builder-fn that processes ResultSet rows"
+(defn sqlite-result-builder
   [_return-type]
   (rs/as-maps-adapter
     rs/as-unqualified-modified-maps
     (fn [^ResultSet rs _rsmeta ^Integer i]
-      ;; Return raw values - JSON decoding handled by decoders in sql/query.clj
       (.getObject rs i))))
 
 (def ^:private defaults
-  "SQLite-specific next.jdbc options for each return type.
-
-  :edn - Keyword keys, kebab-case column names
-  :raw - String keys, original column names"
   {:edn
    {:builder-fn (sqlite-result-builder :edn)
     :label-fn (fn [w]
@@ -465,13 +354,8 @@
   (jdbc-options [_db return-type]
     (get defaults (or return-type :raw) (:raw defaults))))
 
-;;; ============================================================================
-;;; DB Error Translation
-;;; ============================================================================
-
 (defn parse-constraint-targets
-  "Parse the trailing 'KIND constraint failed: T.col[, T.col2 ...]' segment
-   into {:entity name :attrs [name ...]}. Returns nil if not parseable."
+  "{:entity :attrs} from the driver's 'KIND constraint failed: T.col, …' tail, or nil."
   [^String msg]
   (when-let [tail (second (re-find #"constraint failed:\s*(.+?)\s*\)?$" msg))]
     (let [refs   (str/split tail #",\s*")
@@ -565,10 +449,6 @@
   (translate-db-exception [_ e]
     (when (instance? SQLiteException e)
       (translate-sqlite-exception e))))
-
-;;; ============================================================================
-;;; Dialect Protocol Implementation
-;;; ============================================================================
 
 (extend-type SQLite
   db/Dialect

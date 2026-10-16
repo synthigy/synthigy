@@ -31,7 +31,7 @@ runs with data it cannot read.
 
 ## Managing keys
 
-In the **portal** (`synthigy console`), the Encryption panel:
+In the **portal** (`synthigy portal`), the Encryption panel:
 
 - **Change custody** — move from local to Vault or a webhook, or back. **Test
   connection** round-trips throwaway data through the new provider before

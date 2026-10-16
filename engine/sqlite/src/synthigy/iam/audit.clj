@@ -9,14 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.iam.audit
-  "SQLite PRINCIPAL-AWARE audit enhancement.
-
-   Mirror of synthigy.iam.audit (postgres). Extended once at ns load;
-   degradation to timestamp-only is decided per call inside each method
-   against the real precondition (user table / user entity / bound
-   `*principal*`), not against lifecycle state.
-
-   See the postgres counterpart for the design rationale."
+  "SQLite principal-aware audit enhancement."
   (:require
    [next.jdbc :as jdbc]
    [patcho.lifecycle :as lifecycle]
@@ -32,21 +25,8 @@
    [synthigy.db.sqlite]  ; Load SQLite JDBCBackend implementation
    [synthigy.log :as log]))
 
-;; ============================================================================
-;; Helper Functions
-;; ============================================================================
-
-(defn- enhance-audit-data
-  "Populates audit values during mutations based on entity audit config.
-
-  Only populates fields that are enabled in entity's :audit :actions config.
-
-  Args:
-    entity-id - Entity UUID being mutated
-    data      - Mutation data structure (from analyze-data)
-
-  Returns:
-    Enhanced data with audit values populated for all records"
+(defn enhance-audit-data
+  "Stamps the bound principal into the entity's enabled `_by` audit fields."
   [entity-id data]
   (let [entity (deployed-entity entity-id)
         current-user-eid (some-> (access/current-principal) :_eid)
@@ -67,12 +47,7 @@
                         mapping
                         mapping))))))))
 
-;; ============================================================================
-;; SQLite-Specific Protocol Implementations
-;; ============================================================================
-
-(defn- table-columns
-  "Set of column names on table; empty if table doesn't exist."
+(defn table-columns
   [tx table]
   (try
     (->> (jdbc/execute! tx [(format "PRAGMA table_info(\"%s\")" table)])
@@ -80,41 +55,14 @@
          (into #{}))
     (catch Exception _ #{})))
 
-(defn- user-table-exists?
-  "Check if the user table exists. Mirrors the Postgres/Cockroach guard —
-   SQLite doesn't resolve FK targets at DDL time, so an unguarded
-   `REFERENCES \"user\"` succeeds on deploy and only bites later on write
-   with `PRAGMA foreign_keys=ON`."
+(defn user-table-exists?
   [tx]
-  ;; Row-presence rather than count(*) — dodges the qualified-vs-unqualified
-  ;; result-key shift that bites `table-columns` above.
   (boolean
    (seq (jdbc/execute! tx ["SELECT name FROM sqlite_master
                             WHERE type = 'table' AND name = 'user'"]))))
 
-(defn- transform-audit-impl
-  "Ensure audit columns + triggers on every audited entity table (SQLite).
-
-  Idempotent: column existence is probed via PRAGMA before each ALTER, so
-  re-running over already-audited tables is cheap. Triggers are always
-  dropped + recreated to pick up trigger-body changes (e.g. enum/name
-  drift).
-
-  Called by:
-    - deploy! per :new/entities (legacy path, still works)
-    - deploy! at the end over ALL current entities (plug reconcile),
-      so flipping :audit ON for an existing entity actually adds columns
-      + triggers without needing a one-off Patcho upgrade.
-
-  Four audit fields:
-    modified_by  - INTEGER, FK to user(_eid) ON DELETE SET NULL
-    modified_on  - TEXT, CURRENT_TIMESTAMP default, bumped by AFTER UPDATE trigger
-    created_by   - INTEGER, FK to user(_eid) ON DELETE SET NULL
-    created_on   - TEXT, CURRENT_TIMESTAMP default, preserved on UPDATE
-
-  The `_by` FKs are emitted only when the user table already exists — same
-  guard as the Postgres/Cockroach impls. Without it the columns are added
-  bare and `setup!` attaches the FK when :synthigy.iam/audit later runs."
+(defn transform-audit-impl
+  "Idempotently ensures audit columns and triggers on every audited entity table."
   [_db tx entities]
   (let [has-user-table (user-table-exists? tx)
         by-column (fn [col]
@@ -183,9 +131,8 @@
                   :data {:table table :modified modified? :created created?}}
                  "Reconciled audit on table"))))
 
-(defn- augment-schema-impl
-  "Returns audit field and relation definitions for SQLite runtime schema.
-  Only includes fields enabled in entity's audit config."
+(defn augment-schema-impl
+  "Audit fields and relations for the runtime schema, per the entity's audit config."
   [db entity]
   (let [modified? (core/audit-modified? entity)
         created? (core/audit-created? entity)]
@@ -231,40 +178,14 @@
                          :table entity-table
                          :type :one})))))))
 
-;; ============================================================================
-;; Protocol Extension (Top-Level - Runs at Namespace Load)
-;; ============================================================================
-
 (extend-protocol enhance/AuditEnhancement
   synthigy.db.SQLite
   (transform-audit [db tx entities] (transform-audit-impl db tx entities))
   (augment-schema  [db entity]      (augment-schema-impl db entity))
   (audit           [db entity-id data tx] (enhance-audit-data entity-id data)))
 
-;; ============================================================================
-;; Migration Utilities
-;; ============================================================================
-
 (defn setup!
-  "Adds audit columns to ALL existing entity tables in the SQLite database.
-
-  Adds four audit fields to each entity table:
-  - modified_by: User who last modified the record
-  - modified_on: Timestamp of last modification
-  - created_by: User who created the record (preserved on UPDATE)
-  - created_on: Timestamp of creation (immutable after INSERT)
-
-  This is a migration utility for databases that were created before
-  audit enhancement was enabled.
-
-  WARNING: This modifies the database schema. Use with caution.
-
-  Args:
-    db    - SQLite database instance
-    model - ERD model containing entities
-
-  Returns:
-    {:added-columns count :added-triggers count}"
+  "Adds missing audit columns and triggers to every audited entity table; returns counts."
   []
   (log/info {:id ::setup-starting}
             "Adding audit columns to existing entity tables")
@@ -355,24 +276,15 @@
     (log/info {:id ::setup-complete :data @results} "Setup complete")
     @results))
 
-;; ============================================================================
-;; Component Version Registration (Patcho)
-;; ============================================================================
-
 (patch/current-version :synthigy.iam/audit "1.0.1")
 
 (comment
   (patch/read-version *db* :synthigy.iam/audit))
 
-;; ============================================================================
-;; Version Patches (SQLite-specific)
-;; ============================================================================
-
 (patch/upgrade :synthigy.iam/audit
                "1.0.0"
                (log/info {:id ::installing-v100 :data {:action :installing :subject :iam-audit :version "1.0.0"}}
                          "Installing audit enhancement v1.0.0")
-               ;; Add audit columns to all existing tables (migration only)
                (setup!))
 
 (patch/upgrade :synthigy.iam/audit
@@ -380,10 +292,8 @@
                (log/info {:id ::upgrading-v101 :data {:action :upgrading :subject :iam-audit :version "1.0.1"}}
                          "Upgrading to v1.0.1: adding created_by and created_on fields")
 
-               ;; Add new columns to all existing tables
                (setup!)
 
-               ;; Backfill created_by from modified_by for existing records
                (log/info {:id ::backfilling-created-by :data {:action :migrating :subject :created-by}}
                          "Backfilling created_by from modified_by")
                (let [entities (core/get-entities (deployed-model))
@@ -393,8 +303,7 @@
                            :let [table     (entity->table-name entity)
                                  modified? (core/audit-modified? entity)
                                  created?  (core/audit-created? entity)]
-                           ;; setup! only adds audit columns the entity's model config asks
-                           ;; for, so an unaudited table has neither column to read nor write.
+                           ;; must be `and`, not setup!'s `or` — reads modified_by AND writes created_by
                            :when (and modified? created?)]
                      (try
                        (let [{result :jdbc.next/update-count}
@@ -412,17 +321,11 @@
 
                (log/info {:id ::v101-complete :data {:action :upgraded :subject :iam-audit :version "1.0.1"}} "v1.0.1 upgrade complete"))
 
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
-
 (lifecycle/register-module!
  :synthigy.iam/audit
  {:depends-on [:synthigy/iam]
   :doc "Audit trail — principal _by columns + change capture"
   :setup (fn []
-            ;; One-time: retrofit `_by` columns onto any tables that
-            ;; lack them (e.g. tables created in a previous bare session).
            (log/info {:id ::lifecycle-setup-starting :data {:action :setup :subject :audit-fields}}
                      "Retrofitting principal-aware audit columns (SQLite)")
            (setup!)

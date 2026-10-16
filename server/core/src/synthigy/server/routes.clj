@@ -9,9 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server.routes
-  "Backend-agnostic route tables + module gating shared by every Synthigy HTTP
-   adapter (httpkit/ring-jetty/undertow); only SSE streaming mechanics differ
-   per backend."
+  "Backend-agnostic route tables and module gating shared by the ring HTTP adapters."
   (:require
    [clojure.string :as str]
    [patcho.lifecycle :as lifecycle]
@@ -21,12 +19,10 @@
    [synthigy.oauth.handlers :as oauth]
    [synthigy.oauth.page.custom :as login-page]
    [synthigy.server.data :as data]
+   [synthigy.server.health :as health]
    [synthigy.server.history :as history]
    [synthigy.server.info :as info]
    [synthigy.server.subscription :as subscription]))
-
-;; Module Gate — 404s a route when its backing module isn't running, so the
-;; route table stays identical across full vs data-only modes.
 
 (defn module-unavailable [module-key]
   {:status 404
@@ -43,17 +39,7 @@
       (handler request)
       (module-unavailable module-key))))
 
-;; Prefix Extensions — an opt-in module (e.g. console) can't be in the static
-;; route tables:
-;; core can't statically require a namespace that may not be on the classpath,
-;; and
-;; requiring-resolve is banned in this codebase. So it registers a URI prefix
-;; here from
-;; its lifecycle :start instead; backends consult extension-handler after their
-;; own table misses.
-
 (defonce ^:private extensions
-  ;; key -> {:prefix "/console" :handler #'handler-var}
   (atom {}))
 
 (defn register-prefix!
@@ -81,9 +67,7 @@
       (handler request))))
 
 (defn wrap-not-found
-  "Turn a nil response into an explicit 404 — http-kit answers a nil handler
-   result with a bare 200, worse than a 404. Every backend must wrap ITS router
-   with this."
+  "Turn a nil response into an explicit 404; every backend wraps its router with this."
   [handler]
   (fn [request]
     (or (handler request)
@@ -92,9 +76,7 @@
          :body (json/write-str {:error {:code "NOT_FOUND" :message "No matching route"}})})))
 
 (defn wrap-errors
-  "Turn an uncaught handler exception into a JSON 500 and a logged signal.
-   Every backend must wrap OUTSIDE its router — without it the exception
-   reaches the web server's own printer and never becomes a log signal."
+  "Turn an uncaught handler exception into a JSON 500 and a logged signal."
   [handler]
   (fn [request]
     (try
@@ -126,8 +108,7 @@
   nil)
 
 (defn sse-available?
-  "Whether the running backend can stream; callers should degrade to a static
-   render otherwise."
+  "Whether the running backend can stream; callers degrade to a static render otherwise."
   []
   (some? @sse-transport))
 
@@ -153,8 +134,6 @@
                         :body (json/write-str info)})]
     [["/info" :get info-handler]
 
-             ;; OAuth 2.0 Core — gated on :synthigy/iam so a data-only
-             ;; server 404s these instead of NPEing on missing oauth state.
      ["/oauth/authorize" :get (gated :synthigy/iam #'oauth/authorize)]
      ["/oauth/token" :post (gated :synthigy/iam #'oauth/token)]
      ["/oauth/login" :get (gated :synthigy/iam #'oauth/login)]
@@ -164,16 +143,13 @@
      ["/oauth/revoke" :post (gated :synthigy/iam #'oauth/revoke)]
      ["/oauth/introspect" :post (gated :synthigy/iam #'oauth/introspect)]
 
-             ;; Terminal user-facing status page for interactive flows
      ["/oauth/status" :get (gated :synthigy/iam #'oauth/oauth-status)]
 
-             ;; Device Flow (RFC 8628)
      ["/oauth/device/auth" :post (gated :synthigy/iam #'oauth/device-authorization)]
      ["/oauth/device/activate" :get (gated :synthigy/iam #'oauth/device-activation)]
      ["/oauth/device/activate" :post (gated :synthigy/iam #'oauth/device-activation)]
      ["/oauth/device/status" :get (gated :synthigy/iam #'oauth/oauth-status)]
 
-             ;; Federated (social) login — Synthigy brokering to upstream IdPs
      ["/oauth/federated/start" :get (gated :synthigy/iam #'oauth/federated-start)]
      ["/oauth/federated/callback" :get (gated :synthigy/iam #'oauth/federated-callback)]
      ["/oauth/federated/providers" :get (gated :synthigy/iam #'oauth/federated-providers)]
@@ -182,26 +158,22 @@
      ["/oauth/federated/client/identities" :get (gated :synthigy/iam #'oauth/federated-client-identities)]
      ["/oauth/federated/client/unlink" :post (gated :synthigy/iam #'oauth/federated-client-unlink)]
 
-             ;; Account onboarding/claim — federation is one claim method among
-             ;; several
      ["/oauth/onboard" :post (gated :synthigy/iam #'oauth/onboard)]
      ["/oauth/onboard/complete" :post (gated :synthigy/iam #'oauth/onboard-complete)]
      ["/oauth/claim" :get (gated :synthigy/iam #'oauth/claim)]
      ["/oauth/claim/password" :post (gated :synthigy/iam #'oauth/claim-password)]
      ["/oauth/password" :post (gated :synthigy/iam #'oauth/change-password)]
 
-             ;; OpenID Connect
      ["/oauth/userinfo" :get (gated :synthigy/iam #'oauth/userinfo)]
      ["/oauth/jwks" :get (gated :synthigy/iam #'oauth/jwks)]
      ["/.well-known/openid-configuration" :get (gated :synthigy/iam #'oauth/openid-configuration)]
 
-             ;; Public discovery — never gated, must answer pre-auth
+             ;; never gate — must answer pre-auth
      ["/.well-known/synthigy" :get #'info/handler]
+     ["/health" :get (health/handler [:synthigy/dataset :synthigy/iam])]
 
      ["/data" :post #'data/handler]
 
-             ;; Observability plane — separate mount from /data so exposure
-             ;; policy can differ
      ["/logs" :post #'data/logs-handler]
 
      ["/schema" :get #'data/schema-handler]
@@ -213,17 +185,14 @@
      ["/iam/import" :post (gated :synthigy/iam #'data/iam-import-handler)]
      ["/iam/clients" :post (gated :synthigy/iam #'data/iam-add-client-handler)]
 
-             ;; Handler self-gates on :synthigy/observability
      ["/history" :post #'history/handler]
 
-             ;; Gated on plug (feeds delta/dispatch!), not IAM
      ["/data/subscription/set" :post (gated :synthigy/plug #'subscription/set-handler)]
      ["/data/subscription/status" :get (gated :synthigy/plug #'subscription/status-handler)]
      ["/data/events" :get (gated :synthigy/plug sse-handler)]]))
 
 (defn bare-routes
-  "Route table for :synthigy/bare-server — the data-only deployment: no oauth/*,
-   no admin/*."
+  "Route table for :synthigy/bare-server, the data-only deployment."
   [{:keys [info sse-handler] :or {info {}}}]
   (let [info-handler (fn [_]
                        {:status 200
@@ -231,6 +200,7 @@
                         :body (json/write-str info)})]
     [["/info" :get info-handler]
      ["/.well-known/synthigy" :get #'info/handler]
+     ["/health" :get (health/handler [:synthigy/dataset])]
      ["/data" :post #'data/handler]
      ["/logs" :post #'data/logs-handler]
      ["/schema" :get #'data/schema-handler]

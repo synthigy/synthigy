@@ -14,13 +14,14 @@
    [synthigy.json :as json]
    [synthigy.oauth.page.custom :as custom]
    [synthigy.oauth.page.error :as error-page]
+   [synthigy.oauth.onboarding :as onboarding]
    [synthigy.oauth.page.login :as login-page]
    [synthigy.oauth.page.status :as status-page]
    [synthigy.server.console.icon :as icon]
    [synthigy.server.console.ui :as ui]
    [synthigy.server.console.widgets :as widgets]))
 
-(def base "/console/login-pages")
+(def base "/console/custom-pages")
 
 (defn action-url [verb {:keys [name version]}]
   (str base "/" verb "?name=" name "&version=" version))
@@ -75,7 +76,7 @@
     [:div.console-settings-head (icon/icon :layers {:size "13"}) "Bundles"]]
    (if (empty? rows)
      [:div.console-form-body
-      [:p.console-field-hint "Nothing uploaded yet — every client uses the built-in login page."]]
+      [:p.console-field-hint "Nothing uploaded yet — every page is the built-in one."]]
      [:ty-scroll-container {:custom-scrollbar true :shadow true}
       [:table.console-table
        [:thead [:tr [:th "Name"] [:th "Version"] [:th "Status"] [:th "Uploaded"] [:th.num ""]]]
@@ -97,10 +98,10 @@
      const f = document.getElementById('login-page-zip').files[0];
      const n = (document.getElementById('login-page-name').value || '').trim();
      if (!f || !n) return;
-     const r = await fetch('/console/login-pages/upload?name=' + encodeURIComponent(n),
+     const r = await fetch('/console/custom-pages/upload?name=' + encodeURIComponent(n),
                            {method: 'POST', headers: {'Content-Type': 'application/zip'}, body: f})
                      .catch(() => null);
-     location.href = r && r.redirected ? r.url : '/console/login-pages?error=upload-failed';
+     location.href = r && r.redirected ? r.url : '/console/custom-pages?error=upload-failed';
    });")
 
 (def login-json-codes
@@ -175,6 +176,31 @@ if (secure) {
   // possibly an attack: warn not to enter credentials, offer no sign-in link
 }")
 
+(def claim-snippet
+  "<form id=\"claim\" method=\"post\" action=\"/oauth/claim/password\">
+  <input type=\"hidden\" name=\"token\" id=\"token\">
+  <input name=\"password\" type=\"password\" autocomplete=\"new-password\">
+  <button>Set password</button>
+  <p id=\"error\"></p>
+</form>
+<div id=\"providers\"></div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const token = q.get('token') || '';
+  const methods = q.get('methods') ? q.get('methods').split(',') : null;   // null = all
+  document.getElementById('token').value = token;
+  if (methods && !methods.includes('password')) document.getElementById('claim').hidden = true;
+  if (q.get('error')) document.getElementById('error').textContent = MESSAGES[q.get('error')] || q.get('error');
+  fetch('/oauth/federated/providers').then(r => r.json()).then(ps => ps
+    .filter(p => !methods || methods.includes(p.name))
+    .forEach(p => {
+      const a = document.createElement('a');
+      a.href = '/oauth/federated/start?' + new URLSearchParams({provider: p.name, mode: 'claim', state: token});
+      a.textContent = 'Continue with ' + p.label;
+      document.getElementById('providers').append(a);
+    }));
+</script>")
+
 (def guides
   [{:file "index.html"
     :title "Sign-in page"
@@ -233,6 +259,34 @@ if (secure) {
       :rows [["action" "yes" "confirm or cancel."]]}
      {:heading "Minimal page"
       :code device-snippet}]}
+
+   {:file "claim.html"
+    :title "Account set-up"
+    :url "/login/default/claim.html?token=…"
+    :summary (str "Default bundle only. Where a sign-in link from Users → Generate sign-in link (or a provisioning "
+                  "app's /oauth/onboard) lands: the invited person sets their first password or connects a provider. "
+                  "Nobody else ever sets it.")
+    :sections
+    [{:heading "Receives (query string)"
+      :cols ["Parameter" "Meaning"]
+      :rows [["token" "The one-time link token. Send it back unchanged. Never parse it."]
+             ["methods" "Comma list of allowed methods (password, provider names). Absent = all of them."]
+             ["error" "Only after a rejected password. Codes below."]]}
+     {:heading "Password: POST to /oauth/claim/password"
+      :text (str "Form-encoded, plain form submit (no JSON mode). Success redirects to where the link was made for "
+                 "(the console's sign-in for console links), else to the status page with flow=onboarding_claim. "
+                 "A used or expired link goes to the status page with error=claim_invalid.")
+      :cols ["Field" "Required" "Meaning"]
+      :rows [["token" "yes" "The value from ?token=, unchanged."]
+             ["password" "yes" "The new password. Confirm it on the page; the server does not."]]}
+     {:heading "Continue with X"
+      :text (str "GET /oauth/federated/providers lists the active providers. Link each allowed one to "
+                 "/oauth/federated/start?provider=<name>&mode=claim&state=<token>.")}
+     {:heading "?error= codes"
+      :cols ["Code" "Built-in text"]
+      :rows (sort onboarding/claim-errors)}
+     {:heading "Minimal page"
+      :code claim-snippet}]}
 
    {:file "status.html"
     :title "Status page"
@@ -309,6 +363,7 @@ if (secure) {
 (def page-files
   [["index.html"  "Sign-in. Required in every bundle."]
    ["device.html" "Device code entry and confirm (TVs, CLIs). Default bundle only."]
+   ["claim.html"  "Account set-up from a sign-in link — first password or provider. Default bundle only."]
    ["status.html" "Outcome after a login or device flow — success, cancel, error. Default bundle only."]
    ["error.html"  "Authorization request rejected before sign-in, e.g. a bad redirect URI. Default bundle only."]])
 
@@ -344,7 +399,7 @@ if (secure) {
 (defn render
   [request & [notice]]
   (ui/admin-shell
-   {:title "Login pages"
+   {:title "Custom pages"
     :user (:console/principal request)
     :uri (:uri request)
     :confirm (str base "/activate")
@@ -354,9 +409,9 @@ if (secure) {
     [:div.console-page.console-page-scroll {:data-signals "{pageGuide: ''}"}
      [:div.console-page-head
       [:div.console-eyebrow "System"]
-      [:h1.console-title "Login pages"]
+      [:h1.console-title "Custom pages"]
       [:p.console-subtitle
-       (str "Your own sign-in screens, served by this deployment at /login/<name>/. "
+       (str "Your own sign-in, account set-up and status screens, served by this deployment at /login/<name>/. "
             "The console's own sign-in never uses them, so a broken bundle can always "
             "be switched off from here.")]]
      (widgets/notice notice true)

@@ -1,114 +1,51 @@
 # Running Synthigy behind a reverse proxy
 
-Synthigy serves plain HTTP on one port (`SYNTHIGY_SERVER_PORT`, default 7887).
-It terminates no TLS and does no virtual hosting, so an internet-facing
-instance sits behind nginx, Caddy, Traefik or a cloud load balancer. This page
-is what that proxy has to do; copy-paste configs are at the bottom.
+The engine serves plain HTTP on one port (`SYNTHIGY_SERVER_PORT`, default 7887), so
+an internet-facing instance sits behind nginx, Caddy, Traefik or a load balancer.
+Copy-paste configs are at the bottom.
 
-## TLS is required
-
-Session and login cookies are `Secure`, so a browser drops them over plain
-`http://` on anything but `localhost`: the login page accepts the password and
-comes straight back to itself. Terminate TLS at the proxy and keep the engine
-on loopback:
+## Engine settings
 
 ```bash
-SYNTHIGY_SERVER_HOST=127.0.0.1
-SYNTHIGY_SERVER_PORT=7887
-```
-
-## Two engine settings
-
-```bash
+SYNTHIGY_SERVER_HOST=127.0.0.1                    # reachable only through the proxy
 SYNTHIGY_IAM_ROOT_URL=https://synthigy.example.com
 SYNTHIGY_SERVER_TRUST_PROXY=127.0.0.1/32,::1/128
 ```
 
-**`SYNTHIGY_IAM_ROOT_URL`** is the public origin: the token issuer and the
-base of every login and redirect link. Unset, they are derived per request
-from `X-Forwarded-Host` and `X-Forwarded-Proto` — fine on a laptop, wrong
-behind a load balancer, and steerable by whoever can set those headers. The
-portal flags it until it is set.
+- **TLS is required.** Session cookies are `Secure`; over plain `http://` the login
+  page accepts the password and comes straight back.
+- **`SYNTHIGY_IAM_ROOT_URL`** is the public origin: token issuer and base of every
+  login link. Unset, it is taken from `X-Forwarded-Host`/`-Proto` per request, which
+  is wrong behind a load balancer. The portal flags it until set.
+- **`SYNTHIGY_SERVER_TRUST_PROXY`** lists your proxies (IPs or CIDRs). Only requests
+  from them have `X-Forwarded-For` believed. Synthigy reads the header from the
+  right and skips your proxies, so a client can't fake its address, whether the
+  proxy appends to the header or overwrites it. Behind a load balancer and a proxy,
+  list both. In a container network, list the proxy's subnet.
+- An `X-Request-Id` from a trusted proxy becomes the request id.
 
-**`SYNTHIGY_SERVER_TRUST_PROXY`** lists your proxies as IPs or CIDRs, comma
-separated. Only a request that arrives from one of them has its
-`X-Forwarded-For` believed; from anyone else the header is ignored and the
-connection's own address is the client. A proxy on the same host connects from
-loopback, hence `127.0.0.1/32,::1/128`; in a container network, name the
-proxy's subnet. Unset, the header is never believed.
+## What the proxy must do
 
-## The client address
-
-Synthigy reads `X-Forwarded-For` from the right: it skips every hop that is one
-of your proxies and takes the first one that is not. Whatever a client writes
-into the header itself sits to the left of what your proxy adds, so it is never
-reached — the proxy may overwrite the header (`$remote_addr`) or append to it
-(`$proxy_add_x_forwarded_for`), both are safe. Behind a load balancer *and* a
-proxy, list both hops.
-
-That address is the request's `ip` on every log line it produces (`peer` — the
-proxy — and the raw `forwarded_for` sit in the line's `ctx`), it is recorded on
-the OAuth session, and an in-flight login is pinned to it, so a stolen login
-state replayed from elsewhere is rejected.
-
-An `X-Request-Id` sent by one of your proxies becomes the request's id. From
-anyone else it is kept as `client_request_id` and a fresh id is issued; the
-response's `X-Request-Id` always names the id in use.
-
-**Do not expose the engine port directly** once a proxy is in front. Bind it
-to loopback or firewall it: a caller that goes around the proxy can no longer
-choose its address, but it still skips TLS and everything else the proxy
-enforces.
-
-| proxy   | directive                                           |
-|---------|-----------------------------------------------------|
-| nginx   | `proxy_set_header X-Forwarded-For $remote_addr;`     |
-| Caddy   | `header_up X-Forwarded-For {remote_host}`            |
-| Traefik | default — leave `forwardedHeaders.trustedIPs` unset  |
-
-Forward `X-Forwarded-Proto` and `X-Forwarded-Host` too; the OAuth layer builds
-absolute URLs from them whenever the root URL is unset.
-
-## Streaming endpoints
-
-| path              | shape                                                                   |
-|-------------------|-------------------------------------------------------------------------|
-| `/data/events`    | SSE, keepalive every 20s, open until `SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` (15 minutes by default) |
-| `/console/live/*` | SSE, heartbeat every 15s, recycled every 90s                            |
-
-Both need response buffering and compression **off** on those paths and a read
-timeout well above the keepalive interval. A buffering proxy holds events until
-its buffer fills — which looks like a frozen console and a subscription that
-never fires, not like a proxy problem. There is no WebSocket endpoint, so no
-upgrade handling is needed.
-
-## Everything else
-
-- **Give the instance its own hostname.** Every route is an absolute path
-  (`/data`, `/oauth/*`, `/console/*`, `/.well-known/*`). Pass the URI through
-  unrewritten — no `StripPrefix`, no mounting under a subpath.
-- **Do not add CORS at the proxy.** Synthigy emits its own `Access-Control-*`
-  and `Vary: Origin`; a second copy makes browsers reject the response
-  ([CORS.md](CORS.md)).
-- **Raise the body limit.** `/data` writes, model deploys and `/iam/import`
-  arrive as a single POST body. 64m is a workable ceiling; nginx's 1m default
-  is not.
-- **Never proxy port 7888.** That is the portal, and it accepts any connection
-  that comes from 127.0.0.1; a reverse proxy on the same host connects from
-  there, so proxying it publishes the operator surface to the internet. Reach
-  it with `ssh -L 7888:127.0.0.1:7888 <host>` instead. The console at
-  `/console` on 7887 is a normal route and is proxied like everything else.
+- **Stream without buffering** on `/data/events` and `/console/live/*` (server-sent
+  events, keepalive every 15–20s): buffering and compression off, read timeout well
+  above that. A buffering proxy looks like a frozen console. There are no WebSockets.
+- **Give the instance its own hostname** and pass paths through unrewritten — no
+  subpath mounting, no `StripPrefix`.
+- **Don't add CORS headers**; Synthigy sends its own ([CORS.md](CORS.md)).
+- **Raise the body limit** to about 64m for writes, deploys and IAM imports.
+- **Health check:** `GET /health`, 200 while the node can serve, 503 when it can't
+  ([OPERATIONS.md](OPERATIONS.md#health-check)).
+- **Forward `X-Forwarded-Proto` and `X-Forwarded-Host`.**
+- **Never proxy port 7888**, the portal: it trusts anything from 127.0.0.1, so a
+  local proxy would publish it. Reach it with `ssh -L 7888:127.0.0.1:7888 <host>`.
+- **Firewall 7887** so nothing bypasses the proxy.
 
 ---
 
 ## nginx
 
-`proxy_pass http://synthigy;` names the `upstream` block; `http://` is the
-protocol to the engine, which terminates no TLS. Write it with **no path after
-the host**: a bare `proxy_pass http://synthigy;` forwards the request URI
-untouched, while `proxy_pass http://synthigy/;` makes nginx strip the matched
-`location` prefix, so `/console/live/system` arrives as `/live/system` and
-404s.
+Write `proxy_pass http://synthigy;` with **no path after the host**: a trailing `/`
+makes nginx strip the location prefix, and routes 404.
 
 ```nginx
 upstream synthigy {
@@ -124,10 +61,7 @@ server {
 }
 
 server {
-    # nginx 1.25.1+ prefers `listen 443 ssl;` plus a separate `http2 on;`, and
-    # warns that this form is deprecated. This form is the one that also works
-    # on 1.14–1.24, where `http2 on;` is an unknown directive and nginx refuses
-    # to start.
+    # works on nginx 1.14+; on 1.25.1+ you may use `listen 443 ssl;` + `http2 on;`
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name synthigy.example.com;
@@ -138,8 +72,7 @@ server {
     client_max_body_size 64m;
 
     proxy_http_version 1.1;
-    # Required by `keepalive` in the upstream block: without it the client's
-    # own Connection header is forwarded and the pool is never reused.
+    # needed by `keepalive` in the upstream block
     proxy_set_header Connection        "";
     proxy_set_header Host              $host;
     proxy_set_header X-Real-IP         $remote_addr;

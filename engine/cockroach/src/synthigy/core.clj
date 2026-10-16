@@ -9,7 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.core
-  "CockroachDB backend entry point for Synthigy.
+  "DEPRECATED CockroachDB backend entry point: unmaintained, untested, ships in no bundle.
 
   This namespace loads all core functionality plus CockroachDB-specific implementations.
 

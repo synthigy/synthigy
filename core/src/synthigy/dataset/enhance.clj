@@ -29,14 +29,11 @@
     "Phase 3: populates audit values during the mutation pipeline."))
 
 (defprotocol ModelEnhancement
-  "Contributes attribute/relation additions to the runtime model. Composition order
-   in dataset.runtime: identity attrs -> audit attrs -> reference relations."
+  "Contributes attribute/relation additions to the runtime model."
 
   (enhance-model [this model]
     "Returns a new model with this enhancer's contribution applied."))
 
-;; no-op fallback so anything not extending ModelEnhancement passes through the
-;; composer
 (extend-protocol ModelEnhancement
   Object
   (enhance-model [_ model] model)

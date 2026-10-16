@@ -43,7 +43,7 @@ drops the `Secure` session cookie. Put TLS in front and set
 the public URL ([PROXY.md](PROXY.md)).
 
 **Nobody can sign in to the console any more.** Superusers are managed in the
-portal, which needs no sign-in: `synthigy console`, then **Superusers**
+portal, which needs no sign-in: `synthigy portal`, then **Superusers**
 ([CONSOLE.md](CONSOLE.md)).
 
 **Password sign-in fails for everyone at once.** A login connector that errors

@@ -27,11 +27,6 @@
      PKCS8EncodedKeySpec]
     [java.util Base64]))
 
-;;; ============================================================================
-;;; Entity & Data ID Registration
-;;; ============================================================================
-;; XIDs are deterministic Base58 conversions of UUIDs via id/uuid->nanoid
-
 (id/defentity :oauth/client
   :euuid #uuid "0757bd93-7abf-45b4-8437-2841283edcba"
   :xid "1ubBUFuDpcpqxY94TECvMw")
@@ -139,13 +134,10 @@
                 "Store version differs from deployed; deploying")
       (dataset/deploy! store-dataset)
       (dataset/reload)
-      ;; The store model owns the User Role → scopes relation; IAM access
-      ;; starts earlier and skips scope loading when the relation is absent,
-      ;; so a level that (first) brings it in must load scopes itself.
+      ;; The store brings User Role → scopes, which IAM skipped at its earlier start — load them here.
       (access/load-scopes))))
 
-;; RSA*KeyImpl getters expose the private exponent via bean-style
-;; serialization used by JSON sinks — never let raw keypair maps reach a log.
+;; Never let raw keypair maps reach a log — RSA*KeyImpl bean serialization exposes the private exponent.
 (defn redact-keypair
   [kp]
   (when kp
@@ -191,9 +183,7 @@
                          :data {:message (redact-event data)}}
                         ex)))
         (recur (async/<! store-messages))))
-    ;; Order-sensitive: capture the provider's PRE-LOAD in-memory keypairs
-    ;; (from a prior in-memory-only rotation) before loading DB keypairs in,
-    ;; so anything not yet in DB can be persisted below.
+    ;; Order-sensitive: capture PRE-LOAD in-memory keypairs before loading DB ones.
     (let [pre-load (encryption/list-keypairs encryption/*encryption-provider*)
           db-kids  (into #{} (map :kid) kps)]
       (doseq [kp kps]
@@ -202,15 +192,12 @@
       (when (empty? (encryption/list-keypairs encryption/*encryption-provider*))
         (encryption/rotate-keypair encryption/*encryption-provider*))
 
-      ;; Persist any pre-load keypair not already in DB (e.g. a dev-fallback
-      ;; keypair that signed tokens before storage existed).
       (doseq [k pre-load
               :when (not (contains? db-kids (:kid k)))]
         (iam/publish :keypair/added {:key-pair k})))))
 
 (defn on-encryption-enabled
-  "Auto-activate persistence when dataset encryption is available; falls back to
-   in-memory only otherwise."
+  "Open the store when dataset encryption is available, else run in-memory only."
   []
   (if (dataset-encryption/initialized?)
     (open-store)
@@ -224,9 +211,7 @@
   (util/days 7))
 
 (defn clean-expired-rows!
-  "Janitor for the DB-first token/session store; deletes token rows only once
-   past expiry (+1h slack) so revoked-but-unexpired rows keep surviving
-   revocation checks."
+  "Janitor: purge token rows only past expiry +1h (revoked-but-live rows must survive) and retained dead sessions."
   []
   (let [cutoff (java.util.Date. (- (util/now) (util/hours 1)))]
     (doseq [entity [:oauth/access-token :oauth/refresh-token]]
@@ -294,10 +279,6 @@
         (if master
           (on-encryption-enabled)
           (recur (async/<! sub)))))))
-
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
 
 (lifecycle/register-module!
   :synthigy/oauth.persistence

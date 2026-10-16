@@ -94,14 +94,12 @@
        opts))
 
 (defn sync
-  "Sync (upsert) entity data — returns {:count n}. Pass `:returning true`
-   for the written records; see docs/plans/PLAN-SYNC-RETURNING-FLAG.md."
+  "Sync (upsert) entity data; returns {:count n}, or the written records with `:returning true`."
   [entity data & {:keys [returning] :as opts}]
   (run {:op "sync" :entity (name entity) :data data :returning (boolean returning)} opts))
 
 (defn stack
-  "Stack data on top of current state — returns {:count n}. Same
-   `:returning` contract as sync."
+  "Stack data on top of current state; same `:returning` contract as sync."
   [entity data & {:keys [returning] :as opts}]
   (run {:op "stack" :entity (name entity) :data data :returning (boolean returning)} opts))
 
@@ -255,8 +253,7 @@
              track (assoc :track track))
            opts))
 
-;; COPIED CONTRACT — tree composition ported from synthigy.client.core; keep in
-;; step.
+;; COPIED CONTRACT — tree composition ported from synthigy.client.core; keep in step.
 
 (defn record-id
   [record]
@@ -356,8 +353,7 @@
   (subscription/assert-ready!)
   (let [principal (resolve-principal opts)
         key       (keyword "synthigy.embedded" (str "watch-" (gensym)))
-        ;; roles resolved ONCE and closed over — the delivery loop runs outside
-        ;; any principal scope
+        ;; roles resolved ONCE — the delivery loop runs outside any principal scope
         roles     (access/project-role-xids principal)
         state     (atom interest)
         deliver!  (fn [envelope]

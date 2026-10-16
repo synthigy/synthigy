@@ -11,7 +11,7 @@ Synthigy has two web surfaces for two kinds of people.
 
 ## Portal
 
-Started by `synthigy up` and opened with `synthigy console`. It binds to
+Started by `synthigy up` and opened with `synthigy portal`. It binds to
 127.0.0.1 only; to reach a remote instance, forward the port:
 `ssh -L 7888:127.0.0.1:7888 server`.
 

@@ -114,9 +114,6 @@
 ;; IAM Data
 ;; ============================================================================
 
-(defdata :iam/id
-  :euuid #uuid "c5c85417-0aef-4c44-9e86-8090647d6378" :xid "RRY5JcXr8MwppjvK9bhp7Z")
-
 ;; The column /oauth/login authenticates against — see iam/access.md
 (defdata :iam.user/password
   :euuid #uuid "2c5684ac-d8e1-40a9-8a4b-db602052907f" :xid "6UZ37fazSUWp4XwqA2CiFg")

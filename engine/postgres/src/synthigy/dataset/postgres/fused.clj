@@ -9,41 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.postgres.fused
-  "Per-level read compiler for Postgres (see memory
-   project-read-path-per-level-compiler).
-
-   ONE SQL statement PER LEVEL — never the whole tree in one statement —
-   so the planner only ever sees a single junction hop and depth adds
-   statements, not a mis-planned nested blob.
-
-   Flow:
-     root level — one statement: root table filtered/ordered/limited in a
-                  derived table, then every direct relation as a LATERAL
-                  (rows-as-json + _count + _agg fused, one scan each).
-     level 2+   — for any relation whose child has relations of its own,
-                  one statement per level scoped to the child _eids found
-                  above, stitched back by _eid (`expand-tree`).
-
-   Feature SQL is REUSED from the engine, not hand-rolled: predicate /
-   operator / RLS-free WHERE comes from `search-stack-args` (root) and
-   `relation-on-predicate` (relations) — both scoped to `:entity/as`, so
-   this compiler uses each node's `:entity/as` as its SQL table alias and
-   the engine fragments drop straight in.
-
-   Invoked from the `db/ModelQueryProtocol` dispatch in
-   `synthigy.dataset.postgres.query`. `try-search`
-   / `try-get` return a 1-element vector on the fused path, or nil to
-   signal fallback.
-
-   Filtering works at every level — left relations trim the child set;
-   inner relations also scope the parent (`inner-exists` adds an EXISTS to
-   the parent's WHERE). Order / limit / aggregate work at every level too.
-
-   SECURITY — RLS guards are injected per-entity via the engine's own
-   `synthigy.dataset.rls/compile-guards-to-sql` (no-op for superuser or
-   unconfigured entities); RBAC entity + relation access is checked
-   per-entity (deny => fallback). Recursion and encrypted fields fall back
-   to the engine."
+  "Per-level read compiler for Postgres: one SQL statement per tree level, relations as LATERALs."
   (:require [synthigy.db :as db]
             [synthigy.log :as log]
             [synthigy.dataset.id :as id]
@@ -55,29 +21,23 @@
             [clojure.string :as str]
             [jsonista.core :as json]))
 
-(defn- unsupported! [reason]
+(defn unsupported! [reason]
   (throw (ex-info (str "fused-query unsupported: " reason)
                   {::unsupported true :reason reason})))
 
-(defn- qi  "quote SQL identifier" [s] (str \" (str/replace (name s) "\"" "") \"))
-(defn- lit "single-quoted SQL string literal" [s]
+(defn qi  "quote SQL identifier" [s] (str \" (str/replace (name s) "\"" "") \"))
+(defn lit "single-quoted SQL string literal" [s]
   (str \' (str/replace (name s) "'" "''") \'))
 
-(defn- gen
-  "A unique SQL alias with prefix `p`. Aliases only need uniqueness within
-   one statement; `gensym` provides it."
+(defn gen
   [p]
   (name (gensym (str "__" p))))
 
 (def ^:private meta-keys #{:_join :_limit :_offset :_order_by :_distinct :_count :_agg})
 (def ^:private agg-fns  #{:avg :sum :min :max :count})
 
-(defn- order-by-pairs
-  "Normalize an `_order_by` spec into an ordered seq of [field direction]
-   pairs. Accepts a map `{:field :dir}`, a vector of `[field dir]` pairs,
-   bare keywords, or a vector of single-entry maps `[{:field :dir} ...]`
-   — the latter is how callers express ordered multi-column sorts, since
-   map key order is not guaranteed."
+(defn order-by-pairs
+  "Normalizes any `_order_by` spec shape into an ordered seq of [field direction]."
   [order-by]
   (cond
     (map? order-by) (seq order-by)
@@ -90,36 +50,20 @@
             order-by)
     :else nil))
 
-(defn- order-clause [order-by alias]
+(defn order-clause [order-by alias]
   (for [[f d] (order-by-pairs order-by)]
     [(str alias "." (qi f)) (if (#{:desc "desc"} d) "desc nulls last" "asc nulls first")]))
 
-(defn- has-filter?
-  "True if a relation's :args carry actual field predicates."
+(defn has-filter?
   [args] (seq (apply dissoc args meta-keys)))
 
-;; Absent-:_join semantics live in ONE place — core's `relation-left?`
-;; (the 2026-07-30 LEFT-default decree: bare pulls LEFT, predicates or an
-;; explicit :_join keep INNER). Delegate instead of carrying a copy that
-;; would silently drift.
+;; never copy relation-left? here — absent-:_join semantics must live in one place
 (def ^:private left? q/relation-left?)
 
 (def ^:private relation-on-predicate @#'q/relation-on-predicate)
 
-(defn- inner-exists
-  "Inner-join parent scoping. For each INNER relation of `node-schema`,
-   an `EXISTS (...)` predicate scoped to `node-alias` — a node is dropped
-   when it has no matching child.
-
-   Per XSQL.md (Relations): `-rel` is INNER = 'drop parent if no child
-   match'. Existence-of-a-child IS the filter, so we emit an EXISTS for
-   every INNER relation — even when neither the relation nor any deeper
-   inner relation carries an additional predicate. Predicates narrow
-   the EXISTS further; the existence check itself is always present.
-
-   Left relations never scope their parent and are skipped (they also
-   stop deep-filter propagation up the chain). Returns [sql params] or
-   nil when no inner relations are present."
+(defn inner-exists
+  "[sql params] of one EXISTS per INNER relation scoping `node-alias`, or nil."
   [node-schema node-alias]
   (let [preds
         (keep
@@ -148,12 +92,8 @@
     (when (seq preds)
       [(str/join " and " (map first preds)) (vec (mapcat second preds))])))
 
-(defn- rls-where
-  "RLS predicate for `entity-id`, scoped to `alias`. Returns [sql params],
-   or nil when RLS does not apply. The compiled `:rls` is read straight
-   from the engine's cached runtime schema (`q/deployed-schema`) — keyed by
-   entity id, an O(1) lookup. An entity with RLS enabled but no guard
-   applicable to :read denies all rows (`(1=0)`)."
+(defn rls-where
+  "[sql params] of the :read RLS predicate on `alias`, `(1=0)` when no guard applies, nil when RLS is off."
   [entity-id alias]
   (when (rls/should-apply-guards? entity-id :read)
     (when-let [{:keys [enabled guards]} (get-in (q/deployed-schema) [entity-id :rls])]
@@ -162,18 +102,8 @@
           [(:sql r) (vec (:params r))]
           ["(1=0)" []])))))
 
-(defn- field-entries
-  "json_build_object key/value pieces for a node's scalar fields + _eid,
-   referencing columns on `alias`. `_eid` is always carried (for level-
-   stitching) — `coerce-node` later drops it unless the caller selected it
-   — so it is excluded from the `:fields` loop to avoid a duplicate key.
-
-   A `json`-typed (jsonb) column is cast to `::text`: otherwise
-   `json_build_object` embeds it as a natively-parsed value, and then
-   `coerce-node`'s per-field `<-json` decoder parses it a second time —
-   a double-decode that fails on any scalar JSON value (`\"Electronics\"`
-   → bare token `Electronics`). With the `::text` cast the column lands
-   in the row JSON as raw JSON *text*, and the decoder parses it once."
+(defn field-entries
+  "json_build_object pieces for a node's scalar fields plus _eid; json columns go as ::text."
   [schema alias]
   (let [ftypes (:field-types schema)]
     (cons (str "'_eid', " alias "._eid")
@@ -181,13 +111,8 @@
             (str (lit f) ", " alias "." (qi f)
                  (when (= "json" (some-> (get ftypes f) name)) "::text"))))))
 
-(defn- emit-relation
-  "One relation slot (rows and/or _count and/or _agg for key `k`) as a
-   single LATERAL. The child json carries ONLY scalar fields + _eid — the
-   child's own relations are a separate level. Relation-level filtering is
-   supported for LEFT relations (predicate trims the child set); an
-   inner-join relation filter would scope the parent — unsupported here.
-   Returns {:lateral :json-pair :count-pair :agg-pair :params}."
+(defn emit-relation
+  "Rows, _count and _agg of relation `k` as a single LATERAL sharing one predicate."
   [k schema row-alias]
   (let [rel (get-in schema [:relations k])
         cnt (get-in schema [:_count k])
@@ -202,20 +127,9 @@
         to-field   (:to/field ptr)
         child-tbl  (:entity/table ptr)
         rtype      (:type ptr)
-        ;; `rel`, `cnt`, and `agg` are independent schema entries for the
-        ;; same key `k` — a relation requested ONLY via `_count`/`_agg`
-        ;; (no parallel plain `:relations` pull) has no `rel` at all, but
-        ;; still carries its own `:args` predicate on `cnt`/`agg`. Read the
-        ;; filter off whichever entry is actually present (`ptr`, already
-        ;; unified above for table/field metadata) instead of hardcoding
-        ;; `rel` — otherwise a count-only/agg-only relation's filter is
-        ;; silently dropped (see project_agg_filter_dropped_bug memory).
+        ;; never read args off `rel` — a count-only/agg-only relation has none and its filter is dropped
         rel-args   (:args ptr)
-        ;; Must match whichever entry `rel-args`/the predicate come from
-        ;; (`ptr`, not `rel`) — `relation-on-predicate`/`query-selection->sql`
-        ;; bake the schema's OWN `:entity/as` into the predicate text via
-        ;; `prefix`, so the JOIN alias bound below must be the same value
-        ;; or Postgres can't resolve it ("missing FROM-clause entry").
+        ;; must be ptr's :entity/as — the predicate text bakes it in ("missing FROM-clause entry")
         ex (or (:entity/as ptr) (gen "e"))
         jx (gen "j") cx (gen "c")
         [rls-sql rls-data] (rls-where (:to ptr) ex)
@@ -324,9 +238,8 @@
          :agg-pair   (some :agg-pair parts)
          :params     (vec (mapcat :params parts))}))))
 
-(defn- emit-one-relation
-  "A :one relation as a LATERAL — kept separate so the :many path stays
-   readable. Child json = scalar fields + _eid; LIMIT 1."
+(defn emit-one-relation
+  "A :one relation as a LIMIT 1 LATERAL."
   [k schema row-alias]
   (let [rel (get-in schema [:relations k])]
     (when (or (get-in schema [:_count k]) (get-in schema [:_agg k]))
@@ -361,9 +274,8 @@
        :json-pair (str (lit k) ", " lat ".__v")
        :params (vec (concat filter-data ie-data rls-data))})))
 
-(defn- emit-node
-  "One node's level: [laterals-sql json-entries params]. Encrypted fields
-   are decrypted post-parse in `coerce-node`."
+(defn emit-node
+  "One node's level as [laterals-sql json-entries params]."
   [schema row-alias include-fields?]
   (let [rel-keys (distinct (concat (keys (:relations schema))
                                    (keys (:_count schema))
@@ -386,10 +298,8 @@
      entries
      (vec (mapcat :params rels))]))
 
-(defn- compile-root-level
-  "Root level, one statement: the root table filtered/ordered/limited in a
-   derived table (roots folded in — no separate roots query), then every
-   direct relation as a LATERAL. Yields a json array of root objects."
+(defn compile-root-level
+  "Root level as one statement yielding a json array of root objects."
   [schema]
   (let [eas (:entity/as schema)               ; engine-fragment alias
         rt  (gen "rt")                        ; derived-table alias
@@ -430,11 +340,8 @@
           mid ") __top")
      (vec (concat where-data ie-data rls-data lat-params))]))
 
-(defn- compile-sub-level
-  "A non-root level: every relation of `schema`, scoped to `parent-eids`.
-   Yields rows of (__pe parent-eid, __rels json). Parent rows come from the
-   entity table itself (not a VALUES list) so a recursion relation can
-   correlate its LATERAL on the parent's self-FK column."
+(defn compile-sub-level
+  "A non-root level scoped to `parent-eids`, yielding (__pe, __rels json) rows."
   [schema parent-eids]
   (let [p (gen "p")
         [laterals entries lat-params] (emit-node schema p false)
@@ -447,19 +354,17 @@
 
 (def ^:private json-mapper (json/object-mapper {:decode-key-fn keyword}))
 
-(defn- parse-json [v]
+(defn parse-json [v]
   (cond
     (nil? v)    nil
     (string? v) (json/read-value v json-mapper)
     :else       (json/read-value (.getValue ^org.postgresql.util.PGobject v) json-mapper)))
 
-(defn- node-has-children? [schema]
+(defn node-has-children? [schema]
   (or (seq (:relations schema)) (seq (:_count schema)) (seq (:_agg schema))))
 
-(defn- expand-tree
-  "Parent objects already have their DIRECT relations populated; pull every
-   relation whose child has relations of its own — one statement per level
-   — and stitch results back by _eid."
+(defn expand-tree
+  "Pulls deeper levels, one statement per level, and stitches them back by _eid."
   [con schema objs]
   (reduce
    (fn [objs k]
@@ -501,10 +406,8 @@
 
 (def ^:private float-types #{"float" "double" "decimal" "currency" "real"})
 
-(defn- coerce-agg
-  "Match the engine's `_agg` BigDecimal scale: `avg` -> `(bigdec (double v))`,
-   `count` stays a Long, `sum`/`min`/`max` -> `(bigdec v)`.
-   `_agg` shape is {relation-key {field {agg-fn value}}}."
+(defn coerce-agg
+  "Brings `_agg` leaves to the engine's BigDecimal scale."
   [agg]
   (reduce-kv
    (fn [m relk fieldmap]
@@ -524,14 +427,8 @@
              {} fieldmap)))
    {} agg))
 
-(defn- coerce-node
-  "Match the engine's result shape exactly — the same query must return
-   the same thing on the fused path and the old engine:
-     * float-typed fields  -> Double (JSON collapses e.g. 5.0 to 5);
-     * encrypted fields    -> decrypted via the engine's per-field decoder;
-     * `_agg` leaves       -> BigDecimal at the engine's scale (`coerce-agg`);
-     * an empty relation   -> the key is DROPPED (engine omits it).
-   Recurses through relations per `schema`."
+(defn coerce-node
+  "Coerces a parsed node to exactly the engine's result shape, recursively."
   [schema obj]
   (when obj
     (let [o (reduce (fn [m [f t]]
@@ -539,10 +436,6 @@
                         (update m f double)
                         m))
                     obj (:field-types schema))
-          ;; timestamp rehydration (String -> java.util.Date) rides the
-          ;; per-field :decoders pass below — `selection->schema` wires a
-          ;; TypeCodec `decode "timestamp"` decoder, so it's handled uniformly
-          ;; with the old JDBC path (no separate pass here).
           o (reduce (fn [m [f dec]]
                       (if (and (fn? dec) (some? (get m f)))
                         (update m f dec o)
@@ -562,7 +455,7 @@
                     o (:relations schema))]
       o)))
 
-(defn- run-search [schema]
+(defn run-search [schema]
   (with-open [con (jdbc/get-connection (:datasource db/*db*))]
     (let [entity-table (:entity/table schema)
           [sql params] (compile-root-level schema)

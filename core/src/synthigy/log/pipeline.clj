@@ -31,9 +31,7 @@
 
 ;;; ============================================================================
 ;;; Built-in stages
-;;;
-;;; Stages MUST NOT throw — a throwing stage breaks every signal after it;
-;;; print to *err* and pass the signal through instead.
+;;; Stages MUST NOT throw — that breaks every signal after it; print to *err* and pass through.
 ;;; ============================================================================
 
 (def line-key

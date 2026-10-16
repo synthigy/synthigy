@@ -9,12 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.db.cockroach
-  "CockroachDB connection management and lifecycle.
-
-  CRDB speaks the Postgres wire protocol so we reuse `org.postgresql.Driver`
-  and `jdbc:postgresql://…` URLs. Differences from PG that this module
-  papers over: `CREATE EXTENSION \"uuid-ossp\"` parses but is a no-op (UUID
-  is built-in), and default port is 26257."
+  "CockroachDB connection pool, patcho stores and lifecycle, over the Postgres JDBC driver."
   (:require
     [camel-snake-kebab.core :as csk]
     [clojure.string :as str]
@@ -38,7 +33,7 @@
 (defn cockroach-connected? [datasource] (when datasource (not (.isClosed datasource))))
 
 (defn connect
-  "Connects to CockroachDB and returns HikariDataSource instance"
+  "Connects to CockroachDB and returns the Cockroach record holding the pool."
   [{:keys [host port user db password max-connections]
     :or {max-connections 2}
     :as data}]
@@ -72,8 +67,6 @@
     (check host "COCKROACH_HOST not specified")
     (check db "COCKROACH_DB not specified")
     (check user "COCKROACH_USER not specified")
-    ;; Password is OPTIONAL on CRDB insecure clusters (default root user).
-    ;; Skip the check; HikariCP accepts an empty password.
     (when-not user (check user "COCKROACH_USER not specified"))))
 
 (defn from-env
@@ -92,10 +85,6 @@
                        :max-connections (Integer/parseInt (env :cockroach-pool-size "20")))]
     (check-connection-params data)
     data))
-
-;;; ============================================================================
-;;; Patcho VersionStore Implementation
-;;; ============================================================================
 
 (defn ensure-version-table!
   "Creates __component_versions__ table if it doesn't exist."
@@ -129,10 +118,6 @@
        DO UPDATE SET version = EXCLUDED.version, updated_at = CURRENT_TIMESTAMP"
        (str topic)
        version])))
-
-;;; ============================================================================
-;;; Patcho LifecycleStore Implementation
-;;; ============================================================================
 
 (defn ensure-lifecycle-table!
   "Creates __lifecycle_state__ table if it doesn't exist."
@@ -186,7 +171,7 @@
       (alter-var-root #'db/*db* (constantly nil)))))
 
 (defn start
-  "Initializes database connection and returns HikariDataSource instance"
+  "Connects from env (or `database`), binds *db*, ensures the patcho tables and starts the connection monitor."
   ([] (start (from-env)))
   ([database]
    (log/info {:id ::connecting :data (dissoc database :password)}
@@ -231,10 +216,6 @@
        (name topic)
        (:setup-complete? state)
        (:cleanup-complete? state)])))
-
-;;; ============================================================================
-;;; LoginPageStore Implementation
-;;; ============================================================================
 
 (defn ensure-login-page-table!
   [{:keys [datasource]}]
@@ -307,18 +288,11 @@
       ["DELETE FROM __login_pages__ WHERE name = ? AND version = ?" name version])
     nil))
 
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
-
 (lifecycle/register-module!
   :synthigy/database
   {:depends-on [:synthigy/transit]
    :doc "JDBC pool + DB provisioning (CockroachDB)"
    :setup (fn []
-            ;; One-time: connect (the operator provisions the database
-            ;; itself — see check-connection-params), create patcho tables,
-            ;; set stores
             (let [config (from-env)
                   db-name (:db config)
                   db (connect config)]
@@ -345,21 +319,12 @@
    :stop (fn []
            (log/info {:id ::lifecycle-stopping :data {:action :stopping}}
                      "Stopping database connection")
-           ;; Release the patcho stores BEFORE closing the pool — see the same
-           ;; comment in synthigy.db.postgres. They hold THIS datasource, and
-           ;; `setup!` reads the lifecycle store before the next `:start` runs,
-           ;; so a stale one wedges restart beyond recovery. nil (not a fresh
-           ;; AtomStore) so `setup-complete?` isn't reported false and setup
-           ;; doesn't re-run.
+           ;; nil the stores BEFORE closing the pool — stores on a closed pool wedge the next start!
            (patch/set-store! nil)
            (lifecycle/set-store! nil)
            (stop)
            (log/info {:id ::lifecycle-stopped :data {:action :stopped}}
                      "Database connection stopped"))})
-
-;;; ============================================================================
-;;; JDBCBackend Protocol Implementation
-;;; ============================================================================
 
 (defn utc-timestamp-columns
   "Indexes of zone-less timestamp columns in a result set."
@@ -382,9 +347,6 @@
        rs opts))))
 
 (def ^:private defaults
-  "CockroachDB next.jdbc options for each return type. The PG identifier
-  quoter from next.jdbc.quoted works on CRDB unchanged (same PG-wire
-  identifier syntax)."
   {:edn
    {:builder-fn (cockroach-result-builder :edn)
     :table-fn postgres
@@ -406,11 +368,6 @@
 
   (jdbc-options [_db return-type]
     (get defaults return-type (:raw defaults))))
-
-;;; ============================================================================
-;;; Dialect Protocol Implementation
-;;; ============================================================================
-;;; Same PG-wire dialect Postgres uses — CRDB speaks it natively.
 
 (extend-type Cockroach
   db/Dialect

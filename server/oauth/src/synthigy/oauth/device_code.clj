@@ -239,13 +239,6 @@
         (not= id client_id)
         client-id-missmatch
         ;;
-        (nil? session)
-        {:status 403
-         :headers {"Content-Type" "application/json"}
-         :body (json/write-str
-                {:error "authorization_pending"
-                 :error_description "The authorization request is still pending as the end user hasn't yet completed the user-interaction steps"})}
-        ;;
         (not (:active (core/session-row session {:active nil})))
         (do
           (delete device_code)
@@ -272,17 +265,8 @@
                      "Cache-Control" "no-store"}
            :body response})))))
 
-;; =============================================================================
-;; Ring Handlers (Pure Ring, no Pedestal dependencies)
-;; =============================================================================
-
 (defn device-authorization-handler
-  "OAuth 2.0 Device Authorization handler (RFC 8628).
-
-   Initiates device code flow for devices with limited input capabilities
-   (smart TVs, CLI tools, IoT devices).
-
-   Returns device_code, user_code, and verification URIs."
+  "OAuth 2.0 Device Authorization endpoint (RFC 8628)."
   [request]
   (letfn [(split-spaces [req k]
             (if-some [val (get req k)]
@@ -326,8 +310,6 @@
                      :interval 5
                      :expires_in 900})})
           (catch clojure.lang.ExceptionInfo ex
-            ;; Device authorization endpoint returns JSON errors (RFC 8628)
-            ;; This is an API endpoint called by devices, not browsers
             (let [{:keys [type description]} (ex-data ex)
                   error-map {"client_not_registered" "invalid_client"
                              "access_denied" "access_denied"
@@ -340,25 +322,12 @@
                       (cond-> {:error error-code}
                         description (assoc :error_description description)))})))))))
 
-;; -----------------------------------------------------------------------------
-;; Device-confirmation token — a short-lived, SameSite=Lax cookie.
-;;
-;; Replaces the old hidden `challenge` form field so the confirm page can be a
-;; plain static file: the server mints this cookie on the confirm-page GET (its
-;; one server touchpoint), the browser POSTs only `action`, and the cookie
-;; carries device-code + user-code + freshness. SameSite=Lax is the CSRF defense
-;; — the browser withholds the cookie on any cross-site POST, so a malicious
-;; page
-;; can't forge a confirm. Anti-phishing (RFC 8628 §3.3/§5.4) stays the explicit
-;; Confirm button. IP/User-Agent binding is intentionally dropped here (it was
-;; beyond-spec and caused false rejects on IP shifts); the device→login handoff
-;; still binds ip/ua via redirect-to-login's separate login challenge.
-;; -----------------------------------------------------------------------------
+;; SameSite=Lax on the confirm cookie is the CSRF defense — never relax it or confirm without the cookie.
 
 (def ^:private confirm-cookie-name "device_confirm")
 (def ^:private confirm-ttl-ms 300000) ; 5 minutes
 
-(defn- confirm-cookie [device-code user-code]
+(defn confirm-cookie [device-code user-code]
   {confirm-cookie-name
    {:value (encrypt {:device-code device-code
                      :user-code user-code
@@ -373,17 +342,7 @@
   {confirm-cookie-name {:value "" :path "/oauth/device" :max-age 0}})
 
 (defn device-activation-handler
-  "OAuth 2.0 Device Activation handler.
-
-   Handles both GET and POST methods:
-   - GET: Display activation form (with or without user_code pre-filled)
-   - POST: Process activation (confirm/cancel) and redirect to login
-
-   Security validations:
-   - User code validation
-   - IP address verification
-   - User agent verification
-   - Expiration check"
+  "OAuth 2.0 Device Activation page: GET renders entry/confirm, POST confirms or cancels."
   [request]
   (letfn [(redirect-to-login [{:keys [device-code] :as state}]
             (let [challenge (nano-id/nano-id 20)
@@ -407,18 +366,10 @@
           {:keys [action user_code]} params
           {user-agent "user-agent"} (:headers request)
           method (:request-method request)
-          ;; For GET requests, user_code comes from query-params
-          ;; For POST requests, user_code comes from params
           user_code (or (:user_code query-params) user_code)]
       (case method
-        ;; GET: Display activation form
         :get
         (if (some? user_code)
-          ;; verification_uri_complete — code pre-filled → confirm step.
-          ;; Mint the SameSite confirm cookie here (the server's one
-          ;; touchpoint),
-          ;; then hand off to a branded device.html if the folder has one, else
-          ;; render the built-in confirm page. Both carry the same cookie.
           (if-let [device-code (find-device-code user_code)]
             (let [cookie (confirm-cookie device-code user_code)]
               (if-let [redirect (login-page/custom-page-redirect
@@ -433,18 +384,14 @@
             {:status 400
              :headers {"Content-Type" "text/html"}
              :body (str (device/authorize {::error :device-code/not-available}))})
-          ;; verification_uri — manual entry (no code yet, no cookie needed)
           (or (login-page/custom-page-redirect "device.html" {})
               {:status 200
                :headers {"Content-Type" "text/html"}
                :body (str (device/authorize {::complete? false}))}))
 
-        ;; POST: Process activation
         :post
         (let [confirm (get-in request [:cookies confirm-cookie-name :value])]
           (cond
-            ;; Confirm / cancel step — driven by the SameSite confirm cookie.
-            ;; `action` present ⟺ a Confirm/Cancel button was clicked.
             (some? action)
             (if (nil? confirm)
               {:status 400
@@ -454,36 +401,30 @@
                     {real-code :user-code :keys [expires-at]} (get-device-code-data device-code)
                     now (System/currentTimeMillis)]
                 (cond
-                  ;; Confirm cookie expired
                   (or (nil? exp) (< exp now))
                   {:status 400
                    :headers {"Content-Type" "text/html"}
                    :cookies clear-confirm-cookie
                    :body (str (device/authorize {::error :expired}))}
 
-                  ;; Device code itself expired / gone
                   (or (nil? expires-at) (< expires-at now))
                   {:status 400
                    :headers {"Content-Type" "text/html"}
                    :cookies clear-confirm-cookie
                    :body (str (device/authorize {::error :expired}))}
 
-                  ;; Cookie's user-code no longer matches the device code's
                   (not= real-code user-code)
                   {:status 400
                    :headers {"Content-Type" "text/html"}
                    :cookies clear-confirm-cookie
                    :body (str (device/authorize {::error :malicous-code}))}
 
-                  ;; Confirm — bind ip/ua into the separate login handoff
-                  ;; challenge
                   (= action "confirm")
                   (assoc (redirect-to-login {:device-code device-code
                                              :ip remote-addr
                                              :user-agent user-agent})
                          :cookies clear-confirm-cookie)
 
-                  ;; Cancel
                   (= action "cancel")
                   (assoc (redirect-to-canceled {:user-code user-code
                                                 :device-code device-code})
@@ -495,7 +436,6 @@
                    :body (str (device/authorize {::user-code user-code
                                                  ::error :unknown-action}))})))
 
-            ;; Manual entry — user typed the code (no confirm cookie yet)
             :else
             (if-let [device-code (find-device-code user_code)]
               (redirect-to-login {:device-code device-code

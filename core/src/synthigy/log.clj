@@ -37,10 +37,7 @@
   (or (parse-level (env :synthigy-log-level)) :info))
 
 (defn supervised?
-  "True when SYNTHIGY_SUPERVISED=1 — the parent process owns this process's
-   stdout as an exclusive JSON-RPC channel (see synthigy.supervisor and
-   docs/plans/PLAN-PORTAL-SUPERVISOR.md, the framing rule), so any log
-   output must go to stderr instead."
+  "True when SYNTHIGY_SUPERVISED=1; stdout is then the JSON-RPC channel and logs go to stderr."
   []
   (= "1" (env :synthigy-supervised)))
 
@@ -142,8 +139,7 @@
                                     (string? h) h
                                     (map? h)    (or (:name h) @node/hostname)
                                     :else       @node/hostname)))
-            ;; (subs (str kw) 1), NOT `name` — :traffic/sse must stay
-            ;; "traffic/sse"
+            ;; (subs (str kw) 1), NOT `name` — :traffic/sse must stay "traffic/sse"
             (.put "topics"      (->> (:topics signal)
                                      (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t))))
                                      sort vec))
@@ -338,8 +334,7 @@
 (defn shutdown!
   "Tear down handlers + pipeline. Idempotent."
   []
-  ;; Evicting :default/console is load-bearing — Telemere installs it on ns
-  ;; load.
+  ;; Evicting :default/console is load-bearing — Telemere installs it on ns load.
   (try (t/remove-handler! :default/console) (catch Throwable _))
   (uninstall-store-bridge!)
   (doseq [sink-id (vec @raw-handlers)]
@@ -533,8 +528,7 @@
           :stopped (info {:id ::module-stopped
                           :data {:action :stopped :subject :module :module topic}}
                          (str "Module " topic " stopped"))
-          ;; t/error! takes (opts error) — the message rides in :msg, not a
-          ;; third arg
+          ;; t/error! takes (opts error) — the message rides in :msg, not a third arg
           :start-failed (error! {:id   ::module-start-failed
                                  :msg  (str "Module " topic " failed to start")
                                  :data {:action :starting :subject :module :module topic}}
@@ -555,17 +549,11 @@
   :synthigy/log
   {:depends-on []
    :doc "pure logging, zero deps"
-   ;; Ordering is load-bearing: the started-log must come AFTER install!,
-   ;; the stopping-log BEFORE shutdown!.
+   ;; Ordering is load-bearing: started-log AFTER install!, stopping-log BEFORE shutdown!.
    :start (fn []
             (let [{:keys [root-level]} (install!)]
               (install-lifecycle-hook!)
-              ;; Supervised: stdout is the JSON-RPC control channel
-              ;; exclusively (see synthigy.supervisor), so console output goes
-              ;; to stderr. Re-uses :default/console — same id the load-time
-              ;; branch below installs, so `shutdown!` keeps evicting it in one
-              ;; place — but WARN+ from here on: the store bridge is up now and
-              ;; holds every signal, so INFO on stderr is pure duplication.
+              ;; Supervised: stdout is the JSON-RPC channel — never print there; stderr, WARN+.
               (when (supervised?)
                 (t/add-handler! :default/console
                                 (let [fmt (t/format-signal-fn)]
@@ -581,19 +569,14 @@
             (info {:id ::lifecycle-stopping
                    :data {:action :stopping :subject :logging}}
                   "Stopping logging")
-            ;; Hand the hook back BEFORE tearing the bridge down, else patcho's
-            ;; own :stopped notify logs into a dead sink.
+            ;; Hook back BEFORE shutdown!, else patcho's :stopped logs into a dead sink.
             (restore-default-lifecycle-hook!)
             (shutdown!))})
 
-;; Load-time, not start-time — merely requiring synthigy.log must silence
-;; patcho's stdout default.
+;; Load-time, not start-time — merely requiring synthigy.log must silence patcho's stdout.
 (install-lifecycle-hook!)
 
-;; Load-time too: supervised stdout is exclusively the JSON-RPC channel, and
-;; Telemere's :default/console (installed on ITS ns load) prints to *out* —
-;; under the warm-idle boot every namespace loads before :synthigy/log
-;; starts, so load-time signals would leak onto the control channel.
+;; Load-time too: Telemere's :default/console prints to *out*, the supervised JSON-RPC channel.
 (when (supervised?)
   (try (t/remove-handler! :default/console) (catch Throwable _))
   (t/add-handler! :default/console

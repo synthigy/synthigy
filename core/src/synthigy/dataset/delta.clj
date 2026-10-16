@@ -10,18 +10,14 @@
 
 (ns synthigy.dataset.delta
   "Delta pipeline: trigger plug is the only source of envelopes; subscribers register
-   declarative interest and get matching envelopes via a per-subscriber channel + go-loop.
-   See docs/core/synthigy/dataset/delta.md for the interest descriptor shape."
+   declarative interest and get matching envelopes via a per-subscriber channel + go-loop."
   (:require
     [clojure.core.async :as async]
     [synthigy.log :as log]
     [synthigy.traffic :as traffic]))
 
-;; key → {:interest <map> :handler (fn [env]) :ch <chan> :stop? (atom)}
 (defonce registry (atom {}))
 
-;; ready lags shutdown!/init! independently of the defonce registry, which
-;; survives reloads
 (defonce ready (atom false))
 
 (def default-buffer-size 100)
@@ -40,8 +36,7 @@
   (when ch    (async/close! ch)))
 
 (defn shutdown!
-  "Tears the pipe down: closes every subscriber's channel, drops the registry.
-   Called by synthigy.dataset/stop."
+  "Tears the pipe down: closes every subscriber's channel, drops the registry."
   []
   (reset! ready false)
   (doseq [sub (vals @registry)]
@@ -164,8 +159,7 @@
         (recur)))))
 
 (defn subscribe!
-  "Registers handler against interest under key. Re-subscribing under the same key REPLACES
-   the prior binding, losing anything unconsumed — use retune! to change only the interest."
+  "Registers handler against interest under key, replacing any prior binding and losing its unconsumed envelopes."
   ([key interest handler] (subscribe! key interest handler nil))
   ([key interest handler on-drop]
    (let [ch    (async/chan default-buffer-size)
@@ -182,8 +176,7 @@
      key)))
 
 (defn retune!
-  "Atomically replaces the interest of the subscription under key, leaving channel/handler
-   untouched — the lossless way to follow a moving interest. No-op (nil) if key is unknown."
+  "Atomically replaces only the interest under key — the lossless way to follow a moving interest."
   [key interest]
   (let [[old _] (swap-vals! registry
                             (fn [r]
@@ -216,14 +209,9 @@
                   (fn [matched {:keys [interest ch on-drop]}]
                     (try
                       (if (matches? interest envelope)
-                        ;; fixed buffer: offer! false on full is the live-drop
-                        ;; signal, hands to on-drop for durable resync
                         (do (when-not (async/offer! ch envelope)
                               (traffic/count! :deltas-dropped)
-                              ;; explicit :system topic: authoritative
-                              ;; :traffic/delta ids skip ns rules, so a DROP
-                              ;; (delivery health) needs this to be visible in
-                              ;; any lens
+                              ;; keep :topics #{:system} — without it this warn shows in no lens
                               (log/warn {:id ::delta-dropped
                                          :topics #{:system}
                                          :data {:seq (:seq envelope)
@@ -248,8 +236,6 @@
                "Delta dispatched to live subscribers"))
   nil)
 
-;; cross-node transport seam, same idiom as wake/*wake-source* and
-;; audit/*audit-provider*
 (defprotocol DeltaProvider
   (publish-deltas! [this envelopes]
     "Delivers a drained batch toward every node's local dispatch!.")
@@ -309,8 +295,7 @@
   (when (compare-and-set! reconcile-pending false true)
     (async/go
       (async/<! (async/timeout 100))
-      ;; clear before computing: a registry change landing mid-cycle schedules a
-      ;; fresh cycle instead of being missed
+      ;; clear before computing — a mid-cycle registry change must schedule a fresh cycle
       (reset! reconcile-pending false)
       (try
         (reconcile-interest! *delta-provider* (node-interest))

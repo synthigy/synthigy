@@ -301,9 +301,7 @@
           (re-seq #"(?i)\b(?:FROM|JOIN)\s+\"?(\w+)\"?" stripped))))
 
 (defn enforce-rbac!
-  "Apply the same entity/relation RBAC checks as search — attribute-level RBAC
-   is unguardable here and NOT enforced; MUST run per execution, never inside
-   the memoized resolve."
+  "Apply search's entity/relation RBAC checks; must run per execution, never inside the memoized resolve."
   [{:keys [entities relations]}]
   (run! #(sql-query/entity-accessible? % #{:read :owns}) entities)
   (run! (fn [{:keys [relation from to]}]
@@ -646,8 +644,6 @@
              {:keys [rls]} (sql-query/deployed-schema-entity entity-id)
              {:keys [enabled guards]} rls]
          (if (and enabled alias
-                  ;; per-entity O/B bypass (RWDOB) — owner/browse roles read
-                  ;; unscoped
                   (rls/should-apply-guards? entity-id :read))
            (let [{rls-sql :sql rls-params :params}
                  (rls/compile-guards-to-sql alias guards :read)
@@ -788,9 +784,7 @@
         (:columns outer-scope))
        (catch clojure.lang.ExceptionInfo e (throw e))
        (catch Exception e
-         ;; never leak a bare driver exception — the caller wrote a TEMPLATE,
-         ;; not this SQL: RLS injection, auto-FROM and alias generation all
-         ;; happened behind their back, so the resolved form IS the context.
+         ;; never leak a bare driver exception — the resolved SQL is the caller's only context
          (throw (ex-info (str "Template execution failed: " (ex-message e))
                          {:code "TEMPLATE_EXECUTION_ERROR"
                           :resolved-sql final-sql

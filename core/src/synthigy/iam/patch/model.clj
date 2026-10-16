@@ -9,8 +9,8 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.iam.patch.model
-  "Declarative patches for the IAM dataset model (iam.json); level via
-   (patch/level! :synthigy.iam/model)."
+  "Declarative patches for the Synthigy system model (synthigy.json); level via
+   (patch/level! :synthigy/model)."
   (:require
     [synthigy.log :as log]
     [patcho.patch :as patch]
@@ -20,26 +20,20 @@
     [synthigy.iam.access :as access :refer [with-principal]]
     [synthigy.iam.transfer :as transfer]))
 
-(defn current-iam-model
-  "The IAM model from resources/dataset/iam.json, adapted to the current ID
-   provider format."
-  []
-  (dataset/<-resource "dataset/iam.json"))
+(patch/current-version :synthigy/model
+                       (:name (dataset/current-synthigy-version)))
 
-(patch/current-version :synthigy.iam/model
-                       (:name (current-iam-model)))
-
-(patch/installed-version :synthigy.iam/model
-                         (or (some-> (dataset/latest-deployed-version (synthigy.dataset.id/data :iam/id))
+(patch/installed-version :synthigy/model
+                         (or (some-> (dataset/latest-deployed-version (id/data :synthigy/id))
                                      :name
                                      str)
                              "0"))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.80.0"
                (log/info {:id ::deploying-0-80-0 :data {:action :deploying :subject :iam-model :version "0.80.0"}}
                          "Deploying IAM dataset v0.80.0")
-               (dataset/deploy! (current-iam-model))
+               (dataset/deploy! (dataset/current-synthigy-version))
                (log/info {:id ::importing-default-data :data {:action :importing :subject :iam-defaults}}
                          "Importing default OAuth apps and roles")
                (with-principal nil
@@ -52,46 +46,44 @@
                                "exports/role_iam_user.json"]]
                    (transfer/import-role role))))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.80.1"
                (log/info {:id ::deploying-0-80-1 :data {:action :deploying :subject :iam-model :version "0.80.1"}}
                          "Deploying IAM dataset v0.80.1")
-               (dataset/deploy! (current-iam-model)))
+               (dataset/deploy! (dataset/current-synthigy-version)))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.80.3"
                (log/info {:id ::deploying-0-80-3 :data {:action :deploying :subject :iam-model :version "0.80.3"}}
                          "Deploying IAM dataset v0.80.3 (audit config on IAM entities)")
-               (dataset/deploy! (current-iam-model)))
+               (dataset/deploy! (dataset/current-synthigy-version)))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.81.0"
                (log/info {:id ::deploying-0-81-0 :data {:action :deploying :subject :iam-model :version "0.81.0"}}
                          "Deploying IAM dataset v0.81.0 (Auth Connector entity)")
-               (dataset/deploy! (current-iam-model)))
+               (dataset/deploy! (dataset/current-synthigy-version)))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.85.3"
                (log/info {:id ::deploying-0-85-3 :data {:action :deploying :subject :iam-model :version "0.85.3"}}
                          "Deploying IAM dataset v0.85.3 (Dataset entity + User Role/Dataset RLS guards)")
-               (dataset/deploy! (current-iam-model)))
+               (dataset/deploy! (dataset/current-synthigy-version)))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.85.4"
                (log/info {:id ::deploying-0-85-4 :data {:action :deploying :subject :iam-model :version "0.85.4"}}
                          "Deploying IAM dataset v0.85.4 (Dataset RLS write guard + Dataset Version entity/guard)")
-               (dataset/deploy! (current-iam-model)))
+               (dataset/deploy! (dataset/current-synthigy-version)))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.85.8"
                (log/info {:id ::deploying-0-85-8 :data {:action :deploying :subject :iam-model :version "0.85.8"}}
                          "Deploying IAM dataset v0.85.8 (User role guard removed; User Role group-scoped)")
-               (dataset/deploy! (current-iam-model)))
+               (dataset/deploy! (dataset/current-synthigy-version)))
 
 (defn copy-create-grants-to-update!
-  "CRUDOB migration: every :create grant also becomes :update, so no existing
-   role narrows on upgrade. `create entities` IS the old `write entities`
-   renamed, so its links are the pre-split write set."
+  "CRUDOB migration: copy every :create grant to :update so no role narrows on upgrade."
   []
   (let [create-field (access/grant-field :iam/role->create-entities)
         update-field (access/grant-field :iam/role->update-entities)
@@ -100,8 +92,7 @@
     (when-not (and create-field update-field)
       (throw (ex-info "CRUDOB grant relations are not both deployed"
                       {:create create-field :update update-field})))
-    ;; a to-one link table keeps ONE grant per role — the copy would look like
-    ;; it worked and leave every role with a single update entity
+    ;; a to-one link table keeps ONE grant per role — the copy would silently lose grants
     (when-not (= "m2m" cardinality)
       (throw (ex-info "`update entities` must be m2m before grants can be copied"
                       {:cardinality cardinality})))
@@ -126,28 +117,28 @@
                 "Copied create grants to update")
       copied)))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.85.11"
                (log/info {:id ::deploying-0-85-11 :data {:action :deploying :subject :iam-model :version "0.85.11"}}
                          "Deploying IAM dataset v0.85.11 (CRUDOB: write entities split into create + update)")
-               (dataset/deploy! (current-iam-model))
+               (dataset/deploy! (dataset/current-synthigy-version))
                (with-principal nil (copy-create-grants-to-update!)))
 
-;; Data-only — no dataset/deploy!, the model shape doesn't change. Links
-;; Synthigy Tools (the CLI/frontend OAuth client) to the Synthigy API row
-;; it has always actually called, so client-audience (token.clj) has an
-;; entitlement to resolve — see docs/plans/PLAN-AUDIENCE-BINDING.md step 2.
-;; import-app is :mode :stack (additive-only, re-import-safe): re-running
-;; it against an already-migrated instance only adds the new :apis ref.
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.85.12"
                (log/info {:id ::deploying-0-85-12 :data {:action :deploying :subject :iam-model :version "0.85.12"}}
                          "Deploying IAM dataset v0.85.12 (link Synthigy Tools to the Synthigy API)")
                (with-principal nil (transfer/import-app "exports/app_synthigy_tools.json")))
 
-(patch/upgrade :synthigy.iam/model
+(patch/upgrade :synthigy/model
                "0.85.13"
                (log/info {:id ::deploying-0-85-13 :data {:action :deploying :subject :iam-model :version "0.85.13"}}
                          "Deploying IAM dataset v0.85.13 (User Owner Group + owner-group RLS guard)")
-               (dataset/deploy! (current-iam-model))
+               (dataset/deploy! (dataset/current-synthigy-version))
                (with-principal nil (transfer/import-role "exports/role_user_provisioner.json")))
+
+(patch/upgrade :synthigy/model
+               "0.90.0"
+               (log/info {:id ::deploying-0-90-0 :data {:action :deploying :subject :synthigy-model :version "0.90.0"}}
+                         "Deploying Synthigy model v0.90.0 (absorbs the Datasets meta-model; retire follows in iam/start)")
+               (dataset/deploy! (dataset/current-synthigy-version)))

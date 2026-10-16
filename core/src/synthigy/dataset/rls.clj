@@ -18,8 +18,7 @@
    [synthigy.dataset.access :as access]))
 
 (defn should-apply-guards?
-  "False when no principal is bound, principal is superuser, or (entity-aware arity)
-   an RWDOB row-scope bypass grant applies. RLS is independent of RBAC."
+  "False when no principal is bound, principal is superuser, or (entity-aware arity) an RWDOB row-scope bypass grant applies."
   ([]
    (and (some? (access/current-principal))
         (not (access/superuser?))))
@@ -28,8 +27,7 @@
         (not (access/rls-bypass? entity-id operation)))))
 
 (defn get-session-values
-  "Vector of _eid values projected from the current principal for the given match
-   type (:user/:group/:role). Nil still fail-closes to deny-all downstream."
+  "Vector of _eid values projected from the current principal for the given match type (:user/:group/:role)."
   [match]
   (case match
     :user  (when-let [uid (access/principal-eid)] [uid])

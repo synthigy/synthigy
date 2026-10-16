@@ -95,7 +95,7 @@
 (defn adapter? [impl]
   (.isFile (java.io.File. (str "server/" impl "/src/synthigy/server.clj"))))
 
-;; folders that exist but ship no jar: the compile witness, broken CockroachDB,
+;; folders that exist but ship no jar: the compile witness, deprecated CockroachDB,
 ;; the adapters no bundle uses, and DuckDB (source only — its native driver
 ;; would otherwise count as shared and land in core.jar)
 (def unshipped #{:engine-stub :engine-cockroach :server-pedestal :server-undertow :server-ring-jetty

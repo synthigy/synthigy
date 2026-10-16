@@ -161,6 +161,15 @@
                "invalid_request"
                "Proof Key for Code Exchange failed"))))))))
 
+(defn login-location
+  "The login page URL for one authorization: the encrypted state, plus the client's OIDC login_hint for pages that pre-fill it."
+  [login-url state req-params]
+  (let [hint (core/login-hint (:login_hint req-params))]
+    (str login-url "?"
+         (codec/form-encode
+          (cond-> {:state (core/encrypt state)}
+            hint (assoc :login_hint hint))))))
+
 (defn authorization-handler
   "OAuth 2.0 authorization endpoint handler."
   [request]
@@ -265,12 +274,11 @@
                       client (validate-client req-params)
                       client-id (id/extract client)
                       login-url (core/get-client-login-url client)
-                      location (str login-url "?"
-                                    (codec/form-encode
-                                     {:state (core/encrypt
-                                              {:authorization-code code
-                                               :flow "authorization_code"
-                                               :prompt prompt})}))]
+                      location (login-location login-url
+                                               {:authorization-code code
+                                                :flow "authorization_code"
+                                                :prompt prompt}
+                                               req-params)]
                   (ac/create-code! code {:client client-id
                                          :agent user-agent
                                          :ip remote-addr
@@ -291,13 +299,12 @@
                       client (validate-client req-params)
                       client-id (id/extract client)
                       login-url (core/get-client-login-url client)
-                      location (str login-url "?"
-                                    (codec/form-encode
-                                     {:state (core/encrypt
-                                              {:authorization-code code
-                                               :flow "authorization_code"
-                                               :prompt prompt
-                                               :force-consent true})}))]
+                      location (login-location login-url
+                                               {:authorization-code code
+                                                :flow "authorization_code"
+                                                :prompt prompt
+                                                :force-consent true}
+                                               req-params)]
                   (ac/create-code! code {:client client-id
                                          :agent user-agent
                                          :ip remote-addr
@@ -314,11 +321,10 @@
                       client (validate-client req-params)
                       client-id (id/extract client)
                       login-url (core/get-client-login-url client)
-                      location (str login-url "?"
-                                    (codec/form-encode
-                                     {:state (core/encrypt
-                                              {:authorization-code code
-                                               :flow "authorization_code"})}))]
+                      location (login-location login-url
+                                               {:authorization-code code
+                                                :flow "authorization_code"}
+                                               req-params)]
                   (ac/create-code! code {:client client-id
                                          :agent user-agent
                                          :ip remote-addr

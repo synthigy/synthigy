@@ -50,21 +50,15 @@
    [org.postgresql.util PSQLException]))
 
 (extend-protocol p/SettableParameter
-  ;; Java Time type conversion:
   clojure.lang.Keyword
   (set-parameter [^clojure.lang.Keyword v ^PreparedStatement s ^long i]
     (.setString s i (name v))))
 
 (def ^:dynamic *write-retries*
-  "Max retries on transient Postgres errors (40P01 deadlock, 40001
-   serialization failure) for the sync/stack write path. Each retry
-   re-opens the transaction from scratch. Set to 0 to surface the error
-   directly — used by tests that want to observe a deadlock."
+  "Max sync/stack retries on 40P01/40001; 0 surfaces the error."
   3)
 
-(defn- transient-write-error?
-  "True if `t` or its cause is a Postgres deadlock / serialization
-   failure — safe to retry by re-running the whole transaction."
+(defn transient-write-error?
   [^Throwable t]
   (let [e (cond
             (instance? PSQLException t) t
@@ -73,12 +67,8 @@
      (when e
        (#{"40P01" "40001"} (.getSQLState ^PSQLException e))))))
 
-(defn- with-write-retry
-  "Run `thunk`, retrying on transient Postgres errors up to
-   *write-retries* times with exponential backoff + jitter. `thunk` must
-   open and own its transaction — on retry it is re-invoked from scratch.
-   Safe for sync/stack: a deadlocked transaction rolls back completely,
-   so the retry runs against the same pre-attempt state."
+(defn with-write-retry
+  "Runs `thunk`, which must own its transaction, retrying transient PG errors with backoff."
   [thunk]
   (loop [attempt 0]
     (let [outcome (try
@@ -98,13 +88,7 @@
           (Thread/sleep backoff)
           (recur (inc attempt)))))))
 
-(defn- write-entity
-  "Postgres write path for the sync/stack protocol methods. Opens a fresh
-   transaction, binds the tx-local audit GUCs so the relation-audit
-   triggers can attribute the mutation, then runs the shared
-   `sql-query/set-entity`. `stack?` picks sync (false) vs stack (true).
-   Callers wrap this in `with-write-retry` so a transient deadlock /
-   serialization failure re-runs the whole transaction."
+(defn write-entity
   [entity-id data stack?]
   (with-open [connection (jdbc/get-connection (:datasource *db*))]
     (jdbc/with-transaction [tx connection]
@@ -112,14 +96,7 @@
       (sql-query/set-entity tx (id/entity entity-id) data stack?))))
 
 (defn search-entity-roots
-  "Find root-entity `_eid`s matching the schema's filters.
-
-  Roots are filtered by the root entity's own predicates plus a correlated
-  `EXISTS (...)` per INNER relation (`inner-exists`) — never by JOINing
-  through relation tables. A JOIN multiplies root rows (one per matching
-  child), so `_limit` would slice the *joined* set and under-count roots;
-  `EXISTS` keeps one row per root, so `_limit`/`_order_by` are exact and no
-  DISTINCT dedup is needed."
+  "Root `_eid`s matching the schema's filters; INNER relations scope via correlated EXISTS, never JOIN."
   ([schema]
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (search-entity-roots connection schema)))
@@ -127,11 +104,8 @@
    (let [focused-schema (focus-order schema)
          root-as  (:entity/as focused-schema)
          root-tbl (:entity/table focused-schema)
-         ;; Root's OWN field predicates only — dissoc :relations so
-         ;; search-stack-args never emits predicates against relation
-         ;; aliases that the EXISTS rewrite does not join into FROM.
+         ;; never keep :relations here — EXISTS does not join relation aliases into FROM
          [where where-data] (search-stack-args (dissoc focused-schema :relations))
-         ;; INNER relations scope the root via correlated EXISTS.
          [exists-sql exists-data] (inner-exists focused-schema root-as)
          where-all (clojure.string/join
                     " and " (remove clojure.string/blank? [where exists-sql]))
@@ -148,8 +122,6 @@
                               (nil? distinct-on)
                               (not (some #{:_limit :_offset :_order_by}
                                          (keys (:args schema)))))
-                       ;; Whole-table query — no filter / paging / ordering.
-                       ;; nil signals the caller to pull the whole table.
                        nil
                        (do
                          (log/trace {:id :synthigy.dataset.sql/roots-query
@@ -173,17 +145,9 @@
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (search-entity connection entity-id args selection operations)))
   ([connection entity-id args selection operations]
-   ; (def entity-id entity-id)
-   ; (def args args)
-   ; (def selection selection)
-   ; (def operations operations)
    (entity-accessible? entity-id operations)
    (binding [*operation-rules* operations]
      (let [schema (selection->schema entity-id selection args)
-           ; _ (do
-           ;     (def schema schema)
-           ;     (def selection selection)
-           ;     (def args args))
            _ (log/trace {:id :synthigy.dataset.sql/searching-entity :data {:schema schema}}
                         "Searching for entity")
            roots (search-entity-roots connection schema)]
@@ -223,12 +187,7 @@
              [])))))))
 
 (defn get-entity
-  "Get a single entity by identity. Args must carry at least one
-   predicate — `get` is row-identity, not 'search and pick the first'.
-   Calling with `nil` or `{}` throws `IDENTITY_REQUIRED`. Pre-fix
-   (2026-06-03) the empty-args path silently ran an unfiltered scan
-   and returned the first row by `_eid`, which is dangerous: an
-   invalid query looks like a successful identity lookup."
+  "Single entity by identity; empty args throws IDENTITY_REQUIRED."
   ([entity-id args selection]
    (get-entity entity-id args selection #{:read :get}))
   ([entity-id args selection operations]
@@ -312,7 +271,6 @@
            entity-id
            selection
            args))
-        ;;
         on' (name on)]
     (with-open [connection (jdbc/get-connection (:datasource *db*))]
       (letfn [(targeting-args? [args]
@@ -341,7 +299,6 @@
                                     (update schema :args dissoc :_distinct :_limit :_offset))]
                           (not-empty (get found-roots (keyword as)))))]
           (cond
-            ;; If there some targets are found with search-entity-roots
             (not-empty targets)
             (let [sql (format
                        "with recursive tree(_eid,link,path,cycle) as (
@@ -389,11 +346,9 @@
                    (map
                     :_eid
                     (sql/execute! connection sql-final core/*return-type*)))})))
-            ;; If schema is targeted but no results are found
             (and targeting? (empty? targets))
             nil
             :else
-            ;; If targets aren't found
             (let [ranked-init-selection (if (not-empty order-by)
                                           (format
                                            "(select _eid, %s, row_number() over (%s) as _rank from %s where %s is null)"
@@ -431,25 +386,7 @@
 (declare delete-entity-batch)
 
 (defn delete-entity
-  "PK-by-PK delete. Routes through `search-entity-roots` so RLS WHERE
-   conditions (for `:delete` operation) are injected — previously the
-   raw `DELETE WHERE pk=?` bypassed RLS entirely, letting any
-   authenticated user delete any row whose PK they could guess.
-
-   On RLS denial:
-     - If the row truly doesn't exist for anyone → returns true
-       (preserves pre-2026-06-02 'silent no-op on miss' contract,
-       matching test-delete-entity-nonexistent).
-     - If the row exists but RLS hides it from the caller →
-       THROWS ex-info with :code \"DELETE_FORBIDDEN\". Single-target
-       delete is unambiguous — caller named one row, returning true
-       when nothing happened would silently mislead them.
-
-   `args` is filtered to unique-constraint keys (+ id-key); no unique key
-   surviving the filter throws UNIQUE_KEY_REQUIRED, a matched-row count
-   above 1 throws NON_UNIQUE_MATCH — see `sql-query/delete-unique-args` /
-   `assert-single-match!`. A vector `args` is multirow delete by id-key —
-   see `delete-entity-batch`."
+  "RLS-scoped unique-key delete: true when deleted or missing, DELETE_FORBIDDEN when hidden."
   ([entity-id args]
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (jdbc/with-transaction [tx connection]
@@ -479,10 +416,6 @@
                 (sql/execute! connection sql core/*return-type*)
                 true)
 
-              ;; Empty RLS scope. Run an RLS-bypassed existence probe
-              ;; against the predicate to distinguish "doesn't exist"
-              ;; (return true, preserves nonexistent contract) from
-              ;; "exists but RLS hides it" (throw DELETE_FORBIDDEN).
               :else
               (let [where-cols (mapv (fn [k] (format "\"%s\" = ?" (name k)))
                                      (keys filtered-args))
@@ -503,15 +436,10 @@
                        :entity entity-id
                        :entity-name entity-name
                        :args filtered-args})))
-                  ;; Row truly doesn't exist — preserve nonexistent contract.
                   true))))))))))
 
 (defn delete-entity-batch
-  "Multirow delete by a vector of id-key values. One RLS-scoped resolve, one
-   RLS-bypassed existence probe to disambiguate forbidden-vs-missing, one
-   DELETE. Returns the count of rows actually deleted — missing ids are
-   tolerated (idempotent), any id that exists but RLS hides throws
-   DELETE_FORBIDDEN naming the offending ids and rolls back the whole batch."
+  "Multirow delete by id-key values; returns the deleted count, any hidden id throws DELETE_FORBIDDEN."
   [connection entity-id xids]
   (binding [*operation-rules* #{:delete}]
     (let [xids (sql-query/check-delete-batch! xids)
@@ -552,8 +480,6 @@
 
 ;; FIXME
 (defn slice-entity
-  ;; PG-side: drainer wakeup is handled exclusively by the statement-level
-  ;; pg_notify trigger; no app-path wake-drainer! call is needed.
   ([entity-id args selection]
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (jdbc/with-transaction [tx connection]
@@ -564,14 +490,7 @@
              (when args
                (if (vector? args)
                  (some targeting-args? args)
-                 ;; SLICE IS ALWAYS INNER. It removes exactly the links the
-                 ;; caller named — join mode is a READ concern (how to project
-                 ;; parents), never a write one, so `:_join` must not influence
-                 ;; which link rows get deleted. Same for :_order_by /
-                 ;; :_distinct / :_on: all query metadata, not row constraints.
-                 ;; Counting `:_join` here made a bare relation look "targeted",
-                 ;; which built a target subselect carrying no real predicate
-                 ;; and slice silently stopped cutting links.
+                 ;; SLICE IS ALWAYS INNER — never count :_join or other read metadata as a row constraint
                  (let [args' (dissoc args :_offset :_limit :_join :_order_by :_distinct :_on)
                        some-constraint? (not-empty (dissoc args' :_and :_or :_where :_maybe))]
                    (if some-constraint?
@@ -601,23 +520,18 @@
                                   args' :args
                                   :as schema'}]
                           (let [query (str "delete from " \" rt \")
-                                 ;;
                                 [where-from from-data] (search-stack-args (dissoc schema :relations))
-                                 ;;
                                 select-from
                                 (when (targeting-args? args)
                                   (format
                                    "(select _eid from \"%s\" as %s where %s)"
                                    table as where-from))
-                                 ;;
                                 [where-to to-data] (search-stack-args schema')
-                                 ;;
                                 select-to
                                 (when (targeting-args? args')
                                   (format
                                    "(select _eid from \"%s\" as %s where %s)"
                                    tt tas where-to))
-                                 ;;
                                 where (when (or select-to select-from)
                                         (j-and
                                          (cond-> []
@@ -657,36 +571,28 @@
   (db/sync-entity
     [_ entity-id data]
     (with-write-retry #(write-entity entity-id data false)))
-  ;;
   (db/stack-entity
     [_ entity-id data]
     (with-write-retry #(write-entity entity-id data true)))
-  ;;
   (db/slice-entity
     [_ entity-id args selection]
     (slice-entity (id/entity entity-id) args selection))
-  ;;
   (db/get-entity
     [_ entity-id args selection]
     (fused/get-one (id/entity entity-id) args selection))
-  ;;
   (db/get-entity-tree
     [_ entity-id root on selection]
     (get-entity-tree (id/entity entity-id) root on selection))
-  ;;
   (db/search-entity
     [_ entity-id args selection]
     (fused/search (id/entity entity-id) args selection))
-  ;;
   (db/search-entity-tree
     [_ entity-id on args selection]
     (binding [sql-query/*fetch-mode* :serial]
       (search-entity-tree (id/entity entity-id) on args selection)))
-  ;;
   (db/purge-entity
     [_ entity-id args selection]
     (purge-entity (id/entity entity-id) args selection))
-  ;;
   (db/delete-entity
     [_ entity-id data]
     (delete-entity (id/entity entity-id) data)))

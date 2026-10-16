@@ -9,31 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.iam.audit
-  "Postgres-specific PRINCIPAL-AWARE audit enhancement.
-
-   Extends `synthigy.dataset.enhance/AuditEnhancement` with the
-   `*_by` column variant + write-time fill from the bound `*principal*`.
-   Extension happens ONCE, at ns load. There is no lifecycle protocol
-   swap — degradation to timestamp-only is an implementation detail of
-   each method, decided per call against the real precondition rather
-   than against module state:
-
-     transform-audit  `user-table-exists?` → `_by` columns get their FK
-                      to \"user\" only when that table is there; without
-                      it the columns are added bare and `setup!` retrofits
-                      the FK when :synthigy.iam/audit later runs.
-     augment-schema   no `user` entity in the deployed model → the `_by`
-                      fields and relations are simply not emitted, leaving
-                      exactly the timestamp-only shape.
-     audit            no bound `*principal*` → `data` returned unchanged.
-
-   This is what makes bare-server viable as a product: tables created
-   without IAM still get `modified_on`/`created_on`; later starting IAM
-   adds `_by` semantics without losing the timestamps.
-
-   Patch Management:
-   - Patcho topic: :synthigy.iam/audit
-   - Patches are migration-only."
+  "Postgres principal-aware audit enhancement; degrades to timestamp-only per call."
   (:require
    [next.jdbc :as jdbc]
    [patcho.lifecycle :as lifecycle]
@@ -49,21 +25,8 @@
    [synthigy.db.sql :refer [execute! execute-one!]]
    [synthigy.log :as log]))
 
-;; ============================================================================
-;; Helper Functions
-;; ============================================================================
-
-(defn- enhance-audit-data
-  "Populates audit values during mutations based on entity audit config.
-
-  Only populates fields that are enabled in entity's :audit :actions config.
-
-  Args:
-    entity-id - Entity UUID being mutated
-    data      - Mutation data structure (from analyze-data)
-
-  Returns:
-    Enhanced data with audit values populated for all records"
+(defn enhance-audit-data
+  "Stamps the bound principal into the enabled `*_by` fields of every record in `data`."
   [entity-id data]
   (let [entity (deployed-entity entity-id)
         current-user-eid (some-> (access/current-principal) :_eid)
@@ -84,36 +47,15 @@
                         mapping
                         mapping))))))))
 
-;; ============================================================================
-;; Postgres-Specific Protocol Implementations
-;; ============================================================================
-
-(defn- user-table-exists?
-  "Check if the user table exists in the database."
+(defn user-table-exists?
   [tx]
   (let [result (execute-one! tx
                              ["SELECT COUNT(*) as cnt FROM information_schema.tables
                                WHERE table_name = 'user' AND table_schema = 'public'"])]
     (pos? (:cnt result 0))))
 
-(defn- transform-audit-impl
-  "Adds audit columns and triggers to newly created entity tables (Postgres).
-
-  Adds four audit fields:
-  - modified_by: User who last modified the record (FK to user, if user table exists)
-  - modified_on: Timestamp of last modification
-  - created_by: User who created the record (FK to user, if user table exists)
-  - created_on: Timestamp of creation (immutable after INSERT)
-
-  Uses Postgres-specific features:
-  - PL/pgSQL trigger functions
-  - bigint foreign key to user table (only if user table exists)
-  - localtimestamp for automatic timestamps
-  - Triggers to preserve created_by and created_on on UPDATE
-
-  Note: If user table doesn't exist yet (e.g., during dataset meta-model setup),
-  the modified_by and created_by columns are added without FK constraints.
-  FK constraints can be added later when IAM is set up."
+(defn transform-audit-impl
+  "Adds the enabled audit columns and triggers; `_by` FKs only when the user table exists."
   [_ tx entities]
   (let [has-user-table (user-table-exists? tx)
         user-table-name-arg (if has-user-table "exists" "not yet created")]
@@ -121,7 +63,6 @@
                :data {:user-table user-table-name-arg}}
               "Adding audit columns and triggers to new entity tables")
 
-    ;; Create trigger function (once, idempotent)
     (execute! tx
               ["CREATE OR REPLACE FUNCTION update_modified_on()
                 RETURNS TRIGGER AS $$
@@ -131,7 +72,6 @@
                 END;
                 $$ LANGUAGE plpgsql"])
 
-    ;; Create trigger function to preserve created_* fields (once, idempotent)
     (execute! tx
               ["CREATE OR REPLACE FUNCTION preserve_created_audit()
                 RETURNS TRIGGER AS $$
@@ -153,7 +93,6 @@
                   created? (core/audit-created? entity)]
             :when (or modified? created?)]
 
-      ;; Modified audit columns + trigger
       (when modified?
         (execute! tx
                   [(if has-user-table
@@ -175,7 +114,6 @@
                               EXECUTE FUNCTION update_modified_on()"
                              trigger-name table)])))
 
-      ;; Created audit columns + trigger
       (when created?
         (execute! tx
                   [(if has-user-table
@@ -201,9 +139,8 @@
                   :data {:table table :modified modified? :created created?}}
                  "Added audit columns and triggers to table"))))
 
-(defn- augment-schema-impl
-  "Returns audit field and relation definitions for Postgres runtime schema.
-  Only includes fields enabled in entity's audit config."
+(defn augment-schema-impl
+  "Audit fields and relations for the runtime schema; `_by` only when a user entity is deployed."
   [_ entity]
   (let [modified? (core/audit-modified? entity)
         created? (core/audit-created? entity)]
@@ -249,40 +186,14 @@
                          :table entity-table
                          :type :one})))))))
 
-;; ============================================================================
-;; Protocol Extension — once, at ns load
-;; ============================================================================
-
 (extend-protocol enhance/AuditEnhancement
   synthigy.db.Postgres
   (transform-audit [db tx entities] (transform-audit-impl db tx entities))
   (augment-schema  [db entity]      (augment-schema-impl db entity))
   (audit           [_ entity-id data _] (enhance-audit-data entity-id data)))
 
-;; ============================================================================
-;; Migration Utilities
-;; ============================================================================
-
 (defn setup!
-  "Adds audit columns to ALL existing entity tables in the Postgres database.
-
-  Adds four audit fields to each entity table:
-  - modified_by: User who last modified the record
-  - modified_on: Timestamp of last modification
-  - created_by: User who created the record (preserved on UPDATE)
-  - created_on: Timestamp of creation (immutable after INSERT)
-
-  This is a migration utility for databases that were created before
-  audit enhancement was enabled.
-
-  WARNING: This modifies the database schema. Use with caution.
-
-  Args:
-    db    - Postgres database instance
-    model - ERD model containing entities
-
-  Returns:
-    {:added-columns count :added-triggers count}"
+  "Idempotently retrofits the enabled audit columns, FKs and triggers onto every existing entity table."
   [db model]
   (log/info {:id ::setup-starting}
             "Adding audit columns to existing entity tables")
@@ -292,7 +203,6 @@
                        :added-triggers 0})]
 
     (with-open [conn (jdbc/get-connection (:datasource db))]
-      ;; Create trigger function (idempotent)
       (execute! conn
                 ["CREATE OR REPLACE FUNCTION update_modified_on()
                   RETURNS TRIGGER AS $$
@@ -302,7 +212,6 @@
                   END;
                   $$ LANGUAGE plpgsql"])
 
-      ;; Create trigger function to preserve created_* fields (idempotent)
       (execute! conn
                 ["CREATE OR REPLACE FUNCTION preserve_created_audit()
                   RETURNS TRIGGER AS $$
@@ -391,25 +300,16 @@
     (log/info {:id ::setup-complete :data @results} "Setup complete")
     @results))
 
-;; ============================================================================
-;; Component Version Registration (Patcho)
-;; ============================================================================
-
 (patch/current-version :synthigy.iam/audit "1.0.2")
 
 (comment
   (patch/read-version *db* :synthigy.iam/audit))
-
-;; ============================================================================
-;; Version Patches (Postgres-specific)
-;; ============================================================================
 
 (patch/upgrade :synthigy.iam/audit
                "1.0.0"
                (when (instance? synthigy.db.Postgres *db*)
                  (log/info {:id ::installing-v100 :data {:action :installing :subject :iam-audit :version "1.0.0"}}
                            "Installing audit enhancement v1.0.0")
-                 ;; Add audit columns to all existing tables (migration only)
                  (setup! *db* (deployed-model))))
 
 (patch/upgrade :synthigy.iam/audit
@@ -418,10 +318,8 @@
                  (log/info {:id ::upgrading-v101 :data {:action :upgrading :subject :iam-audit :version "1.0.1"}}
                            "Upgrading to v1.0.1: adding created_by and created_on fields")
 
-                 ;; Add new columns to all existing tables
                  (setup! *db* (deployed-model))
 
-                 ;; Backfill created_by from modified_by for existing records
                  (log/info {:id ::backfilling-created-by :data {:action :migrating :subject :created-by}}
                            "Backfilling created_by from modified_by")
                  (let [entities (core/get-entities (deployed-model))
@@ -431,8 +329,7 @@
                              :let [table     (entity->table-name entity)
                                    modified? (core/audit-modified? entity)
                                    created?  (core/audit-created? entity)]
-                             ;; setup! only adds audit columns the entity's model config asks
-                             ;; for, so an unaudited table has neither column to read nor write.
+                             ;; must be `and`, not setup!'s `or` — reads modified_by AND writes created_by
                              :when (and modified? created?)]
                        (try
                          (let [{result :jdbc.next/update-count}
@@ -455,36 +352,23 @@
                (when (instance? synthigy.db.Postgres *db*)
                  (log/info {:id ::upgrading-v102 :data {:action :upgrading :subject :iam-audit :version "1.0.2"}}
                            "Upgrading to v1.0.2: adding FK constraints to audit columns")
-                 ;; Re-run setup to add FK constraints to tables created before user table existed
                  (setup! *db* (deployed-model))
                  (log/info {:id ::v102-complete :data {:action :upgraded :subject :iam-audit :version "1.0.2"}} "v1.0.2 upgrade complete")))
-
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
 
 (lifecycle/register-module!
  :synthigy.iam/audit
  {:depends-on [:synthigy/iam]
   :doc "Audit trail — principal `_by` columns + change capture"
   :setup (fn []
-            ;; One-time: retrofit `_by` columns + FK constraints onto any
-            ;; tables that exist but lack them (e.g. tables created in a
-            ;; previous bare-mode session). Idempotent.
            (log/info {:id ::lifecycle-setup-starting :data {:action :setup :subject :audit-fields}}
                      "Retrofitting principal-aware audit columns onto existing tables")
            (setup! *db* (deployed-model))
            (log/info {:id ::lifecycle-setup-complete :data {:action :setup-complete :subject :audit-fields}}
                      "Audit retrofit complete"))
   :start (fn []
-            ;; Swap the AuditEnhancement protocol from timestamp-only
-            ;; (the default loaded at boot) to principal-aware. Every
-            ;; subsequent deploy + write picks up the IAM-enriched impl.
            (log/info {:id ::lifecycle-started :data {:action :started :subject :principal-audit}}
                      "Principal-aware audit enhancement active")
            (core/reload *db*))
   :stop (fn []
-           ;; Restore timestamp-only behaviour. Subsequent deploys add
-           ;; only `modified_on`/`created_on` + their UPDATE triggers.
           (log/info {:id ::lifecycle-stopped :data {:action :stopped :subject :principal-audit}}
                     "Reverted to timestamp-only audit enhancement"))})

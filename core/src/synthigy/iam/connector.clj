@@ -9,11 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.iam.connector
-  "Pluggable credential-verification chain for OAuth login: multimethod
-   `verify-credentials` dispatches on connector `:type` (built-ins `:database`,
-   `:webhook`; embedders add their own defmethod), backed by the
-   `CredentialsProvider` protocol for persistence/refresh. See docs for the
-   connector return contract and webhook JSON shape."
+  "Pluggable credential-verification chain for OAuth login."
   (:require
    [synthigy.log :as log]
    [synthigy.dataset :as dataset]
@@ -55,8 +51,7 @@
 
 (defmethod verify-credentials :database
   [_ {:keys [username password]}]
-  ;; raw fetch, not iam.context/get-user-details — that strips :password, but we
-  ;; need the hash
+  ;; raw fetch, not iam.context/get-user-details — that strips :password, we need the hash
   (let [{db-password :password
          active :active
          :as user} (dataset/get-entity :iam/user {:name username}
@@ -107,10 +102,7 @@
       (throw (ex-info "Webhook 5xx" {:status status :body (.body resp)})))
     {:status status :body (.body resp)}))
 
-;; HMAC-SHA256-signs the payload in X-Synthigy-Signature when :secret is set —
-;; verify it webhook-side.
-;; Network errors / timeouts / 5xx deny (fail-closed) rather than falling
-;; through to local DB.
+;; Fail-closed: network errors / timeouts / 5xx deny, never fall through to local DB.
 (defmethod verify-credentials :webhook
   [{:keys [url secret timeout-ms]} {:keys [username password]}]
   (let [request-id (str (java.util.UUID/randomUUID))
@@ -134,8 +126,7 @@
           (case (some-> parsed :reason keyword)
             :unknown-user        {:ok false :reason :unknown-user}
             :invalid-credentials {:ok false :reason :invalid-credentials}
-            ;; locked / expired / anything else → invalid-credentials (stop
-            ;; chain)
+            ;; locked / expired / anything else → invalid-credentials (stop chain)
             {:ok false :reason :invalid-credentials})
 
           :else
@@ -190,8 +181,7 @@
 ;; =============================================================================
 
 (defprotocol CredentialsProvider
-  "Storage backend for the connector chain, bound to `*credentials-provider*`.
-   Methods are `-`-prefixed as internal — call the sugar fns below."
+  "Storage backend for the connector chain, bound to `*credentials-provider*`."
 
   (-list-chain [this]
     "Ordered, enabled connector chain, sorted by :priority asc.")
@@ -241,8 +231,7 @@
   nil)
 
 (defmacro with-credentials-provider
-  "Temporarily rebind `*credentials-provider*` for the body's dynamic scope.
-   Useful in tests."
+  "Temporarily rebind `*credentials-provider*` for the body's dynamic scope."
   [provider & body]
   `(binding [*credentials-provider* ~provider]
      ~@body))

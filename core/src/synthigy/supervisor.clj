@@ -9,12 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.supervisor
-  "JSON-RPC-over-stdio supervision channel — the protocol half of
-   docs/plans/PLAN-PORTAL-SUPERVISOR.md. Lives in core, not a server
-   backend or the uberjar entry point, so a `clj -M` dev process is
-   supervisable on the same contract as a released jar: `synthigy
-   supervise -- clj -M:...:dev` and a supervised `java -jar` both just call
-   `serve!` over their inherited stdin/stdout."
+  "JSON-RPC-over-stdio supervision channel, the same contract for a `clj -M` process and a released jar."
   (:require
     [clojure.string :as str]
     [environ.core :refer [env]]
@@ -72,9 +67,7 @@
   nil)
 
 (defn register-method!
-  "Handler is (fn [params] result); params is the request's :params, already
-   keywordized. Throw ex-info with :code (a JSON-RPC error code, default
-   -32603) to answer with an error instead of a result."
+  "Register `(fn [params] result)` for `method`; throw ex-info with `:code` to answer an error."
   [method handler]
   (swap! method-table assoc method handler)
   nil)
@@ -84,9 +77,7 @@
   nil)
 
 (defn dispatch
-  "One JSON-RPC request/notification map (keywordized) in, a response map
-   out — or nil for a notification (no :id) and for anything else that gets
-   no reply."
+  "One JSON-RPC request map in, a response map out; nil for a notification."
   [{:keys [id method params]}]
   (if-let [handler (get @method-table method)]
     (try
@@ -107,11 +98,6 @@
 (register-method! "ping" (fn [_] {:pong true}))
 
 ;; --- db.probe: param-driven backend probes -------------------------------
-;; Backends register a probe (postgres/sqlite); the verb classifies what is
-;; behind a set of credentials/a path — empty / foreign tables / current
-;; Synthigy (with pending patch upgrades) / legacy euuid — WITHOUT touching
-;; the engine's own lifecycle or env. This is the operator console's Test
-;; button speaking Synthigy's own knowledge instead of driver heuristics.
 
 (defonce ^:private db-probes (atom {}))
 
@@ -201,11 +187,8 @@
     (future (Thread/sleep 1000) (System/exit 0))
     {:success true :message "Shutdown initiated"}))
 
-(defn- write-frame!
-  "One JSON-RPC message as a single line on *out*, flushed immediately —
-   the whole framing contract. Locked on System/out: `serve!`'s read loop
-   runs on its own thread, so a response frame must never interleave with
-   another thread's write mid-line."
+(defn write-frame!
+  "One JSON-RPC message as a single flushed line on *out*; locked so frames never interleave."
   [msg]
   (locking System/out
     (println (json/write-str msg))
@@ -214,14 +197,7 @@
 (defonce ^:private serving (atom nil))
 
 (defn serve!
-  "Start the stdio read-dispatch-respond loop on a daemon thread; a no-op if
-   already running. One JSON-RPC frame per line on *in*: a line that fails
-   to parse or dispatch is logged (never to stdout — see
-   synthigy.log/supervised?) and the loop continues, since a malformed
-   frame is the parent's bug to fix, not a reason to die. `:modules` is the
-   lifecycle target `server.start` starts (its first entry is what
-   `server.stop`/`server.status` act on). When supervised, stdin EOF means
-   the parent died — the process exits rather than run orphaned."
+  "Start the stdio read-dispatch-respond loop on a daemon thread; a no-op if already running."
   ([] (serve! nil))
   ([{:keys [modules]}]
    (when modules
@@ -236,10 +212,7 @@
                    (if-let [line (.readLine rdr)]
                      (do
                        (when-not (str/blank? line)
-                         ;; each frame on its own thread — a long verb
-                         ;; (server.start running migrations) must never
-                         ;; block ping/doctor; write-frame! serializes the
-                         ;; interleaved responses on System/out
+                         ;; each frame on its own thread — a long verb must never block ping/doctor
                          (future
                            (try
                              (when-let [resp (dispatch (json/read-str line))]

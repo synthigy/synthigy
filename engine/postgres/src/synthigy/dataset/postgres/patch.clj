@@ -9,24 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.postgres.patch
-  "PostgreSQL-specific dataset feature patches.
-
-  This namespace defines patches for the :synthigy/dataset topic.
-  These patches handle database transforms and feature evolution that
-  are specific to PostgreSQL.
-
-  While the topic :synthigy/dataset is defined in synthigy.dataset
-  (database-agnostic), the actual patch implementations are database-specific.
-
-  Examples of feature patches:
-  - Schema transforms (integer → bigint conversions)
-  - Constraint modifications (NOT NULL removals)
-  - Index optimizations
-  - New storage features
-
-  To level dataset features:
-    (require '[patcho.patch :as patch])
-    (patch/level! :synthigy/dataset)"
+  "PostgreSQL :synthigy/dataset feature patches."
   (:require
    [clojure.string :as str]
    [next.jdbc :as jdbc]
@@ -47,15 +30,8 @@
    [synthigy.db.sql :as sql :refer [execute-one!]]
    [synthigy.log :as log]))
 
-;;; ============================================================================
-;;; ID Immutability Triggers
-;;; ============================================================================
-
 (defn postgres-id-trigger-function
-  "Returns SQL to create the PostgreSQL trigger function for ID immutability.
-
-  This function prevents updates to the ID column (euuid/xid) once it's set.
-  Instead of throwing an exception, it silently keeps the old value."
+  "SQL for `prevent_<id>_update()`, which silently keeps the old id on UPDATE."
   []
   (format
    "CREATE OR REPLACE FUNCTION prevent_%s_update()
@@ -71,13 +47,6 @@ $$ LANGUAGE plpgsql;"
    (id/field) (id/field) (id/field) (id/field) (id/field) (id/field)))
 
 (defn postgres-id-trigger
-  "Returns SQL to create a PostgreSQL trigger for ID immutability on a table.
-
-  Args:
-    table-name - Name of the table to protect
-
-  Returns:
-    SQL string to create the trigger"
   [table-name]
   (format
    "CREATE OR REPLACE TRIGGER prevent_%s_update_trigger
@@ -87,37 +56,16 @@ $$ LANGUAGE plpgsql;"
    (id/field) table-name (id/field)))
 
 (defn drop-postgres-id-trigger
-  "Returns SQL to drop a PostgreSQL ID immutability trigger.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    SQL string to drop the trigger"
   [table-name]
   (format
    "DROP TRIGGER IF EXISTS prevent_%s_update_trigger ON \"%s\";"
    (id/field) table-name))
 
 (defn drop-postgres-id-trigger-function
-  "Returns SQL to drop the PostgreSQL trigger function for ID immutability."
   []
   (format "DROP FUNCTION IF EXISTS prevent_%s_update() CASCADE;" (id/field)))
 
-;;; ============================================================================
-;;; SQLite ID Immutability Triggers
-;;; ============================================================================
-
 (defn sqlite-id-trigger
-  "Returns SQL to create a SQLite trigger for ID immutability on a table.
-
-  SQLite triggers use WHEN clause and RAISE() instead of stored functions.
-
-  Args:
-    table-name - Name of the table to protect
-
-  Returns:
-    SQL string to create the trigger"
   [table-name]
   (format
    "CREATE TRIGGER IF NOT EXISTS prevent_%s_update_trigger
@@ -130,38 +78,18 @@ END;"
    (id/field) table-name (id/field) (id/field) (id/field)))
 
 (defn drop-sqlite-id-trigger
-  "Returns SQL to drop a SQLite ID immutability trigger.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    SQL string to drop the trigger"
   [table-name]
   (format
    "DROP TRIGGER IF EXISTS prevent_%s_update_trigger;"
    (id/field)))
 
 (defn get-entity-tables
-  "Gets all entity table names from the deployed schema.
-
-  Returns:
-    Vector of table name strings"
   []
   (let [schema (sql-query/deployed-schema)]
     (vec (distinct (keep :table (vals schema))))))
 
 (defn create-id-immutability-triggers!
-  "Creates ID immutability triggers on all entity tables.
-
-  This should be called after deploying a schema to ensure ID (euuid/xid)
-  values cannot be changed once set.
-
-  Args:
-    db - Database connection (from *db* binding)
-
-  Returns:
-    Map with :created (count of triggers created) and :tables (list of table names)"
+  "Installs the id immutability trigger on every deployed entity table."
   ([]
    (let [tables (get-entity-tables)]
 
@@ -169,12 +97,9 @@ END;"
                 :data {:table-count (count tables) :column (id/field)}}
                "Creating ID immutability triggers")
 
-     ;; Create the trigger function once
-     ;; Note: This works for both PostgreSQL and CockroachDB (PostgreSQL-compatible)
      (sql/execute! [(postgres-id-trigger-function)])
      (log/debug {:id ::trigger-function-created} "Created PostgreSQL/CockroachDB trigger function")
 
-     ;; Create trigger on each table
      (doseq [table tables]
        (try
          (sql/execute! [(postgres-id-trigger table)])
@@ -187,15 +112,7 @@ END;"
       :type :postgres})))
 
 (defn remove-id-immutability-triggers!
-  "Removes ID immutability triggers from all entity tables.
-
-  This is primarily for rollback or testing purposes.
-
-  Args:
-    db - Database connection (from *db* binding)
-
-  Returns:
-    Map with :removed (count of triggers removed) and :tables (list of table names)"
+  "Removes the id immutability triggers and function (rollback/testing)."
   []
   (let [tables (get-entity-tables)]
 
@@ -206,7 +123,6 @@ END;"
       (sql/execute! *db* [(drop-postgres-id-trigger table)])
       (log/debug {:id ::trigger-dropped :data {:table table}} "Dropped trigger from table"))
 
-        ;; Drop the trigger function
     (sql/execute! *db* [(drop-postgres-id-trigger-function)])
     (log/debug {:id ::trigger-function-dropped} "Dropped PostgreSQL/CockroachDB trigger function")
 
@@ -214,18 +130,12 @@ END;"
      :tables tables
      :type :postgres}))
 
-;;; ============================================================================
-;;; Patch Helper Functions
-;;; ============================================================================
-
 (defn is-mandatory-attribute?
-  "Check if attribute has mandatory constraint in the dataset model.
-   Includes `unique+mandatory` (natural key) via `core/mandatory-constraint?`."
+  "True for mandatory attributes, including `unique+mandatory` natural keys."
   [attribute]
   (core/mandatory-constraint? (:constraint attribute)))
 
 (defn get-column-constraints
-  "Get column constraints from database including NOT NULL"
   [table-name column-name]
   (try
     (execute-one! ["SELECT column_name, is_nullable, data_type
@@ -254,7 +164,6 @@ END;"
                                       :type (if (.getBoolean col "NON_UNIQUE") :non-unique :unique)})))))))))
 
 (defn get-column-type
-  "Get current column type from database"
   [table-name column-name]
   (try
     (execute-one! ["SELECT data_type
@@ -281,7 +190,6 @@ END;"
                           (cond-> r
                             (not (indexes (str table \_ "fidx")))
                             (conj (format "create index %s_fidx on \"%s\" (%s);" table table from-field))
-                               ;;
                             (not (indexes (str table \_ "tidx")))
                             (conj (format "create index %s_tidx on \"%s\" (%s);" table table to-field)))))
                       []
@@ -309,7 +217,6 @@ END;"
                                   #{"user" "group" "role"}
                                   :type)
                                  (:attributes entity))
-                ;;
              current-result
              (conj r
                    (format "alter table \"%s\" drop constraint \"%s\"" entity-table modified_by)
@@ -337,9 +244,7 @@ END;"
      entities)))
 
 (defn fix-mandatory-constraints
-  "Remove NOT NULL constraints from all mandatory fields in the dataset model.
-   This allows more flexible data entry by making all fields nullable at the database level
-   while still preserving the logical mandatory constraint in the dataset model."
+  "Drops NOT NULL from mandatory columns; mandatory stays enforced in the model."
   []
   (let [model (dataset/deployed-model)
         entities (core/get-entities model)
@@ -347,10 +252,8 @@ END;"
                     (fn [statements entity]
                       (let [entity-table (entity->table-name entity)
 
-                              ;; Get all mandatory attributes for this entity
                             mandatory-attributes (filter is-mandatory-attribute? (:attributes entity))
 
-                              ;; Generate ALTER TABLE statements for mandatory attributes
                             attribute-statements
                             (reduce
                              (fn [attr-statements {:keys [name]}]
@@ -368,7 +271,6 @@ END;"
                         (concat statements attribute-statements)))
                     []
                     entities)]
-      ;; Execute the statements
     (with-open [con (jdbc/get-connection (:datasource *db*))]
       (doseq [statement statements]
         (try
@@ -379,10 +281,7 @@ END;"
             (log/error! {:id ::mandatory-constraint-failed :data {:sql statement}} ex)))))))
 
 (defn fix-int-types
-  "Fix integer types by converting integer columns to bigint for:
-   - All int type attributes
-   - All references to user/group/role entities (foreign keys)
-   - Skip if column is already bigint"
+  "Converts integer columns of int attrs, user/group/role refs and modified_by to bigint."
   []
   (let [model (dataset/deployed-model)
         entities (core/get-entities model)
@@ -390,14 +289,12 @@ END;"
                     (fn [statements entity]
                       (let [entity-table (entity->table-name entity)
 
-                              ;; Handle modified_by column (always references user)
                             modified-by-type (get-column-type entity-table "modified_by")
                             modified-by-statements
                             (if (and modified-by-type (= "integer" (:data_type modified-by-type)))
                               [(format "ALTER TABLE \"%s\" ALTER COLUMN modified_by TYPE bigint" entity-table)]
                               [])
 
-                              ;; Handle entity attributes
                             attribute-statements
                             (reduce
                              (fn [attr-statements {:keys [name type]}]
@@ -426,109 +323,6 @@ END;"
           (catch Throwable ex
             (log/error! {:id ::int-type-conversion-failed :data {:sql statement}} ex)))))))
 
-(defn fix-deployed-on
-  []
-  (let [model (dataset/deployed-model)
-        dataset-version-entity (core/get-entity model (id/entity :dataset/version))
-        table-name (entity->table-name dataset-version-entity)]
-    (try
-      (with-open [con (jdbc/get-connection (:datasource *db*))]
-        (execute-one! con [(format "update \"%s\" set deployed_on = modified_on" table-name)]))
-      (catch Throwable ex
-        (log/error! {:id ::deployed-on-patch-failed :data {:action :patching :subject :deployed-on}} ex)))))
-
-;;; ============================================================================
-;;; Dataset Model Versioning (:synthigy.dataset/model)
-;;; ============================================================================
-;;
-;; This topic tracks the version of the dataset META-MODEL schema itself
-;; (the entities/relations/attributes that describe datasets).
-;;
-;; The meta-model is stored in resources/dataset/dataset.json and defines:
-;; - Dataset, DatasetVersion entities
-;; - Entity, Relation, Attribute entities
-;; - Model structure and constraints
-;;
-;; Model patches deploy new versions via dataset/deploy! and are tracked
-;; in the __deploy_history table (same versioning system as user models).
-;;
-
-;; Current model version (from resources file)
-(patch/current-version :synthigy.dataset/model (:name (dataset/current-dataset-version)))
-
-;; Installed model version from __deploy_history
-(patch/installed-version
- :synthigy.dataset/model
- (or (some-> (dataset/latest-deployed-version (id/data :dataset/id))
-             :name
-             str)
-     "0"))
-
-;;; ============================================================================
-;;; Dataset Model Patches
-;;; ============================================================================
-
-;; Patch 1.0.0 - Initial dataset meta-model deployment
-(patch/upgrade :synthigy.dataset/model
-               "1.0.0"
-               (log/info {:id ::model-v100-deploying :data {:action :deploying :subject :dataset-model :version "1.0.0"}}
-                         "Deploying meta-model v1.0.0 (removing Dataset Entity/Relation)")
-               (dataset/deploy! (dataset/current-dataset-version)))
-
-;; Patch 1.0.2 - Remove UI layout attributes
-(patch/upgrade :synthigy.dataset/model
-               "1.0.2"
-               (log/info {:id ::model-v102-deploying :data {:action :deploying :subject :dataset-model :version "1.0.2"}}
-                         "Deploying meta-model v1.0.2 (removing UI layout attributes)")
-               (log/info {:id ::model-v102-ui-inactivation :data {:action :upgrading :subject :ui-layout :version "1.0.2"}}
-                         "Width/Height/Position/Type/Path will become inactive")
-               (dataset/deploy! (dataset/current-dataset-version))
-               (log/info {:id ::model-v102-complete :data {:action :upgraded :subject :dataset-model :version "1.0.2"}}
-                         "Migration complete - UI attributes preserved as inactive columns"))
-
-(patch/upgrade :synthigy.dataset/model
-               "1.0.3"
-               (log/info {:id ::model-v103-deploying :data {:action :deploying :subject :dataset-model :version "1.0.3"}}
-                         "Deploying meta-model v1.0.3 (removing UI layout attributes)")
-               (log/info {:id ::model-v103-adding-deployed-on :data {:action :upgrading :subject :deployed-on :version "1.0.3"}}
-                         "Adding deployed_on to dataset versions")
-               (dataset/deploy! (dataset/current-dataset-version))
-               (fix-deployed-on)
-               (log/info {:id ::model-v103-complete :data {:action :upgraded :subject :dataset-model :version "1.0.3"}} "Migration complete"))
-
-;; Patch 1.0.5 — Dataset + Dataset Version opt into principal-aware audit
-;; (`:configuration :audit :actions #{:created :modified}` lands in their
-;; entity config). The JSON resource already carries the new opt-in; this
-;; upgrade triggers `dataset/deploy!` which serializes the augmented model
-;; into a new dataset_version row, refreshes the runtime schema cache, and
-;; lets the validator accept modified-on / modified-by selections on those
-;; entities.
-(patch/upgrade :synthigy.dataset/model
-               "1.0.5"
-               (log/info {:id ::model-v105-deploying
-                          :data {:action :deploying :subject :dataset-model :version "1.0.5"}}
-                         "Deploying meta-model v1.0.5 — audit opt-in for Dataset + Dataset Version")
-               (dataset/deploy! (dataset/current-dataset-version))
-               (log/info {:id ::model-v105-complete
-                          :data {:action :upgraded :subject :dataset-model :version "1.0.5"}}
-                         "Meta-model v1.0.5 deployed; audit fields now resolvable in selections"))
-
-(patch/upgrade :synthigy.dataset/model
-               "1.0.6"
-               (log/info {:id ::model-v106-deploying
-                          :data {:action :deploying :subject :dataset-model :version "1.0.6"}}
-                         "Deploying meta-model v1.0.6 — RBAC opt-in on meta-entities")
-               (dataset/deploy! (dataset/current-dataset-version))
-               (log/info {:id ::model-v106-complete
-                          :data {:action :upgraded :subject :dataset-model :version "1.0.6"}}
-                         "Meta-model v1.0.6 deployed"))
-
-;;; ============================================================================
-;;; PostgreSQL Dataset Feature Patches
-;;; ============================================================================
-
-;; Patch 0.5.0 - Database schema fixes (PostgreSQL only)
-;; (Matches the legacy 0.5.0 patch for compatibility)
 (patch/upgrade :synthigy/dataset
                "0.5.0"
                (when (instance? synthigy.db.Postgres *db*)
@@ -539,20 +333,14 @@ END;"
                            "Removing NOT NULL constraints from mandatory fields")
                  (fix-mandatory-constraints)))
 
-;; Patch 1.0.0 - Initial feature version marker (PostgreSQL only)
 (patch/upgrade :synthigy/dataset
                "1.0.0"
                (when (instance? synthigy.db.Postgres *db*)
                  (log/info {:id ::v100-initialized :data {:action :initialized :subject :dataset-features :version "1.0.0"}}
                            "PostgreSQL dataset features initialized at v1.0.0")))
 
-;; Patch 1.0.1 - EUUID Immutability Triggers (PostgreSQL only)
-;; This patch installs triggers on all entity tables to ensure EUUID values
-;; cannot be modified once set. This enables order-independent mapping in
-;; store-entity-records
 (patch/upgrade :synthigy/dataset
                "1.0.1"
-               ;; Guard: only run on PostgreSQL (skip for SQLite, etc.)
                (when (instance? synthigy.db.Postgres *db*)
                  (log/info {:id ::v101-installing-id-triggers :data {:action :installing :subject :id-triggers :version "1.0.1"}}
                            "Installing ID immutability triggers")
@@ -573,14 +361,6 @@ END;"
                  (log/info {:id ::v101-complete}
                            "EUUID immutability migration complete")))
 
-;; Patch 1.2.0 - Relation Audit Triggers (PostgreSQL only)
-;; Installs the relation delta queue + synthigy_emit_relation_delta() trigger
-;; function and attaches an INSERT/DELETE trigger to every relation link
-;; table in the deployed model. Captures cascade DELETEs, raw operator SQL,
-;; and any code path that bypasses publish-delta.
-;; (Queue was originally named __delta_queue; renamed to __relation_delta_queue
-;; in 1.4.0. New installs land on the new name directly via the DDL constant.)
-;; Idempotent — re-runs on every level! to reconcile newly-deployed relations.
 (patch/upgrade :synthigy/dataset
                "1.2.0"
                (when (instance? synthigy.db.Postgres *db*)
@@ -602,16 +382,6 @@ END;"
                                   :data {:action :installing :subject :dataset-features :version "1.2.0"}} e)
                      (throw e)))))
 
-;; Patch 1.3.0 - Xid denormalization for relation tables (PostgreSQL only)
-;; Adds from_xid / to_xid TEXT columns to every existing relation table,
-;; backfills from entity tables, installs the BEFORE INSERT populate
-;; trigger, and updates the audit trigger payload to carry resolvable
-;; xids even after FK cascade DELETE removes the parent entity.
-;;
-;; The work is all done inside `transform-relation-audit` (idempotent),
-;; so this patch just re-invokes it; the same call already runs from
-;; 1.2.0, but bumping the version triggers a re-run that picks up the
-;; new schema additions on existing deployments.
 (patch/upgrade :synthigy/dataset
                "1.3.0"
                (when (instance? synthigy.db.Postgres *db*)
@@ -633,13 +403,6 @@ END;"
                                   :data {:action :upgrading :subject :dataset-features :version "1.3.0"}} e)
                      (throw e)))))
 
-;; Patch 1.4.0 - Enum columns to TEXT (PostgreSQL only)
-;; Enum values are model metadata, not database types. Native enum types made
-;; every value change a type-rotation DDL dance, behaved differently on each
-;; backend (SQLite already stores TEXT), and could destroy row data on value
-;; removal. Convert every enum-typed column to TEXT and drop all enum types —
-;; including orphaned `x__` rotation leftovers. Catalog-driven and idempotent:
-;; a second run finds no enum columns/types and no-ops.
 (patch/upgrade :synthigy/dataset
                "1.4.0"
                (when (instance? synthigy.db.Postgres *db*)
@@ -659,9 +422,6 @@ END;"
                                        from pg_type t
                                        join pg_namespace n on n.oid = t.typnamespace
                                        where t.typtype = 'e' and n.nspname = 'public'"])]
-                     ;; sql/execute! builds UNQUALIFIED maps with identity labels
-                     ;; (see synthigy.db.postgres/defaults :raw) - keys are plain
-                     ;; :table_name / :column_name / :typname.
                      (doseq [{table :table_name
                               column :column_name} enum-columns]
                        (execute-one!
@@ -681,11 +441,6 @@ END;"
                      (throw e)))))
 
 
-;; Patch 1.5.0 - Unique groups as indexes (no-op on PostgreSQL)
-;; SQLite cannot ALTER a table constraint, so 1.5.0 moves its unique groups to
-;; CREATE UNIQUE INDEX and rebuilds tables carrying the old inline form.
-;; Postgres has real constraint DDL and keeps using it; the marker keeps the
-;; feature version aligned across backends.
 (patch/upgrade :synthigy/dataset
                "1.5.0"
                (log/info {:id ::v150-unique-index

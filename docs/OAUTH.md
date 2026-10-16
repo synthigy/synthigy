@@ -8,13 +8,8 @@ Step by step, with code: [SIGN_IN.md](SIGN_IN.md).
 
 ## Applications
 
-An application is an OAuth **client** — in the console under
-Administration → Apps, or from the CLI:
-
-```bash
-synthigy iam add-client "My App" --id my-app --type confidential \
-  --grant client_credentials --role "Dataset Explorer" --api Synthigy --local
-```
+An application is an OAuth **client**, created in the console under
+Administration → Apps or with `synthigy iam add-client` ([SIGN_IN.md](SIGN_IN.md)).
 
 - **Public** clients run where a secret cannot be kept: browsers, mobile and
   desktop apps. They sign users in with the authorization code flow.
@@ -74,30 +69,14 @@ with `USER_NOT_FOUND` or `USER_INACTIVE`.
 
 ## Identity providers
 
-Users can sign in with an external account. Add a provider in the engine
-console under Administration → Identity Providers: Google, Microsoft, LinkedIn,
-GitHub, Facebook, Discord, and up to three custom OpenID Connect providers.
-The console shows the redirect URI to register with the provider.
+Add Google, Microsoft, LinkedIn, GitHub, Facebook, Discord or up to three custom
+OpenID Connect providers in the console under Administration → Identity Providers;
+it shows the redirect URI to register with the provider. A user can link several
+sign-in methods to one account (Your account → Sign-in methods).
 
-A user can link several sign-in methods to one account (Your account →
-Sign-in methods). Where credentials are checked against a directory of your own
-— LDAP, a legacy database — see [IAM_CONNECTORS.md](IAM_CONNECTORS.md).
+## See also
 
-## Login pages
-
-The sign-in, device, error and status pages can be replaced. Upload them as a
-zip bundle in the console under System → Login pages. A bundle named `default`
-replaces the pages for every client; any other bundle is chosen per client.
-The contract and a working starter: [LOGIN_PAGES.md](LOGIN_PAGES.md).
-
-## New accounts
-
-Accounts are created over `/data` or in the console; the person sets their
-first credential through a one-time link. See
-[ACCESS.md](ACCESS.md#delegated-administration).
-
-## Running behind a proxy
-
-Set `SYNTHIGY_IAM_ROOT_URL` to the public URL: it is the token issuer and the
-base of every link the login pages produce. Session cookies are `Secure`, so a
-public instance needs TLS ([PROXY.md](PROXY.md)).
+- Checking passwords against your own directory: [IAM_CONNECTORS.md](IAM_CONNECTORS.md)
+- Your own login pages: [LOGIN_PAGES.md](LOGIN_PAGES.md)
+- New accounts and invitation links: [ACCESS.md](ACCESS.md#delegated-administration)
+- Public URL and TLS: [PROXY.md](PROXY.md)

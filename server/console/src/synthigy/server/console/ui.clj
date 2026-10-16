@@ -15,6 +15,7 @@
    [hiccup2.core :refer [html raw]]
    [ring.util.codec :as codec]
    [synthigy.dataline :as dataline]
+   [synthigy.dataset.id :as id]
    [synthigy.env :as env]
    [synthigy.iam.access :as access]
    [synthigy.info :as info]
@@ -139,6 +140,30 @@
            [:div.console-login-error message]
            [:a.console-back {:href "/console"} "← Back to console"]]}))
 
+(defn console-admin?
+  "Whether the current principal may use the console: a System Operator, or able to change rows on some administration page."
+  []
+  (boolean
+   (or (data/system-operator?)
+       (some (fn [{:keys [key]}]
+               (some #(try (access/entity-allows? (id/entity key) [%])
+                           (catch Exception _ false))
+                     [:create :update :delete]))
+             (pages/all)))))
+
+(defn not-admin-page
+  "What a signed-in account without admin rights sees instead of the console."
+  []
+  (bare-shell
+   {:title "Not available"
+    :body [:div.console-login
+           (lockup)
+           [:div.console-login-hint "console"]
+           [:div.console-login-error
+            "This console is for administrators. Manage your account in the app you use."]
+           [:form {:method "post" :action "/console/logout"}
+            [:ty-button {:type "submit" :size "sm" :appearance "outlined" :wide true} "Sign out"]]]}))
+
 (defn nav
   []
   (let [admin (filterv data/visible? (pages/all))]
@@ -156,7 +181,7 @@
              :items [{:href "/console/system" :label "Overview" :icon :server}
                      {:href "/console/system/topology" :label "Topology" :icon :link}
                      {:href "/console/encryption" :label "Encryption" :icon :key}
-                     {:href "/console/login-pages" :label "Login pages" :icon :globe}]}))))
+                     {:href "/console/custom-pages" :label "Custom pages" :icon :globe}]}))))
 
 (def tools
   [{:key "model" :label "Data modeling" :icon :layers}
@@ -198,8 +223,7 @@
   (some? (tools-origin)))
 
 (defn tools-callback-page
-  "The registered redirect address. Deliberately bare: a silent-renew iframe
-   loads it on every token refresh, and it never needs the component bundle."
+  "Bare page at the registered Synthigy Tools redirect address."
   []
   (render
    [:html {:lang "en"}
@@ -257,9 +281,6 @@
        :title "Updates stream in as data changes"}
       [:span.console-live-dot {:slot "start"}]
       [:span.console-live-label "Offline"]])
-   ;; :none — a page with nothing to filter (the cards index). The fallback
-   ;; below is a DOM filter over `.console-table`, so it would render a box
-   ;; that silently does nothing.
    (when-not (= :none search)
      [:div.console-search
       [:ty-input (merge {:id "console-search" :type "search" :placeholder "Filter…"
@@ -269,19 +290,13 @@
        [:span.console-kbd {:slot "end"} "⌘K"]]])])
 
 (defn on-enter
-  "Enter in a field runs `expr` — ty-input keeps its native input in the shadow
-   DOM, so a form never gets implicit submission and a dialog never gets a
-   default button."
+  "Enter in a field runs `expr`."
   [expr]
   {(keyword "data-on:keydown")
    (str "if (evt.key === 'Enter') { evt.preventDefault(); " expr " }")})
 
 (defn confirm-dialog
-  "One dialog per page; each opener carries its OWN post target in
-   `$confirmAction`, because a page can host more than one destructive action
-   and a single baked-in URI silently sends whichever loses the cond to the
-   winner's endpoint (Regenerate secret posted to /delete and destroyed the
-   app). `action` is the fallback for openers that set no target of their own."
+  "The page's one confirm dialog; each opener sets its own `$confirmAction`, `action` is the fallback."
   [action stale?]
   [:ty-modal {(keyword "data-attr:open") "$confirmTarget !== ''"
               :backdrop "true" :close-on-outside-click true :close-on-escape true
@@ -337,15 +352,7 @@
                      stream-expr stream-expr
                      stream (str "'" stream "'"))]
     (render
-      ;; :data-signals sits on <html>, not <body> — hiccup2 sorts an
-      ;; element's own attributes alphabetically, so "data-init"/
-      ;; "data-on-interval" always precede "data-signals" in the rendered
-      ;; tag regardless of the map's build order, and Datastar applies a
-      ;; single element's own directives in that (attribute-source) order.
-      ;; A same-element data-init would therefore read its signals before
-      ;; data-signals ever ran. <html> is a genuine ANCESTOR of <body>, so
-      ;; its directives are guaranteed to apply first regardless of
-      ;; alphabetization within either tag.
+      ;; never move :data-signals onto <body> — hiccup2 sorts attrs, so data-init would read unset signals
       [:html {:class "dark" :data-theme "dark" :lang "en"
               :data-signals
               (str "{confirmTarget: '', confirmVerb: '', confirmWhat: '', confirmPassword: ''"
@@ -472,8 +479,7 @@
        [:tbody (browse-rows-fragment spec rows sel?)]]])])
 
 (defn field-shell
-  "The wrapper every form control shares — label, optional hint, and the
-  full-row `.wide` rule. One place, so create and edit cannot drift apart."
+  "The wrapper every form control shares: label, optional hint and the full-row `.wide` rule."
   [label kind hint control & [status]]
   [:div.console-field {:class (when (#{:text :textarea} kind) "wide")}
    [:div.console-field-label label]
@@ -495,10 +501,6 @@
                    :checked (when (get row k) true)}]
       [:span label]]
 
-     ;; :signal lets a spec drive other controls off this field WITHOUT a save
-     ;; round-trip (Apps hides the secret block the moment you pick Public).
-     ;; ty-radio-group's change carries {:value :formValue :originalEvent},
-     ;; verified in the vendored bundle.
      :enum
      (let [cur (some-> (get row k) name)]
        [:ty-radio-group (cond-> {:name (name k) :value cur}
@@ -661,18 +663,7 @@
 
 (defn nav-filter-trigger
   [k icon-k label]
-  ;; The clear "x" lives in ty-button's OWN "end" slot (verified against the
-  ;; bundle: it builds a genuine `<slot name="end">` alongside "start" and
-  ;; the default content slot) rather than as a sibling button — one control,
-  ;; not two adjacent ones. evt.stopPropagation() is load-bearing: without
-  ;; it, a click starting on this slotted icon still bubbles up through the
-  ;; ty-button host (and the enclosing ty-select's own trigger-click
-  ;; handling), which would also toggle the dropdown open/closed.
-  ;;
-  ;; ALWAYS rendered, never hidden/data-attr:hidden — toggling display:none
-  ;; removes it from layout, which is its own flicker/shift (found live).
-  ;; Dimmed via opacity + pointer-events instead, so the button's own box
-  ;; never changes shape; only how the icon looks does.
+  ;; never drop stopPropagation on the clear icon — the click would also toggle the dropdown
   [:ty-button {:slot "trigger" :type "button" :size "sm" :appearance "outlined"
                :flavor "primary" :muted true}
    (icon/icon icon-k {:size "12" :slot "start"})
@@ -712,8 +703,6 @@
   (str/replace (str/lower-case label) #"s$" ""))
 
 (defn truthy?
-  "Form state carries everything as strings, a DB row carries real types —
-  the panel renders both, so booleans have to be read either way."
   [v]
   (or (true? v) (= "true" (str v))))
 
@@ -911,8 +900,7 @@
        "{label}"])]])
 
 (defn link-options-for
-  "Picker options for a link — nil for an OWNED one, which renders a list
-  and never searches, so the query would be pure waste."
+  "Picker options for a link; nil for an owned one, which never searches."
   [l]
   (when-not (get-in (last l) [:create :parent])
     (data/link-options (nth l 2) nil 0 (nth l 5 nil))))
@@ -1069,7 +1057,7 @@
   (when-let [sig (get-in spec [:detail :signals])] (sig row)))
 
 (defn unit-patches
-  "`{:patches [[hiccup mode] ..] :signals m}` answering a post to unit `nm`; a picker whose stored set matches what was posted is left alone, so an open dropdown survives."
+  "`{:patches [[hiccup mode] ..] :signals m}` answering a post to unit `nm`."
   [{:keys [slug detail] :as spec} xid nm [status a b :as outcome] params]
   (let [[kind u] (data/unit spec nm)
         k        (when (= :link kind) (first u))
@@ -1139,21 +1127,12 @@
   (keep (fn [[panel-label f]] (when-let [h (f row panel-notice)] [panel-label h])) panels))
 
 (defn stacked-panels
-  "Every panel, one under another — no tab chrome. Fine on a wide/tall
-  viewport (.console-detail-side still bounds + scrolls as a safety net);
-  the multi-panel case this replaces on narrower viewports is `panel-tabs`."
+  "Every panel stacked, no tab chrome."
   [rendered]
   (for [[_ body] rendered] body))
 
 (defn panel-tabs
-  "Multiple :panels tabbed instead of stacked — stacked panels ran off the
-  bottom of the frame with no scroll on short viewports. A single panel
-  (Providers/Connectors) renders exactly as before, no tab chrome.
-
-  `id-prefix` namespaces the generated ty-tab ids — `detail` renders this
-  more than once (desktop side column vs. the narrow layout's System tab),
-  and duplicate ids across those hidden/shown copies would otherwise be
-  invalid HTML even though only one copy is ever visible at a time."
+  "Multiple :panels as ty-tabs; a single panel renders bare."
   [rendered id-prefix]
   (case (count rendered)
     0 nil
@@ -1215,11 +1194,7 @@
       :session (:console/session request)
       :body
       [:div.console-page
-       ;; `:detail :signals` seeds page state from the SAVED row so a field can
-       ;; drive other controls without a save round-trip. Declared on this
-       ;; ancestor, never on a sibling — Datastar applies one element's own
-       ;; directives in attribute order and hiccup2 sorts them, so a reader on
-       ;; the same element can run first.
+       ;; never move these signals onto the reading element — hiccup2 sorts attrs, the reader can run first
        (when-let [sig (page-signals spec row)]
          {:data-signals (json/write-str sig)})
        [:div.console-page-head
@@ -1318,9 +1293,7 @@
               "internal address at the provider.")])])))
 
 (defn wizard-ids
-  "Step ids in order: one per guide stage, then the config form. There is no
-   chooser step — the provider is decided by the card you clicked on the index,
-   which IS the chooser."
+  "Step ids in order: one per guide stage, then the config form."
   [stages]
   (conj (mapv #(str "s" %) (range (count stages))) "configure"))
 
@@ -1330,8 +1303,7 @@
        "$wizCompleted = '" (str/join "," (take idx ids)) "'"))
 
 (defn wizard-nav
-  "Back/Next for one step. At step 0 there is no previous step, so Back is a
-   real navigation to `back-href` (the index you came from) rather than nothing."
+  "Back/Next for one step; step 0's Back navigates to `back-href`."
   [ids idx & [submit back-href]]
   (list
    (if (pos? idx)
@@ -1403,16 +1375,41 @@
                        [:ty-button {:type "submit" :size "sm" :flavor "primary"}
                         (or submit (str "Create " (singular label)))])))]]]]))
 
+(defn create-form-row
+  "The create form's row: spec defaults when fresh, everything a rejected POST carried when re-rendered."
+  [{:keys [create detail]} values]
+  (let [{:keys [settings config]} detail
+        row (into {} (map (fn [[k _ _ {:keys [default]}]] [k (or (get values k) default)]))
+                  (:fields create))
+        row (into row
+                  (keep (fn [[k _ entity _ _ show]]
+                          (if (contains? values k)
+                            [k (or (data/link-selected entity (get values k) show) [])]
+                            (when-let [d (some->> (:default show) (data/link-default entity))]
+                              [k [d]]))))
+                  (:links create))
+        row (into row
+                  (map (fn [[k _ _ _ _ show]]
+                         [k (data/panel-rows k (get-in show [:create :fields]) values)]))
+                  (:owned create))]
+    (cond-> row
+      (and values settings)
+      (assoc :settings (into {} (map (fn [[k :as f]] [(name k) (data/setting-posted f values)]))
+                             (:fields settings)))
+
+      (and values config)
+      (assoc (:attr config)
+             (data/config-encode
+              config
+              (apply dissoc (data/config-merge config row values)
+                     (for [[k _ kind] (data/config-fields config row)
+                           :when (= :password kind)]
+                       (name k))))))))
+
 (defn create-page
   [request {:keys [slug label create] :as spec} & [notice values]]
   (let [title (str "New " (singular label))
-        row   (into (into {} (map (fn [[k _ _ {:keys [default]}]] [k (or (get values k) default)]))
-                          (:fields create))
-                    (keep (fn [[k _ entity _ _ show]]
-                            (when (and (:default show) (not (get values k)))
-                              (when-let [row (data/link-default entity (:default show))]
-                                [k [row]]))))
-                    (concat (:links create) (:owned create)))
+        row   (create-form-row spec values)
         form  (if (:wizard create)
                 (create-wizard request spec row notice values)
                 (form-page
@@ -1610,9 +1607,6 @@
                            exp? (conj "exportMode: false, exportSel: [], exportOpen: false, exportName: ''")
                            imp? (conj (str "importOpen: " (boolean import-state)))))
                "}")})
-       ;; A save redirects here, so its verdict has to arrive in the URL —
-       ;; a 303 drops an inline notice (the same reason `:create :after`
-       ;; renders at 200 instead of redirecting).
        (widgets/notice notice true)
        [:div.console-page-head
         [:div.console-eyebrow "Administration"]

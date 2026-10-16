@@ -9,34 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server
-  "ring-jetty (Jetty 12) HTTP server implementation for Synthigy.
-
-   Provides core HTTP infrastructure:
-   - OAuth 2.0 + OpenID Connect endpoints
-   - Data API (/data)
-   - Data subscriptions (SSE)
-   - Authentication middleware
-   - CORS configuration
-   - SPA serving
-
-   Uses ring/ring-jetty-adapter (Jetty 12) with the Ring 1.11+ spec
-   for StreamableResponseBody and the ring.websocket protocol.
-
-
-   ## Quick Start
-
-   ```clojure
-   (require '[synthigy.server :as server])
-
-   ;; Start with defaults (localhost:7887)
-   (server/start)
-
-   ;; Custom port
-   (server/start {:port 3000})
-
-   ;; Stop
-   (server/stop)
-   ```"
+  "ring-jetty (Jetty 12) HTTP server adapter for Synthigy."
   (:require
     [synthigy.client-address :as client-address]
     [synthigy.cors :as cors]
@@ -65,11 +38,7 @@
     [synthigy.server.routes :as routes]
     [synthigy.server.subscription :as subscription]))
 
-;;; ============================================================================
-;;; Simple Router
-;;; ============================================================================
-
-(defn- match-route
+(defn match-route
   [request routes]
   (let [uri (:uri request)
         method (:request-method request)]
@@ -85,13 +54,7 @@
   (fn [request]
     (if-let [handler (match-route request routes)]
       (handler request)
-      ;; opt-in modules (console, …) register URI prefixes at lifecycle
-      ;; start; consulted per request so no server restart is needed
       (routes/extension-handler request))))
-
-;;; ============================================================================
-;;; SSE Handler (Jetty StreamableResponseBody)
-;;; ============================================================================
 
 (defrecord SSEBody [identity-key stream-chan]
   ring-proto/StreamableResponseBody
@@ -125,7 +88,7 @@
         (subscription/destroy-event-stream identity-key stream-chan)
         (try (.close out) (catch Exception _))))))
 
-(defn- make-sse-handler
+(defn make-sse-handler
   []
   (fn [request]
     (let [request (if (get-in request [:headers "authorization"])
@@ -133,8 +96,6 @@
                     (if-let [token (get-in request [:query-params "access_token"])]
                       (assoc-in request [:headers "authorization"] (str "Bearer " token))
                       request))
-          ;; Optional-IAM: token mandatory only when :synthigy/iam runs
-          ;; (same contract as the /data handlers).
           iam-active? (lifecycle/started? :synthigy/iam)
           iam (when iam-active? (auth/authenticate-request request))]
       (if (and iam-active? (not iam))
@@ -150,31 +111,15 @@
                      "Connection" "keep-alive"}
            :body (->SSEBody identity-key stream-chan)})))))
 
-;;; ============================================================================
-;;; Route Tables — table + module gating live in synthigy.server.routes,
-;;; shared with httpkit/undertow. This backend only supplies its own SSE
-;;; transport (:sse-handler).
-;;; ============================================================================
-
 (defn default-routes
-  "Route table for the full server (`:synthigy/server`). See
-   `synthigy.server.routes/full-routes` for the shared route definitions."
+  "Route table for the full server (`:synthigy/server`)."
   [opts]
   (routes/full-routes (assoc opts :sse-handler (make-sse-handler))))
 
 (defn bare-routes
-  "Route table for `:synthigy/bare-server`. See
-   `synthigy.server.routes/bare-routes` for the shared route definitions."
+  "Route table for `:synthigy/bare-server`."
   [opts]
   (routes/bare-routes (assoc opts :sse-handler (make-sse-handler))))
-
-;;; ============================================================================
-;;; Middleware
-;;; ============================================================================
-
-;;; ============================================================================
-;;; Static Resource Serving
-;;; ============================================================================
 
 (def ^:private content-type-map
   {"css" "text/css"
@@ -188,7 +133,7 @@
    "woff" "font/woff"
    "woff2" "font/woff2"})
 
-(defn- get-extension [path]
+(defn get-extension [path]
   (when-let [idx (str/last-index-of path ".")]
     (subs path (inc idx))))
 
@@ -219,8 +164,6 @@
           response (log/with-ctx (merge (auth/log-context request) req-ctx)
                      (let [resp (handler request)
                            duration (- (System/currentTimeMillis) started)]
-                       ;; measurement = counters; the DEBUG signal exists for
-                       ;; request-id e2e correlation only (no info traffic).
                        (traffic/record! (:status resp) duration)
                        (log/debug
                          {:id :synthigy.server/request-completed
@@ -238,8 +181,7 @@
   (let [routes (or routes (default-routes {:info info}))
         router (routes/wrap-not-found (make-router routes))]
     (wrap-request-id
-      ;; INSIDE wrap-request-id, never outside — the error signal must be
-      ;; emitted while log/with-ctx still carries the request-id.
+      ;; never outside wrap-request-id — the error signal needs the request-id ctx
       (routes/wrap-errors
         (-> router
             wrap-static-resources
@@ -249,10 +191,6 @@
             wrap-params
             data/wrap-preserve-body)))))
 
-;;; ============================================================================
-;;; Server Lifecycle
-;;; ============================================================================
-
 (defonce server (atom nil))
 
 (defn stop
@@ -260,7 +198,6 @@
   (when-let [s @server]
     (log/info {:id ::http-stopping :data {:action :stopping :subject :http-server}} "Stopping HTTP server")
     (.stop s)
-    ;; drop the transport with the server that supplied it
     (routes/unregister-sse-transport!)
     (reset! server nil))
   nil)
@@ -279,17 +216,11 @@
          s (jetty/run-jetty handler {:host host
                                      :port port
                                      :join? false})]
-     ;; Opt-in modules register their prefix after boot, so they can't be
-     ;; handed :sse-handler as an argument — they look the adapter up.
      (routes/register-sse-transport! d*ring/->sse-response)
      (reset! server s)
      (log/info {:id ::http-started :data {:action :started :subject :http-server :host host :port port}}
                "HTTP server started")
      nil)))
-
-;;; ============================================================================
-;;; Main Entry Point
-;;; ============================================================================
 
 (defn -main
   [& _]
@@ -300,10 +231,6 @@
     (catch Throwable ex
       (log/error! {:id ::server-start-failed :data {:action :starting :subject :http-server}} ex)
       (System/exit 1))))
-
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
 
 (lifecycle/register-module!
   :synthigy/server
@@ -321,14 +248,8 @@
            (stop)
            (log/info {:id ::lifecycle-stopped :data {:action :stopped}} "HTTP server lifecycle stopped"))})
 
-;;; ============================================================================
-;;; Bare server — data-only + live subscriptions, no IAM, no audit
-;;; ============================================================================
-
 (lifecycle/register-module!
   :synthigy/bare-server
-  ;; Mutually exclusive with :synthigy/server (same Jetty instance, same
-  ;; port) — the operator starts one or the other.
   {:doc profile/bare-doc
    :depends-on profile/bare-deps
    :start (fn []

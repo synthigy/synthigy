@@ -35,7 +35,10 @@
   --sy-glass: rgba(255, 255, 255, 0.06);
   --sy-glass-border: rgba(255, 255, 255, 0.12);
   --sy-glass-hover: rgba(255, 255, 255, 0.13);
-  --sy-error: #ef4444;
+  --sy-error: #f3a6a6;
+  --sy-error-strong: #ef4444;
+  --sy-error-bg: rgba(239, 68, 68, 0.10);
+  --sy-error-border: rgba(239, 68, 68, 0.28);
 }
 
 html, body {

@@ -9,36 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.plug.cockroach
-  "CockroachDB-side delta plug — DDL, trigger generation, drainer thread.
-
-   Owned by `:synthigy/subscriptions`. Mirrors
-   `synthigy.plug.sqlite` in shape (no LISTEN/NOTIFY, polling drainer)
-   but rides PG-wire DDL primitives: jsonb_build_object, plpgsql functions,
-   session GUCs.
-
-   CRDB-specific deltas vs SQLite:
-     - jsonb_build_object instead of json_object
-     - One plpgsql function per (entity, op) and per (relation, op),
-       called by a row-level trigger (CRDB triggers can't be inline-BEGIN
-       like SQLite — they must call a function — and CRDB doesn't support
-       statement-level triggers + transition tables like Postgres does)
-     - Context propagation via PG-style session GUCs
-       (`SET LOCAL synthigy.actor_xid = '…'`) read by trigger fns via
-       `NULLIF(current_setting('synthigy.actor_xid', true), '')`. No
-       `_ctx` table — CRDB supports custom GUC namespaces unchanged.
-     - `(OLD).col IS DISTINCT FROM (NEW).col` in WHEN clauses (CRDB
-       plpgsql can't reference bare `NEW.field` — issue 114687)
-     - Trigger discovery via `information_schema.triggers` instead of
-       `sqlite_master`. Function discovery via `pg_proc`.
-     - `UNLOGGED TABLE` + `BIGSERIAL` queue (BIGSERIAL on CRDB returns
-       `unique_rowid()` — monotonic-ish, large gaps, ORDER BY still works).
-
-   CRDB-specific deltas vs Postgres:
-     - No statement-level triggers + transition tables (issue 126362) —
-       per-row inline triggers (one fn + trigger per (table, op))
-     - No `pg_notify` / LISTEN — polling drainer with in-process
-       `*drain-wakeup*` for app-path wake
-     - No `txid_current()` — synthesized UUIDv7 in set-context!"
+  "CockroachDB delta plug: queue DDL, row-level trigger functions, polling drainer, tx context."
   (:require
     [clojure.string :as str]
     [next.jdbc :as jdbc]
@@ -51,25 +22,10 @@
     [synthigy.plug.wake :as wake]
     [synthigy.dataset.sql.query :as sql.query]))
 
-;; ============================================================================
-;; Wake source — delegate to shared `synthigy.plug.wake/*wake-source*`.
-;;
-;; The CRDB default (LocalChannel) is installed by
-;; `:synthigy/subscriptions` :start. Operators override by
-;; alter-var-root'ing `wake/*wake-source*` before starting subscriptions
-;; (e.g. to a Composite of LocalChannel + NATS for multi-node fanout).
-;; ============================================================================
-
 (defn wake-drainer!
-  "Backend-named alias for `synthigy.plug.wake/signal-drainer!`.
-   Kept so query.cockroach call sites don't have to know they're
-   delegating. App-path writes call this post-commit."
+  "Wakes the drainer; app-path writes call this post-commit (CRDB has no NOTIFY)."
   []
   (wake/signal-drainer!))
-
-;; ============================================================================
-;; Queue DDL
-;; ============================================================================
 
 (def ^:private delta-queue-ddl
   "CREATE UNLOGGED TABLE IF NOT EXISTS __relation_delta_queue (
@@ -86,14 +42,7 @@
      payload JSONB NOT NULL
    )")
 
-;; ============================================================================
-;; Helpers — UUIDv7 + trigger/function discovery
-;; ============================================================================
-
-(defn- uuid-v7
-  "Generate a UUIDv7. CRDB has no txid_current(); we synthesize a
-   chronologically-sortable id so envelopes can be grouped/ordered without
-   a separate `ts` column. Same impl as the SQLite plug."
+(defn uuid-v7
   []
   (let [ts (System/currentTimeMillis)
         rnd (java.security.SecureRandom.)
@@ -108,33 +57,23 @@
    "trg\\_%\\_audit\\_insert"
    "trg\\_%\\_audit\\_delete"])
 
-(defn- strip-quotes
-  "CRDB v25 SHOW TRIGGERS returns trigger_name with literal surrounding
-   double-quotes baked into the string (e.g. `\"trg_…_insert\"` — 41 chars,
-   not 39). Strip them for matching and DROP."
+(defn strip-quotes
+  "Removes the literal double quotes CRDB's SHOW TRIGGERS wraps trigger names in."
   [^String s]
   (when s
     (cond-> s
       (and (.startsWith s "\"") (.endsWith s "\"") (>= (count s) 2))
       (subs 1 (dec (count s))))))
 
-(defn- plug-trigger?
-  "Match our naming convention. Used to filter SHOW TRIGGERS output
-   (after stripping the embedded quotes CRDB returns)."
+(defn plug-trigger?
   [trigger-name]
   (let [n (strip-quotes (str trigger-name))]
     (boolean
       (or (re-find #"^trg_.+_entity_audit_(insert|update|delete)$" n)
           (re-find #"^trg_.+_audit_(insert|delete)$"               n)))))
 
-(defn- drop-all-plug-triggers-for-table!
-  "Pattern-drop every plug trigger attached to `table`. Closes the
-   orphan-on-rename gap (a relation- or entity-xid change leaves the old
-   trigger firing alongside the new one). Idempotent.
-
-   CRDB stores triggers but does NOT populate `information_schema.triggers`
-   or `pg_trigger` in v25.2 — discovery is only via
-   `SHOW TRIGGERS FROM <table>`. We filter by our naming convention."
+(defn drop-all-plug-triggers-for-table!
+  "Drops every plug trigger on `table`, found via SHOW TRIGGERS (the only CRDB discovery path)."
   [tx table]
   (let [rows (try
                (jdbc/execute! tx [(format "SHOW TRIGGERS FROM \"%s\"" table)])
@@ -161,23 +100,11 @@
           (log/error! {:id ::trigger-drop-failed
                        :data {:table table :trigger trg}} e))))))
 
-(defn- drop-plug-function!
-  "Drop a plug plpgsql function by name. Idempotent. Used during
-   reinstall so a renamed entity doesn't leave the old function pinned by
-   the new trigger."
+(defn drop-plug-function!
   [tx fn-name]
-    ;; CRDB v24.3 doesn't support DROP FUNCTION … CASCADE — we drop triggers
-  ;; first in the install flow, so the function has no dependents and a
-  ;; bare DROP is enough.
+  ;; no CASCADE on CRDB — drop the function's triggers first
   (jdbc/execute! tx [(format "DROP FUNCTION IF EXISTS \"%s\"()" fn-name)]))
 
-;; ============================================================================
-;; Context — read via current_setting in trigger bodies
-;; ============================================================================
-
-;; Convenience SQL fragment for every payload's context fields. Trigger
-;; functions can't `current_setting()` an unset GUC without a default, so
-;; we wrap each in `NULLIF(current_setting('synthigy.x', true), '')`.
 (def ^:private context-payload-pairs
   (str "'tenant_xid', NULLIF(current_setting('synthigy.tenant_xid', true), ''),"
        "'actor_xid',  NULLIF(current_setting('synthigy.actor_xid',  true), ''),"
@@ -185,22 +112,15 @@
        "'scope_xid',  NULLIF(current_setting('synthigy.scope_xid',  true), ''),"
        "'txid',       NULLIF(current_setting('synthigy.txid',       true), '')"))
 
-;; ============================================================================
-;; Relation plug — function + trigger per (relation, op)
-;; ============================================================================
-
-(defn- relation-trigger-name
+(defn relation-trigger-name
   [rel-xid op]
   (str "trg_" rel-xid "_audit_" (name op)))
 
-(defn- relation-fn-name
+(defn relation-fn-name
   [rel-xid op]
   (str "fn_" rel-xid "_audit_" (name op)))
 
-(defn- insert-trigger-fn-ddl
-  "plpgsql function body for relation INSERT. Inlines the relation-xid +
-   from/to column names so a single fn handles all rows for that link
-   table. CRDB requires (NEW).field for reads."
+(defn insert-trigger-fn-ddl
   [{rel-id :relation table :table from :from/field to :to/field}]
   (let [fn-name (relation-fn-name (str rel-id) :insert)]
     (format "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS TRIGGER AS $$
@@ -220,8 +140,7 @@
              END $$ LANGUAGE plpgsql"
             fn-name (str rel-id) (name from) (name to) context-payload-pairs)))
 
-(defn- delete-trigger-fn-ddl
-  "plpgsql function body for relation DELETE — mirror of insert, reads OLD."
+(defn delete-trigger-fn-ddl
   [{rel-id :relation table :table from :from/field to :to/field}]
   (let [fn-name (relation-fn-name (str rel-id) :delete)]
     (format "CREATE OR REPLACE FUNCTION \"%s\"() RETURNS TRIGGER AS $$
@@ -241,22 +160,21 @@
              END $$ LANGUAGE plpgsql"
             fn-name (str rel-id) (name from) (name to) context-payload-pairs)))
 
-(defn- relation-insert-trigger-ddl [{rel-id :relation table :table}]
+(defn relation-insert-trigger-ddl [{rel-id :relation table :table}]
   (format "CREATE TRIGGER \"%s\" AFTER INSERT ON \"%s\"
            FOR EACH ROW EXECUTE FUNCTION \"%s\"()"
           (relation-trigger-name (str rel-id) :insert)
           table
           (relation-fn-name (str rel-id) :insert)))
 
-(defn- relation-delete-trigger-ddl [{rel-id :relation table :table}]
+(defn relation-delete-trigger-ddl [{rel-id :relation table :table}]
   (format "CREATE TRIGGER \"%s\" AFTER DELETE ON \"%s\"
            FOR EACH ROW EXECUTE FUNCTION \"%s\"()"
           (relation-trigger-name (str rel-id) :delete)
           table
           (relation-fn-name (str rel-id) :delete)))
 
-(defn- column-exists?
-  "Check whether a column exists on a CRDB table via information_schema."
+(defn column-exists?
   [tx table column]
   (boolean
    (seq (jdbc/execute! tx
@@ -266,17 +184,12 @@
               AND column_name = ?"
            table column]))))
 
-(defn- ensure-xid-columns!
-  "Add from_xid / to_xid varchar(22) columns to a relation link table
-   if missing. CRDB supports `ADD COLUMN IF NOT EXISTS` directly so we
-   don't need the SQLite PRAGMA dance, but using it keeps the diff small."
+(defn ensure-xid-columns!
   [tx table]
   (jdbc/execute! tx [(format "ALTER TABLE \"%s\" ADD COLUMN IF NOT EXISTS from_xid varchar(22)" table)])
   (jdbc/execute! tx [(format "ALTER TABLE \"%s\" ADD COLUMN IF NOT EXISTS to_xid   varchar(22)" table)]))
 
-(defn- backfill-xid-columns!
-  "Backfill from_xid / to_xid from the entity tables. Only updates rows
-   where the column is still NULL — safe to re-run."
+(defn backfill-xid-columns!
   [tx {table :table from-table :from/table to-table :to/table
        from-field :from/field to-field :to/field}]
   (jdbc/execute!
@@ -292,9 +205,7 @@
                  " WHERE to_xid IS NULL")
             table to-table table (name to-field))]))
 
-(defn- install-relation-triggers!
-  "Install INSERT + DELETE plug function-trigger pairs on one link
-   table. Idempotent — pattern-drops every plug trigger first."
+(defn install-relation-triggers!
   [tx {table :table rel-id :relation :as rel}]
   (ensure-xid-columns! tx table)
   (drop-all-plug-triggers-for-table! tx table)
@@ -305,22 +216,15 @@
   (jdbc/execute! tx [(relation-insert-trigger-ddl rel)])
   (jdbc/execute! tx [(relation-delete-trigger-ddl rel)]))
 
-;; ============================================================================
-;; Entity plug — function + trigger per (entity, op)
-;; ============================================================================
-
-(defn- entity-trigger-name
+(defn entity-trigger-name
   [entity-xid op]
   (str "trg_" entity-xid "_entity_audit_" (name op)))
 
-(defn- entity-fn-name
+(defn entity-fn-name
   [entity-xid op]
   (str "fn_" entity-xid "_entity_audit_" (name op)))
 
-(defn- attribute-distinct-or
-  "Build the WHEN-clause body for the entity UPDATE trigger: an OR'd
-   chain of `(OLD).col IS DISTINCT FROM (NEW).col` predicates across every
-   user-defined field. CRDB plpgsql requires (OLD).field / (NEW).field."
+(defn attribute-distinct-or
   [field-map]
   (->> field-map
        (map (fn [[col _attr-xid]]
@@ -328,26 +232,21 @@
                       (name col) (name col))))
        (str/join " OR ")))
 
-(defn- entity-user-fields
-  "Walk an entity schema entry's :field->attribute and return
-   {column-name attribute-xid ...} for user-defined fields only.
-   System fields are keyword-xid'd and skipped."
+(defn entity-user-fields
+  "{column attribute-xid} for user-defined fields; system fields carry keyword xids and are skipped."
   [entity]
   (->> (:field->attribute entity)
        (filter (fn [[_col attr-xid]] (string? attr-xid)))
        (into (sorted-map))))
 
-(defn- attribute-json-pairs
-  "Build the jsonb_build_object pairs emitting `'<attr-xid>', <ref>.\"<col>\"`
-   for every user-defined field. `ref` is `(NEW)` or `(OLD)` (parenthesised
-   per CRDB plpgsql rules)."
+(defn attribute-json-pairs
   [field-map ref]
   (->> field-map
        (map (fn [[col attr-xid]]
               (format "'%s', %s.\"%s\"" attr-xid ref (name col))))
        (str/join ", ")))
 
-(defn- entity-insert-fn-ddl
+(defn entity-insert-fn-ddl
   [entity-xid {table :table :as entity}]
   (let [fn-name (entity-fn-name entity-xid :insert)
         pairs (attribute-json-pairs (entity-user-fields entity) "(NEW)")]
@@ -367,7 +266,7 @@
              END $$ LANGUAGE plpgsql"
             fn-name entity-xid context-payload-pairs pairs)))
 
-(defn- entity-update-fn-ddl
+(defn entity-update-fn-ddl
   [entity-xid {table :table :as entity}]
   (let [fn-name (entity-fn-name entity-xid :update)
         fields (entity-user-fields entity)
@@ -390,7 +289,7 @@
              END $$ LANGUAGE plpgsql"
             fn-name entity-xid context-payload-pairs before after)))
 
-(defn- entity-delete-fn-ddl
+(defn entity-delete-fn-ddl
   [entity-xid {table :table :as entity}]
   (let [fn-name (entity-fn-name entity-xid :delete)
         pairs (attribute-json-pairs (entity-user-fields entity) "(OLD)")]
@@ -410,14 +309,14 @@
              END $$ LANGUAGE plpgsql"
             fn-name entity-xid context-payload-pairs pairs)))
 
-(defn- entity-insert-trigger-ddl [entity-xid {table :table}]
+(defn entity-insert-trigger-ddl [entity-xid {table :table}]
   (format "CREATE TRIGGER \"%s\" AFTER INSERT ON \"%s\"
            FOR EACH ROW EXECUTE FUNCTION \"%s\"()"
           (entity-trigger-name entity-xid :insert)
           table
           (entity-fn-name entity-xid :insert)))
 
-(defn- entity-update-trigger-ddl [entity-xid {table :table :as entity}]
+(defn entity-update-trigger-ddl [entity-xid {table :table :as entity}]
   (let [when-clause (attribute-distinct-or (entity-user-fields entity))]
     (format "CREATE TRIGGER \"%s\" AFTER UPDATE ON \"%s\"
              FOR EACH ROW WHEN (%s)
@@ -427,18 +326,14 @@
             when-clause
             (entity-fn-name entity-xid :update))))
 
-(defn- entity-delete-trigger-ddl [entity-xid {table :table}]
+(defn entity-delete-trigger-ddl [entity-xid {table :table}]
   (format "CREATE TRIGGER \"%s\" AFTER DELETE ON \"%s\"
            FOR EACH ROW EXECUTE FUNCTION \"%s\"()"
           (entity-trigger-name entity-xid :delete)
           table
           (entity-fn-name entity-xid :delete)))
 
-(defn- install-entity-triggers!
-  "Install AFTER INSERT/UPDATE/DELETE function + trigger pairs on one
-   entity table. Idempotent — pattern-drops every plug trigger and
-   function on the table first. Skips entities with no user-defined fields
-   (UPDATE WHEN clause would be empty)."
+(defn install-entity-triggers!
   [tx entity-xid {table :table :as entity}]
   (when (seq (entity-user-fields entity))
     (drop-all-plug-triggers-for-table! tx table)
@@ -452,23 +347,13 @@
     (jdbc/execute! tx [(entity-update-trigger-ddl entity-xid entity)])
     (jdbc/execute! tx [(entity-delete-trigger-ddl entity-xid entity)])))
 
-;; ============================================================================
-;; Drainer — polling loop. Mirrors sqlite's shape; CRDB has no
-;; LISTEN/NOTIFY so we park on *drain-wakeup* with a safety-poll fallback.
-;; ============================================================================
-
 (def ^:private drain-batch-size 500)
 (def ^:private safety-poll-ms (long 10000))
 
 (defonce ^:private drainer-state (atom nil))
 
-(defn- row->envelope
-  "Translate a __relation_delta_queue row into the delta envelope shape.
-   `ts` is passed through as the raw java.sql.Timestamp / Date that JDBC
-   returns — downstream consumers (audit writer's `ts->pg`, SDK) accept
-   it. Stringifying with `(str ts)` produces a space-separated form
-   CRDB's clock_timestamp() emits that `java.time.Instant/parse` won't
-   accept, so we leave the type alone here."
+(defn row->envelope
+  ;; never (str ts) — CRDB's space-separated form fails Instant/parse downstream
   [{ts :__relation_delta_queue/ts
     payload :__relation_delta_queue/payload}]
   (let [data (if (map? payload) payload (read-str (str payload)))]
@@ -485,7 +370,7 @@
                     :scope    (id/coerce-stored-id (:scope_xid data))
                     :txid     (:txid data)}}}))
 
-(defn- entity-row->envelope
+(defn entity-row->envelope
   [{ts :__entity_delta_queue/ts
     payload :__entity_delta_queue/payload}]
   (let [data (if (map? payload) payload (read-str (str payload)))]
@@ -502,9 +387,7 @@
                     :before     (:before data)
                     :after      (:after data)}}}))
 
-(defn- drain-batch!
-  "Claim up to N rows in id order, publish each, optionally persist via
-   the audit provider, then DELETE on success. Same shape as sqlite."
+(defn drain-batch!
   [tx]
   (let [rows (jdbc/execute! tx
                             [(str "SELECT id, ts, payload FROM __relation_delta_queue "
@@ -523,7 +406,7 @@
                            ")")]))
     (count rows)))
 
-(defn- drain-entity-batch!
+(defn drain-entity-batch!
   [tx]
   (let [rows (jdbc/execute! tx
                             [(str "SELECT id, ts, payload FROM __entity_delta_queue "
@@ -542,8 +425,7 @@
                            ")")]))
     (count rows)))
 
-(defn- drainer-tick!
-  "One iteration. Drain both queues to empty: relation then entity."
+(defn drainer-tick!
   [db]
   (loop []
     (let [n-rel (try
@@ -562,10 +444,7 @@
                 (= n-ent drain-batch-size))
         (recur)))))
 
-(defn- drainer-loop!
-  "Worker body. Parks on the registered WakeSource with a safety-poll-ms
-   fallback. Whichever wake source is plugged in (LocalChannel, NATS,
-   changefeed, Composite, …), the loop shape is unchanged."
+(defn drainer-loop!
   [db wake-source stop?]
   (try
     (log/info {:id ::drainer-wakeup-listening
@@ -592,13 +471,8 @@
                  :data {:action :stopped :subject :relation-drainer}}
                 "Plug drainer loop exited"))))
 
-;; ============================================================================
-;; Public API — plug reconcile + drainer + context
-;; ============================================================================
-
 (defn reconcile-relations!
-  "Deploy relation-plug infrastructure: queue table + per-relation
-   function/trigger pairs across the deployed schema. Idempotent."
+  "Idempotently installs the relation queue and per-relation trigger pairs, then backfills xids."
   [_db tx schema-relations]
   (jdbc/execute! tx [delta-queue-ddl])
   (let [rel-seq (if (map? schema-relations)
@@ -630,9 +504,7 @@
   nil)
 
 (defn reconcile-entities!
-  "Deploy entity-plug infrastructure: queue table + per-entity
-   function/trigger triples across every entity in the deployed schema.
-   Idempotent."
+  "Idempotently installs the entity queue and per-entity trigger triples."
   [_db tx schema-entities]
   (jdbc/execute! tx [entity-queue-ddl])
   (let [pairs (cond
@@ -655,24 +527,14 @@
   nil)
 
 (defn set-context!
-  "Write per-tx request/principal context as session GUCs so plug
-   trigger functions can read them via `current_setting`. CRDB-side:
-   `SET LOCAL synthigy.x = '…'` is scoped to the current transaction and
-   visible to triggers firing within it. No `_ctx` table needed.
-
-   ISOLATION: SET LOCAL is per-transaction in CRDB (and PG), so each
-   connection's principal stays distinct under concurrent writers."
+  "Writes the tx's actor/request/scope/txid as SET LOCAL GUCs for the plug triggers."
   [_db tx]
   (let [principal (access/current-principal)
         actor   (some-> principal :xid str)
         request (log/request-id)
         scope   (some-> principal :scope-xid str)
-        tenant  (str (id/data :dataset/id))
         txid    (str (uuid-v7))]
-    ;; CRDB doesn't accept parameterised SET LOCAL — value must be a
-    ;; literal. The strings come from app-supplied principal data; they
-    ;; never carry untrusted user input directly, but we still escape
-    ;; single quotes defensively.
+    ;; SET LOCAL takes no parameters on CRDB — never drop the quote escaping
     (letfn [(set-guc! [k v]
               (when v
                 (jdbc/execute! tx
@@ -681,13 +543,11 @@
       (set-guc! "actor_xid"  actor)
       (set-guc! "request_id" request)
       (set-guc! "scope_xid"  scope)
-      (set-guc! "tenant_xid" tenant)
       (set-guc! "txid"       txid)))
   nil)
 
 (defn start-drainer!
-  "Start the plug drainer thread. Initializes the active
-   WakeSource and parks the loop on it. Idempotent."
+  "Starts the drainer thread parked on the active WakeSource; idempotent."
   [db]
   (if @drainer-state
     (log/info {:id ::drainer-already-running
@@ -704,8 +564,7 @@
       nil)))
 
 (defn stop-drainer!
-  "Cleanly stop the plug drainer and tear down its wake source.
-   Idempotent."
+  "Stops the drainer and its wake source; idempotent."
   [_db]
   (when-let [{:keys [thread stop? wake-source]} @drainer-state]
     (reset! stop? true)
@@ -715,16 +574,8 @@
     (reset! drainer-state nil)
     nil))
 
-;; ============================================================================
-;; Unified entry points
-;; ============================================================================
-
 (defn trigger-fingerprint
-  "Compact value capturing the trigger-relevant shape of `model` — table
-   names, user-defined-field maps, relation link-table identities. Two
-   models with `=` fingerprints produce byte-identical plug trigger
-   DDL, so the watch can short-circuit reconcile when fingerprint is
-   unchanged (e.g. position-coordinate-only save-model! calls)."
+  "Trigger-relevant shape of `model`; equal fingerprints mean byte-identical plug trigger DDL."
   [model]
   (when model
     (let [schema (sql.query/model->schema model)]
@@ -744,10 +595,7 @@
             (into {}))})))
 
 (defn reconcile-plug!
-  "Idempotent full resync of the CRDB delta plug against `model`.
-   Backwards-compatible (always reconciles); the watch caller in
-   `subscriptions.cockroach` uses `trigger-fingerprint` to skip
-   no-op invocations before reaching this entry point."
+  "Idempotent full resync of the CRDB delta plug against `model`."
   [db model]
   (when model
     (let [schema (sql.query/model->schema model)
@@ -757,15 +605,7 @@
   nil)
 
 (defn reconcile-plug-diff!
-  "Incremental reconcile: only install/refresh triggers for entities
-   and relations whose `trigger-fingerprint` value DIFFERS between
-   `old-fp` and `new-model`. Entities/relations that disappeared have
-   their plug triggers + functions dropped.
-
-   For a deployment-test workload that adds one entity to an existing
-   N-entity dataset, this collapses an O(N) trigger rebuild to O(1) —
-   the dominant cost of CRDB's declarative schema changer is paid only
-   once per real change instead of once per entity per save-model!."
+  "Reinstalls triggers only where the fingerprint changed, drops removed ones; returns the new fingerprint."
   [db old-fp new-model]
   (when new-model
     (let [schema (sql.query/model->schema new-model)
@@ -775,22 +615,18 @@
           new-ents (:entities new-fp)
           old-rels (:relations old-fp)
           new-rels (:relations new-fp)
-          ;; Entities to install: new + changed
           ent-changed (->> new-ents
                            (keep (fn [[xid fp]]
                                    (when (not= fp (get old-ents xid)) xid)))
                            set)
-          ;; Relations to install: new + changed
           rel-changed (->> new-rels
                            (keep (fn [[rid fp]]
                                    (when (not= fp (get old-rels rid)) rid)))
                            set)
-          ;; Removed: present in old, absent in new
           ent-removed (->> (keys old-ents)
                            (remove (set (keys new-ents))))
           rel-removed (->> (keys old-rels)
                            (remove (set (keys new-rels))))
-          ;; Filter schema entries to only the changed/added subsets
           schema-changed (into {}
                            (filter (fn [[eid _]] (ent-changed (str eid))))
                            schema)
@@ -806,9 +642,6 @@
                           :entities-removed (count ent-removed)
                           :relations-removed (count rel-removed)}}
                   "Incremental plug reconcile"))
-      ;; Drop removed-entity triggers (table is gone or no longer in model;
-      ;; if the table itself was dropped this is a no-op). Pass the
-      ;; datasource directly — drop-* helpers expect a Sourceable.
       (let [ds (:datasource db)]
         (doseq [old-xid ent-removed
                 :let [old-table (get-in old-ents [old-xid :table])]
@@ -832,7 +665,6 @@
               (log/warn {:id ::drop-removed-relation-failed
                          :data {:relation-xid old-rid :table old-table}}
                         (.getMessage e))))))
-      ;; Install/refresh only the changed entities + relations
       (when (seq rels-changed)
         (reconcile-relations! db (:datasource db) rels-changed))
       (when (seq schema-changed)
@@ -840,12 +672,7 @@
       new-fp)))
 
 (defn strip-all!
-  "Drop every plug trigger + function. Used on subscriptions stop and
-   as the bare-server upgrader helper. Leaves the queue tables in place —
-   they're cheap; re-:start reconciles triggers back.
-
-   CRDB has no cross-table trigger enumeration view, so we walk
-   `pg_tables` (public schema) and run SHOW TRIGGERS FROM each."
+  "Drops every plug trigger and function, keeping the queue tables."
   [_db tx]
   (let [tables (->> (jdbc/execute! tx
                      [(str "SELECT tablename FROM pg_tables "

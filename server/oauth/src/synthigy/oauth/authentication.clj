@@ -24,8 +24,7 @@
     (second (re-find #"(?i)^Bearer\s+(.+)" authorization))))
 
 (defn validate-token
-  "Validate a bearer token by JWT signature; stateless — revocation is enforced
-   at refresh, not per-request."
+  "Validate a bearer token by signature and expiry; stateless — revocation is enforced at refresh."
   [token]
   (and token
        (> (count token) 6)
@@ -36,15 +35,11 @@
               (> exp (quot (System/currentTimeMillis) 1000)))))))
 
 (def first-party-audiences
-  "Both faces of a first-party token: the platform audience and the identity
-   default. NEVER pass this to authorize a data-plane request — it exists for
-   enrichment (telemetry/log attribution), where dropping the user off an
-   identity-token request loses attribution without gaining any safety."
+  "Platform + identity audiences, for log attribution only — NEVER pass it to authorize a data-plane request."
   #{oauth/platform-audience oauth/oidc-audience})
 
 (defn verdict
-  "Judge `token` for `audience`: {:principal :claims}, or {:rejected reason} with
-   the claims once its signature holds."
+  "Judge `token` for `audience`: {:principal :claims}, or {:rejected reason} with claims once the signature holds."
   [token audience]
   (if-let [claims (and token (> (count token) 6) (encryption/unsign-data token))]
     (try
@@ -71,8 +66,7 @@
     {:rejected :signature}))
 
 (defn token->user-context
-  "User/service context of an acceptable token, or nil; `:audience` is a string
-   or a set of acceptable ones, defaulting to the platform audience."
+  "User/service context of an acceptable token, or nil; `:audience` defaults to the platform audience."
   [token & {:keys [audience]}]
   (let [v (verdict token audience)]
     (when-not (:rejected v) v)))
@@ -95,8 +89,7 @@
     nil))
 
 (defn authenticate-request
-  "Authenticate request to {:principal :claims} or nil, logging a refused token;
-   no audience means the platform audience, never 'any'."
+  "Authenticate request to {:principal :claims} or nil; no audience means platform, never 'any'."
   ([request] (authenticate-request request nil))
   ([request audience]
    (when-let [token (extract-bearer-token request)]
@@ -134,8 +127,7 @@
       session   (assoc :session (oauth/short-id session)))))
 
 (defn wrap-authenticate
-  "Ring middleware for OAuth token-based authentication. Adds ::principal +
-   ::claims to the request."
+  "Ring middleware adding ::principal + ::claims for a valid bearer token."
   [handler]
   (fn [request]
     (if-let [{:keys [principal claims]} (authenticate-request request)]

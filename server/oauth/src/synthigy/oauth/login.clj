@@ -25,13 +25,8 @@
    [synthigy.oauth.page.login :refer [login-html]]
    [synthigy.oauth.token :as token]))
 
-;; =============================================================================
-;; Response Mode Helpers
-;; =============================================================================
-
 (defn form-post-response
-  "Generate an HTML page that auto-submits a form via POST
-   (response_mode=form_post)."
+  "Auto-submitting HTML form for response_mode=form_post."
   [redirect-uri params]
   (let [hidden-inputs (str/join "\n"
                                 (for [[k v] params]
@@ -67,16 +62,13 @@
           {:status 302
            :headers {"Location" (str redirect-uri "#" (codec/form-encode params))}}
 
-          ;; Default: query
           {:status 302
            :headers {"Location" (str redirect-uri "?" (codec/form-encode params))}})]
     (if cookies
       (assoc base-response :cookies cookies)
       base-response)))
 
-;; Omits :expires entirely — a cookie with no Max-Age/Expires IS a session
-;; cookie (RFC 6265); the old literal "Expires=Session" was malformed and
-;; tripped strict parsers.
+;; No Max-Age/Expires = browser-session cookie (RFC 6265); never write "Expires=Session", it's malformed.
 (defn session-cookie
   [session]
   {"idsrv.session" {:value session
@@ -86,8 +78,7 @@
                     :same-site :none}})
 
 (defn abort-authorization!
-  "RFC 6749 §4.1.2.1 — hand the client its failure the same way a code would
-   have been handed over, so an abandoned login stops leaving it waiting."
+  "RFC 6749 §4.1.2.1: send the client its error the way a code would have been sent."
   [authorization-code error]
   (when-let [{{redirect-uri :redirect_uri
                :keys [state response_mode]} :request}
@@ -106,9 +97,7 @@
        nil))))
 
 (defn complete-authorization-code-login!
-  "Finish a pending authorization_code flow once a resource-owner is
-   authenticated by ANY mechanism (password or federated); caller MUST have
-   verified the code is still live."
+  "Finish a pending authorization_code flow for an authenticated owner; caller MUST have verified the code is live."
   ([authorization-code resource-owner amr]
    (complete-authorization-code-login! authorization-code resource-owner amr nil))
   ([authorization-code resource-owner amr client-info]
@@ -157,13 +146,8 @@
                       :iss (core/domain+)}  ; RFC 9207 Issuer Identification
                (not-empty state) (assoc :state state))})))
 
-;; =============================================================================
-;; JSON Login API (for custom login pages)
-;; =============================================================================
-
 (defn wants-json?
-  "True when a custom login page called POST /oauth/login via fetch with Accept:
-   application/json."
+  "True when the caller asked for Accept: application/json (custom login page fetch)."
   [request]
   (when-let [accept (get-in request [:headers "accept"])]
     (str/includes? accept "application/json")))
@@ -177,8 +161,7 @@
      cookies (assoc :cookies cookies))))
 
 (defn json-success-redirect
-  "Redirect-target portion of a JSON success payload; form_post returns
-   url+params separately since the page must build and submit the form."
+  "Redirect target of a JSON success payload; form_post returns url+params for the page to submit."
   [redirect-uri params response-mode]
   (case response-mode
     "form_post"
@@ -187,16 +170,10 @@
     "fragment"
     {:redirect (str redirect-uri "#" (codec/form-encode params))}
 
-    ;; default: query
     {:redirect (str redirect-uri "?" (codec/form-encode params))}))
 
-;; =============================================================================
-;; Security Checks
-;; =============================================================================
-
 (defn security-check
-  "IP/user-agent/challenge mismatch check against the decrypted state, guarding
-   session hijack; nil if all checks pass."
+  "IP/user-agent/challenge check against the decrypted state, guarding session hijack; nil when all pass."
   [{:keys [params form-params headers remote-addr] :as request}]
   (let [data (merge params form-params)
         {{:keys [flow ip user-agent challenge device-code]} :state}
@@ -219,13 +196,8 @@
 
       :else nil)))
 
-;; =============================================================================
-;; Ring Handlers (Pure Ring, no Pedestal dependencies)
-;; =============================================================================
-
 (defn login-handler
-  "OAuth login page handler; GET displays the form, POST authenticates and
-   creates the session (cookie set inline with the response)."
+  "OAuth login page: GET renders the form, POST authenticates and sets the session cookie inline."
   [request]
   (binding [core/*domain* (core/original-uri request)]  ; RFC 9207 issuer identification
     (let [{:keys [params request-method form-params]} request
@@ -255,7 +227,6 @@
         (let [resource-owner (core/validate-resource-owner username password)
               json? (wants-json? request)]
           (case flow
-          ;; Authorization Code Flow
             "authorization_code"
             (let [{{response_type :response_type} :request
                    :as prepared-code}
@@ -284,7 +255,7 @@
                     (json-body 400 {:ok false :error "credentials"})
                     {:status 400
                      :headers {"Content-Type" "text/html"}
-                     :body (str (login-html {::state flow-state ::error :credentials ::raw-state (:state data)}))}))
+                     :body (str (login-html {::state flow-state ::error :credentials ::username username ::raw-state (:state data)}))}))
 
                 (and resource-owner (set/intersection #{"code" "authorization_code"} response_type))
                 (let [{:keys [redirect-uri response-mode cookies params]}
@@ -304,7 +275,6 @@
                    :headers {"Content-Type" "text/html"}
                    :body (str (login-html {::state flow-state ::error :unknown ::raw-state (:state data)}))})))
 
-          ;; Device Code Flow
             "device_code"
             (let [{:keys [session client expires-at]
                    {:keys [audience scope client_id]} :request} (dc/get-device-code-data device-code)
@@ -350,7 +320,7 @@
                     (json-body 400 {:ok false :error "credentials"})
                     {:status 400
                      :headers {"Content-Type" "text/html"}
-                     :body (str (login-html {::error :credentials}))}))
+                     :body (str (login-html {::error :credentials ::username username}))}))
 
                 :else
                 (let [session (core/gen-session-id)
@@ -394,11 +364,10 @@
                       {:status 302
                        :headers {"Location" redirect}})))))
 
-          ;; Unknown flow
             (if json?
               (json-body 400 {:ok false :error "broken_flow"})
               {:status 302
-               :headers {"Location" "/oauth/status?value=error&error=broken_flow"}})))))))  ; Extra paren for binding
+               :headers {"Location" "/oauth/status?value=error&error=broken_flow"}})))))))
 
 (defn post-logout-location
   "`uri` with `state` appended, keeping any query the registered URI already has."
@@ -408,8 +377,7 @@
                   (codec/form-encode {:state state})))))
 
 (defn logout-handler
-  "OAuth logout handler; terminates the session and optionally redirects to
-   post_logout_redirect_uri."
+  "OAuth logout: terminate the session and optionally redirect to post_logout_redirect_uri."
   [request]
   (let [{:keys [params]} request
         {:keys [post_logout_redirect_uri id_token_hint state]

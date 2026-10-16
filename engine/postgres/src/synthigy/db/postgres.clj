@@ -34,28 +34,12 @@
 (defn postgres-connected? [datasource] (when datasource (not (.isClosed datasource))))
 
 (defn listen-connection
-  "Open a dedicated raw connection for LISTEN/NOTIFY, bypassing the Hikari pool.
-
-   A LISTEN connection is held for the whole process lifetime (pgjdbc requires
-   the same physical connection to receive notifications). Drawing it from a
-   Hikari pool would permanently pin a pool slot and — because Hikari can't tell
-   an intentionally long-lived connection from a leaked one — trip its leak
-   detector on every boot. So cache-coherence listeners (plug wake, IAM
-   connector chain) take a raw `DriverManager` connection instead.
-
-   Pulls the JDBC coordinates straight off the configured `HikariDataSource`.
-   Caller owns the returned connection and must close it on teardown."
+  "Raw off-pool connection for LISTEN/NOTIFY; the caller must close it."
   ^Connection [^HikariDataSource ds]
   (DriverManager/getConnection (.getJdbcUrl ds) (.getUsername ds) (.getPassword ds)))
 
-(defn- build-drainer-pool
-  "Build a small, dedicated Hikari pool for the plug drainer + wake
-   source so they never compete with the writer pool for connections.
-
-   Sizing: default 2 conns for SKIP LOCKED drain transactions. The
-   PostgresNotify LISTEN no longer lives here — it runs off-pool via
-   `listen-connection` — so the pool is purely the drainer's working set.
-   Override via POSTGRES_DRAINER_POOL_SIZE."
+(defn build-drainer-pool
+  "Dedicated Hikari pool for the plug drainer (POSTGRES_DRAINER_POOL_SIZE, default 2)."
   [{:keys [host port user db password]
     :as data}]
   (let [size (Integer/parseInt (env :postgres-drainer-pool-size "2"))
@@ -72,7 +56,6 @@
                (.setMaximumPoolSize size)
                (.setMinimumIdle 1)
                (.setConnectionTestQuery "select 1")
-               ;; Hikari ignores keepaliveTime < 30s; 30s is the floor.
                (.setKeepaliveTime 30000)
                (.setConnectionTimeout 30000)
                (.setIdleTimeout 60000)
@@ -101,12 +84,8 @@
                      (.setConnectionInitSql "SET TIME ZONE 'UTC'")
                      (.setMaximumPoolSize max-connections)
                      (.setConnectionTestQuery "select 1")
-                     ;; Hikari ignores keepaliveTime < 30s; 30s is the floor.
                      (.setKeepaliveTime 30000)
                      (.setConnectionTimeout 30000)
-                     ;; No idleTimeout: minimumIdle defaults to maxPoolSize, so
-                     ;; this is a fixed-size pool where idleTimeout has no effect
-                     ;; (Hikari warns about it). Keep the pool warm instead.
                      (.setValidationTimeout 5000))]
     (when-not (postgres-connected? datasource)
       (throw (ex-info "Couldn't connect to Postgres" data)))
@@ -141,13 +120,7 @@
     (check-connection-params data)
     data))
 
-;;; ============================================================================
-;;; Patcho VersionStore Implementation
-;;; ============================================================================
-
 (defn ensure-version-table!
-  "Creates __component_versions__ table if it doesn't exist.
-   Called during setup and automatically by read-version and write-version."
   [{:keys [datasource]}]
   (jdbc/execute-one!
    datasource
@@ -179,13 +152,7 @@
       (str topic)
       version])))
 
-;;; ============================================================================
-;;; Patcho LifecycleStore Implementation
-;;; ============================================================================
-
 (defn ensure-lifecycle-table!
-  "Creates __lifecycle_state__ table if it doesn't exist.
-   Called during setup and automatically by read-lifecycle-state and write-lifecycle-state."
   [{:keys [datasource]}]
   (jdbc/execute-one!
    datasource
@@ -259,10 +226,7 @@
 (extend-type Postgres
   lifecycle/LifecycleStore
 
-  ;; NOTE: Only :setup-complete? and :cleanup-complete? are persisted.
-  ;; The :started? flag is RUNTIME-ONLY and must NOT be stored.
-  ;; This ensures :start functions execute fresh on every JVM restart.
-
+  ;; never persist :started? — it is runtime-only, so :start runs fresh on every JVM
   (read-lifecycle-state [db topic]
     (if-let [row (jdbc/execute-one!
                   (:datasource db)
@@ -270,14 +234,12 @@
                     FROM __lifecycle_state__
                     WHERE topic = ?"
                    (name topic)])]
-      ;; Return only persistent state - never include :started?
       {:setup-complete? (:__lifecycle_state__/setup_complete row)
        :cleanup-complete? (:__lifecycle_state__/cleanup_complete row)}
       {:setup-complete? false
        :cleanup-complete? false}))
 
   (write-lifecycle-state [db topic state]
-    ;; Only persist setup/cleanup state - :started? is ignored (runtime-only)
     (jdbc/execute-one!
      (:datasource db)
      ["INSERT INTO __lifecycle_state__ (topic, setup_complete, cleanup_complete, updated_at)
@@ -290,10 +252,6 @@
       (name topic)
       (:setup-complete? state)
       (:cleanup-complete? state)])))
-
-;;; ============================================================================
-;;; LoginPageStore Implementation
-;;; ============================================================================
 
 (defn ensure-login-page-table!
   [{:keys [datasource]}]
@@ -366,18 +324,11 @@
      ["DELETE FROM __login_pages__ WHERE name = ? AND version = ?" name version])
     nil))
 
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
-
 (lifecycle/register-module!
  :synthigy/database
  {:depends-on [:synthigy/transit]
   :doc "JDBC pool + DB provisioning (PostgreSQL)"
   :setup (fn []
-            ;; One-time: connect (the operator provisions the database
-            ;; itself — see check-connection-params), create patcho tables,
-            ;; set stores
            (let [config (from-env)
                  db-name (:db config)
                  db (connect config)]
@@ -392,7 +343,6 @@
                        "Setup complete")))
 
   :start (fn []
-            ;; Runtime: Ensure connection pool and stores are set
            (log/info {:id ::lifecycle-starting :data {:action :starting}}
                      "Starting database connection")
            (when-not (postgres-connected? (:datasource db/*db*))
@@ -403,28 +353,14 @@
                      "Database connection started"))
 
   :stop (fn []
-           ;; Runtime: Close connections
           (log/info {:id ::lifecycle-stopping :data {:action :stopping}}
                     "Stopping database connection")
-           ;; Release the patcho stores BEFORE closing the pool — they hold
-           ;; THIS datasource. Leaving them pointed at a closed pool wedges the
-           ;; next `start!` beyond recovery: patcho reads the lifecycle store in
-           ;; `setup!`, which runs BEFORE this module's `:start` fn, so nothing
-           ;; downstream ever gets the chance to re-point them.
-           ;;
-           ;; nil, not a fresh AtomStore, is deliberate: an empty atom store
-           ;; reports `setup-complete?` false and would RE-RUN setup (schema
-           ;; creation). nil makes `start!` skip setup entirely, and `:start`
-           ;; re-points both stores at the new pool.
+          ;; must nil the stores BEFORE closing the pool — never a fresh AtomStore (re-runs setup)
           (patch/set-store! nil)
           (lifecycle/set-store! nil)
           (stop)
           (log/info {:id ::lifecycle-stopped :data {:action :stopped}}
                     "Database connection stopped"))})
-
-;;; ============================================================================
-;;; JDBCBackend Protocol Implementation
-;;; ============================================================================
 
 (defn utc-timestamp-columns
   "Indexes of zone-less timestamp columns in a result set."
@@ -447,10 +383,7 @@
        rs opts))))
 
 (def ^:private defaults
-  "PostgreSQL-specific next.jdbc options for each return type.
-
-  :edn - Keyword keys, kebab-case column names
-  :raw - String keys, original column names"
+  "next.jdbc options per return type: :edn kebab-case keywords, :raw original column names."
   {:edn
    {:builder-fn (postgres-result-builder :edn)
     :table-fn postgres
@@ -473,10 +406,6 @@
   (jdbc-options [_db return-type]
     (get defaults return-type (:raw defaults))))
 
-;;; ============================================================================
-;;; Dialect Protocol Implementation
-;;; ============================================================================
-
 (extend-type Postgres
   db/Dialect
 
@@ -497,10 +426,6 @@
   (json-remove [_ expr k] (str expr " - '" k "'"))
   (cast-placeholder [_ type] (str "?::" type))
   (template-sql [_ raw-sql] raw-sql))
-
-;;; ============================================================================
-;;; Error Translation
-;;; ============================================================================
 
 (def sqlstate-codes
   {"23505" "UNIQUE_VIOLATION"

@@ -57,8 +57,7 @@
 ;; ── Syntax error coalescing ─────────────────────────────────────────────
 
 (defn last-content-offset
-  "Offset just past the last non-whitespace char — errors past here are
-   'user hasn't finished typing yet' and get suppressed."
+  "Offset just past the last non-whitespace char; errors past it are suppressed."
   [^String source]
   (let [n (count source)]
     (loop [i (dec n)]
@@ -139,8 +138,6 @@
 ;; ── Scalar ──────────────────────────────────────────────────────────────
 
 (defn get-bare-identifiers
-  "`:identifier` children of `parent` not nested in
-   :alias/:join-marker/:pred-op."
   [parent]
   (filterv #(= :identifier (:node %)) (:children parent)))
 
@@ -151,15 +148,10 @@
             field-name (:text field-id)
             attr-def (get-in entity-def [:attributes field-name])
             rel-def  (get-in entity-def [:relations field-name])
-            ;; A misplaced `:` after a valid field means the user meant a
-            ;; relation alias in the wrong order (`name: -roles`) or a
-            ;; scalar alias (unsupported).
             colon-err (some #(and (= :error (:node %))
                                   (= ":" (:text %)) %)
                             (:children scalar-node))]
         (cond
-          ;; `_args` was removed from the grammar — checked before schema
-          ;; lookups so the message helps even without a loaded schema.
           (= "_args" field-name)
           (vswap! (:diags ctx) conj
                   (error-diag field-id
@@ -304,9 +296,7 @@
 ;; ── Args inside parens ──────────────────────────────────────────────────
 
 (defn lint-order-restriction-set
-  "Validate a `?name:order(cols…)` restriction set: each column must be
-   a real scalar attribute of `entity-def` (schema-dependent, so it runs
-   inside the entity-tracking walk rather than the schema-blind pass)."
+  "Each column of a `?name:order(cols…)` restriction set must be a scalar attribute of `entity-def`."
   [param-ref-node entity-def ctx]
   (doseq [col (:param-type-args param-ref-node)
           :when (not (contains? (:attributes entity-def) col))]
@@ -393,8 +383,7 @@
 ;; ── Operator / type compatibility ───────────────────────────────────────
 
 (defn classify-pred-op
-  "[kind op-key] for a :pred-op node, or [nil nil] for incomplete input
-   (e.g. `is`/`not` mid-edit) via strict sequence matching."
+  "[kind op-key] for a :pred-op node, or [nil nil] for incomplete input."
   [pred-op-node]
   (let [children (:children pred-op-node)
         first-text (-> children first :text)
@@ -463,20 +452,15 @@
                                    " attribute '" field-name "'"))))))))
 
 ;; ── Op-specific rules (multimethod) ─────────────────────────────────────
-;; Per-op rules layer on top of the universal syntax/schema baseline.
-;; Contract: `[op tree ctx]`, mutates `(:diags ctx)`.
 
 (defmulti op-lint-rules
-  "Apply op-specific lint rules. Dispatches on the wire op string;
-   `:default` is a no-op."
+  "Apply op-specific lint rules, dispatched on the wire op string."
   (fn [op _tree _ctx] (or op :default)))
 
 (defmethod op-lint-rules :default [_ _ _] nil)
 
 (defn lint-get-root-scalar
-  "Get-mode root-scalar check: bare projection or `field = value` on a
-   unique attr is valid; other operators, and non-`=` compound parens
-   forms, are errors."
+  "Get-mode root scalar: only a bare projection or `=` on a unique attr is valid."
   [scalar-node entity-def ctx]
   (let [pred-op  (ast/find-child scalar-node :pred-op)
         filter   (ast/find-child scalar-node :scalar-filter)
@@ -496,9 +480,6 @@
                                    (op-key->human op-key op-key)
                                    "` on '" field-name "' is not allowed.")))
 
-          ;; Only flag non-unique `=` when the schema carries :unique
-          ;; info for at least one attr (avoids false positives where
-          ;; uniqueness isn't propagated yet).
           (and (= "_eq" op-key)
                attr-def
                (not (:unique attr-def))
@@ -525,8 +506,7 @@
                                    field-name "' are not allowed."))))))))
 
 (defn attr-identity?
-  "True when `field-name` `=`-matched is a valid get identity: the
-   attribute is unique (or the schema carries no unique info at all)."
+  "True when `=` on `field-name` is a valid get identity (unique, or no unique info in the schema)."
   [field-name pred-op entity-def]
   (let [attr-def (when (and entity-def field-name)
                    (get-in entity-def [:attributes field-name]))]
@@ -585,8 +565,6 @@
             (lint-get-root-scalar inner entity-def ctx)))
 
         nil))
-    ;; get is row-identity, not "search and take first" — without a root
-    ;; `=` on a unique attr the server falls through to first-by-_eid.
     (when (and entity-def
                (seq (:children tree))
                (not (root-statement-has-identity? tree entity-def))
@@ -636,8 +614,7 @@
                 (error-diag n (str "`_on` is only valid on @search-tree / @get-tree — not @" op)))))))
 
 (defn lint-tree-on
-  "Shared @search-tree/@get-tree rule: exactly one `_on <rel>` in the root
-   parens, naming a self-relation of the root entity."
+  "Tree-op rule: exactly one root-parens `_on <rel>`, naming a self-relation of the root entity."
   [op tree ctx]
   (let [entity-def (:root-entity-def ctx)
         ons (root-on-nodes tree)]
@@ -673,8 +650,7 @@
                                      root-name " — it targets " (:target rel-def))))))))))
 
 (defn root-parens-id-identity?
-  "True if the root parens carry `xid = …` (or `euuid = …`) — the ID
-   field, since a unique business attr isn't enough for @get-tree."
+  "True if the root parens carry `xid = …` (or `euuid = …`)."
   [tree]
   (boolean
     (when-let [parens (:root-parens tree)]
@@ -703,13 +679,9 @@
              :message "`get-tree` requires the tree root's identity in the root parens: `xid = …`"})))
 
 ;; ── Named-parameter validation (schema-independent) ────────────────────
-;; Bare `?`/`?N` are rejected at the tokenizer; this walk catches what
-;; parsed fine but still needs flagging (unknown type, misplaced :order).
 
 (defn order-default-diags
-  "Validate an :order param's inline `=\"col dir, …\"` default (mirrors
-   compile's normalize-order-specs; kept textual here so lint stays
-   throw-free)."
+  "Validate an :order param's inline `=\"col dir, …\"` default, textually so lint stays throw-free."
   [n]
   (when-let [d (:param-default n)]
     (let [raw     (str/trim d)
@@ -744,8 +716,6 @@
     (letfn [(walk [n in-order-by?]
               (when (= :param-ref (:node n))
                 (let [raw    (some-> (:param-type-raw n) str/lower-case)
-                      ;; Type is inferred from position: an untyped param
-                      ;; in `order by` IS an order param.
                       order? (or (= "order" raw) (and in-order-by? (nil? raw)))]
                   (cond
                     (and raw (not= "order" raw)
@@ -781,10 +751,6 @@
     @diags))
 
 ;; ── Legacy meta-key spellings ──────────────────────────────────────────
-;;
-;; The bare SQL spellings (`limit`, `order by`, `distinct`, `join`, `on`)
-;; are canonical; the `_`-prefixed wire forms still parse. Nudge, don't
-;; break — migration per repo policy is codemod + escalating lint.
 
 (def ^:private legacy-meta-spelling
   {"_limit" "limit" "_offset" "offset" "_order_by" "order by"
@@ -808,13 +774,9 @@
     @diags))
 
 ;; ── Duplicate-sibling warnings ─────────────────────────────────────────
-;; XSQL has no scalar aliases and bare relations share a response key,
-;; so duplicates at the same scope (query root or any block) are warned
-;; on second-and-later occurrence; aliased relations are skipped.
 
 (defn statement-bare-name
-  "If `stmt-node` is a bare scalar or bare relation/count-child, return
-   `[:scalar|:relation identifier-node]`, else nil."
+  "`[:scalar|:relation id-node]` for a bare scalar or relation/count-child statement, else nil."
   [stmt-node]
   (let [inner (first (:children stmt-node))]
     (cond
@@ -830,8 +792,7 @@
           [:relation id])))))
 
 (defn lint-duplicate-siblings
-  "Warn on each duplicate bare attribute/relation at a scope; the first
-   occurrence is unflagged."
+  "Warn on each duplicate bare attribute/relation at a scope after the first."
   [tree ctx]
   (letfn [(walk [node]
             (when (ast/container? node)
@@ -863,20 +824,16 @@
 ;; ── Public entry ────────────────────────────────────────────────────────
 
 (defn lint
-  "Lint an XSQL source against a schema and root entity, returning a
-   vector of diagnostic maps. `op` is the wire op string (\"search\" /
-   \"get\" / …); `\"get\"` additionally requires root identity."
+  "Lint an XSQL source against a schema and root entity into diagnostic maps; `op` adds op-specific rules."
   ([source]
    (lint source nil nil nil))
   ([source schema root-entity]
    (lint source schema root-entity nil))
   ([source schema root-entity op]
    (let [tree     (parser/parse source)
-         ;; Query-root entity wins over the (legacy) external arg.
          root-tok (:root-entity tree)
          root     (or (some-> root-tok :text) root-entity)
-         ;; Root parens hang off :query under :root-parens, not
-         ;; :children — collectors must be pointed at them explicitly.
+         ;; root parens hang off :root-parens, not :children — every collector must also walk them
          rp       (:root-parens tree)
          diags    (volatile! (vec
                               (concat (collect-syntax-errors tree source)

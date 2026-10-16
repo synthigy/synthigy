@@ -22,12 +22,7 @@
    [synthigy.iam.access :as access]))
 
 (defonce ^{:dynamic true
-           :doc "The current user context provider.
-
-  Can be temporarily overridden with with-user-context-provider macro.
-  Set the default provider with set-user-context-provider!
-
-  See UserContextProvider protocol for implementation details."}
+           :doc "The current user context provider."}
   *user-context-provider*
   nil)
 
@@ -84,8 +79,7 @@
    :website nil
    :zone_info nil})
 
-;; Selecting a missing/inactive key throws and this resolves the principal —
-;; optional keys must stay gated by the liveness probes or login breaks.
+;; Selecting a missing/inactive key throws — optional keys stay gated by liveness probes or login breaks.
 (defn user-details-selection
   []
   (cond-> {:_eid nil
@@ -134,8 +128,7 @@
                               (map (juxt id/extract #(assoc % :role/via :direct)))
                               (:roles user))]
              (assoc user
-                    ;; direct last — never relabel a directly-held role as
-                    ;; group-derived
+                    ;; direct last — never relabel a directly-held role as group-derived
                     :roles  (merge (group-roles (:groups user)) direct)
                     :groups (materialize (map #(dissoc % :roles) (:groups user)))))))))
 
@@ -260,8 +253,7 @@
         nil)
 
       (start! [this]
-        ;; No TTL — every source feeding the cached principal must invalidate
-        ;; it, or a revoked role keeps working forever.
+        ;; No TTL — every source feeding the cached principal must invalidate it, or a revoked role keeps working.
         (let [user-xid (id/entity :iam/user)
               user->roles  (str (id/relation :iam/user->roles))
               user->groups (str (id/relation :iam/user->groups))

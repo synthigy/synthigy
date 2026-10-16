@@ -9,18 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.cockroach.xid
-  "CockroachDB XID migration utilities.
-
-  All conversions are deterministic via id/uuid->nanoid (bidirectional).
-  No mapping files or lookup tables needed.
-
-  Main entry points:
-  - migrate-to-xid!       - Run full migration
-  - reset-xid-migration!  - Revert migration (destructive, for testing)
-  - verify-xid-migration  - Check all records have XIDs
-
-  Workflow:
-    (xid/migrate-to-xid!)  ; That's it — fully deterministic"
+  "CockroachDB legacy euuid → xid import."
   (:require
     [clojure.string :as str]
     [synthigy.dataset :as dataset]
@@ -33,18 +22,7 @@
     [synthigy.log :as log]))
 
 
-;;; ============================================================================
-;;; Table Discovery
-;;; ============================================================================
-
 (defn table-exists?
-  "Check if a table exists in the database.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    Boolean indicating if table exists"
   [table-name]
   (let [result (sql/execute-one!
                  ["SELECT COUNT(*) as cnt FROM information_schema.tables
@@ -53,24 +31,12 @@
     (pos? (:cnt result 0))))
 
 (defn get-all-entity-tables
-  "Gets all entity table names from the deployed schema.
-
-  NOTE: Returns tables from schema, may include tables that don't exist in DB.
-  Use get-existing-entity-tables for safety.
-
-  Returns:
-    Vector of table name strings"
+  "Entity tables named by the deployed schema; may include tables missing from the DB."
   []
   (let [schema (sql-query/deployed-schema)]
     (vec (distinct (keep :table (vals schema))))))
 
 (defn get-existing-entity-tables
-  "Gets entity tables that actually exist in the database.
-
-  Filters out tables from schema that don't exist in DB (corrupted/partial state).
-
-  Returns:
-    Vector of existing table name strings"
   []
   (let [all-tables (get-all-entity-tables)
         existing (filterv table-exists? all-tables)
@@ -82,18 +48,13 @@
     existing))
 
 (defn get-all-relation-tables
-  "Gets all relation (junction) table names from the deployed schema.
-
-  Returns:
-    Vector of table name strings"
   []
   (let [model (dataset/deployed-model)
         relations (core/get-relations model)]
     (vec (distinct (map relation->table-name relations)))))
 
 (defn rename-relation-tables!
-  "Rename relation tables from EUUID-based to XID-based names.
-   Must be called BEFORE switching ID provider."
+  "Renames relation tables from euuid- to xid-based names; call BEFORE switching the provider."
   []
   (log/info {:id ::relation-tables-rename-starting}
             "Renaming relation tables")
@@ -101,8 +62,7 @@
         relations (core/get-relations model)
         renamed (atom 0)]
     (doseq [relation relations]
-      (let [;; Resolve xid deterministically if not present in relation
-            relation-with-xid (if (:xid relation)
+      (let [relation-with-xid (if (:xid relation)
                                 relation
                                 (assoc relation :xid (id/uuid->nanoid (:euuid relation))))
             old-name (naming/relation->table-name-for-id relation-with-xid :euuid)
@@ -112,9 +72,7 @@
             (log/info {:id ::relation-table-renamed
                        :data {:from old-name :to new-name}}
                       "Renaming relation table")
-            ;; Rename table
             (sql/execute! [(format "ALTER TABLE \"%s\" RENAME TO \"%s\"" old-name new-name)])
-            ;; Rename indexes
             (sql/execute! [(format "ALTER INDEX IF EXISTS \"%s\" RENAME TO \"%s\""
                                    (str old-name "_fidx") (str new-name "_fidx"))])
             (sql/execute! [(format "ALTER INDEX IF EXISTS \"%s\" RENAME TO \"%s\""
@@ -127,8 +85,7 @@
      :relations (count relations)}))
 
 (defn revert-relation-tables!
-  "Revert relation table names from XID-based back to EUUID-based names.
-   Used during migration reset."
+  "Reverts relation table names from xid- back to euuid-based names (migration reset)."
   []
   (log/info {:id ::relation-tables-revert-starting}
             "Reverting relation table names")
@@ -136,8 +93,7 @@
         relations (core/get-relations model)
         reverted (atom 0)]
     (doseq [relation relations]
-      (let [;; Resolve xid deterministically if not in model
-            xid (or (:xid relation) (id/uuid->nanoid (:euuid relation)))
+      (let [xid (or (:xid relation) (id/uuid->nanoid (:euuid relation)))
             relation-with-xid (assoc relation :xid xid)]
         (when xid
           (let [xid-name (naming/relation->table-name-for-id relation-with-xid :xid)
@@ -147,9 +103,7 @@
                 (log/info {:id ::relation-table-reverted
                            :data {:from xid-name :to euuid-name}}
                           "Reverting relation table")
-                ;; Rename table
                 (sql/execute! [(format "ALTER TABLE \"%s\" RENAME TO \"%s\"" xid-name euuid-name)])
-                ;; Rename indexes
                 (sql/execute! [(format "ALTER INDEX IF EXISTS \"%s\" RENAME TO \"%s\""
                                        (str xid-name "_fidx") (str euuid-name "_fidx"))])
                 (sql/execute! [(format "ALTER INDEX IF EXISTS \"%s\" RENAME TO \"%s\""
@@ -161,19 +115,7 @@
     {:reverted @reverted
      :relations (count relations)}))
 
-;;; ============================================================================
-;;; Column Management
-;;; ============================================================================
-
 (defn column-exists?
-  "Check if a column exists in a table.
-
-  Args:
-    table-name - Name of the table
-    column-name - Name of the column
-
-  Returns:
-    Boolean indicating if column exists"
   [table-name column-name]
   (let [result (sql/execute-one!
                  [(str "SELECT COUNT(*) as cnt FROM information_schema.columns "
@@ -182,13 +124,6 @@
     (pos? (:cnt result 0))))
 
 (defn add-xid-column!
-  "Add xid column to a table if it doesn't exist.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :added if column was added, :exists if already exists"
   [table-name]
   (if (column-exists? table-name "xid")
     (do
@@ -202,10 +137,6 @@
       :added)))
 
 (defn add-xid-columns-to-all-tables!
-  "Add xid column to all entity and relation tables.
-
-  Returns:
-    Map with :added (count) and :existed (count)"
   []
   (let [tables (get-existing-entity-tables)
         results (doall (map (fn [table]
@@ -225,27 +156,10 @@
 
 
 (def ^:private default-batch-size
-  "Default batch size for XID generation. Balances memory usage vs round-trips."
   10000)
 
 (defn generate-xids-for-table!
-  "Generate XID for all records in a table that don't have one.
-
-  Uses deterministic uuid->nanoid conversion — every euuid maps to
-  exactly one xid, no mapping needed.
-
-  Batched processing for large tables:
-  - Fetches records in batches (default 10,000)
-  - Uses batch UPDATE for efficiency
-  - Memory-bounded: only batch-size rows in memory at once
-
-  Args:
-    table-name - Name of the table
-    opts - Optional map with:
-           :batch-size - Number of records per batch (default 10,000)
-
-  Returns:
-    Map with :table, :updated (total count), :batches (number of batches)"
+  "Backfills missing xids in JVM-side batches via id/uuid->nanoid."
   ([table-name]
    (generate-xids-for-table! table-name {}))
   ([table-name {:keys [batch-size]
@@ -267,12 +181,10 @@
              {:table table-name
               :updated total
               :batches batches})
-           (let [;; Build batch params: [[xid1 eid1] [xid2 eid2] ...]
-                 params (mapv (fn [{:keys [_eid euuid]}]
+           (let [params (mapv (fn [{:keys [_eid euuid]}]
                                 [(id/uuid->nanoid euuid) _eid])
                               records)
                  batch-count (count params)]
-             ;; Batch update
              (sql/execute-batch! (into [update-sql] params))
              (log/debug {:id ::xid-batch-updated
                          :data {:table table-name :batch (inc batches) :records batch-count}}
@@ -280,15 +192,8 @@
              (recur (+ total batch-count)
                     (inc batches)))))))))
 
-;;; ============================================================================
-;;; Constraints and Indexes
-;;; ============================================================================
-
 (defn get-all-tables-with-xid
-  "Get all tables in the database that have an xid column.
-
-  This finds ALL tables with xid, not just those in deployed-schema.
-  Important for ensuring test tables and other tables get constraints."
+  "Every public table with an xid column, not just those in the deployed schema."
   []
   (let [results (sql/execute!
                   ["SELECT table_name FROM information_schema.columns
@@ -296,13 +201,6 @@
     (mapv :table_name results)))
 
 (defn add-xid-unique-constraint!
-  "Add UNIQUE constraint to xid column.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :added or :exists"
   [table-name]
   (let [constraint-name (str table-name "_xid_unique")]
     (try
@@ -320,13 +218,6 @@
           (throw e))))))
 
 (defn add-xid-not-null-constraint!
-  "Add NOT NULL constraint to xid column.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :added or :exists"
   [table-name]
   (try
     (sql/execute! [(format "ALTER TABLE \"%s\" ALTER COLUMN xid SET NOT NULL" table-name)])
@@ -342,13 +233,6 @@
         (throw e)))))
 
 (defn add-xid-index!
-  "Add index on xid column for faster lookups.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :added or :exists"
   [table-name]
   (let [index-name (str table-name "_xid_idx")]
     (try
@@ -363,16 +247,7 @@
           (throw e))))))
 
 (defn add-constraints!
-  "Add NOT NULL and UNIQUE constraints after XIDs are populated.
-
-  Should be called after all XIDs are generated.
-
-  NOTE: Uses get-all-tables-with-xid to find ALL tables with xid column,
-  not just those in deployed-schema. This ensures test tables and other
-  tables created outside the main schema also get constraints.
-
-  Returns:
-    Map with constraint statistics"
+  "Adds the xid UNIQUE constraint and index to every table with xid; run after the backfill."
   []
   (log/info {:id ::constraints-starting} "Adding XID constraints")
   (let [tables (get-all-tables-with-xid)
@@ -392,27 +267,8 @@
     {:tables results
      :count (count tables)}))
 
-;;; ============================================================================
-;;; XID Immutability Triggers
-;;; ============================================================================
-
 (defn xid-trigger-function
-  "Returns SQL to create the CockroachDB trigger function for XID immutability.
-
-  CRDB differences vs the PG version:
-    1. plpgsql functions can't reference NEW.field / OLD.field directly —
-       reads must use (NEW).field / (OLD).field parenthesised form
-       (CRDB issue 114687).
-    2. plpgsql functions cannot ASSIGN to fields of NEW (neither
-       `NEW.xid := …` nor `(NEW).xid := …` is supported in v24.3).
-       So the PG version's silent 'keep the old value' is impossible.
-       Instead we RAISE EXCEPTION — semantics differ: CRDB rejects
-       the UPDATE, PG silently preserves. Callers that previously
-       relied on silent-preserve must switch to either not setting xid
-       on update, or catching the SQLSTATE.
-
-  Function name and signature stay the same so the CREATE TRIGGER
-  wiring is unchanged."
+  "SQL for `prevent_xid_update()`, which REJECTS an xid change (PG silently keeps the old xid)."
   []
   "CREATE OR REPLACE FUNCTION prevent_xid_update()
 RETURNS TRIGGER AS $$
@@ -425,28 +281,18 @@ END;
 $$ LANGUAGE plpgsql;")
 
 (defn xid-trigger-name
-  "Deterministic trigger name for the per-table xid immutability trigger.
-   Kept as a public helper so the drop / create pair can target the same
-   identifier without duplication."
   [table-name]
   (format "prevent_xid_update_trigger_%s"
           (str/replace table-name #"[^a-zA-Z0-9_]" "_")))
 
 (defn xid-trigger-drop
-  "DROP TRIGGER IF EXISTS for the per-table xid immutability trigger.
-   Idempotent. CRDB v25.2 doesn't support `CREATE OR REPLACE TRIGGER`
-   (issue 128422), so we drop-then-create."
   [table-name]
   (format "DROP TRIGGER IF EXISTS %s ON \"%s\";"
           (xid-trigger-name table-name)
           table-name))
 
 (defn xid-trigger
-  "Returns SQL to create the XID immutability trigger on a table.
-
-  CRDB v25.2 doesn't support `CREATE OR REPLACE TRIGGER` (issue 128422)
-  so we emit plain `CREATE TRIGGER`. Callers MUST run
-  `(xid-trigger-drop table)` first for idempotency."
+  "Plain CREATE TRIGGER (no OR REPLACE on CRDB); run `xid-trigger-drop` first."
   [table-name]
   (format
     "CREATE TRIGGER %s
@@ -457,18 +303,12 @@ $$ LANGUAGE plpgsql;")
     table-name))
 
 (defn create-xid-immutability-triggers!
-  "Creates XID immutability triggers on all tables with xid column.
-
-  Returns:
-    Map with :created (count) and :tables (list)"
   []
   (let [tables (get-all-tables-with-xid)]
     (log/info {:id ::immutability-triggers-starting
                :data {:tables (count tables)}}
               "Creating XID immutability triggers")
-
-    ;; CRDB v25.2 disallows CREATE OR REPLACE FUNCTION when active
-    ;; triggers depend on it (issue 134555). Pre-check pg_proc.
+    ;; never CREATE OR REPLACE here — CRDB refuses while triggers depend on the fn
     (let [exists? (boolean
                    (seq (sql/execute!
                          ["select 1 from pg_proc where proname = 'prevent_xid_update'"])))]
@@ -478,8 +318,6 @@ $$ LANGUAGE plpgsql;")
         (do (sql/execute! [(xid-trigger-function)])
             (log/debug {:id ::trigger-function-created}
                        "Created PostgreSQL/CRDB trigger function for xid"))))
-
-    ;; Drop-then-create (CRDB has no CREATE OR REPLACE TRIGGER).
     (doseq [table tables]
       (try
         (sql/execute! [(xid-trigger-drop table)])
@@ -495,38 +333,15 @@ $$ LANGUAGE plpgsql;")
     {:created (count tables)
      :tables tables}))
 
-;;; ============================================================================
-;;; Meta-Table Migration (Schema Tables)
-;;; ============================================================================
-;;
-;; Meta-tables store the schema definitions:
-;; - dataset_entity: Entity definitions
-;; - dataset_relation: Relation definitions
-;; - dataset_entity_attribute: Attribute definitions
-;;
-;; These must be migrated BEFORE transforming stored models to ensure
-;; XIDs in model blobs match XIDs in meta-table rows.
-
 (defn migrate-meta-table!
-  "Add xid column to a meta-table and populate XIDs via uuid->nanoid.
-
-  Args:
-    table-name - Name of the meta-table
-
-  Returns:
-    Map with :table, :added-column, :updated"
   [table-name]
   (log/info {:id ::meta-table-migrating :data {:action :migrating :subject :meta-table :table table-name}}
             "Migrating meta-table")
-
-  ;; Add xid column if not exists
   (let [column-added (if (column-exists? table-name "xid")
                        false
                        (do
                          (sql/execute! [(format "ALTER TABLE %s ADD COLUMN xid VARCHAR(64)" table-name)])
                          true))]
-
-    ;; Populate XIDs for rows that don't have one
     (let [rows (sql/execute! [(format "SELECT _eid, euuid FROM %s WHERE xid IS NULL" table-name)])
           updated (atom 0)]
       (doseq [{:keys [_eid euuid]} rows]
@@ -547,12 +362,7 @@ $$ LANGUAGE plpgsql;")
        :updated @updated})))
 
 (defn migrate-meta-tables!
-  "Migrate all schema meta-tables (dataset_entity, dataset_relation, dataset_entity_attribute).
-
-  Uses deterministic uuid->nanoid — no mapping needed.
-
-  Returns:
-    Map with results for each meta-table"
+  "Adds and backfills xid on dataset_entity, dataset_relation and dataset_entity_attribute."
   []
   (log/info {:id ::meta-tables-migration-starting :data {:action :migrating :subject :meta-tables}}
             "Migrating meta-tables")
@@ -567,36 +377,17 @@ $$ LANGUAGE plpgsql;")
               "Meta-tables migrated")
     results))
 
-;;; ============================================================================
-;;; Full Migration
-;;; ============================================================================
-
 (defn migrate-all-tables!
-  "Add xid columns to all entity tables, populate XIDs, and add constraints.
-
-  Uses deterministic uuid->nanoid for all records.
-
-  Steps:
-  1. Add xid columns (if not exist) to deployed-schema tables
-  2. Generate XIDs for all records
-  3. Add UNIQUE constraint and index to each table
-
-  Returns:
-    Map with migration statistics"
+  "Adds xid columns to data tables, backfills them, then adds the UNIQUE constraint and index."
   []
   (log/info {:id ::data-tables-migration-starting :data {:action :migrating :subject :data-tables}}
             "Starting XID migration on data tables")
-
-  ;; Step 1: Add xid columns to deployed-schema tables
   (log/info {:id ::data-tables-step-1} "Step 1: Adding xid columns")
   (let [column-result (add-xid-columns-to-all-tables!)]
     (log/info {:id ::data-tables-columns-added
                :data {:added (:added column-result)
                       :existed (:existed column-result)}}
               "Added xid columns")
-
-    ;; Step 2: Generate XIDs for all tables with xid column
-    ;; (includes tables created via deploy! outside deployed-schema)
     (log/info {:id ::data-tables-step-2} "Step 2: Generating XIDs for all records")
     (let [tables (get-all-tables-with-xid)
           gen-results (doall (map generate-xids-for-table! tables))
@@ -604,8 +395,6 @@ $$ LANGUAGE plpgsql;")
       (log/info {:id ::data-tables-xids-generated
                  :data {:total-updated total-updated :tables (count tables)}}
                 "Generated XIDs across tables")
-
-      ;; Step 3: Add constraints to each table immediately after populating
       (log/info {:id ::data-tables-step-3} "Step 3: Adding UNIQUE constraints")
       (let [constraint-results (doall
                                  (map (fn [table]
@@ -628,55 +417,26 @@ $$ LANGUAGE plpgsql;")
                      :tables gen-results}
          :constraints constraint-results}))))
 
-;;; ============================================================================
-;;; Complete XID Migration Orchestration
-;;; ============================================================================
-
 (defn migrate-to-xid!
-  "Complete XID migration. Fully deterministic — no mapping needed.
-
-  Every euuid maps to exactly one xid via uuid->nanoid, and back via nanoid->uuid.
-
-  Steps:
-  1. Migrate meta-tables (add xid column, populate via uuid->nanoid)
-  2. Transform stored models (deterministic conversion in model blobs)
-  3. Migrate data tables (add xid columns, populate via uuid->nanoid)
-  4. Rename relation tables (EUUID-based → XID-based names)
-  5. Add constraints & triggers
-  6. Switch provider, save & reload
-
-  Returns:
-    Map with results from each step"
+  "Full deterministic euuid → xid migration, ending with the provider switch."
   []
   (log/info {:id ::migration-starting :data {:action :migrating :subject :xid}}
             "Starting complete XID migration (deterministic)")
-
-  ;; Step 1: Migrate meta-tables
   (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 1 :of 6 :name "migrate-meta-tables"}}
             "Migrating meta-tables")
   (let [meta-result (migrate-meta-tables!)]
-
-    ;; Step 2: Transform stored models
     (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 2 :of 6 :name "transform-stored-models"}}
               "Transforming stored models")
     (let [model-result (model/transform-stored-models! :xid)]
-
-      ;; Step 3: Migrate data tables
       (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 3 :of 6 :name "migrate-data-tables"}}
                 "Migrating data tables")
       (let [data-result (migrate-all-tables!)]
-
-        ;; Step 4: Rename relation tables (BEFORE provider switch!)
         (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 4 :of 6 :name "rename-relation-tables"}}
                   "Renaming relation tables")
         (let [rename-result (rename-relation-tables!)]
-
-          ;; Step 5: Add immutability triggers (constraints already added in step 3)
           (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 5 :of 6 :name "add-immutability-triggers"}}
                     "Adding immutability triggers")
           (create-xid-immutability-triggers!)
-
-          ;; Step 6: Switch provider, save & reload
           (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 6 :of 6 :name "switch-provider"}}
                     "Switching to NanoID provider")
           (dataset/set-format! "xid")
@@ -692,15 +452,8 @@ $$ LANGUAGE plpgsql;")
            :data-tables data-result
            :relation-tables rename-result})))))
 
-;;; ============================================================================
-;;; Verification
-;;; ============================================================================
-
 (defn verify-xid-migration
-  "Verify all records have XIDs.
-
-  Returns:
-    Map with verification results. Throws if any records missing XIDs."
+  "Throws unless every row of every existing entity table has an xid."
   []
   (log/info {:id ::verification-starting :data {:action :verifying :subject :xid-migration}} "Verifying XID migration")
   (let [tables (get-existing-entity-tables)
@@ -731,18 +484,7 @@ $$ LANGUAGE plpgsql;")
                         {:missing missing-tables
                          :verified false}))))))
 
-;;; ============================================================================
-;;; Migration Reset (Testing Only)
-;;; ============================================================================
-
 (defn drop-xid-column!
-  "Drop xid column from a table if it exists.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :dropped or :not-exists"
   [table-name]
   (if (column-exists? table-name "xid")
     (do
@@ -753,34 +495,17 @@ $$ LANGUAGE plpgsql;")
     :not-exists))
 
 (defn reset-xid-migration!
-  "Drop all xid columns and revert models — for testing only.
-
-  WARNING: This is destructive!
-
-  Steps:
-  1. Revert stored models to euuid format
-  2. Revert relation table names (XID-based → EUUID-based)
-  3. Drop xid columns from all tables
-  4. Clear the stored format stamp
-  5. Restore the euuid provider (full inverse of the import's step 6)
-
-  Returns:
-    Map with results"
+  "DESTRUCTIVE: fully reverts the xid import (models, relation names, xid columns, stamp, provider)."
   []
   (log/warn {:id ::reset-starting}
             "RESETTING XID MIGRATION")
-
-  ;; Step 1: Revert models to euuid format first (before dropping columns)
   (log/info {:id ::reset-step :data {:step 1 :of 5 :name "revert-stored-models"}}
             "Reverting stored models to euuid format")
   (let [model-result (model/transform-stored-models! :euuid)]
-
-    ;; Step 2: Revert relation table names (BEFORE dropping xid columns!)
+    ;; BEFORE dropping xid columns
     (log/info {:id ::reset-step :data {:step 2 :of 5 :name "revert-relation-tables"}}
               "Reverting relation table names")
     (let [revert-result (revert-relation-tables!)]
-
-      ;; Step 3: Find all tables with xid column and drop it
       (log/info {:id ::reset-step :data {:step 3 :of 5 :name "drop-xid-columns"}}
                 "Dropping xid columns")
       (let [tables-with-xid (get-all-tables-with-xid)
@@ -793,16 +518,10 @@ $$ LANGUAGE plpgsql;")
                                    :result (drop-xid-column! table)})
                                 tables-with-xid))
             dropped-count (count (filter #(= :dropped (:result %)) drop-results))]
-
-        ;; Step 4: Clear the format stamp — a stale "xid" stamp would boot the
-        ;; reverted DB as migrated.
+        ;; never skip — a stale "xid" stamp boots the reverted DB as migrated
         (log/info {:id ::reset-step :data {:step 4 :of 5 :name "clear-format-stamp"}}
                   "Clearing stored format stamp")
         (dataset/clear-format!)
-
-        ;; Step 5: Flip the provider back — the import gate reads the AMBIENT
-        ;; provider, so without this a same-process rerun skips as
-        ;; :already-synthigy.
         (log/info {:id ::reset-step :data {:step 5 :of 5 :name "restore-euuid-provider"}}
                   "Restoring euuid provider")
         (id/set-provider! (id/->UUIDProvider))

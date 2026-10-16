@@ -9,8 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.page.assets
-  "Shared brand marks for the OAuth pages. See
-   docs/core/synthigy/oauth/page/assets.md."
+  "Shared brand marks for the OAuth pages."
   (:require
    [clojure.java.io :as io]
    [hiccup.util :as hu]))

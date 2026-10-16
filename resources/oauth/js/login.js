@@ -39,7 +39,9 @@
   setupRow(userInput);
   setupRow(passwordInput);
 
-  if (userInput) {
+  if (userInput && userInput.value && passwordInput) {
+    passwordInput.focus();
+  } else if (userInput) {
     userInput.focus();
   }
 })();

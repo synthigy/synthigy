@@ -18,10 +18,16 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  width: 100%;
-  max-width: 340px;
-  padding: 2rem;
-  gap: 24px;
+  width: calc(100% - 32px);
+  max-width: 380px;
+  padding: 2.5rem 2.25rem 2rem;
+  gap: 28px;
+  background: rgba(20, 20, 22, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 #logo-image { height: 56px; }
@@ -42,12 +48,6 @@ form .row {
   transition: border-color 0.2s;
 }
 
-form .row:has(.error) {
-  border-bottom: none;
-  min-height: 1.1rem;   /* reserve space so the form doesn't jump on error */
-  align-items: flex-start;
-}
-
 form .row.active {
   border-bottom-color: var(--sy-field-border-active);
 }
@@ -66,7 +66,16 @@ form .row.active .ficon {
 }
 
 form button {
-  margin-top: 12px;
+  margin-top: 0;
+  color: #111113;
+  background: #ececec;
+  border-color: transparent;
+}
+
+form button:hover {
+  color: #000;
+  background: #ffffff;
+  border-color: transparent;
 }
 
 /* Inputs */
@@ -88,10 +97,41 @@ input::placeholder {
   color: var(--sy-placeholder);
 }
 
-/* Error */
-span.error {
-  font-size: 0.8rem;
+/* Error — the slot is always there, so a message never moves the form */
+.sy-error-slot {
+  min-height: 3.5rem;   /* two lines of message; only a 3-line one grows it */
+  display: flex;
+  align-items: center;
+}
+
+.sy-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.35;
   color: var(--sy-error);
+  background: var(--sy-error-bg);
+  border: 1px solid var(--sy-error-border);
+  border-radius: 8px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  animation: sy-error-in 0.18s ease-out;
+}
+
+.sy-error .ficon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+
+@keyframes sy-error-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: none; }
 }
 
 /* Button — glassy, blurs the starfield behind it */

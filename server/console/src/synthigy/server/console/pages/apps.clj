@@ -55,8 +55,11 @@
     [:token-expiry "Token lifetime" :expiry nil
      {:defaults expiry-defaults}]
     [:login-page "Login page" :login-page
-     (str "Name of a login page bundle (System → Login pages) for this "
+     (str "Name of a login page bundle (System → Custom pages) for this "
           "client. Blank uses the \"default\" bundle, else the built-in page.")]
+    [:app-url "App URL" :url
+     (str "Where people open this app. A sign-in link made for this app "
+          "sends the person here once their account is set up.")]
     [:logo-url "Logo URL" :text nil]
     [:allow-signup "Allow sign-up" :switch
      (str "A federated login may create a new account rather than "

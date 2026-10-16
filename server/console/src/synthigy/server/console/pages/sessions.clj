@@ -39,7 +39,8 @@
          "and revokes its tokens; an app using it loses access once its "
          "current access token expires."]
         (when (pos? others)
-          [:ty-button {:type "button" :size "sm" :flavor "danger" :muted true
+          [:div.console-toolbar
+           [:ty-button {:type "button" :size "sm" :flavor "danger" :muted true
                        :appearance "outlined"
                        (keyword "data-on:click")
                        (format (str "$confirmTarget = 'all'; $confirmVerb = 'Sign out everywhere'; "
@@ -48,5 +49,5 @@
                                     (if (= 1 others) " session" " sessions")
                                     " and revokes their tokens. This device stays signed in."))}
            (icon/icon :log-out {:size "12" :slot "start"})
-           "Sign out everywhere"])]
+           "Sign out everywhere"]])]
        (widgets/sessions-table rows)]})))

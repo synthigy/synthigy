@@ -61,7 +61,6 @@ the result are the model's names in snake case (`"Birth Date"` → `birth_date`)
 | `timestamp` | an ISO 8601 string in UTC to the second, `"2026-10-04T14:30:00Z"`. Send any RFC 3339 date-time; it is stored and returned in UTC. |
 | `json`, `encrypted` | any JSON value. An `encrypted` attribute arrives and leaves as plain JSON; only the database holds ciphertext. |
 | `hashed` | send the plain string; a hash is stored and the plain value is never returned |
-| `transit` | a string holding Transit-encoded data |
 | `user`, `group`, `role` | a reference to one IAM record, written and selected like a relation: `"owner": {"xid": "…"}` |
 
 ## Reading
@@ -246,13 +245,10 @@ Branch on `error.code`; messages may change.
 
 ## Live data
 
-`GET /data/events` is a server-sent event stream; `POST
-/data/subscription/set` says which entities and records it should carry. Events
-say what changed — inserted, updated, deleted, linked, unlinked — and SDKs use
-them to re-run your query, so every refresh is checked against access rules
-again. In practice you use `watch` in an SDK rather than the stream directly.
-The server closes each stream after
-`SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS`; SDKs reconnect on their own.
+Use `watch` in an SDK. Underneath, `GET /data/events` is a server-sent event stream
+of what changed, scoped by `POST /data/subscription/set`; the SDK re-runs your query
+on each event, so every refresh passes access rules again. Streams close after
+`SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` and SDKs reconnect.
 
 ## History
 

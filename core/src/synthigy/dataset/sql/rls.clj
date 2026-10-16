@@ -25,8 +25,7 @@
   "Compile a :ref condition; nil if the attribute is missing or invalid."
   [entity condition]
   (let [attr-uuid (:attribute condition)
-        ;; dangling attr must DROP the rule, never throw — get-attribute throws;
-        ;; audit who-cols are synthetic, hence the concat
+        ;; dangling attr must DROP the rule, never throw — never core/get-attribute here
         attr (some #(when (= attr-uuid (id/extract %)) %)
                    (concat (:attributes entity) (core/audit-ref-attrs entity)))]
     (when (and attr (:active attr))
@@ -103,8 +102,7 @@
            final-entity-id (id/extract entity)]
       (if (empty? remaining-steps)
         (let [final-entity (core/get-entity model final-entity-id)
-              ;; dangling attr drops the rule, never throw — same safe lookup as
-              ;; compile-ref-condition
+              ;; dangling attr drops the rule, never throw — same safe lookup as compile-ref-condition
               final-attr (when final-entity
                            (some #(when (= attr-uuid (id/extract %)) %)
                                  (concat (:attributes final-entity)
@@ -154,8 +152,7 @@
       {:id (:id guard)
        :operation (:operation guard)
        :conditions (vec compiled)}
-      ;; drop must be LOUD — a dropped :write/:delete guard fail-closes (1=0)
-      ;; and writes silently no-op
+      ;; drop must be LOUD — a dropped :write/:delete guard fail-closes and writes silently no-op
       (do
         (log/warn {:id ::guard-dropped
                    :data {:action :dropped
@@ -223,9 +220,7 @@
         broken)))
 
 (defn assert-guards-compile!
-  "Throws when `candidate` breaks a guard it authors itself; a guard some OTHER
-   dataset authors only warns — a stale copy of a foreign entity must not hold
-   an unrelated deployment hostage."
+  "Throws when `candidate` breaks a guard it authors itself; only warns for a guard another dataset authors."
   [model candidate]
   (let [broken (broken-guards model)
         {own true foreign false} (group-by #(declares-guard? candidate %) broken)]

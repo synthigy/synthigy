@@ -14,6 +14,7 @@
   (:require
    [clojure.core.async :as async]
    [clojure.java.io :as io]
+   clojure.set
    [synthigy.log :as log]
    [synthigy.supervisor :as supervisor]
    [patcho.patch :as patch]
@@ -22,11 +23,14 @@
    [synthigy.dataset.delta :as delta]
    [synthigy.dataset.id :as id :refer [defentity defrelation defdata]]
    [synthigy.dataset.key :as dk]
+   [synthigy.dataset.sql.naming :refer [entity->table-name]]
    [synthigy.dataset.sql.schema :as sql-schema]
+   synthigy.iam.keys
    synthigy.dataset.operations
    [synthigy.dataset.patch.model :as model]
-   synthigy.dataset.projection
+   [synthigy.dataset.projection :as projection]
    [synthigy.db :as db :refer [*db*]]
+   [synthigy.db.sql :as sql]
    [synthigy.env :as env]
    [synthigy.transit :refer [<-transit ->transit]]
    [version-clj.core :as version]))
@@ -37,6 +41,9 @@
 
 (defdata :dataset/id
   :euuid #uuid "4ab2fe4f-9b74-4a23-8441-60b58be08e7e" :xid "AE18CKqkpn1txrdJxhU9v5")
+
+(defdata :synthigy/id
+  :euuid #uuid "c5c85417-0aef-4c44-9e86-8090647d6378" :xid "RRY5JcXr8MwppjvK9bhp7Z")
 
 (defdata :dataset.model/version-1.0.5
   :euuid #uuid "5e9704b0-cc4a-4763-96a7-5c11da57c05e" :xid "CgTka9ViKjvcSz1hmuaC53")
@@ -165,13 +172,7 @@
 ;;; ============================================================================
 
 (defn latest-deployed-version
-  "Gets the latest deployed version for a dataset.
-
-  Returns a map with :name (version string), :model, and ID (via id/key).
-  Compatible with patcho versioning system.
-
-  Note: Currently returns the in-memory model since we don't have
-  per-dataset versioning yet. The dataset-id is ignored."
+  "Latest deployed version (:name, :model, id) of a dataset, or nil."
   [dataset-id]
   (try
     (->
@@ -188,10 +189,6 @@
                     :deployed_on nil
                     :dataset [{:selections {(id/key) nil
                                             :name nil}}]}
-                   ;; Order by `deployed_on` — the meta-model entities are not
-                   ;; row-stamp-audited, so they have no `modified_on` column;
-                   ;; `deployed_on` is also the semantically correct cursor for
-                   ;; "latest deployed version".
                    :args {:deployed {:_eq true}
                           :_order_by {:deployed_on :desc}
                           :_limit 1}}]})
@@ -200,13 +197,7 @@
      (as-> v (if (and v (string? (:model v)))
                (update v :model <-transit)
                v)))
-    ;; Legacy (pre-`deployed_on`) meta-model: the Dataset Version entity does
-    ;; not yet define the `deployed_on` attribute, so this selection is invalid.
-    ;; That attribute is added by the `:synthigy.dataset/model` patches — but
-    ;; those patches read THIS function to decide the installed version, a
-    ;; chicken-and-egg. Returning nil makes installed-version resolve to "0",
-    ;; so the model patches deploy forward and add `deployed_on`. Self-heals on
-    ;; first boot of an old dataset; subsequent boots take the fast path above.
+    ;; legacy meta-model without deployed_on: nil lets the model patches deploy forward
     (catch clojure.lang.ExceptionInfo e
       (if (= "UNKNOWN_ATTRIBUTE" (:code (ex-data e)))
         (do (log/warn {:id ::legacy-version-unreadable
@@ -216,9 +207,7 @@
         (throw e)))))
 
 (defn deployed-versions
-  "Drift stamp — `{dataset-id {:version :deployed-at}}` for every dataset's
-   latest deployed version. Public, cheap; consumed by `/schema`,
-   generated `schema.json` and `/.well-known/synthigy`."
+  "Drift stamp — `{dataset-id {:version :deployed-at}}` for every dataset's latest deployed version."
   []
   (model/deployed-versions))
 
@@ -280,28 +269,15 @@
 
   (:model version)
 
-  (spit "resources/dataset/dataset.json"
+  (spit "resources/dataset/synthigy.json"
         (synthigy.transit/->transit
          (->
-          (latest-deployed-version (id/data :dataset/id))
-          (assoc-in [:dataset :euuid] (id/data :dataset/id :euuid))
-          (assoc-in [:dataset :xid] (id/data :dataset/id :xid)))))
-  (spit "resources/dataset/iam.json"
-        (synthigy.transit/->transit
-         (->
-          (latest-deployed-version (id/data :iam/id))
-          (assoc-in [:dataset :euuid] (id/data :iam/id :euuid))
-          (assoc-in [:dataset :xid] (id/data :iam/id :xid))))))
+          (latest-deployed-version (id/data :synthigy/id))
+          (assoc-in [:dataset :euuid] (id/data :synthigy/id :euuid))
+          (assoc-in [:dataset :xid] (id/data :synthigy/id :xid))))))
 
 (defn adapt-model-to-provider
-  "Transform model to match current ID provider format.
-
-  When loading models from resources (dataset.json, iam.json), they are stored
-  in EUUID format. After XID migration, the system uses XID format.
-  This function transforms the model to match the active provider.
-
-  Note: For well-known entities (defentity registrations), XIDs are stable
-  and derived from code, so transformation is deterministic."
+  "Transform model to match the current ID provider format."
   [model]
   (let [model-key (try
                     (if (uuid? (first (keys (:entities model))))
@@ -311,17 +287,7 @@
     (model/transform-model model model-key (id/key))))
 
 (defn <-resource
-  "Load a model from classpath resource and adapt to current ID provider format.
-
-  Resource models are stored in EUUID format. This function:
-  1. Loads and parses the transit-encoded model
-  2. Transforms it to match the current ID provider (euuid or xid)
-
-  Args:
-    path - Resource path (e.g., \"dataset/dataset.json\", \"dataset/iam.json\")
-
-  Returns:
-    Model adapted to current provider format"
+  "Load a transit-encoded model resource adapted to the current ID provider."
   [path]
   (letfn [(adjust-id [{:keys [euuid xid]
                        :as data}]
@@ -339,29 +305,37 @@
       (adjust-id version)
       (update version :dataset adjust-id))))
 
-(defn current-dataset-version
-  "Returns the dataset meta-model from resources/dataset/dataset.json,
-  adapted to current ID provider format."
+(defn current-synthigy-version
+  "The Synthigy system model (resources/dataset/synthigy.json), adapted to the current ID provider."
   []
-  (<-resource "dataset/dataset.json"))
+  (<-resource "dataset/synthigy.json"))
+
+(defn bootstrap-version
+  "Synthigy model without RLS, for compiling the meta tables before the global model exists."
+  []
+  (update (current-synthigy-version) :model
+          (fn [model]
+            (reduce #(core/set-entity %1 (update %2 :configuration dissoc :rls))
+                    model
+                    (core/get-entities model)))))
+
+(defn register-reference-types!
+  "Register the user/group/role attribute types; must run before any model carrying one is mounted."
+  []
+  (doseq [[type-name entity-key] [["user" :iam/user]
+                                  ["group" :iam/user-group]
+                                  ["role" :iam/user-role]]]
+    (core/register-reference-type!
+     type-name (id/entity entity-key)
+     {:table-fn #(entity->table-name
+                  (or (core/get-entity (deployed-model) (id/entity entity-key))
+                      (core/get-entity (:model (current-synthigy-version)) (id/entity entity-key))))})))
 
 (comment
-  (<-resource "dataset/dataset.json")
-  (def new-dataset-model
-    (synthigy.dataset.patch.model/transform-model
-     (:model (<-transit (slurp (io/resource "dataset/dataset.json"))))
-     :euuid
-     :xid))
-  (def new-dataset-model2 new-dataset-model)
-  (= new-dataset-model)
-
   (binding [id/*provider* (id/->NanoIDProvider)]
-    (<-resource "dataset/dataset.json"))
+    (<-resource "dataset/synthigy.json"))
   (binding [id/*provider* (id/->NanoIDProvider)]
-    (spit "resources/dataset/iam.json" (synthigy.transit/->transit (<-resource "dataset/iam.json"))))
-  (binding [id/*provider* (id/->NanoIDProvider)]
-    (spit "resources/dataset/dataset.json" (synthigy.transit/->transit (<-resource "dataset/dataset.json")))
-    (spit "resources/dataset/iam.json" (synthigy.transit/->transit (<-resource "dataset/iam.json")))))
+    (spit "resources/dataset/synthigy.json" (synthigy.transit/->transit (<-resource "dataset/synthigy.json")))))
 
 (id/entity-id-for-key :dataset/dataset :euuid)
 
@@ -370,19 +344,7 @@
 ;;; ============================================================================
 
 (defn normalize-selection
-  "Normalize a user-friendly selection into the internal format
-  expected by selection->schema.
-
-  Normalizes keys to snake_case (kebab-case and camelCase accepted).
-
-  Supports shorthand syntax:
-  - nil / true              → nil (include field)
-  - [:name :email]          → {:name nil :email nil}
-  - {:roles {:name nil}}    → {:roles [{:selections {:name nil}}]}
-  - {:roles [:name]}        → {:roles [{:selections {:name nil}}]}
-  - {:roles {:selections {:name nil} :args {...}}} → wraps in vector
-
-  Existing internal format [{:selections {...}}] passes through unchanged."
+  "Normalize a user-friendly selection into the internal format selection->schema expects."
   [selection]
   (cond
     (or (nil? selection) (true? selection))
@@ -393,8 +355,6 @@
     (normalize-selection (zipmap selection (repeat nil)))
 
     ;; Mixed vector — keywords and maps together
-    ;; [:name :active {:created-by {:name nil}} :created-on]
-    ;; → {:name nil :active nil :created-by {:name nil} :created-on nil}
     (and (vector? selection)
          (every? #(or (keyword? %) (map? %)) selection))
     (normalize-selection
@@ -449,127 +409,61 @@
 ;;; Database Operations (Protocol Delegation)
 ;;; ============================================================================
 
-;; These functions delegate to the database-specific protocol implementations
-;; defined in synthigy.db/ModelQueryProtocol
-
 (defn sync-entity
-  "Sync entity takes dataset entity id and data and synchronizes DB with
-  current state. This includes inserting/updating new records and relations
-  as well as removing relations that were previously linked with input data
-  and currently are not.
-
-  entity-id can be:
-  - A keyword like :iam/user (auto-resolved via id/entity)
-  - A UUID directly
-  - A string XID directly
-
-  Empty input (nil, `[]`, or `{}`) is a NO-OP — it returns `[]` and writes
-  nothing. Otherwise a nil/empty map would be turned into `{:tmp/id …}` deep in
-  `analyze-data` and persisted as a phantom record with all defaults."
+  "Upserts records and relations, unlinking relations the input no longer lists; empty input is a no-op."
   [entity-id data]
   (if (or (nil? data) (and (coll? data) (empty? data)))
     []
     (db/sync-entity *db* (id/entity entity-id) data)))
 
 (defn stack-entity
-  "Stack takes dataset entity id and data to stack input data on top of
-  current DB state.
-
-  entity-id can be a keyword (auto-resolved), UUID, or string.
-
-  Empty input (nil, `[]`, or `{}`) is a NO-OP — see `sync-entity`."
+  "Stacks input data on top of current DB state; empty input is a no-op."
   [entity-id data]
   (if (or (nil? data) (and (coll? data) (empty? data)))
     []
     (db/stack-entity *db* (id/entity entity-id) data)))
 
 (defn slice-entity
-  "Slice takes dataset entity id and data to slice current DB state based
-  on input data effectively deleting relations between entities.
-
-  entity-id can be a keyword (auto-resolved), UUID, or string."
+  "Deletes the relations between entities that match args."
   [entity-id args selection]
   (db/slice-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn get-entity
-  "Takes dataset entity id, arguments to pinpoint target row and selection
-  that specifies which attributes and relations should be returned.
-
-  entity-id can be a keyword (auto-resolved), UUID, or string."
+  "Returns the one row `args` pinpoints, shaped by `selection`."
   [entity-id args selection]
   (db/get-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn get-entity-tree
-  "Takes dataset entity id, root record and constructs tree based 'on'.
-  Selection specifies which attributes and relations should be returned.
-
-  entity-id can be a keyword (auto-resolved), UUID, or string."
+  "Builds the tree below `root` along the `on` recursion."
   [entity-id root on selection]
   (db/get-entity-tree *db* (id/entity entity-id) root on (normalize-selection selection)))
 
-;; Wire-arg normalization at the protocol entry. Backends expect the
-;; snake-case meta-key form `:_order_by` — `dk/normalize-keys-deep` resolves
-;; any inbound spelling to it via `preserve-prefix`. Callers that hand in
-;; kebab meta-keys (embedded/REPL/SDK) would otherwise have `_order_by` (and
-;; siblings `_limit`, `_offset`, `_where`, `_join`, `_distinct`, `_count`,
-;; `_agg`) sneak past the fused EXISTS-builder's `meta-keys` check in
-;; postgres/fused.clj and get treated as filter predicates, silently
-;; dropping rows. Idempotent — already-normalized args pass through.
-;;
-;; The `selection` gets the same treatment via `normalize-selection` — it
-;; carries model keys too (attribute names AND the nested relation `:args`/
-;; `_where` inside relation configs), and `selection->schema` validates them
-;; by EXACT match against the schema. Normalizing args but not the selection
-;; is why a kebab where key worked at the top level but not inside a relation
-;; pull or a projection. Both are model-key surfaces; the server owns their
-;; normalization so clients can send idiomatic kebab everywhere. Idempotent.
-
 (defn search-entity
-  "Takes dataset entity id, arguments to pinpoint target rows and selection
-  that specifies which attributes and relations should be returned.
-
-  entity-id can be a keyword (auto-resolved), UUID, or string."
+  "Returns the rows matching `args`, shaped by `selection`."
   [entity-id args selection]
   (db/search-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn search-entity-tree
-  "Takes dataset entity id, arguments to pinpoint target rows based 'on'
-  recursion and selection that specifies which attributes and relations
-  should be returned.
-
-  entity-id can be a keyword (auto-resolved), UUID, or string."
+  "Returns rows matching `args` with their ancestors along the `on` recursion."
   [entity-id on args selection]
   (db/search-entity-tree *db* (id/entity entity-id) on (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn purge-entity
-  "Find all records that match arguments, delete found records and return
-  deleted information based on selection input.
-
-  entity-id can be a keyword (auto-resolved), UUID, or string."
+  "Deletes every row matching `args` and returns them shaped by `selection`."
   [entity-id args selection]
   (db/purge-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
 
 (defn delete-entity
-  "Deletes entity records. `data` is a unique-key map (single row) or a
-  vector of xid strings (multirow, one transaction).
-
-  entity-id can be a keyword (auto-resolved), UUID, or string."
+  "Deletes by a unique-key map (one row) or a vector of xid strings (one transaction)."
   [entity-id data]
   (db/delete-entity *db* (id/entity entity-id) (cond-> data (map? data) dk/normalize-keys)))
 
 ;;; ============================================================================
 ;;; Dataset Lifecycle (deploy / recall / destroy)
 ;;; ============================================================================
-;;;
-;;; Top-level model-change emits — these are what the cockpit's System lens
-;;; surfaces as "who deployed what, when". The backend's lower-level
-;;; `synthigy.dataset.postgres` schema-diff signals still fire underneath
-;;; for the per-table detail; these are the *headline* events.
 
-(defn- version-summary
-  "Pull the identifying bits of a version map for log payloads. Vary
-   shape — some callers pass a model map directly, others a deploy
-   envelope `{:model …}`."
+(defn version-summary
+  "Identifying bits of a version (or a `{:model …}` envelope) for log payloads."
   [v]
   (let [m (or (:model v) v)]
     (cond-> {}
@@ -603,12 +497,25 @@
           (not= (persisted-model (:model version))
                 (persisted-model (:model stored)))))))
 
+(defn log-deploy-changes!
+  "Log what deploying `version` changes against the global model — the deploy drawer's diff, for every deploy path."
+  [version base]
+  (try
+    (let [last-deployed (some-> (:dataset version) id/extract latest-deployed-version)
+          changes (projection/deploy-changes (deployed-model) (:model version) last-deployed)
+          cap #(vec (take 100 %))]
+      (log/info {:id ::deploy-changes
+                 :data (-> (merge base changes)
+                           (update :entities cap)
+                           (update :relations cap))}
+                (str "Deploy changes " (pr-str (:summary changes)))))
+    (catch Throwable e
+      (log/warn {:id ::deploy-changes-failed
+                 :data (assoc base :error (ex-message e))}
+                "Could not compute deploy changes"))))
+
 (defn deploy!
-  "Deploy a dataset version. Creates/updates schema, tables, etc.
-   Emits `:synthigy.dataset/deploying` before and
-   `:synthigy.dataset/deployed` (success) or `:synthigy.dataset/deploy-failed`
-   (failure) after — both carry the actor xid (when IAM is on) and a
-   version summary so the System lens can answer 'who deployed what'."
+  "Deploy a dataset version: creates/updates schema and tables, logging deploying/deployed/deploy-failed."
   [version]
   (let [actor   (log/current-principal-xid)
         summary (version-summary version)
@@ -618,7 +525,9 @@
               (str "Deploying dataset version "
                    (or (:version-name summary) (:version-xid summary) "")))
     (try
-      (let [result (core/deploy! *db* (update version :model persisted-model))]
+      (let [version (update version :model persisted-model)
+            _ (log-deploy-changes! version base)
+            result (core/deploy! *db* version)]
         (log/info {:id ::deployed
                    :data (assoc base :action :deployed)}
                   (str "Deployed dataset version "
@@ -631,10 +540,7 @@
         (throw e)))))
 
 (defn recall!
-  "Recall (delete) a specific dataset version. Handles schema rollback,
-   orphaned table cleanup, and global model rebuild.
-   Emits `:synthigy.dataset/recalling` / `:synthigy.dataset/recalled` for
-   System-lens visibility."
+  "Recall (delete) a dataset version, rolling back its schema and rebuilding the global model."
   [version]
   (let [actor   (log/current-principal-xid)
         summary (version-summary version)
@@ -644,8 +550,6 @@
         stored  (when id
                   (get-entity :dataset/version {(id/key) id} {(id/key) nil :deployed nil}))]
     (if (and stored (not (:deployed stored)))
-      ;; Never deployed — nothing is mounted, so drop the record and skip
-      ;; schema rollback entirely.
       (do (delete-entity :dataset/version {(id/key) id})
           (log/info {:id ::recalled
                      :data (assoc base :action :recalled :deployed? false)}
@@ -671,10 +575,7 @@
             (throw e)))))))
 
 (defn destroy!
-  "Destroy a dataset — recalls all versions and removes all dataset data.
-   Nuclear delete: tables, schema, versions, dataset record — all gone.
-   This emit is at WARN level since destruction is operationally significant
-   and should stand out in the System lens."
+  "Destroy a dataset — recalls all versions and removes tables, schema, versions and the dataset record."
   [dataset]
   (let [actor (log/current-principal-xid)
         base  (cond-> {:subject :dataset
@@ -696,41 +597,99 @@
                     e)
         (throw e)))))
 
+(defn model-ids
+  "Active and all entity, relation and attribute ids of a model, for before/after comparison."
+  [model]
+  (let [active? #(not (false? (:active %)))
+        entities (core/get-entities model)
+        attr-ids (fn [pred] (set (for [e entities a (:attributes e) :when (pred a)]
+                                   [(id/extract e) (id/extract a)])))]
+    {:entities (set (map id/extract (filter active? entities)))
+     :relations (set (map id/extract (filter active? (core/get-relations model))))
+     :attributes (attr-ids active?)
+     :all-attributes (attr-ids any?)}))
+
+(defn retire-datasets!
+  "Remove the legacy Datasets dataset once Synthigy claims all it held — rows only, no DDL; no-op when absent."
+  []
+  (try
+    (when-let [datasets (get-entity :dataset/dataset {(id/key) (id/data :dataset/id)}
+                                    {(id/key) nil
+                                     :name nil
+                                     :versions [{:selections {(id/key) nil :name nil}}]})]
+      (let [base {:subject :dataset :dataset-name (:name datasets) :versions (mapv :name (:versions datasets))}
+            global (deployed-model)
+            version-ids (set (map id/extract (:versions datasets)))
+            exclusive (concat (core/find-exclusive-entities global version-ids)
+                              (core/find-exclusive-relations global version-ids))
+            {blocking true orphaned false} (group-by #(not (false? (:active %))) exclusive)
+            label #(or (:name %) (str (:from-label %) "->" (:to-label %)))
+            synthigy (:model (latest-deployed-version (id/data :synthigy/id)))
+            uncovered (when synthigy
+                        (for [e (some-> (latest-deployed-version (id/data :dataset/id)) :model core/get-entities)
+                              a (:attributes e)
+                              :when (not (false? (:active a)))
+                              :let [a' (some #(when (= (id/extract a) (id/extract %)) %)
+                                             (:attributes (core/get-entity synthigy (id/extract e))))]
+                              :when (or (nil? a') (false? (:active a')))]
+                          (str (:name e) "." (:name a))))]
+        (cond
+          (nil? synthigy)
+          (log/warn {:id ::datasets-retire-skipped :data (assoc base :action :skipped :reason :synthigy-not-deployed)}
+                    "Datasets kept: Synthigy model not deployed")
+
+          (or (seq blocking) (seq uncovered))
+          (log/warn {:id ::datasets-retire-skipped
+                     :data (assoc base :action :skipped :reason :not-covered
+                                  :exclusive (mapv label blocking) :attributes (vec uncovered))}
+                    "Datasets kept: Synthigy does not cover everything it holds")
+
+          :else
+          (let [before (model-ids global)]
+            (doseq [vid version-ids]
+              (delete-entity :dataset/version {(id/key) vid}))
+            (delete-entity :dataset/dataset {(id/key) (id/data :dataset/id)})
+            (core/reload *db*)
+            (let [after (model-ids (deployed-model))
+                  lost (into {} (for [k [:entities :relations :attributes]
+                                      :let [d (clojure.set/difference (get before k) (get after k))]
+                                      :when (seq d)]
+                                  [k (vec d)]))
+                  data (cond-> (assoc base :action :retired
+                                      :orphan-tables (mapv label orphaned)
+                                      :orphan-columns (vec (clojure.set/difference (:all-attributes before)
+                                                                                   (:all-attributes after))))
+                         (seq lost) (assoc :deactivated lost))]
+              (if (seq lost)
+                (log/warn {:id ::datasets-retired :data data} "Retired Datasets; some objects went inactive")
+                (log/info {:id ::datasets-retired :data data} "Retired Datasets; schema kept as is")))))))
+    ;; never block boot — the next boot retries
+    (catch Throwable e
+      (log/error! {:id ::datasets-retire-failed
+                   :msg "Retiring Datasets failed; retried on next boot"
+                   :data {:action :retiring :subject :dataset}}
+                  e))))
+
 ;;; ============================================================================
 ;;; Sugar API
 ;;; ============================================================================
-;; Idiomatic Clojure interface with:
-;; - kebab-case output by default
-;; - Selection shorthand (see normalize-selection)
-;; - Key normalization on args and data (kebab/camel → snake_case)
-;; - Schema-aware output transformation (JSON values untouched)
-
 (def ^:private default-key-format :kebab)
 
-(defn- resolve-key-fn
-  "Resolve key-fn from opts. Returns nil for snake (no transform needed)."
+(defn resolve-key-fn
+  "Resolve key-fn from opts; nil for snake (no transform)."
   [opts]
   (let [fmt (get opts :key-format default-key-format)]
     (when (not= fmt :snake)
       (dk/format->key-fn fmt))))
 
-(defn- selection-sub-map
-  "Pull the nested selection map out of a relation-style selection value.
-   Normalized form is [{:selections {...} :args ...}]."
+(defn selection-sub-map
+  "Pull the nested selection map out of a relation-style selection value."
   [v]
   (when (and (vector? v) (seq v) (map? (first v)))
     (:selections (first v))))
 
-(defn- result-key->info
-  "Build a map from result-key → {:original-k k :sub-sel ...} for a
-  normalized selection. Each relation-style entry contributes one
-  result-key (alias if present, else original key); scalar entries
-  contribute their key directly. Used to bridge selection (keyed by
-  schema names) and result data (keyed by aliases when present).
-
-  Aliases supplied as strings are keywordized so the result-key set
-  matches what the JSON parser produces (every JSON key becomes a
-  keyword via `synthigy.json/read-str`)."
+(defn result-key->info
+  "Map result-key (alias or schema key) → {:original-k k :sub-sel ...} for a normalized selection."
   [selection]
   (reduce-kv
    (fn [m k v]
@@ -745,21 +704,7 @@
    selection))
 
 (defn strip-to-selection
-  "Trim a query result so it contains only the keys the caller actually
-   asked for (plus the id key for row identity).
-
-   The query engine auto-includes recursions like :father/:mother as empty
-   maps even when the caller didn't request them. Callers who write
-   minimal selections expect minimal responses, so we filter those away
-   here — recursively, so nested records also honor their sub-selection.
-
-   Honors :alias on relation entries: a result key may be an alias string,
-   in which case relation metadata is looked up by the original schema key.
-
-   Expects `selection` in the normalized internal format (see
-   normalize-selection). Snake_case keys throughout.
-
-   Non-map / nil data passes through untouched."
+  "Trim a query result, recursively, to the keys the normalized `selection` asked for plus the id key."
   [entity-id selection data]
   (cond
     (nil? data) nil
@@ -794,12 +739,8 @@
        {}
        data))))
 
-(defn- transform-output
-  "Shape a query result for return to the caller:
-   1. Strip keys that weren't in the user's selection (keeps id key)
-   2. Apply key-format (kebab/camel) — recurses into nested references
-
-   Operates on single maps or sequences. Pass-through for nil and scalars."
+(defn transform-output
+  "Strip a result to the selection, then apply the key format."
   [entity-id selection key-fn data]
   (when data
     (let [stripped (strip-to-selection entity-id selection data)]
@@ -810,14 +751,7 @@
         :else stripped))))
 
 (defn search
-  "Search for entities matching args.
-
-  Returns results with kebab-case keys by default.
-  Args and selection accept kebab-case (normalized to snake_case).
-  Selection supports shorthand syntax (see normalize-selection).
-
-  Options:
-    :key-format - :kebab (default), :snake, :camel"
+  "Search for entities matching args; kebab-case keys by default (`:key-format`)."
   ([entity-id args selection]
    (search entity-id args selection nil))
   ([entity-id args selection opts]
@@ -830,14 +764,7 @@
                                       sel)))))
 
 (defn get-one
-  "Get a single entity by unique constraint.
-
-  Returns result with kebab-case keys by default.
-  Args and selection accept kebab-case (normalized to snake_case).
-  Selection supports shorthand syntax (see normalize-selection).
-
-  Options:
-    :key-format - :kebab (default), :snake, :camel"
+  "Get a single entity by unique constraint; kebab-case keys by default (`:key-format`)."
   ([entity-id args selection]
    (get-one entity-id args selection nil))
   ([entity-id args selection opts]
@@ -850,13 +777,7 @@
                                    sel)))))
 
 (defn sync
-  "Sync (upsert) entity data.
-
-  Returns synced record with kebab-case keys by default.
-  Data keys accept kebab-case (normalized to snake_case).
-
-  Options:
-    :key-format - :kebab (default), :snake, :camel"
+  "Sync (upsert) entity data; kebab-case keys by default (`:key-format`)."
   ([entity-id data]
    (sync entity-id data nil))
   ([entity-id data opts]
@@ -866,13 +787,7 @@
                        (sync-entity entity-id (dk/normalize-keys data))))))
 
 (defn stack
-  "Stack data on top of current state.
-
-  Returns stacked record with kebab-case keys by default.
-  Data keys accept kebab-case (normalized to snake_case).
-
-  Options:
-    :key-format - :kebab (default), :snake, :camel"
+  "Stack data on top of current state; kebab-case keys by default (`:key-format`)."
   ([entity-id data]
    (stack entity-id data nil))
   ([entity-id data opts]
@@ -882,17 +797,7 @@
                        (stack-entity entity-id (dk/normalize-keys data))))))
 
 (defn delete
-  "Delete entity records.
-
-  `data` is a unique-key map (single row, boolean result) or a vector of
-  xid strings (multirow, returns the count deleted) — see delete-entity.
-
-  Returns deleted record with kebab-case keys by default.
-  Map data keys accept kebab-case (normalized to snake_case); a vector of
-  xids is passed through as-is.
-
-  Options:
-    :key-format - :kebab (default), :snake, :camel"
+  "Delete by a unique-key map (boolean) or a vector of xid strings (count deleted)."
   ([entity-id data]
    (delete entity-id data nil))
   ([entity-id data opts]
@@ -902,14 +807,7 @@
      (transform-output eid nil key-fn (delete-entity entity-id data)))))
 
 (defn slice
-  "Slice relations from entity.
-
-  Returns result with kebab-case keys by default.
-  Args and selection accept kebab-case (normalized to snake_case).
-  Selection supports shorthand syntax (see normalize-selection).
-
-  Options:
-    :key-format - :kebab (default), :snake, :camel"
+  "Slice relations from entity; kebab-case keys by default (`:key-format`)."
   ([entity-id args selection]
    (slice entity-id args selection nil))
   ([entity-id args selection opts]
@@ -921,14 +819,7 @@
                                      (normalize-selection selection))))))
 
 (defn purge
-  "Find and delete matching records, return deleted data.
-
-  Returns result with kebab-case keys by default.
-  Args and selection accept kebab-case (normalized to snake_case).
-  Selection supports shorthand syntax (see normalize-selection).
-
-  Options:
-    :key-format - :kebab (default), :snake, :camel"
+  "Find and delete matching records, returning them; kebab-case keys by default (`:key-format`)."
   ([entity-id args selection]
    (purge entity-id args selection nil))
   ([entity-id args selection opts]
@@ -946,32 +837,20 @@
 ;;; ============================================================================
 
 (defn start
-  "Initialize dataset system: load model and set up event channels.
-
-  This is the unified startup function.
-  It orchestrates:
-  1. ID provider initialization (based on user's stored format choice)
-  2. Delta pipe initialization (async channels for change notifications)
-  3. Model versioning (apply patches for dataset meta-model)
-  4. Model loading from __deploy_history
-  5. Service user binding (*SYNTHIGY*)
-
-  This should be called during application startup."
+  "Initialize the dataset system: delta pipe, model load, then dataset and meta-model patches."
   ([]
    (log/info {:id ::initializing} "Initializing Datasets")
 
    (delta/init!)
 
-;; Reload model from database (after patches are applied)
+   (register-reference-types!)
    (core/reload *db*)
 
-;; Apply dataset feature patches (database transforms)
    (supervisor/progress-patching! :synthigy/dataset
                                   (patch/deployed-version :synthigy/dataset)
                                   (patch/version :synthigy/dataset))
    (patch/level! :synthigy/dataset)
 
-;; Apply dataset model patches (meta-model deployment)
    (supervisor/progress-patching! :synthigy.dataset/model
                                   (patch/deployed-version :synthigy.dataset/model)
                                   (patch/version :synthigy.dataset/model))
@@ -979,25 +858,50 @@
    nil))
 
 (defn stop
-  "Stop dataset system: tear down the delta registry and clean up resources.
-
-  This should be called during application shutdown to properly clean up:
-  1. Close every delta-subscriber channel (delta/shutdown!)
-  2. Drop the subscriber registry
-  3. Clear model state
-
-  Without this, async go-loops subscribing to delta events will hang
-  waiting for channel operations that never complete."
+  "Stop the dataset system; without it delta-subscriber go-loops hang."
   []
   (log/info {:id ::stopping :data {:action :stopping :subject :dataset}} "Stopping Datasets")
 
-;; Tear down the delta pipe. Drainer ownership has moved to
-;; :synthigy/subscriptions.<backend>; its :stop hook stops the drainer
-;; thread before this code runs.
   (delta/shutdown!)
 
   (log/info {:id ::stopped :data {:action :stopped :subject :dataset}} "Datasets stopped")
   nil)
+
+(defn mount-synthigy-schema!
+  "Bring the tables in line with synthigy.json without recording a version."
+  []
+  (let [version (current-synthigy-version)
+        global (or (deployed-model)
+                   (core/map->ERDModel {:entities {} :relations {}}))]
+    (core/mount *db* (update version :model #(core/with-merged-config global %)))
+    (core/reload *db* version)))
+
+(defn fix-deployed-on!
+  "Backfill dataset_version.deployed_on from modified_on where it is missing."
+  []
+  (let [table (entity->table-name (core/get-entity (deployed-model) (id/entity :dataset/version)))]
+    (when (pos? (:n (sql/execute-one! [(format "select count(*) as n from \"%s\" where deployed_on is null" table)])))
+      (sql/execute-one! [(format "update \"%s\" set deployed_on = modified_on where deployed_on is null" table)])
+      (log/info {:id ::deployed-on-backfilled :data {:action :patching :subject :deployed-on}}
+                "Backfilled deployed_on from modified_on"))))
+
+(patch/current-version :synthigy.dataset/model "1.0.6")
+
+;; never "0" once Synthigy 0.90.0+ is deployed — the legacy step would rerun on every boot
+(patch/installed-version
+ :synthigy.dataset/model
+ (if (some-> (latest-deployed-version (id/data :synthigy/id)) :name str (version/newer-or-equal? "0.90.0"))
+   "1.0.6"
+   (or (some-> (latest-deployed-version (id/data :dataset/id)) :name str)
+       "0")))
+
+(patch/upgrade :synthigy.dataset/model
+               "1.0.6"
+               (log/info {:id ::legacy-meta-upgrading
+                          :data {:action :upgrading :subject :dataset-model :version "1.0.6"}}
+                         "Upgrading legacy meta-model tables to the Synthigy model")
+               (mount-synthigy-schema!)
+               (fix-deployed-on!))
 
 (patch/current-version :synthigy/dataset "1.6.0")
 
@@ -1017,11 +921,7 @@
                  (core/reload *db*)))
 
 (defn can-migrate-to-xid?
-  "Check if system can migrate to XID format.
-
-  Prerequisites:
-  - Database has xid columns on all entity tables
-  - All records have xid values populated"
+  "Check if the system can migrate to XID format."
   []
   (try
     ; (model/verify-xid-migration)

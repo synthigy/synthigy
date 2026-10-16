@@ -9,8 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.page.status
-  "User-facing terminal status page for interactive OAuth flows with no client
-   redirect to bounce to. See docs/core/synthigy/oauth/page/status.md."
+  "Terminal status page for interactive OAuth flows with no client redirect."
   (:require
    [clojure.string :as str]
    [hiccup2.core :refer [html]]

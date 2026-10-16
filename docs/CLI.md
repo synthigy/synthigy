@@ -162,20 +162,6 @@ Flags:
       --keep int   Number of most recent releases to keep (default 2)
 ```
 
-### `synthigy console`
-
-Open the portal: setup, health and configuration of the instance on this machine
-
-```
-synthigy console [flags]
-```
-
-Flags:
-
-```
-  -p, --print   Print the URL only, don't open a browser
-```
-
 ### `synthigy down`
 
 Stop the engine and the portal started by 'up'
@@ -205,7 +191,7 @@ Flags:
 ```
       --api stringArray        audience this client may request a token for (repeatable, confidential only)
       --grant stringArray      allowed grant type, e.g. client_credentials (repeatable)
-      --id string              client id (default: server-generated)
+      --id string              client id (required; the server does not generate one)
       --local                  go through the portal of the instance on this machine instead of a connected server
       --redirect stringArray   allowed redirect URI for authorization_code (repeatable)
       --role stringArray       grant this role to the service user (repeatable, confidential only)
@@ -272,6 +258,20 @@ Flags:
 ```
   -f, --follow      Keep printing as the log grows
   -n, --lines int   Number of trailing lines to print (default 200)
+```
+
+### `synthigy portal`
+
+Open the portal: setup, health and configuration of the instance on this machine
+
+```
+synthigy portal [flags]
+```
+
+Flags:
+
+```
+  -p, --print   Print the URL only, don't open a browser
 ```
 
 ### `synthigy pull`

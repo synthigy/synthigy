@@ -9,12 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.traffic
-  "Traffic metrics provider for the `traffic-stats` op — statistics at the
-   source (no per-request log event), PROVIDER pattern with a dev default
-   and durable backends taking over via classpath alias, multi-node correct
-   via node-tagged minute rows summed at read. Three layers: hot-path
-   `LongAdder` cells for the current minute, a `TrafficStore` receiving
-   periodic delta flushes, and `report` folding window queries across nodes."
+  "Traffic metrics provider for the `traffic-stats` op, counted at the source and flushed as node-tagged minute deltas."
   (:require
    [patcho.lifecycle :as lifecycle]
    [patcho.patch :as patch]
@@ -32,8 +27,7 @@
 ;;; ============================================================================
 
 (def hist-bounds
-  "Latency histogram upper bounds (ms). Durations above the last bound
-   count under :inf."
+  "Latency histogram upper bounds (ms); anything above the last counts under :inf."
   [1 2 5 10 25 50 100 250 500 1000 2500 5000])
 
 (defn bound-of [duration-ms]
@@ -51,7 +45,7 @@
   (query-window [this {:keys [from to]}]
     "Return delta rows with `:minute` in `[from,to]`, across all nodes. Never throws — returns [] on failure.")
   (traffic-health [this]
-    "Snapshot map describing store liveness; named `traffic-health` (not `health`) to avoid colliding with `LogStore/health`. Must not throw."))
+    "Snapshot map describing store liveness. Must not throw."))
 
 ;;; ============================================================================
 ;;; InMemoryTrafficStore — dev default; bounded 48h ring of summed cells
@@ -65,9 +59,7 @@
       (assoc :hist (merge-with + (:hist a) (:hist b)))))
 
 (defn row->cell
-  "Strip a delta/query-window row to a plain counter cell — every `merge-cell`
-   fold must use cells, never raw rows, or `merge-with +` corrupts
-   :node/:minute."
+  "Strip a row to a plain counter cell; `merge-cell` must fold cells, never raw rows."
   [row]
   (dissoc row :node :minute))
 
@@ -127,8 +119,7 @@
           (get minute))))
 
 (defn record!
-  "Count one completed request: ok/err by status (>= 400 = err, missing
-   status = ok) + latency histogram. Never throws."
+  "Count one completed request by status class and latency. Never throws."
   [status duration-ms]
   (try
     (let [cell (cell-for (minute-now))
@@ -157,8 +148,7 @@
     (reset! (:state *traffic-store*) {})))
 
 (defn drain-cell!
-  "sumThenReset every LongAdder in a cell — atomic per-adder drain. The
-   result is this minute's DELTA since the last flush."
+  "Drain a cell's adders into this minute's delta since the last flush."
   [cell]
   {:ok (.sumThenReset ^LongAdder (:ok cell))
    :err (.sumThenReset ^LongAdder (:err cell))
@@ -204,9 +194,7 @@
       (flush-deltas! *traffic-store* rows))))
 
 (defn start-flusher!
-  "Start the daemon scheduler that periodically drains cells into
-   `*traffic-store*`. Idempotent — a second call is a no-op while one is
-   already running."
+  "Start the daemon scheduler that drains cells into `*traffic-store*`; idempotent."
   []
   (when (compare-and-set! scheduler nil ::starting)
     (let [^ScheduledExecutorService ex
@@ -240,8 +228,7 @@
   (.format hh-mm (Instant/ofEpochMilli (* minute-epoch 60000))))
 
 (defn percentile-from-hist
-  "Nearest-rank percentile over a merged histogram: the upper bound of the
-   bucket containing rank ceil(p*n). nil when the histogram is empty."
+  "Nearest-rank percentile (bucket upper bound) over a merged histogram; nil when empty."
   [hist p]
   (let [n (reduce + 0 (vals hist))]
     (when (pos? n)
@@ -265,9 +252,7 @@
                        [minute (reduce (fn [acc r] (merge-cell acc (row->cell r))) {} rs)])))))
 
 (defn live-cell-snapshot
-  "Non-destructive peek (`.sum`, not `.sumThenReset`) of a hot-path cell,
-   in delta-row cell shape — safe to fold alongside durable rows without
-   disturbing what the flusher will drain later."
+  "Non-destructive `.sum` peek of a hot-path cell in delta-row cell shape."
   [cell]
   {:ok (.sum ^LongAdder (:ok cell))
    :err (.sum ^LongAdder (:err cell))
@@ -278,9 +263,7 @@
    :deltas-dropped (.sum ^LongAdder (:deltas-dropped cell))})
 
 (defn by-node-summary
-  "One summary row per node, requests/errors/etc summed across the whole window
-   and sorted by `:requests` descending; includes this node's still-open current
-   minute."
+  "One summary row per node over the window, busiest first, including this node's open minute."
   [rows now-m from-m to-m]
   (let [live-cell (when (<= from-m now-m to-m) (get @cells now-m))
         rows (cond-> rows
@@ -301,18 +284,14 @@
          vec)))
 
 (defn merge-open-minute
-  "Merge this node's still-open current-minute counters (a live peek, no
-   drain) on top of the summed-per-minute map so the chart stays current
-   without a flush on every request."
+  "Merge this node's still-open current minute (live peek) into the per-minute map."
   [by-minute now-m]
   (if-let [cell (get @cells now-m)]
     (update by-minute now-m (fnil merge-cell {}) (live-cell-snapshot cell))
     by-minute))
 
 (defn parse-instant
-  "Strict absolute-instant parse — nil for anything but a literal ISO-8601
-   timestamp; unlike `parse-time-ref`, never resolves durations against
-   wall-clock now."
+  "Strict ISO-8601 instant parse; never resolves durations against now."
   [s]
   (when (string? s) (try (Instant/parse (.trim ^String s)) (catch Throwable _ nil))))
 
@@ -329,9 +308,7 @@
   (str (Instant/ofEpochMilli (* minute-epoch 60000))))
 
 (defn report
-  "Query `*traffic-store*` for the window and fold into the traffic-stats report
-   shape; per-minute gap-filled buckets, `:window` is the actual
-   resolved-and-clamped range."
+  "Fold the window's `*traffic-store*` rows into the traffic-stats report shape."
   [{:keys [since until]}]
   (let [now-m (minute-now)
         [from to] (resolve-window since until)
@@ -369,10 +346,6 @@
                                  (percentile-from-hist h 0.95)]))
                             (range from-m (inc to-m)) minute-cells)}
       (seq by-node) (assoc :by-node by-node))))
-
-;;; ============================================================================
-;;; Module registration — DEV default; backends re-register the same key
-;;; ============================================================================
 
 (patch/current-version :synthigy/traffic "1.0.0")
 

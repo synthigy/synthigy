@@ -9,10 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.onboarding
-  "Admin-provisioned account onboarding — a confidential client mints a signed,
-   one-time, account-bound claim token (Auth0 \"tickets\" pattern) that the
-   invited person redeems with a first credential. See
-   docs/core/synthigy/oauth/onboarding.md."
+  "Admin-provisioned onboarding: one-time, account-bound claim tokens redeemed with a first credential."
   (:require
    [buddy.core.nonce :as nonce]
    [clojure.string :as str]
@@ -30,6 +27,7 @@
    [synthigy.log :as log]
    [synthigy.oauth.core :as core]
    [synthigy.oauth.federated.registry :as registry]
+   [synthigy.oauth.page.custom :as custom]
    [synthigy.oauth.page.login :as page.login]
    [synthigy.oauth.authentication :as auth])
   (:import
@@ -57,8 +55,7 @@
 (defn now-ms [] (System/currentTimeMillis))
 
 (defn provisioner
-  "The confidential, active client and the principal behind this request's
-   bearer, or nil."
+  "Confidential active client and principal behind the request's bearer, or nil."
   [request]
   (when-let [{:keys [principal claims]} (auth/authenticate-request request)]
     (let [client (some-> (:client_id claims) core/get-client)]
@@ -68,8 +65,7 @@
         {:client client :principal principal}))))
 
 (defn administers?
-  "Whether `principal` may update `user`: RBAC :update on User and the row
-   inside the principal's write scope."
+  "Whether `principal` may update `user`: RBAC :update on User and the row in its write scope."
   [principal user]
   (access/with-principal principal
     (and (access/entity-allows? (id/entity :iam/user) [:update])
@@ -86,8 +82,7 @@
 (defn kill-user-sessions!
   "Revoke every live OAuth session (and their DB-tracked tokens) of `user-xid`."
   [user-xid]
-  ;; :_join :inner is load-bearing — under the flat-LEFT default a bare
-  ;; predicated relation would match every active session in the system.
+  ;; :_join :inner is load-bearing — flat-LEFT would match every active session in the system.
   (doseq [{sid :id} (dataset/search-entity
                      (id/entity :oauth/session)
                      {:active {:_eq true}}
@@ -100,14 +95,12 @@
 (def ^:private deactivation-watcher-key ::deactivation-watcher)
 
 (defn user-still-inactive?
-  "Re-reads the CURRENT `active` flag rather than decoding the delta envelope's
-   :before/:after."
+  "Re-read the current `active` flag rather than decoding the delta envelope."
   [record-xid]
   (false? (:active (dataset/get-entity :iam/user {:xid record-xid} {:active nil}))))
 
 (defn start-deactivation-watcher!
-  "Subscribe to :iam/user deltas; when `active` reads false after an update,
-   kill that user's live sessions. Idempotent registration."
+  "Idempotently subscribe to :iam/user updates and kill the sessions of users left inactive."
   []
   (when-let [user-xid (some-> (id/entity :iam/user) str)]
     (delta/subscribe!
@@ -126,10 +119,7 @@
   (delta/unsubscribe! deactivation-watcher-key))
 
 (defn reset-account!
-  "Soft recycle: strip federated identities, null the password, and revoke
-   live sessions/tokens to lock out the current holder before re-onboarding.
-   Leaves `active` untouched — that flag is the owning client's data, not
-   this protocol's to flip."
+  "Soft recycle before re-onboarding: strip identities, null the password, kill sessions; never touches `active`."
   [user]
   (doseq [xid (user-identity-xids (:name user))]
     (dataset/delete-entity :id-federation/external-identity {:xid xid}))
@@ -140,8 +130,7 @@
             "Reset account for re-onboarding"))
 
 (defn issue-onboard-token!
-  "Stamp a fresh one-time nonce on the user and return the signed claim token;
-   regenerating the nonce invalidates any prior outstanding token."
+  "Stamp a fresh nonce on the user and return the signed claim token, invalidating any prior one."
   [user ttl-ms methods client-id return-url]
   (let [nonce (b64url (nonce/random-bytes 16))]
     (dataset/sync-entity :iam/user
@@ -152,18 +141,20 @@
                              return-url (assoc :r return-url)))
      :exp   (+ (now-ms) ttl-ms)}))
 
+(defn app-url
+  "The client's App URL setting, where its people land after setting up an account."
+  [client]
+  (not-empty (get-in client [:settings "app-url"])))
+
 (defn return-url-allowed?
-  "Open-redirect guard: `return-url` must match the minting client's registered
-   redirections or a loopback URI whose path matches one (RFC 8252 §7.3)."
+  "Open-redirect guard: `return-url` must match a registered redirection or loopback path (RFC 8252 §7.3)."
   [client return-url]
   (let [{{redirections "redirections"} :settings} client]
     (or (some #(= (core/get-base-uri return-url) %) redirections)
         (core/loopback-redirect-matches? return-url redirections))))
 
 (defn onboard-handler
-  "POST /oauth/onboard {xid, reset?, ttl_seconds?, methods?, return_url?} —
-   mints a one-time claim URL, for an account already created over /data, for
-   the caller to deliver itself."
+  "POST /oauth/onboard {xid, reset?, ttl_seconds?, methods?, return_url?} — mint a one-time claim URL."
   [request]
   (binding [core/*domain* (core/original-uri request)]
     (if-let [{:keys [client principal]} (provisioner request)]
@@ -188,7 +179,9 @@
           :else
           (let [_ (when reset? (reset-account! user))
                 {:keys [token exp]} (issue-onboard-token! user ttl methods (:id client)
-                                                          (when-not (str/blank? return_url) return_url))]
+                                                          (if (str/blank? return_url)
+                                                            (app-url client)
+                                                            return_url))]
             (log/info {:id ::onboard-link-issued
                        :data {:action :created :subject :onboarding-user
                               :user (:name user) :client (:id client)
@@ -202,8 +195,7 @@
       (json-response 403 {:error "provision_forbidden"}))))
 
 (defn valid-claim
-  "Decode+validate a claim token -> {:u :n :m :c :r} if signed, unexpired, and
-   the nonce still matches the user's current onboard-nonce; nil otherwise."
+  "Claim token -> {:u :n :m :c :r} when signed, unexpired and its nonce is current; else nil."
   [token]
   (when-let [{:keys [claim n exp m c r]} (some-> token core/decrypt)]
     (when (and claim n exp (< (now-ms) exp))
@@ -216,10 +208,7 @@
   [u]
   (dataset/get-entity :iam/user {:xid u} {:name nil :xid nil :settings nil}))
 
-;; Compare-and-swap, not a blind write: the UPDATE's WHERE clause only
-;; activates + burns the nonce if it still equals the CURRENT stored value,
-;; so concurrent claims of the same token can't all "succeed". Returns true
-;; iff THIS call won the race — false means treat it as claim_invalid.
+;; CAS, never a blind write — true iff THIS call burned the current nonce; false = claim_invalid.
 (defn finish-claim!
   [target nonce]
   (let [{:keys [table]} (schema/deployed-schema-entity (id/entity :iam/user))
@@ -232,8 +221,7 @@
             [sql (:name target) nonce])))))
 
 (defn claim-success-redirect
-  "`return-url`, already validated at mint time, sends the browser back to the
-   client's app instead of Synthigy's generic status page."
+  "Redirect to the mint-time-validated `return-url`, else the status page."
   ([method-name] (claim-success-redirect method-name nil))
   ([method-name return-url]
    (if return-url
@@ -247,23 +235,28 @@
 (def ^:private min-password-length
   8) ; ponytail: length-only policy; add a real password-strength check if compliance requires
 
+(def claim-errors
+  {"password_too_short" (str "Password must be at least " min-password-length " characters.")})
+
 (defn render-claim-page
-  "Render (or re-render, with an error) the claim page, offering only the
-   methods `allowed` permits."
+  "Claim page offering only the `allowed` methods: the default bundle's claim.html when it has one, else built-in."
   ([token allowed] (render-claim-page token allowed nil))
   ([token allowed error]
-   {:status 200
-    :headers {"Content-Type" "text/html"}
-    :body (str (page.login/claim-html
-                token
-                (cond->> (registry/list-providers)
-                  allowed (filter #(contains? allowed (name (:provider %)))))
-                (or (nil? allowed) (contains? allowed "password"))
-                error))}))
+   (or (custom/custom-page-redirect "claim.html"
+                                    (cond-> {:token token}
+                                      allowed (assoc :methods (str/join "," (sort allowed)))
+                                      error (assoc :error error)))
+       {:status 200
+        :headers {"Content-Type" "text/html"}
+        :body (str (page.login/claim-html
+                    token
+                    (cond->> (registry/list-providers)
+                      allowed (filter #(contains? allowed (name (:provider %)))))
+                    (or (nil? allowed) (contains? allowed "password"))
+                    (claim-errors error)))})))
 
 (defn claim-page-handler
-  "GET /oauth/claim?token=XXX — the onboarding claim page; invalid/spent token
-   never reveals whether the target account exists."
+  "GET /oauth/claim — claim page; an invalid token never reveals whether the account exists."
   [request]
   (binding [core/*domain* (core/original-uri request)]
     (let [token (get-in request [:params :token])]
@@ -272,8 +265,7 @@
         (error-redirect "claim_invalid")))))
 
 (defn claim-password-handler
-  "POST /oauth/claim/password {token, password} — bootstraps method #1
-   (password) to complete the same claim as a provider link."
+  "POST /oauth/claim/password {token, password} — complete a claim with a first password."
   [request]
   (binding [core/*domain* (core/original-uri request)]
     (let [{:keys [token password]} (:params request)
@@ -286,8 +278,7 @@
         (error-redirect "claim_method_not_allowed")
 
         (or (str/blank? password) (< (count password) min-password-length))
-        (render-claim-page token (:m claim)
-                           (str "Password must be at least " min-password-length " characters."))
+        (render-claim-page token (:m claim) "password_too_short")
 
         :else
         (let [target (claim-target (:u claim))]
@@ -295,8 +286,7 @@
             (nil? target)
             (error-redirect "claim_invalid")
 
-            ;; CAS gate FIRST — a losing concurrent request must not mutate
-            ;; the account at all, not even overwrite the password.
+            ;; CAS gate FIRST — a losing request must not mutate the account, not even the password.
             (finish-claim! target (:n claim))
             (do
               (dataset/sync-entity :iam/user
@@ -311,13 +301,7 @@
             (error-redirect "claim_invalid")))))))
 
 (defn onboard-complete-handler
-  "POST /oauth/onboard/complete {ticket} — the indirect (non-browser) face of
-   the same ticket claim-password-handler redeems directly: burns the nonce
-   and activates. Never sets a credential — the client's own proofing earns
-   activation only; a credential still comes from the claim page (password or
-   a federated identity) or a later ticket. The completing client must be the
-   SAME client that minted the ticket, and its principal must still
-   administer the account."
+  "POST /oauth/onboard/complete {ticket} — the minting client activates the account; never sets a credential."
   [request]
   (if-let [{:keys [client principal]} (provisioner request)]
     (let [{:keys [ticket]} (core/parse-body request)
@@ -326,8 +310,7 @@
         (nil? claim)
         (json-response 400 {:error "claim_invalid"})
 
-        ;; Don't distinguish "no such ticket" from "not your ticket" — both
-        ;; read as claim_invalid to the caller.
+        ;; "no such ticket" and "not your ticket" must read the same: claim_invalid.
         (not= (:id client) (:c claim))
         (json-response 400 {:error "claim_invalid"})
 
@@ -340,8 +323,7 @@
             (not (administers? principal target))
             (json-response 403 {:error "provision_forbidden"})
 
-            ;; CAS gate FIRST — a losing concurrent request must not mutate
-            ;; the account at all.
+            ;; CAS gate FIRST — a losing request must not mutate the account.
             (finish-claim! target (:n claim))
             (do
               (log/info {:id ::account-claimed

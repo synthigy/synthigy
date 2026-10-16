@@ -9,8 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.patch
-  "OAuth-specific model patches and migrations for the :synthigy.iam.oauth/model
-   topic. See docs/core/synthigy/oauth/patch.md."
+  "Model patches and migrations for the :synthigy.iam.oauth/model topic."
   (:require
     [buddy.hashers :as hashers]
     [clojure.string :as str]
@@ -22,13 +21,8 @@
     [synthigy.iam.service-user :as service-user]
     [synthigy.iam.access :refer [with-principal]]))
 
-;;; ============================================================================
-;;; Helper Functions
-;;; ============================================================================
-
 (defn hash-client-secrets!
-  "Migrate all OAuth clients with plaintext secrets to hashed (bcrypt) secrets;
-   returns {:total :hashed :skipped}."
+  "Hash plaintext confidential-client secrets; returns {:total :hashed :skipped}."
   []
   (log/info {:id ::hash-secrets-start :data {:action :migrating :subject :client-secrets}} "Migrating client secrets to hashed format")
   (let [clients (dataset/search-entity
@@ -39,8 +33,6 @@
                    :secret nil
                    :type nil})
 
-        ;; Bcrypt hashes start with "$2a$", "$2b$", "$2y$" or synthigy's
-        ;; "bcrypt+sha512$"
         plaintext-clients (filter
                             (fn [{:keys [secret type]}]
                               (and secret
@@ -57,7 +49,6 @@
                       :plaintext plaintext-count}}
               "Surveyed clients for plaintext secrets")
 
-    ;; Hash and update each client
     (doseq [client plaintext-clients
             :let [entity-id (id/extract client)
                   {:keys [id secret]} client]]
@@ -85,7 +76,6 @@
 
 (patch/current-version :synthigy.iam.oauth/model "1.0.5")
 
-;; Patch 1.0.4 - Hash client secrets
 (patch/upgrade :synthigy.iam.oauth/model
                "1.0.4"
                (log/info {:id ::upgrade-1-0-4-start :data {:action :upgrading :subject :oauth-store :version "1.0.4"}}
@@ -98,7 +88,6 @@
                (log/info {:id ::upgrade-1-0-4-done :data {:action :upgraded :subject :oauth-store :version "1.0.4"}}
                          "OAuth model v1.0.4 upgrade complete"))
 
-;; Downgrade for 1.0.4 (reverting hashed secrets to plaintext is not supported)
 (patch/downgrade :synthigy.iam.oauth/model
                  "1.0.4"
                  (log/warn {:id ::downgrade-1-0-4-rejected}
@@ -119,8 +108,7 @@
             (map #(assoc % :name (str (:name %) " (" (fallback %) ")")) dups))))
 
 (defn normalize-names!
-  "Make OAuth Client and OAuth API names unique and non-blank before their
-   unique constraints are deployed."
+  "Make OAuth Client and OAuth API names unique and non-blank."
   []
   (with-principal nil
     (into {}
@@ -140,8 +128,7 @@
          count)))
 
 (defn sync-service-users!
-  "Name, activate and (for confidential clients) create every client's service
-   user; a taken name is logged and leaves the old name."
+  "Name, activate and (for confidential clients) create every client's service user."
   []
   (with-principal nil
     (let [clients (dataset/search-entity :iam/app nil {(id/key) nil :id nil})
@@ -168,7 +155,6 @@
                   "SERVICE users with no client left untouched"))
       {:clients (count clients) :linked (count synced) :orphans (vec orphans)})))
 
-;; Patch 1.0.5 - Service user relation, unique names
 (patch/upgrade :synthigy.iam.oauth/model
                "1.0.5"
                (let [adopted (adopt-service-users!)

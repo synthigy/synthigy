@@ -9,33 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server
-  "Undertow HTTP server implementation for Synthigy.
-
-   Provides core HTTP infrastructure:
-   - OAuth 2.0 + OpenID Connect endpoints
-   - Data API (/data)
-   - Data subscriptions (SSE)
-   - Authentication middleware
-   - CORS configuration
-   - SPA serving
-
-   Uses ring-undertow-adapter (Luminus/Kit compatible).
-
-
-   ## Quick Start
-
-   ```clojure
-   (require '[synthigy.server :as server])
-
-   ;; Start with defaults (localhost:7887)
-   (server/start)
-
-   ;; Custom port
-   (server/start {:port 3000})
-
-   ;; Stop
-   (server/stop)
-   ```"
+  "Undertow HTTP server adapter for Synthigy."
   (:require
     [synthigy.client-address :as client-address]
     [synthigy.cors :as cors]
@@ -63,12 +37,7 @@
     [synthigy.server.routes :as routes]
     [synthigy.server.subscription :as subscription]))
 
-;;; ============================================================================
-;;; Simple Router
-;;; ============================================================================
-
-(defn- match-route
-  "Simple route matching. Returns handler or nil."
+(defn match-route
   [request routes]
   (let [uri (:uri request)
         method (:request-method request)]
@@ -80,18 +49,12 @@
           routes)))
 
 (defn make-router
-  "Creates a simple router from route definitions."
+  "Ring handler dispatching on exact [uri method handler] route vectors."
   [routes]
   (fn [request]
     (if-let [handler (match-route request routes)]
       (handler request)
-      ;; opt-in modules (console, …) register URI prefixes at lifecycle
-      ;; start; consulted per request so no server restart is needed
       (routes/extension-handler request))))
-
-;;; ============================================================================
-;;; SSE Handler
-;;; ============================================================================
 
 (defrecord SSEBody [identity-key stream-chan])
 
@@ -138,13 +101,16 @@
                   (recur)
                   (try (.endExchange exchange) (catch Exception _)))))))))))
 
-(defn- make-sse-handler
-  "Creates a Ring handler for SSE event streaming."
+(defn make-sse-handler
+  "Ring handler streaming the identity's subscription events over Undertow."
   []
   (fn [request]
-    ;; Optional-IAM: token mandatory only when :synthigy/iam runs
-    ;; (same contract as the /data handlers).
-    (let [iam-active? (lifecycle/started? :synthigy/iam)
+    (let [request (if (get-in request [:headers "authorization"])
+                    request
+                    (if-let [token (get-in request [:query-params "access_token"])]
+                      (assoc-in request [:headers "authorization"] (str "Bearer " token))
+                      request))
+          iam-active? (lifecycle/started? :synthigy/iam)
           iam (when iam-active? (auth/authenticate-request request))]
       (if (and iam-active? (not iam))
         {:status 401
@@ -159,34 +125,17 @@
                      "Connection" "keep-alive"}
            :body (->SSEBody identity-key stream-chan)})))))
 
-;;; ============================================================================
-;;; Route Tables — table + module gating live in synthigy.server.routes,
-;;; shared with httpkit/ring-jetty. This backend only supplies its own SSE
-;;; transport (:sse-handler).
-;;; ============================================================================
-
 (defn default-routes
-  "Route table for the full server (`:synthigy/server`). See
-   `synthigy.server.routes/full-routes` for the shared route definitions."
+  "Route table for the full server (`:synthigy/server`)."
   [opts]
   (routes/full-routes (assoc opts :sse-handler (make-sse-handler))))
 
 (defn bare-routes
-  "Route table for `:synthigy/bare-server`. See
-   `synthigy.server.routes/bare-routes` for the shared route definitions."
+  "Route table for `:synthigy/bare-server`."
   [opts]
   (routes/bare-routes (assoc opts :sse-handler (make-sse-handler))))
 
-;;; ============================================================================
-;;; Middleware Stack
-;;; ============================================================================
-
-;;; ============================================================================
-;;; Static Resource Serving
-;;; ============================================================================
-
 (def ^:private content-type-map
-  "Map of file extensions to MIME content types."
   {"css" "text/css"
    "js" "application/javascript"
    "png" "image/png"
@@ -198,13 +147,12 @@
    "woff" "font/woff"
    "woff2" "font/woff2"})
 
-(defn- get-extension [path]
+(defn get-extension [path]
   (when-let [idx (str/last-index-of path ".")]
     (subs path (inc idx))))
 
 (defn wrap-static-resources
-  "Middleware to serve static resources from classpath.
-   Handles /oauth/css/*, /oauth/js/*, /oauth/images/* paths."
+  "Middleware serving /oauth/css|js|images/* from the classpath."
   [handler]
   (fn [request]
     (let [uri (:uri request)]
@@ -212,8 +160,7 @@
                (or (str/starts-with? uri "/oauth/css/")
                    (str/starts-with? uri "/oauth/js/")
                    (str/starts-with? uri "/oauth/images/")))
-        ;; Try to serve from classpath
-        (let [resource-path (subs uri 1) ; remove leading /
+        (let [resource-path (subs uri 1)
               resp (response/resource-response resource-path)]
           (if resp
             (let [ext (get-extension uri)
@@ -232,8 +179,6 @@
           response (log/with-ctx (merge (auth/log-context request) req-ctx)
                      (let [resp (handler request)
                            duration (- (System/currentTimeMillis) started)]
-                       ;; measurement = counters; the DEBUG signal exists for
-                       ;; request-id e2e correlation only (no info traffic).
                        (traffic/record! (:status resp) duration)
                        (log/debug
                          {:id :synthigy.server/request-completed
@@ -257,18 +202,11 @@
         cors/wrap-options
         wrap-keyword-params
         wrap-params
-        ;; LAST in this -> means OUTERMOST, i.e. runs before wrap-params,
-        ;; which consumes the body stream — without it /data answers
-        ;; INVALID_BODY to every SDK
+        ;; keep outermost — body readers downstream need :raw-body and a fresh stream
         data/wrap-preserve-body
-        ;; before wrap-request-id, so the error signal is emitted while
-        ;; log/with-ctx still carries the request-id
+        ;; must stay inside wrap-request-id — the error signal needs the request-id ctx
         routes/wrap-errors
         wrap-request-id)))
-
-;;; ============================================================================
-;;; Server Lifecycle
-;;; ============================================================================
 
 (defonce server (atom nil))
 
@@ -282,7 +220,7 @@
   nil)
 
 (defn start
-  "Starts the Undertow HTTP server."
+  "Starts the Undertow HTTP server, replacing any running one."
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
   ([{:keys [host port info routes]
      :or {host (or (env :synthigy-server-host) "localhost")
@@ -300,10 +238,6 @@
                "HTTP server started")
      nil)))
 
-;;; ============================================================================
-;;; Main Entry Point
-;;; ============================================================================
-
 (defn -main
   "Main entry point for Undertow server."
   [& _]
@@ -314,10 +248,6 @@
     (catch Throwable ex
       (log/error! {:id ::server-start-failed :data {:action :starting :subject :http-server}} ex)
       (System/exit 1))))
-
-;;; ============================================================================
-;;; Module Lifecycle Registration
-;;; ============================================================================
 
 (lifecycle/register-module!
   :synthigy/server
@@ -335,14 +265,8 @@
            (stop)
            (log/info {:id ::lifecycle-stopped :data {:action :stopped}} "HTTP server lifecycle stopped"))})
 
-;;; ============================================================================
-;;; Bare server — data-only + live subscriptions, no IAM, no audit
-;;; ============================================================================
-
 (lifecycle/register-module!
   :synthigy/bare-server
-  ;; Mutually exclusive with :synthigy/server (same Undertow instance,
-  ;; same port) — the operator starts one or the other.
   {:doc profile/bare-doc
    :depends-on profile/bare-deps
    :start (fn []

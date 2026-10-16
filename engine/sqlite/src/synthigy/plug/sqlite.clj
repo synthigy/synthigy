@@ -9,21 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.plug.sqlite
-  "SQLite-side delta plug — DDL, trigger generation, drainer thread.
-
-   Owned by `:synthigy/subscriptions.sqlite` (OSS). Mirrors
-   `synthigy.plug.postgres`. Consumers: SSE subscriptions (OSS) and
-   the observability plug (`:synthigy/observability` — DuckDB OSS,
-   ClickHouse Pro).
-
-   SQLite-specific deltas vs PG:
-     - No NOTIFY → drainer parks on `*drain-wakeup*` with a safety poll
-     - No `current_setting` → per-process `_ctx` regular table
-     - No SKIP LOCKED → single-writer model is sufficient
-     - SQLite triggers can't share a parameterized function, so we install
-       separate INSERT/UPDATE/DELETE triggers per entity table and
-       INSERT/DELETE triggers per relation link table, each inlining the
-       `json_object` payload."
+  "SQLite delta plug: queue and `_ctx` DDL, per-table triggers, drainer thread."
   (:require
     [clojure.string :as str]
     [next.jdbc :as jdbc]
@@ -40,29 +26,10 @@
     [synthigy.plug.wake :as wake]
     [synthigy.dataset.sql.query :as sql.query]))
 
-;; ============================================================================
-;; In-process drainer wakeup channel — SQLite-specific
-;;
-;; SQLite has no LISTEN/NOTIFY, so app-path writes nudge the drainer
-;; through this channel. `dropping-buffer 1` coalesces concurrent wakeups:
-;; the drainer drains-to-empty per wake, so one wake covers N puts.
-;;
-;; Lives on the plug ns (not in the query ns) because moving it
-;; eliminates the plug.sqlite ↔ dataset.sqlite.query cyclic require
-;; introduced when the query ns started calling plug/set-context!
-;; on every mutation.
-;; ============================================================================
-
 (defn wake-drainer!
-  "Backend-named alias for `synthigy.plug.wake/signal-drainer!`.
-   Kept so the SQLite query callsites don't have to know they're
-   delegating. App-path writes call this post-commit."
+  "Wakes the drainer; app-path writes call it post-commit."
   []
   (wake/signal-drainer!))
-
-;; ============================================================================
-;; Queue + context table DDL
-;; ============================================================================
 
 (def ^:private delta-queue-ddl
   "CREATE TABLE IF NOT EXISTS __relation_delta_queue (
@@ -87,15 +54,8 @@
      seq     INTEGER
    )")
 
-;; ============================================================================
-;; Helpers — UUIDv7 + shared trigger plumbing
-;; ============================================================================
-
-(defn- uuid-v7
-  "Generate a UUIDv7 (RFC 9562): 48-bit unix-ms timestamp prefix, 4-bit
-   version=7, 12 random bits, 2-bit variant=10, 62 random bits. Lexically
-   and binary-sortable by time — txid grouping AND chronological ordering
-   off the same id without leaning on a separate `ts` column."
+(defn uuid-v7
+  "Time-ordered UUIDv7 (RFC 9562)."
   []
   (let [ts  (System/currentTimeMillis)
         rnd (java.security.SecureRandom.)
@@ -108,13 +68,8 @@
                     rand-62)]
     (java.util.UUID. msb lsb)))
 
-(defn- drop-all-plug-triggers-for-table!
-  "Pattern-drop every plug trigger attached to `table`, regardless of
-   name shape. Closes the orphan-on-rename gap: switching to xid-keyed
-   names (or renaming an entity xid) would otherwise leave the old
-   table-named triggers firing alongside the new ones, double-emitting
-   events. Idempotent — runs on every deploy. Used by both the relation
-   and entity install paths."
+(defn drop-all-plug-triggers-for-table!
+  "Drops every plug trigger on `table`, whatever its name shape."
   [tx table]
   (let [stale (->> (jdbc/execute! tx
                      ["SELECT name FROM sqlite_master
@@ -129,23 +84,11 @@
     (doseq [trg stale]
       (jdbc/execute! tx [(format "DROP TRIGGER IF EXISTS \"%s\"" trg)]))))
 
-;; ============================================================================
-;; Relation plug — trigger generation
-;; ============================================================================
-
-(defn- relation-trigger-name
-  "Deterministic trigger name per (relation-xid, op). Xid-keyed for the
-   same reason as entity triggers — link-table renames don't leave
-   orphan triggers in `sqlite_master`. SQLite has no per-function dispatch
-   so we install one trigger per (relation, INSERT|DELETE)."
+(defn relation-trigger-name
   [rel-xid op]
   (str "trg_" rel-xid "_audit_" (name op)))
 
-(defn- insert-trigger-ddl
-  "INSERT trigger inlines the json_object payload, reads from_xid/to_xid
-   straight off NEW (populated by app-path link-relations subselects),
-   reads context from _ctx (NULL when row absent — gracefully handles raw
-   mutations outside the app path that didn't go through set-context!)."
+(defn insert-trigger-ddl
   [{rel-id :relation table :table from :from/field to :to/field} audit?]
   (format "CREATE TRIGGER \"%s\"
            AFTER INSERT ON \"%s\"
@@ -173,11 +116,7 @@
           (relation-trigger-name (str rel-id) :insert)
           table (str rel-id) (if audit? "json('true')" "json('false')") (name from) (name to)))
 
-(defn- delete-trigger-ddl
-  "DELETE trigger — mirror of insert-trigger-ddl, reads OLD.* and op='unlink'.
-   from_xid/to_xid come straight off OLD (populated at link time) — so
-   cascade deletes from entity removal still emit resolvable xids even
-   after the entity row is gone."
+(defn delete-trigger-ddl
   [{rel-id :relation table :table from :from/field to :to/field} audit?]
   (format "CREATE TRIGGER \"%s\"
            AFTER DELETE ON \"%s\"
@@ -205,8 +144,7 @@
           (relation-trigger-name (str rel-id) :delete)
           table (str rel-id) (if audit? "json('true')" "json('false')") (name from) (name to)))
 
-(defn- column-exists?
-  "Check whether a column exists on a SQLite table via PRAGMA table_info."
+(defn column-exists?
   [tx table column]
   (some
    #(= column (:name %))
@@ -219,9 +157,7 @@
   (when-not (column-exists? tx table "seq")
     (jdbc/execute! tx [(format "ALTER TABLE \"%s\" ADD COLUMN seq INTEGER" table)])))
 
-(defn- ensure-xid-columns!
-  "Add from_xid / to_xid TEXT columns to a relation link table if missing.
-   SQLite lacks `ADD COLUMN IF NOT EXISTS` so we PRAGMA-check first."
+(defn ensure-xid-columns!
   [tx table]
   (when-not (column-exists? tx table "from_xid")
     (jdbc/execute! tx
@@ -230,9 +166,8 @@
     (jdbc/execute! tx
                    [(format "ALTER TABLE \"%s\" ADD COLUMN to_xid TEXT" table)])))
 
-(defn- backfill-xid-columns!
-  "Backfill from_xid / to_xid from the entity tables. Only updates rows
-   where the column is still NULL — safe to re-run."
+(defn backfill-xid-columns!
+  "Fills NULL from_xid/to_xid from the entity tables; safe to re-run."
   [tx {table      :table
        from-table :from/table
        to-table   :to/table
@@ -251,68 +186,40 @@
                  " WHERE to_xid IS NULL")
             table to-table table (name to-field))]))
 
-(defn- install-relation-triggers!
-  "Attach INSERT + DELETE plug triggers to one link table.
-   Idempotent — pattern-drops every audit-track trigger on the table
-   first, then reinstalls the xid-keyed pair so a switch from table-name
-   to xid-name (or any subsequent relation-xid change) leaves no orphans.
-
-   Schema additions for from_xid/to_xid (ALTER TABLE) run first so the
-   trigger DDLs can reference the columns.
-
-   Will throw if the underlying table doesn't exist — that's a model/DB
-   drift bug to fix at the source, not to swallow here."
+(defn install-relation-triggers!
+  "Reinstalls the INSERT/DELETE plug triggers on one link table; throws when the table is missing."
   [tx {table :table :as rel} audit?]
   (ensure-xid-columns! tx table)
   (drop-all-plug-triggers-for-table! tx table)
   (jdbc/execute! tx [(insert-trigger-ddl rel audit?)])
   (jdbc/execute! tx [(delete-trigger-ddl rel audit?)]))
 
-;; ============================================================================
-;; Entity plug — trigger generation
-;; ============================================================================
-
-(defn- entity-trigger-name
-  "Deterministic trigger name per (entity-xid, op). Xid-keyed so that
-   table renames don't leave orphan triggers in `sqlite_master`. Distinct
-   prefix from relation triggers so we can grep / drop them independently."
+(defn entity-trigger-name
   [entity-xid op]
   (str "trg_" entity-xid "_entity_audit_" (name op)))
 
-(defn- attribute-when-distinct
-  "Build the WHEN-clause body for the entity UPDATE trigger — an OR'd
-   chain of `OLD.<col> IS NOT NEW.<col>` predicates across every user-defined
-   field. SQLite's `IS NOT` is the IS-DISTINCT-FROM operator (NULL-safe).
-   Gates the queue insert at trigger time: phantom UPDATE rewrites with no
-   real attribute change produce no envelope and no provider write."
+(defn attribute-when-distinct
   [field-map]
   (->> field-map
        (map (fn [[col _attr-xid]]
               (format "OLD.\"%s\" IS NOT NEW.\"%s\"" (name col) (name col))))
        (str/join " OR ")))
 
-(defn- entity-user-fields
-  "Walk an entity schema entry's :field->attribute and return
-   {column-name attribute-xid ...} for user-defined fields only.
-   System fields (`:created_on`, `:modified_on`, `:created_by`, `:modified_by`)
-   are marked with keyword xids and skipped — they're auto-managed by the
-   dataset layer and don't carry semantic meaning at the plug layer."
+(defn entity-user-fields
+  "Sorted {column attribute-xid} of user fields; system fields carry keyword xids and are skipped."
   [entity]
   (->> (:field->attribute entity)
        (filter (fn [[_col attr-xid]] (string? attr-xid)))
        (into (sorted-map))))
 
-(defn- attribute-json-pairs
-  "Build the json_object key/value comma-separated string emitting
-   `'<attr-xid>', <ref>.\"<col>\"` for every user-defined field.
-   Used by INSERT/UPDATE/DELETE trigger DDLs to assemble before/after maps."
+(defn attribute-json-pairs
   [field-map ref]
   (->> field-map
        (map (fn [[col attr-xid]]
               (format "'%s', %s.\"%s\"" attr-xid ref (name col))))
        (str/join ", ")))
 
-(defn- entity-insert-trigger-ddl
+(defn entity-insert-trigger-ddl
   [entity-xid {table :table :as entity} audit?]
   (let [pairs (attribute-json-pairs (entity-user-fields entity) "NEW")
         al    (if audit? "json('true')" "json('false')")]
@@ -342,7 +249,7 @@
             al
             pairs)))
 
-(defn- entity-update-trigger-ddl
+(defn entity-update-trigger-ddl
   [entity-xid {table :table :as entity} audit?]
   (let [fields (entity-user-fields entity)
         before (attribute-json-pairs fields "OLD")
@@ -379,7 +286,7 @@
             before
             after)))
 
-(defn- entity-delete-trigger-ddl
+(defn entity-delete-trigger-ddl
   [entity-xid {table :table :as entity} audit?]
   (let [pairs (attribute-json-pairs (entity-user-fields entity) "OLD")
         al    (if audit? "json('true')" "json('false')")]
@@ -409,13 +316,8 @@
             al
             pairs)))
 
-(defn- install-entity-triggers!
-  "Attach AFTER INSERT/UPDATE/DELETE triggers to one entity table.
-   Idempotent — pattern-drops every plug trigger on the table then
-   reinstalls the xid-keyed set so trigger bodies pick up
-   column → attribute_xid changes after a rename and a switch from
-   table-name to xid-name leaves no orphans. Throws if the table
-   doesn't exist (signals model/DB drift; we don't swallow)."
+(defn install-entity-triggers!
+  "Reinstalls the INSERT/UPDATE/DELETE plug triggers on one entity table."
   [tx entity-xid {table :table :as entity} audit?]
   (when (seq (entity-user-fields entity))
     (drop-all-plug-triggers-for-table! tx table)
@@ -423,18 +325,8 @@
     (jdbc/execute! tx [(entity-update-trigger-ddl entity-xid entity audit?)])
     (jdbc/execute! tx [(entity-delete-trigger-ddl entity-xid entity audit?)])))
 
-;; ============================================================================
-;; Drainer — polling loop (no LISTEN/NOTIFY available in SQLite).
-;; Single-process scope per the SQLite parity plan; SKIP LOCKED isn't needed
-;; because SQLite is single-writer at the DB level.
-;; ============================================================================
-
-;; 2000, not PG's 500 — SQLite has no SKIP LOCKED; see docs/core/synthigy/plug/sqlite.md
+;; 2000, not PG's 500 — SQLite has no SKIP LOCKED.
 (def ^:private drain-batch-size 2000)
-;; Safety-net poll for raw-SQL mutations that bypass the app-path
-;; wakeup. App-path mutations wake the drainer immediately via
-;; *drain-wakeup*, so this timeout effectively only fires when there's
-;; nothing happening — no per-tick CPU cost beyond the alt!! park.
 (def ^:private safety-poll-ms (long 10000))
 ;; pages handed back per idle poll — 8 MB at the 4 KB page size, never during a burst
 (def ^:private idle-vacuum-pages 2000)
@@ -474,7 +366,7 @@
                     :before     (values/canonical-values entity-xid (:before data) true)
                     :after      (values/canonical-values entity-xid (:after data) true)}}}))
 
-(defn- alloc-seqs!
+(defn alloc-seqs!
   "Allocate `n` ascending delta-seq values from the single-row __delta_seq counter inside the claim tx."
   [tx n]
   (let [v (long (:__delta_seq/value
@@ -627,13 +519,8 @@
                 (min 30000 (max 1000 (* 2 backoff-ms)))))]
         (recur next-backoff)))))
 
-(defn- drainer-loop!
-  "Worker body. Parks on the registered WakeSource (default
-   LocalChannel) with a safety-poll-ms fallback for raw-SQL mutations
-   that bypass the wake signal.
-
-   Cost when idle: one park per safety-poll-ms. Cost on wakeup: one
-   indexed SELECT, drains all pending rows, then re-parks."
+(defn drainer-loop!
+  "Parks on the wake source (safety poll as fallback) and drains on every wake."
   [db wake-source ^java.util.concurrent.BlockingQueue signal stop?]
   (try
     (log/info {:id ::drainer-wakeup-listening
@@ -671,36 +558,13 @@
                  :data {:action :stopped :subject :relation-drainer}}
                 "Plug drainer loop exited"))))
 
-;; ============================================================================
-;; Public API — plug reconcile + drainer + context
-;; ============================================================================
-
 (defn reconcile-relations!
-  "Deploy relation-plug infrastructure: idempotent prelude
-   (queue + _ctx tables) followed by per-relation triggers across the
-   deployed schema.
-
-   Args:
-     _db               - SQLite backend instance (unused; kept for symmetry)
-     tx                - JDBC-executable target
-     schema-relations  - Relations map or seq from (query/model->schema model),
-                         each value carrying :relation, :table, :from/field,
-                         :to/field pre-resolved.
-
-   Idempotent. Side effects only. Returns nil."
+  "Installs the queue and `_ctx` tables, then per-relation triggers across the deployed schema; idempotent."
   [_db tx schema-relations]
-  ;; _ctx is a regular (non-TEMP) table because SQLite triggers can't
-  ;; tolerate a missing table reference even via subquery — see
-  ;; set-context! comment for the isolation trade-off.
   (jdbc/execute! tx [delta-queue-ddl])
   (ensure-seq-column! tx "__relation_delta_queue")
   (jdbc/execute! tx [audit-ctx-ddl])
-  ;; Walk schema relations; dedup by :table (same m2m link appears in
-  ;; both endpoints' :relations). All cardinalities are link tables in
-  ;; Synthigy → no cardinality filter. When the same :table appears with
-  ;; and without :relation set, prefer the record that has it — the
-  ;; xid-keyed trigger name depends on :relation, so picking the
-  ;; relation-less record would emit `trg__audit_insert` (empty xid).
+  (jdbc/execute! tx ["DELETE FROM _ctx WHERE k = 'tenant_xid'"])
   (let [rel-seq (if (map? schema-relations)
                   (vals schema-relations)
                   schema-relations)
@@ -730,18 +594,7 @@
   nil)
 
 (defn reconcile-entities!
-  "Deploy entity-plug infrastructure: idempotent prelude (entity
-   queue) followed by per-entity triggers across every entity in the
-   deployed schema.
-
-   Args:
-     _db               - SQLite backend instance (unused; kept for symmetry)
-     tx                - JDBC-executable target
-     schema-entities   - Entities map from (query/model->schema model),
-                         each value carrying :table, :fields,
-                         :field->attribute pre-resolved.
-
-   Idempotent. Side effects only. Returns nil."
+  "Installs the entity queue, then per-entity triggers across the deployed schema; idempotent."
   [_db tx schema-entities]
   (jdbc/execute! tx [entity-queue-ddl])
   (ensure-seq-column! tx "__entity_delta_queue")
@@ -766,20 +619,8 @@
   nil)
 
 (defn set-context!
-  "Write per-tx request/principal context so plug triggers can record
-   who drove the mutation.
-
-   ISOLATION CAVEAT (single-process scope is enough): _ctx is a regular
-   table; if connection A writes actor='alice' and connection B does a
-   RAW mutation (bypassing set-context!), B's trigger reads 'alice' —
-   misattribution. Single-writer SQLite serializes concurrent writers so
-   the trigger in a tx that DID call set-context! always sees its own
-   write first. Acceptable for the dev / small-on-prem scope this path
-   targets."
+  "Writes the tx's principal/request context into `_ctx` for the plug triggers."
   [_db tx]
-  ;; First-deploy ordering: on a fresh DB the dataset setup hook calls
-  ;; set-entity (→ set-context!) before reconcile-* has run. Create _ctx
-  ;; defensively so cold-start works.
   (jdbc/execute! tx [audit-ctx-ddl])
   (let [principal (access/current-principal)]
     (jdbc/execute! tx
@@ -791,16 +632,6 @@
     (jdbc/execute! tx
                    ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('scope_xid', ?)"
                     (some-> principal :scope-xid str)]))
-  ;; Install-level tenant identifier — every envelope is stamped with
-  ;; the install's primary dataset xid. Becomes per-request when the
-  ;; principal projection grows :tenant-xid.
-  (jdbc/execute! tx
-                 ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('tenant_xid', ?)"
-                  (str (id/data :dataset/id))])
-  ;; Per-transaction opaque id — SQLite has no `txid_current()` equivalent
-  ;; so we synthesize. UUIDv7 (RFC 9562): time-prefix means tx ids are
-  ;; naturally chronological — `ORDER BY txid` matches `ORDER BY ts`
-  ;; without an extra column.
   (jdbc/execute! tx
                  ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('txid', ?)"
                   (str (uuid-v7))])
@@ -814,7 +645,6 @@
                :data {:action :starting :subject :relation-drainer}}
               "Plug drainer already running; ignoring start")
     (let [ds     (:datasource db)
-          ;; single-row counter: SQLite serializes writers, so read-then-bump in the claim tx is gap-free
           _      (jdbc/execute! ds ["CREATE TABLE IF NOT EXISTS __delta_seq (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)"])
           _      (jdbc/execute! ds ["INSERT OR IGNORE INTO __delta_seq (id, value) VALUES (0, 0)"])
           _      (doseq [ddl pending-ddl] (jdbc/execute! ds [ddl]))
@@ -846,25 +676,10 @@
     (reset! drainer-state nil)
     nil))
 
-;; ============================================================================
-;; Unified entry points
-;; ============================================================================
-
 (defn reconcile-plug!
-  "Idempotent full resync of the SQLite delta plug against `model`.
-
-   Walks the deployed schema, then reconciles entity-side and relation-side
-   triggers in a single pass. Called by `:synthigy/subscriptions.sqlite`
-   on lifecycle :start and on every `save-model!` via
-   `dataset/add-model-watch!`. No-op when `model` is nil.
-
-   Idempotent: each `install-*-triggers!` pattern-drops then re-creates.
-   Partial-failure recovery is 'next call reconciles again.'"
+  "Idempotent full resync of the SQLite delta plug against `model`."
   [db model]
   (when model
-    ;; Freshen the audit policy from THIS model before baking trigger flags so
-    ;; the frozen-at-enqueue audit decision is model-derived and independent of
-    ;; watch-firing order. Mirrors the Postgres plug.
     (policy/recompile-policy! model)
     (let [schema (sql.query/model->schema model)
           relations (mapcat (fn [[_eid ent]] (vals (:relations ent))) schema)]
@@ -873,14 +688,7 @@
   nil)
 
 (defn strip-all!
-  "Drop every plug trigger across `sqlite_master`. Used on
-   `:synthigy/subscriptions.sqlite` :stop (clean removal) and as the
-   bare-server upgrader helper.
-
-   Leaves `__relation_delta_queue`, `__entity_delta_queue`, and `_ctx`
-   in place — cheap tables; re-:start reconciles triggers back.
-
-   Idempotent. Safe to call multiple times."
+  "Drops every plug trigger; the queue and `_ctx` tables stay."
   [_db tx]
   (let [stale (->> (jdbc/execute! tx
                      [(str "SELECT name FROM sqlite_master "

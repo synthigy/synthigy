@@ -9,9 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.federated.oauth2
-  "The `:oauth2` provider family — plain OAuth2 (no ID token) IdPs;
-   `fetch-identity` is written per provider. See
-   docs/core/synthigy/oauth/federated/oauth2.md."
+  "The `:oauth2` provider family — plain OAuth2 IdPs without an ID token."
   (:require
    [ring.util.codec :as codec]
    [synthigy.oauth.federated :as federated :refer [authorize-url fetch-identity]])
@@ -21,8 +19,7 @@
    [java.time Duration]))
 
 (defn http-get-bearer
-  "Authenticated JSON GET for OAuth2 userinfo; always sends a User-Agent (GitHub
-   rejects requests without one)."
+  "Authenticated JSON GET; always sends a User-Agent (GitHub rejects requests without one)."
   [url token]
   (federated/send-json
    (-> (HttpRequest/newBuilder (URI/create url))
@@ -35,8 +32,7 @@
 
 (defmethod authorize-url :oauth2
   [cfg {:keys [redirect-uri state]}]
-  ;; No nonce/PKCE: plain OAuth2 has no ID token; client_secret authenticates
-  ;; the exchange, `state` carries CSRF defense.
+  ;; No nonce/PKCE: client_secret authenticates the exchange, `state` carries CSRF defense.
   (str (:authorize-url cfg) "?"
        (codec/form-encode {:client_id (:client-id cfg)
                            :redirect_uri redirect-uri
@@ -65,9 +61,7 @@
   [cfg {:keys [code redirect-uri]}]
   (when-let [token (oauth2-token cfg code redirect-uri)]
     (let [user   (http-get-bearer (:userinfo-url cfg) token)
-          ;; Hijack defense: GitHub email is private/unverified by default —
-          ;; require a PRIMARY + VERIFIED address from /user/emails or no
-          ;; identity.
+          ;; Hijack defense: require a PRIMARY + VERIFIED address, else no identity.
           emails (http-get-bearer (str (:userinfo-url cfg) "/emails") token)
           email  (some #(when (and (:primary %) (:verified %)) (:email %)) emails)]
       (when email
@@ -77,9 +71,7 @@
 
 (defmethod fetch-identity :facebook
   [cfg {:keys [code redirect-uri]}]
-  ;; Graph /me only returns email when the account has one and granted the
-  ;; scope — phone-only signups get none, and no email means no identity to
-  ;; onboard (fails closed, same posture as GitHub).
+  ;; No email (phone-only signup) means no identity — fails closed.
   (when-let [token (oauth2-token cfg code redirect-uri)]
     (let [user (http-get-bearer (:userinfo-url cfg) token)]
       (when-let [email (:email user)]
@@ -91,8 +83,7 @@
   [cfg {:keys [code redirect-uri]}]
   (when-let [token (oauth2-token cfg code redirect-uri)]
     (let [user (http-get-bearer (:userinfo-url cfg) token)]
-      ;; :verified is Discord's own email-verification flag — unverified
-      ;; addresses are hijackable, so they don't make an identity.
+      ;; Unverified addresses are hijackable — never make an identity from one.
       (when (and (:email user) (:verified user))
         {:iss    (or (:issuer cfg) "https://discord.com")
          :sub    (str (:id user))

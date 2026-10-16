@@ -11,8 +11,7 @@
 (ns synthigy.engine
   "The operation engine — data in, data out, no transport. Every /data verb
    executes here; synthigy.server.data (HTTP) and synthigy.embedded (in-process)
-   are both just callers. No oauth/ring/lifecycle dependency — an in-process
-   caller must never need an HTTP stack. See docs/core/synthigy/engine.md."
+   are both just callers."
   (:require
    [clojure.core.cache :as cache]
    [clojure.string :as str]
@@ -37,9 +36,7 @@
    [synthigy.xsql.program :as xsql-program]))
 
 (defn normalize-op
-  "Normalize an operation name
-   (camelCase/PascalCase/snake_case/kebab-case/spaces) to kebab-case; nil passes
-   through."
+  "Normalize an operation name to kebab-case; nil passes through."
   [op]
   (when (string? op)
     (-> op
@@ -48,14 +45,7 @@
         (str/replace #"[_\s]+" "-"))))
 
 (def ^:private known-args-keys
-  "Operators + modifiers valid at the top of an `args` map. Anything else
-   `_`-prefixed at the top level is a typo — caught in `coerce-args`
-   before the args reach the SQL builder, where the failure surfaces as
-   a Java cast and gets sanitized to INTERNAL_ERROR.
-
-   Plain attribute / relation keys at the top level are NOT gated here —
-   the deeper resolver in `sql.query/selection->schema` knows the
-   per-entity attribute set and raises `UNKNOWN_ATTRIBUTE` with a hint."
+  "Operators and modifiers valid at the top of an `args` map."
   #{:_where :_or :_and :_not :_maybe :_count :_agg
     :_limit :_offset :_order_by :_distinct :_join})
 
@@ -81,10 +71,6 @@
       (map? ob)
       args
 
-      ;; Without this gate a flat ["name" "asc"] silently destructures as
-      ;; iterators over the
-      ;; characters and crashes deep in the SQL builder as an opaque
-      ;; INTERNAL_ERROR.
       (sequential? ob)
       (let [bad (some (fn [item]
                         (when-not (and (sequential? item)
@@ -129,24 +115,8 @@
 (defn write-op? [{:keys [op]}] (contains? write-ops op))
 
 (def ^:private ops-requiring-entity
-  "Op names for which `:entity` is mandatory. Caught at the op-shape gate
-   in `operation-context` before any expensive work runs — failure mode
-   `MISSING_ENTITY` rather than the late-binding crash that used to
-   surface as `INTERNAL_ERROR`. Ops absent from this set (e.g.
-   `sql-template`, `deployed-model`, `schema`, `log-query`) don't need
-   an entity ref.
-
-   Derived from `write-ops` (like `audit-ops` below) so a new write op is
-   picked up here automatically instead of silently losing its entity gate."
+  "Op names for which `:entity` is mandatory."
   (into write-ops #{"search" "get" "search-tree" "get-tree"}))
-
-;; Error enrichment: the backend Translator (db/translate-db-exception) maps a
-;; native SQL
-;; exception to a backend-neutral :code + :details; this layers on operation
-;; context + the
-;; deployed model that the translator can't see. SQLite FK violations carry no
-;; per-attribute
-;; context, so find-fk-candidates walks the op's data to recover it.
 
 (defn find-fk-candidates
   "Relations attempted in op[:data], as [{:attribute label :target_entity name}
@@ -212,18 +182,9 @@
       details)))
 
 (def ^:private error-passthrough-keys
-  "Keys lifted from an `ex-info`'s data onto the wire `:error` map — and the
-   SAME set the audit row captures, so the two cannot drift. They had:
-   `:available` / `:operator` / `:op` reached the client but were silently
-   absent from the log, because each site kept its own hand-written list.
-
-   `:message` and `:code` are NOT here — they're built separately (message
-   comes from `ex-message`, code carries a default)."
+  "Keys lifted from ex-data onto the wire `:error` — the same set the audit row captures."
   [:diagnostics :hint :available :path :entity :relation :operator
    :line :col :start :end
-   ;; Wire-triage fields added 2026-05-30 so the typed codes
-   ;; (UNKNOWN_ATTRIBUTE, BAD_ARGS_SHAPE, MISSING_ENTITY, BAD_OP) surface
-   ;; their context to the client instead of being stripped by the envelope.
    :rule :attribute :modifier :supported :argument :op
    :args :limit :matched :xids
    :details :retryable])
@@ -255,9 +216,7 @@
     (some-> db/*db* (db/translate-db-exception c))))
 
 (def ^:private java-leak-patterns
-  "Regexes that match Java/Clojure internal exception messages we don't
-   want surfaced on the wire. Hits the response with a sanitized generic
-   message; the raw original goes into the server log only."
+  "Regexes matching Java/Clojure internal messages kept off the wire."
   [#"class\s+[\w.$]+\s+cannot be cast"
    #"^nth not supported"
    #"^Nested problem"
@@ -291,34 +250,11 @@
     err))
 
 (def platform-audience
-  "THE platform audience (PLAN-AUDIENCE-BINDING.md REV 3) — what /data,
-   /schema, and /logs require on a bearer token. MUST match
-   resources/exports/api_synthigy.json's :audience (asserted by
-   synthigy.iam.scope-contract-test). Passed to `auth/authenticate-request`
-   so a token minted for a DIFFERENT declared audience, or for the
-   identity-only default (`synthigy.oauth.core/oidc-audience`), is rejected
-   here — a client must explicitly request this audience and be linked via
-   `:iam/app`->`:apis` to receive it. See
-   synthigy.oauth.authentication/token->user-context's :audience option."
+  "THE platform audience /data, /schema and /logs require on a bearer token; must match api_synthigy.json's :audience."
   "https://synthigy.com")
 
 (def capability-scopes
-  "Every scope this engine ENFORCES — the complete set passed to
-   `assert-scope!`, here and in `synthigy.server.subscription`. These gate
-   ENGINE CAPABILITIES that RBAC cannot express: there is no entity to
-   grant on for \"may deploy a schema\", \"may read logs\", or \"may hold
-   open a model-deploy subscription\". Entity CRUD is RBAC's job and must
-   never appear here (see the scope-strategy doctrine); third-party API
-   scopes are issued as token claims and enforced by the consumer, never
-   here.
-
-   Kept as data so `synthigy.iam.scope-contract-test` can assert every
-   enforced scope is actually DECLARED in resources/exports/api_synthigy.json
-   and GRANTED by at least one shipped role. Without that test the three
-   sets drift silently: on 2026-08-04, four of these six were enforced here
-   while granted to no role at all, making the modeler, schema
-   introspection, codegen `describe` and the whole log cockpit
-   unreachable for every non-superuser."
+  "Every scope this engine enforces — capabilities RBAC cannot express; never entity CRUD."
   #{"dataset:load" "dataset:delete" "dataset:deploy"
     "schema:read" "log:read" "log:configure" "dataset:subscription"})
 
@@ -348,10 +284,6 @@
 ;;; Operation Dispatch
 ;;; ============================================================================
 
-;; Entity xids for Dataset and Dataset Version, resolved from the `defentity`
-;; registry (see `synthigy.dataset`) rather than hand-copied literals.
-;; XID-only: the engine is xid-native, and a euuid-authored model is converted
-;; on the frontend at import — so there is no euuid dispatch value to register.
 (def dataset-xid (id/entity :dataset/dataset :xid))
 (def version-xid (id/entity :dataset/version :xid))
 
@@ -361,13 +293,6 @@
   [ctx]
   (throw (ex-info (str "Unknown operation: '" (:op ctx) "'")
                   {:code "UNKNOWN_OP" :op (:op ctx)})))
-
-;; XSQL transport is STRICT: the only XSQL-aware wire shape is the `xsql` op,
-;; whose :xsql
-;; field carries a full operation DOCUMENT. No complecting — a plain wire op
-;; with a string
-;; :selections, or an xsql op with explicit :entity/:selections/:args, is an
-;; error.
 
 (defn assert-map-selections
   "STRICT wire: :selections on a plain wire op is a map or nil, never an XSQL
@@ -401,14 +326,6 @@
       (assoc :start (offset->line-col source (:from error-data)))
       (and (:to error-data) source)
       (assoc :end (offset->line-col source (:to error-data))))))
-
-;; XSQL document cache: generated clients send byte-identical documents every
-;; call, so
-;; parse+lint is pure repeat work. Syntax-only (nil schema) so entries never go
-;; stale on
-;; model deploys — unlike sql-template's cache, no deploy hook needed. Bounded
-;; LRU; lint
-;; failures are cached too (a retried broken doc shouldn't re-lint).
 
 (defonce ^:private xsql-doc-cache
   (atom (cache/lru-cache-factory {} :threshold 512)))
@@ -459,8 +376,7 @@
   (let [{:keys [decls errors]} (cached-xsql-program xsql)
         _ (when (seq errors)
             (let [{:keys [message from to]} (first errors)]
-              ;; Warn here (not at the cache-miss site) so a request against a
-              ;; cached failure still logs.
+              ;; warn here, not at the cache-miss site — cached failures must still log
               (when-not quiet?
                 (log/warn {:id ::xsql-compile-failed
                            :data {:diagnostic-count (count errors)
@@ -477,8 +393,6 @@
     (let [base (-> ctx (dissoc :xsql) (assoc :op (:op compiled)))]
       (cond
         (:mutate compiled)
-        ;; wire :params keys are keywordized by json/read-str; fall back to
-        ;; string for transit/edn callers.
         (let [dv (:data-var compiled)]
           (assoc base :entity (:entity compiled)
                       :data   (or (get params (keyword dv)) (get params dv))))
@@ -487,7 +401,6 @@
         (assoc base :template (:sql compiled))
 
         :else
-        ;; Tree ops carry :on (+ :root for get-tree) as top-level wire keys.
         (cond-> (assoc base :entity     (:entity compiled)
                             :selections (:selections compiled)
                             :args       (:args compiled))
@@ -497,16 +410,11 @@
 (defmethod execute-operation "search"
   [ctx]
   (let [{:keys [entity-id args] selection :selections :as ctx} (assert-map-selections ctx)]
-    ;; Empty match set is [] on the wire, never null.
     (assoc ctx :result (or (dataset/search-entity entity-id args selection) []))))
 
 (defmethod execute-operation "get"
   [ctx]
   (let [{:keys [entity-id args] selection :selections :as ctx} (assert-map-selections ctx)]
-    ;; get args must be scalars — an unchecked map value ({:_eq v}) reaches JDBC
-    ;; and binds
-    ;; as hstore, surfacing "No hstore extension installed" instead of the real
-    ;; mistake.
     (when-let [bad (first (filter (comp map? val) args))]
       (throw (ex-info (str "`get` matches one row by unique constraint, so its args are "
                            "plain scalars (e.g. {\"name\": \"alice\"}) — " (pr-str (key bad))
@@ -515,11 +423,6 @@
                        :rule "get_args"
                        :argument (name (key bad))})))
     (assoc ctx :result (dataset/get-entity entity-id args selection))))
-
-;; Tree operations: search-tree walks :on UP to ancestors from matched entities;
-;; get-tree
-;; walks DOWN from :root via reverse FK. Tree aggregation belongs in
-;; sql-template, not here.
 
 (defmethod execute-operation "search-tree"
   [{:keys [entity-id on args] selection :selections :as ctx}]
@@ -541,18 +444,12 @@
          (dataset/get-entity-tree entity-id root (keyword on) selection)))
 
 (defmulti mutate
-  "Extensible write hook chain, dispatching on [op entity-id priority]: negative
-   = pre-hooks, ##Inf = default handler, positive = post-hooks. reduced in a
-   pre-hook short-circuits."
+  "Extensible write hook chain, dispatching on [op entity-id priority]."
   (fn [{:keys [op entity-id]} priority]
     [op entity-id priority]))
 
-(defn- write-result
-  "Shapes a sync/stack result per the op's `returning` flag. `returning?`
-   false/absent -> a bare {:count n} marker, tagged via metadata so
-   shape-data passes it through untouched instead of stripping it as
-   entity data. Any future `[\"sync\"/\"stack\" entity-id priority]` hook
-   reading ctx :result must handle both shapes."
+(defn write-result
+  "Shapes a sync/stack result per the op's `returning` flag."
   [returning? result]
   (if returning?
     result
@@ -646,29 +543,10 @@
   [ctx]
   (execute-operation-chain ctx "delete"))
 
-;; Analytics / arbitrary queries — ERD-aware SQL templates.
-;; Covers aggregation, cross-entity joins, tree-rollups, and anything else
-;; CRUD-shaped ops can't express. See synthigy.dataset.sql.template for the
-;; placeholder DSL: `{entity.field}`, `{entity->rel.field}`, chain joins.
-;;
-;; DELIBERATELY not scope-gated (Robert, 2026-08-08): entity/relation RBAC
-;; applies, but
-;; deterministic aliases (e1, e2) make the PROJECTION unguardable — a data:sql
-;; scope was
-;; built and dropped, the cost (losing the console's SQL tab for ungranted
-;; roles) outweighed
-;; closing a hole attribute deny-lists never closed here anyway. Raw SQL sees
-;; every
-;; attribute of every readable entity; RLS still filters rows.
+;; deliberately not scope-gated — entity/relation RBAC and RLS still apply
 (defmethod execute-operation "sql-template"
   [{:keys [template params cached] :as ctx}]
   (assoc ctx :result (template/execute-template template params {:cached cached})))
-
-;; Log query — one-shot read against the configured log backend.
-;; synthigy.log.query/
-;; validate-filter-map is the wire contract; coerce-log-filter lifts JSON string
-;; shapes
-;; (operator heads, level, paths, order-by) to keywords before validation runs.
 
 (defn coerce-log-where-value
   "Coerce a single :where value from JSON shape to the validate-filter-map
@@ -711,8 +589,7 @@
    where))
 
 (def ^:private log-filter-key-aliases
-  "Snake-case wire keys → kebab-case Clojure keys for the filter top level.
-   JSON callers send snake; the validator expects kebab."
+  "Snake-case wire keys → kebab-case keys for the filter top level."
   {:order_by :order-by
    :group_by :group-by
    :bucket_ms :bucket-ms})
@@ -740,8 +617,6 @@
                         (assoc (ex-data e) :code "INVALID_LOG_FILTER")))))
     (assoc ctx :result (log.query/query coerced))))
 
-;; Store-aggregated (GROUP BY bucket) — returns ~N counts, never rows. Requires
-;; bucket_ms.
 (defmethod execute-operation "log-histogram"
   [{:keys [filter] :as ctx}]
   (assert-scope! "log:read")
@@ -757,9 +632,6 @@
     (assoc ctx :result {:bucket-ms (:bucket-ms coerced)
                         :buckets   (log.query/query coerced)})))
 
-;; Reads the LongAdder hot-path provider (synthigy.traffic) — traffic is
-;; measured with
-;; statistics at the source, never by querying log rows (Robert, 2026-07-22).
 (defmethod execute-operation "traffic-stats"
   [{:keys [since until] :as ctx}]
   (assert-scope! "log:read")
@@ -769,8 +641,6 @@
                       {:code "INVALID_LOG_FILTER" :field k}))))
   (assoc ctx :result (traffic/report {:since since :until until})))
 
-;; get/set/clear the DB-backed routing overlay (synthigy.log.config); one
-;; entrypoint, action-dispatched.
 (defmethod execute-operation "log-config"
   [{:keys [action config] :as ctx}]
   (assert-scope! "log:configure")
@@ -795,8 +665,6 @@
   (assert-scope! "dataset:load")
   (assoc ctx :result (transit/->transit (daccess/protect-model (dataset/deployed-model)))))
 
-;; Augmented view (xid/euuid + audit attrs + reference-typed-attrs as
-;; relations); modeler/canvas/deploy-drawer keep reading raw "deployed-model".
 (defmethod execute-operation "runtime-model"
   [ctx]
   (assert-scope! "dataset:load")
@@ -844,11 +712,7 @@
     (assoc ctx :result (codegen/describe schema files params))))
 
 (defn deploy-payload
-  "Normalize what a client sent into a dataset VERSION map. The export file a
-   modeler writes is the artifact: a client hands over its bytes and gets
-   deployed-or-error back, without knowing what is inside it. Accepts the whole
-   export as a string, a version map whose `:model` is an export string, or an
-   already-decoded version map."
+  "Normalize what a client sent (export string, version map, or either with an export-string `:model`) into a dataset version map."
   [data]
   (let [data (if (string? data) (transit/<-transit data) data)]
     (if (string? (:model data))
@@ -862,11 +726,6 @@
     (when (dataset/deployed-version-altered? data)
       (throw (ex-info "Deployed version is immutable; create a new version to change the model."
                       {:code "IMMUTABLE_VERSION_ALTERED" :rule "deploy_immutable"})))
-    ;; deploy!'s ERDModel return used to hit the response key-transform, whose
-    ;; :entities/
-    ;; :relations keys collide with Dataset Version's same-named :many relations
-    ;; ("String cannot be cast to Map$Entry") — clients re-fetch via the deploy
-    ;; subscription anyway, so return a plain ack instead.
     (dataset/deploy! data)
     (assoc ctx :result {:deployed true
                         :version (:name data)
@@ -888,13 +747,7 @@
     op))
 
 (def ^:private audit-ops
-  "Op names that emit `:synthigy.server.data/op-completed` on finish.
-  Union of read + write data ops. Excludes meta-ops because their access
-  is governed by separate scopes and they don't represent user data access:
-    - deployed-model / runtime-model / schema — model introspection
-    - deploy — admin operation
-    - log-query / audit-query / history-query — observability surfaces
-      (auditing the cockpit's own polls would make it watch itself)."
+  "Op names that emit `:synthigy.server.data/op-completed` on finish; meta-ops excluded."
   (into write-ops #{"search" "get" "search-tree" "get-tree" "sql-template"}))
 
 (defn selection-shape
@@ -978,8 +831,6 @@
                           (:filter op))      (-> (assoc :predicate-keys
                                                         (predicate-keys (:filter op)))
                                                  (assoc :filter (:filter op)))
-                     ;; Counts + bytes only, no values — verbatim payloads
-                     ;; belong in the audit plug.
                      (and write?
                           (some? (:data op))) (-> (assoc :records-in
                                                          (write-records-in op))
@@ -987,8 +838,6 @@
                                                          (write-bytes-in op)))
                      (:args op)              (assoc :args (:args op))
                      (:template op)          (assoc :template (:template op))
-                     ;; Same key set the wire :error carries, so the log can't
-                     ;; silently omit a field the client saw.
                      err                     (assoc :error
                                                     (select-keys
                                                      err
@@ -1032,8 +881,7 @@
   ctx)
 
 (defn ^:no-doc operation-context
-  "Resolve one wire operation into the context execute-operation dispatches on.
-   Public because embedded runs single ops without the batch scheduler."
+  "Resolve one wire operation into the context execute-operation dispatches on."
   [ctx op]
   (as-> (merge op ctx) ctx
     (if (= "xsql" (:op ctx)) (coerce-xsql-op ctx) ctx)
@@ -1062,10 +910,6 @@
             [op]
             (try
               (let [ctx (operation-context ctx op)]
-                ;; ::op-shape carries the coerced :entity/:entity-id/:selections
-                ;; so
-                ;; transform-results can strip/shape without re-resolving;
-                ;; dissoc'd before the wire.
                 {:data (:result (execute-operation ctx))
                  :ok true
                  ::op-shape (select-keys ctx [:entity :entity-id :selections])})
@@ -1091,8 +935,6 @@
                                   (seq details)     (assoc :details details)
                                   (:hint data)      (assoc :hint (:hint data))
                                   (:retryable data) (assoc :retryable true))]
-                    ;; TIMEOUT is a server-health signal -> warn; constraint
-                    ;; codes are routine -> debug.
                     (case code
                       "TIMEOUT"
                       (log/warn {:id ::db-statement-timeout :error e}
@@ -1112,8 +954,6 @@
                                  :data {:op (:op op) :entity (:entity op)
                                         :raw-message raw}}
                                 e)
-                    ;; ::throwable rides to op-completed for the full
-                    ;; stacktrace; the wire only sees the sanitized :error.
                     {:error {:message clean :code "INTERNAL_ERROR"}
                      ::throwable e
                      :ok false})))
@@ -1134,13 +974,7 @@
               (maybe-audit-op! op started result)
               (cond-> result
                 (map? (:error result)) (update :error with-request-id))))]
-    (let [;; xsql ops are resolved to their real @verb up front — write-ops/audit-ops/
-          ;; ops-requiring-entity key off :op, so otherwise an xsql-wrapped
-          ;; write schedules
-          ;; as a read and loses its audit row. Parse failures fall through
-          ;; unresolved;
-          ;; operation-context retries inside run-op's try/catch -> proper
-          ;; XSQL_PARSE_ERROR.
+    (let [;; resolve xsql ops to their real @verb first — else an xsql write schedules as a read
           indexed (map-indexed
                    (fn [i op]
                      (let [op (update op :op normalize-op)]
@@ -1237,19 +1071,14 @@
 
 (defn ^:no-doc shape-data
   "Shape one operation's data like the wire does: strip keys not in :selections,
-   then apply key-fn if given. Public so embedded shapes identically."
+   then apply key-fn if given."
   [key-fn op data]
   (cond
-    ;; Silent-write marker ({:count n} from a returning:false sync/stack) —
-    ;; not entity data, must not be stripped/key-transformed.
     (::count-only? (meta data))
     data
 
     (and (:entity op) (coll? data))
     (let [entity-id (or (:entity-id op) (sql-query/resolve-entity (:entity op)))
-          ;; Only MAP selections drive stripping — an XSQL op's STRING
-          ;; :selections would
-          ;; reduce-kv over the string's characters and ClassCastException.
           sel (when (map? (:selections op))
                 (dataset/normalize-selection (:selections op)))
           strip #(dataset/strip-to-selection entity-id sel %)
@@ -1261,8 +1090,6 @@
                :else strip-eid)]
       (if (sequential? data) (mapv xf data) (xf data)))
 
-    ;; sql-template (and other entity-less ops) — apply key-fn to top-level
-    ;; map keys only; no stripping (caller owns the shape).
     (and (nil? (:entity op)) key-fn (sequential? data))
     (mapv #(update-keys % key-fn) data)
 
@@ -1273,10 +1100,6 @@
    failed results and entity-less ops."
   [key-fn operations results]
   (mapv (fn [op result]
-          ;; Prefer the coerced op-shape captured at execution — a raw "xsql"
-          ;; wire op has
-          ;; no :entity/:selections of its own (they fall out of parsing the
-          ;; document).
           (let [op (merge op (::op-shape result))
                 result (dissoc result ::op-shape ::throwable)]
             (if (:ok result)
@@ -1296,8 +1119,7 @@
       (let [operations (mapv ensure-tree-on-relation operations)
             results (execute-operations
                      {:principal (:principal user-ctx)
-                      ;; Claims ride from the TOKEN, not the impersonated user —
-                      ;; scope checks are the client's.
+                      ;; claims ride from the TOKEN, never the impersonated user
                       :claims (:claims auth)
                       ;; always present: operation-context merges the op body UNDER this map
                       :client (:client auth)}

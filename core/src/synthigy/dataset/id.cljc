@@ -134,8 +134,7 @@
          (catch :default _ nil)))))
 
 
-;; MD5 (UUID v3) is locked forever — changing it shifts every derived id ever
-;; produced
+;; MD5 (UUID v3) is locked forever — changing it shifts every derived id ever produced
 (defn canonical-anchor-string
   "Coerces parent-id (UUID, xid string, or {:euuid :xid} map) to a stable hash
    anchor."
@@ -227,8 +226,7 @@
   (extract* *provider* record))
 
 (defn coerce-arg
-  "Coerces a query-arg value to the active provider's runtime id type — PostgreSQL refuses
-   an implicit uuid = varchar comparison. Tolerant, never throws. CLJS passes through."
+  "Coerces a query-arg value to the active provider's runtime id type; tolerant, never throws."
   [v]
   (if (and (= :euuid (key)) (string? v))
     #?(:clj  (try (java.util.UUID/fromString v) (catch Exception _ v))
@@ -236,8 +234,7 @@
     v))
 
 (defn coerce-stored-id
-  "Coerces an id persisted as TEXT (audit/relation plug) back to the active
-   provider's runtime type. Strict — assumes a real id string; nil for nil."
+  "Coerces an id persisted as TEXT (audit/relation plug) back to the active provider's runtime type."
   [s]
   (when s
     (case (key)
@@ -256,8 +253,7 @@
   (derive* *provider* parent name-str))
 
 (defn new-model-node-id
-  "Mints a fresh, euuid-first dual-id for a portable schema artifact (entity/attribute/relation).
-   Random, not derived — records use generate instead."
+  "Mints a fresh, random euuid-first dual-id for a portable schema artifact (entity/attribute/relation)."
   []
   (let [u #?(:clj (java.util.UUID/randomUUID) :cljs (random-uuid))]
     {:euuid u :xid (uuid->nanoid u)}))
@@ -283,14 +279,12 @@
   (if (instance? UUIDProvider *provider*) :euuid :xid))
 
 (defmulti -entity-
-  "Resolves entity schema ID, dispatching on [entity-key provider-type]. Use
-   entity instead."
+  "Resolves entity schema ID per [entity-key provider-type]; call `entity` instead."
   (fn [entity-key provider-type]
     [entity-key provider-type]))
 
 (defmulti -relation-
-  "Resolves relation schema ID, dispatching on [relation-key provider-type]. Use
-   relation instead."
+  "Resolves relation schema ID per [relation-key provider-type]; call `relation` instead."
   (fn [relation-key provider-type]
     [relation-key provider-type]))
 

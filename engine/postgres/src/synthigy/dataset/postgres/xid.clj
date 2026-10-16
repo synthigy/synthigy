@@ -9,18 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.postgres.xid
-  "PostgreSQL XID migration utilities.
-
-  All conversions are deterministic via id/uuid->nanoid (bidirectional).
-  No mapping files or lookup tables needed.
-
-  Main entry points:
-  - migrate-to-xid!       - Run full migration
-  - reset-xid-migration!  - Revert migration (destructive, for testing)
-  - verify-xid-migration  - Check all records have XIDs
-
-  Workflow:
-    (xid/migrate-to-xid!)  ; That's it — fully deterministic"
+  "PostgreSQL legacy euuid → xid import and boot-time ID-format detection."
   (:require
     [clojure.string :as str]
     [synthigy.dataset :as dataset]
@@ -37,18 +26,7 @@
     [synthigy.transit :refer [<-transit ->transit]]))
 
 
-;;; ============================================================================
-;;; Table Discovery
-;;; ============================================================================
-
 (defn table-exists?
-  "Check if a table exists in the database.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    Boolean indicating if table exists"
   [table-name]
   (let [result (sql/execute-one!
                  ["SELECT COUNT(*) as cnt FROM information_schema.tables
@@ -57,24 +35,12 @@
     (pos? (:cnt result 0))))
 
 (defn get-all-entity-tables
-  "Gets all entity table names from the deployed schema.
-
-  NOTE: Returns tables from schema, may include tables that don't exist in DB.
-  Use get-existing-entity-tables for safety.
-
-  Returns:
-    Vector of table name strings"
+  "Entity tables named by the deployed schema; may include tables missing from the DB."
   []
   (let [schema (sql-query/deployed-schema)]
     (vec (distinct (keep :table (vals schema))))))
 
 (defn get-existing-entity-tables
-  "Gets entity tables that actually exist in the database.
-
-  Filters out tables from schema that don't exist in DB (corrupted/partial state).
-
-  Returns:
-    Vector of existing table name strings"
   []
   (let [all-tables (get-all-entity-tables)
         existing (filterv table-exists? all-tables)
@@ -86,18 +52,13 @@
     existing))
 
 (defn get-all-relation-tables
-  "Gets all relation (junction) table names from the deployed schema.
-
-  Returns:
-    Vector of table name strings"
   []
   (let [model (dataset/deployed-model)
         relations (core/get-relations model)]
     (vec (distinct (map relation->table-name relations)))))
 
 (defn rename-relation-tables!
-  "Rename relation tables from EUUID-based to XID-based names.
-   Must be called BEFORE switching ID provider."
+  "Renames relation tables from euuid- to xid-based names; call BEFORE switching the provider."
   []
   (log/info {:id ::relation-tables-rename-starting}
             "Renaming relation tables")
@@ -105,8 +66,7 @@
         relations (core/get-relations model)
         renamed (atom 0)]
     (doseq [relation relations]
-      (let [;; Resolve xid deterministically if not present in relation
-            relation-with-xid (if (:xid relation)
+      (let [relation-with-xid (if (:xid relation)
                                 relation
                                 (assoc relation :xid (id/uuid->nanoid (:euuid relation))))
             old-name (naming/relation->table-name-for-id relation-with-xid :euuid)
@@ -116,9 +76,7 @@
             (log/info {:id ::relation-table-renamed
                        :data {:from old-name :to new-name}}
                       "Renaming relation table")
-            ;; Rename table
             (sql/execute! [(format "ALTER TABLE \"%s\" RENAME TO \"%s\"" old-name new-name)])
-            ;; Rename indexes
             (sql/execute! [(format "ALTER INDEX IF EXISTS \"%s\" RENAME TO \"%s\""
                                    (str old-name "_fidx") (str new-name "_fidx"))])
             (sql/execute! [(format "ALTER INDEX IF EXISTS \"%s\" RENAME TO \"%s\""
@@ -131,8 +89,7 @@
      :relations (count relations)}))
 
 (defn revert-relation-tables!
-  "Revert relation table names from XID-based back to EUUID-based names.
-   Used during migration reset."
+  "Reverts relation table names from xid- back to euuid-based names (migration reset)."
   []
   (log/info {:id ::relation-tables-revert-starting}
             "Reverting relation table names")
@@ -140,8 +97,7 @@
         relations (core/get-relations model)
         reverted (atom 0)]
     (doseq [relation relations]
-      (let [;; Resolve xid deterministically if not in model
-            xid (or (:xid relation) (id/uuid->nanoid (:euuid relation)))
+      (let [xid (or (:xid relation) (id/uuid->nanoid (:euuid relation)))
             relation-with-xid (assoc relation :xid xid)]
         (when xid
           (let [xid-name (naming/relation->table-name-for-id relation-with-xid :xid)
@@ -151,9 +107,7 @@
                 (log/info {:id ::relation-table-reverted
                            :data {:from xid-name :to euuid-name}}
                           "Reverting relation table")
-                ;; Rename table
                 (sql/execute! [(format "ALTER TABLE \"%s\" RENAME TO \"%s\"" xid-name euuid-name)])
-                ;; Rename indexes
                 (sql/execute! [(format "ALTER INDEX IF EXISTS \"%s\" RENAME TO \"%s\""
                                        (str xid-name "_fidx") (str euuid-name "_fidx"))])
                 (sql/execute! [(format "ALTER INDEX IF EXISTS \"%s\" RENAME TO \"%s\""
@@ -165,19 +119,7 @@
     {:reverted @reverted
      :relations (count relations)}))
 
-;;; ============================================================================
-;;; Column Management
-;;; ============================================================================
-
 (defn column-exists?
-  "Check if a column exists in a table.
-
-  Args:
-    table-name - Name of the table
-    column-name - Name of the column
-
-  Returns:
-    Boolean indicating if column exists"
   [table-name column-name]
   (let [result (sql/execute-one!
                  [(str "SELECT COUNT(*) as cnt FROM information_schema.columns "
@@ -186,13 +128,6 @@
     (pos? (:cnt result 0))))
 
 (defn add-xid-column!
-  "Add xid column to a table if it doesn't exist.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :added if column was added, :exists if already exists"
   [table-name]
   (if (column-exists? table-name "xid")
     (do
@@ -206,10 +141,6 @@
       :added)))
 
 (defn add-xid-columns-to-all-tables!
-  "Add xid column to all entity and relation tables.
-
-  Returns:
-    Map with :added (count) and :existed (count)"
   []
   (let [tables (get-existing-entity-tables)
         results (doall (map (fn [table]
@@ -229,24 +160,11 @@
 
 
 (def ^:private default-batch-size
-  "Default `_eid` stride for the server-side backfill. Each stride is one
-  autocommit UPDATE; bigger = fewer round-trips but longer per-statement lock
-  and more dead tuples per transaction. 50k keeps each chunk sub-second on
-  task_log-scale tables while bounding bloat."
+  "Default `_eid` stride per backfill UPDATE."
   50000)
 
 (def uuid->nanoid-plpgsql
-  "DDL for the server-side `uuid_to_nanoid(uuid)` function.
-
-  This is the in-database twin of `synthigy.dataset.id/uuid->nanoid`: same
-  Base58 alphabet, same big-endian 128-bit → Base58 conversion, same '1'
-  left-pad to 22 chars. It MUST stay byte-identical to the Clojure version or
-  the backfill corrupts ids silently — verified over the zero/all-FF edge
-  cases plus thousands of random UUIDs.
-
-  Having the conversion run inside Postgres is what lets `generate-xids-for-table!`
-  backfill 16M-row tables (e.g. task_log) with a set-based `UPDATE … SET xid =
-  uuid_to_nanoid(euuid)` instead of streaming every row to the app and back."
+  "In-DB twin of id/uuid->nanoid — must stay byte-identical or the backfill corrupts ids silently."
   "CREATE OR REPLACE FUNCTION uuid_to_nanoid(u uuid)
 RETURNS text AS $$
 DECLARE
@@ -280,30 +198,13 @@ END;
 $$ LANGUAGE plpgsql IMMUTABLE;")
 
 (defn install-uuid->nanoid-fn!
-  "Install (idempotently) the server-side `uuid_to_nanoid(uuid)` function used
-  by the set-based backfill. Safe to call repeatedly — CREATE OR REPLACE."
   []
   (sql/execute! [uuid->nanoid-plpgsql])
   (log/debug {:id ::uuid-to-nanoid-fn-installed}
              "Installed server-side uuid_to_nanoid function"))
 
 (defn generate-xids-for-table!
-  "Backfill XIDs for every euuid-keyed row missing one, entirely server-side.
-
-  The conversion runs in Postgres via `uuid_to_nanoid(euuid)` (see
-  `install-uuid->nanoid-fn!`), so no row data crosses the wire — the app only
-  drives `_eid`-range chunks. Each chunk is one autocommit `UPDATE` over a PK
-  index range, so the whole backfill is O(n) and bounded in lock/bloat per
-  statement. This is what makes 16M-row tables (task_log) tractable; the old
-  per-row fetch-convert-update path timed out on them.
-
-  Args:
-    table-name - Name of the table (must have `_eid` PK + `euuid` column)
-    opts - Optional map with:
-           :batch-size - `_eid` stride per chunk (default 50,000)
-
-  Returns:
-    Map with :table, :updated (total count), :batches (number of chunks)"
+  "Backfills missing xids server-side in `_eid`-range chunks; the table needs `_eid` and `euuid`."
   ([table-name]
    (generate-xids-for-table! table-name {}))
   ([table-name {:keys [batch-size]
@@ -313,9 +214,6 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
              "Generating XIDs for table")
    (supervisor/progress-update! {:detail table-name :done nil :total nil})
    (install-uuid->nanoid-fn!)
-   ;; Bound the work to the `_eid` window that still needs a backfill. On a
-   ;; fully-migrated table this returns nil and we skip entirely (cheap
-   ;; idempotent re-run).
    (let [{:keys [lo hi]} (sql/execute-one!
                            [(format "SELECT min(_eid) AS lo, max(_eid) AS hi FROM \"%s\" WHERE xid IS NULL"
                                     table-name)])]
@@ -325,8 +223,6 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
                     :data {:table table-name :updated 0 :batches 0}}
                    "Generated XIDs for table")
          {:table table-name :updated 0 :batches 0})
-       ;; Walk `[lo, hi]` in fixed `_eid` strides. The PK index serves each
-       ;; range scan, so chunks never re-walk migrated rows — O(n) overall.
        (let [update-sql (format "UPDATE \"%s\" SET xid = uuid_to_nanoid(euuid) WHERE xid IS NULL AND _eid >= ? AND _eid < ?"
                                 table-name)]
          (loop [start lo
@@ -352,15 +248,8 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
                       (+ total updated)
                       (inc batches))))))))))
 
-;;; ============================================================================
-;;; Constraints and Indexes
-;;; ============================================================================
-
 (defn get-all-tables-with-xid
-  "Get all tables in the database that have an xid column.
-
-  This finds ALL tables with xid, not just those in deployed-schema.
-  Important for ensuring test tables and other tables get constraints."
+  "Every public table with an xid column, not just those in the deployed schema."
   []
   (let [results (sql/execute!
                   ["SELECT table_name FROM information_schema.columns
@@ -368,13 +257,6 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
     (mapv :table_name results)))
 
 (defn add-xid-unique-constraint!
-  "Add UNIQUE constraint to xid column.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :added or :exists"
   [table-name]
   (let [constraint-name (str table-name "_xid_unique")]
     (try
@@ -392,13 +274,6 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
           (throw e))))))
 
 (defn add-xid-not-null-constraint!
-  "Add NOT NULL constraint to xid column.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :added or :exists"
   [table-name]
   (try
     (sql/execute! [(format "ALTER TABLE \"%s\" ALTER COLUMN xid SET NOT NULL" table-name)])
@@ -414,13 +289,6 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
         (throw e)))))
 
 (defn add-xid-index!
-  "Add index on xid column for faster lookups.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :added or :exists"
   [table-name]
   (let [index-name (str table-name "_xid_idx")]
     (try
@@ -435,16 +303,7 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
           (throw e))))))
 
 (defn add-constraints!
-  "Add NOT NULL and UNIQUE constraints after XIDs are populated.
-
-  Should be called after all XIDs are generated.
-
-  NOTE: Uses get-all-tables-with-xid to find ALL tables with xid column,
-  not just those in deployed-schema. This ensures test tables and other
-  tables created outside the main schema also get constraints.
-
-  Returns:
-    Map with constraint statistics"
+  "Adds the xid UNIQUE constraint and index to every table with xid; run after the backfill."
   []
   (log/info {:id ::constraints-starting} "Adding XID constraints")
   (let [tables (get-all-tables-with-xid)
@@ -464,12 +323,7 @@ $$ LANGUAGE plpgsql IMMUTABLE;")
     {:tables results
      :count (count tables)}))
 
-;;; ============================================================================
-;;; XID Immutability Triggers
-;;; ============================================================================
-
 (defn postgres-xid-trigger-function
-  "Returns SQL to create the PostgreSQL trigger function for XID immutability."
   []
   "CREATE OR REPLACE FUNCTION prevent_xid_update()
 RETURNS TRIGGER AS $$
@@ -483,13 +337,7 @@ END;
 $$ LANGUAGE plpgsql;")
 
 (defn postgres-xid-trigger
-  "Returns SQL to create a PostgreSQL trigger for XID immutability on a table.
-
-  Args:
-    table-name - Name of the table to protect
-
-  Returns:
-    SQL string to create the trigger"
+  "SQL for the per-table trigger that silently reverts any xid UPDATE."
   [table-name]
   (format
     "CREATE OR REPLACE TRIGGER prevent_xid_update_trigger_%s
@@ -500,22 +348,16 @@ $$ LANGUAGE plpgsql;")
     table-name))
 
 (defn create-xid-immutability-triggers!
-  "Creates XID immutability triggers on all tables with xid column.
-
-  Returns:
-    Map with :created (count) and :tables (list)"
   []
   (let [tables (get-all-tables-with-xid)]
     (log/info {:id ::immutability-triggers-starting
                :data {:tables (count tables)}}
               "Creating XID immutability triggers")
 
-    ;; Create the trigger function once
     (sql/execute! [(postgres-xid-trigger-function)])
     (log/debug {:id ::trigger-function-created}
                "Created PostgreSQL trigger function for xid")
 
-    ;; Create trigger on each table
     (doseq [table tables]
       (try
         (sql/execute! [(postgres-xid-trigger table)])
@@ -530,33 +372,11 @@ $$ LANGUAGE plpgsql;")
     {:created (count tables)
      :tables tables}))
 
-;;; ============================================================================
-;;; Meta-Table Migration (Schema Tables)
-;;; ============================================================================
-;;
-;; Meta-tables store the schema definitions:
-;; - dataset_entity: Entity definitions
-;; - dataset_relation: Relation definitions
-;; - dataset_entity_attribute: Attribute definitions
-;;
-;; These must be migrated BEFORE transforming stored models to ensure
-;; XIDs in model blobs match XIDs in meta-table rows.
-
 (defn migrate-meta-table!
-  "Add xid column to a meta-table and populate XIDs via uuid->nanoid.
-
-  Args:
-    table-name - Name of the meta-table
-
-  Returns:
-    Map with :table, :added-column, :updated"
   [table-name]
   (log/info {:id ::meta-table-migrating :data {:action :migrating :subject :meta-table :table table-name}}
             "Migrating meta-table")
 
-  ;; Add xid column if not exists, then populate XIDs for rows that don't have
-  ;; one — set-based, same server-side conversion as the data tables (these
-  ;; tables are small, but this keeps one conversion path + zero round-trips).
   (let [column-added (if (column-exists? table-name "xid")
                        false
                        (do
@@ -578,12 +398,7 @@ $$ LANGUAGE plpgsql;")
      :updated updated}))
 
 (defn migrate-meta-tables!
-  "Migrate all schema meta-tables (dataset_entity, dataset_relation, dataset_entity_attribute).
-
-  Uses deterministic uuid->nanoid — no mapping needed.
-
-  Returns:
-    Map with results for each meta-table"
+  "Adds and backfills xid on dataset_entity, dataset_relation and dataset_entity_attribute."
   []
   (log/info {:id ::meta-tables-migration-starting :data {:action :migrating :subject :meta-tables}}
             "Migrating meta-tables")
@@ -599,46 +414,19 @@ $$ LANGUAGE plpgsql;")
               "Meta-tables migrated")
     results))
 
-;;; ============================================================================
-;;; Legacy Audit-Config Normalization (Model Blobs)
-;;; ============================================================================
-;;
-;; Real legacy tables carry `modified_by` columns (modified-auditing) but their
-;; stored data models declare NO audit CONFIG. The modern schema augmentation
-;; (`iam/audit` `augment-schema-impl`) gates the `modified_by`/`created_by`
-;; schema fields ENTIRELY on `[:configuration :audit :actions]`, so without
-;; this the schema rebuilt by `migrate-to-xid!` would not declare those fields —
-;; diverging from the columns that actually exist on disk. This runs BEFORE the
-;; euuid→xid model transform; since it only touches `:configuration` (no ids)
-;; it is format-agnostic and the later transform carries the config through.
-
 (defn audited-table-names
-  "Set of public table names carrying a `modified_by` column — i.e. the tables
-   legacy modified-audits. Read from live information_schema so it matches
-   exactly the tables `reconcile-legacy-audit-columns!` brought up to the modern
-   created+modified layout."
+  "Public tables carrying a `modified_by` column."
   []
   (set (map :table_name
             (sql/execute! ["SELECT DISTINCT table_name FROM information_schema.columns
                             WHERE table_schema = 'public' AND column_name = 'modified_by'"]))))
 
 (defn normalize-stored-audit-config!
-  "Bring legacy model blobs in line with their audit COLUMNS.
-
-   For every deployed `dataset_version`, unions `#{:modified :created}` into
-   `[:configuration :audit :actions]` on each entity whose table carries
-   `modified_by`. Entities whose tables are NOT audited are left untouched, so we
-   never declare audit fields with no backing column. Existing `:actions` (and any
-   `:who`/`:when` config) are preserved — never clobbered.
-
-   Format-agnostic and idempotent (the union is a no-op once the actions are
-   present). Postgres / legacy import only — call BEFORE `migrate-to-xid!`."
+  "Unions #{:modified :created} into the audit actions of stored entities whose table has `modified_by`."
   []
   (log/info {:id ::audit-config-normalize-starting :data {:action :patching :subject :model}}
             "Normalizing legacy audit config across stored models")
   (let [audited (audited-table-names)
-        ;; euuid PK at call time (pre-migrate); `deployed = true` mirrors
-        ;; `transform-stored-models!` so every dataset's active model is covered.
         versions (sql/execute! ["SELECT euuid, name, model FROM dataset_version
                                  WHERE deployed = true"])
         stats (atom {:versions 0 :entities 0})]
@@ -675,27 +463,12 @@ $$ LANGUAGE plpgsql;")
               "Normalized legacy audit config across stored models")
     @stats))
 
-;;; ============================================================================
-;;; Full Migration
-;;; ============================================================================
-
 (defn migrate-all-tables!
-  "Add xid columns to all entity tables, populate XIDs, and add constraints.
-
-  Uses deterministic uuid->nanoid for all records.
-
-  Steps:
-  1. Add xid columns (if not exist) to deployed-schema tables
-  2. Generate XIDs for all records
-  3. Add UNIQUE constraint and index to each table
-
-  Returns:
-    Map with migration statistics"
+  "Adds xid columns to data tables, backfills them, then adds the UNIQUE constraint and index."
   []
   (log/info {:id ::data-tables-migration-starting :data {:action :migrating :subject :data-tables}}
             "Starting XID migration on data tables")
 
-  ;; Step 1: Add xid columns to deployed-schema tables
   (log/info {:id ::data-tables-step-1} "Step 1: Adding xid columns")
   (let [column-result (add-xid-columns-to-all-tables!)]
     (log/info {:id ::data-tables-columns-added
@@ -703,11 +476,7 @@ $$ LANGUAGE plpgsql;")
                       :existed (:existed column-result)}}
               "Added xid columns")
 
-    ;; Step 2: Generate XIDs for every euuid-keyed DATA table (has both `_eid`
-    ;; and `euuid`). `get-all-tables-with-xid` is deliberately broad and also
-    ;; catches xid-native infra side-tables (e.g. `__iam_auth_connector`, which
-    ;; has an xid PK but no `_eid`/`euuid`) — those have nothing to backfill and
-    ;; would fail the `SELECT _eid, euuid …` query, so filter them out.
+    ;; never drop the _eid/euuid filter — xid-native infra tables would fail the backfill
     (log/info {:id ::data-tables-step-2} "Step 2: Generating XIDs for all records")
     (let [tables (->> (get-all-tables-with-xid)
                       (filterv (fn [t] (and (column-exists? t "_eid")
@@ -718,7 +487,6 @@ $$ LANGUAGE plpgsql;")
                  :data {:total-updated total-updated :tables (count tables)}}
                 "Generated XIDs across tables")
 
-      ;; Step 3: Add constraints to each table immediately after populating
       (log/info {:id ::data-tables-step-3} "Step 3: Adding UNIQUE constraints")
       (let [constraint-results (doall
                                  (map (fn [table]
@@ -741,60 +509,38 @@ $$ LANGUAGE plpgsql;")
                      :tables gen-results}
          :constraints constraint-results}))))
 
-;;; ============================================================================
-;;; Complete XID Migration Orchestration
-;;; ============================================================================
-
 (defn migrate-to-xid!
-  "Complete XID migration. Fully deterministic — no mapping needed.
-
-  Every euuid maps to exactly one xid via uuid->nanoid, and back via nanoid->uuid.
-
-  Steps:
-  1. Migrate meta-tables (add xid column, populate via uuid->nanoid)
-  2. Transform stored models (deterministic conversion in model blobs)
-  3. Migrate data tables (add xid columns, populate via uuid->nanoid)
-  4. Rename relation tables (EUUID-based → XID-based names)
-  5. Add constraints & triggers
-  6. Switch provider, save & reload
-
-  Returns:
-    Map with results from each step"
+  "Full deterministic euuid → xid migration, ending with the provider switch."
   []
   (log/info {:id ::migration-starting :data {:action :migrating :subject :xid}}
             "Starting complete XID migration (deterministic)")
 
-  ;; Step 1: Migrate meta-tables
   (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 1 :of 6 :name "migrate-meta-tables"}}
             "Migrating meta-tables")
   (supervisor/progress-step! 1 6 "migrate-meta-tables")
   (let [meta-result (migrate-meta-tables!)]
 
-    ;; Step 2: Transform stored models
     (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 2 :of 6 :name "transform-stored-models"}}
               "Transforming stored models")
     (supervisor/progress-step! 2 6 "transform-stored-models")
     (let [model-result (model/transform-stored-models! :xid)]
 
-      ;; Step 3: Migrate data tables
       (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 3 :of 6 :name "migrate-data-tables"}}
                 "Migrating data tables")
       (supervisor/progress-step! 3 6 "migrate-data-tables")
       (let [data-result (migrate-all-tables!)]
 
-        ;; Step 4: Rename relation tables (BEFORE provider switch!)
+        ;; must run BEFORE the provider switch
         (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 4 :of 6 :name "rename-relation-tables"}}
                   "Renaming relation tables")
         (supervisor/progress-step! 4 6 "rename-relation-tables")
         (let [rename-result (rename-relation-tables!)]
 
-          ;; Step 5: Add immutability triggers (constraints already added in step 3)
           (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 5 :of 6 :name "add-immutability-triggers"}}
                     "Adding immutability triggers")
           (supervisor/progress-step! 5 6 "add-immutability-triggers")
           (create-xid-immutability-triggers!)
 
-          ;; Step 6: Switch provider, save & reload
           (log/info {:id ::migration-step :data {:action :migrating :subject :xid :step 6 :of 6 :name "switch-provider"}}
                     "Switching to NanoID provider")
           (supervisor/progress-step! 6 6 "switch-provider")
@@ -811,15 +557,8 @@ $$ LANGUAGE plpgsql;")
            :data-tables data-result
            :relation-tables rename-result})))))
 
-;;; ============================================================================
-;;; Verification
-;;; ============================================================================
-
 (defn verify-xid-migration
-  "Verify all records have XIDs.
-
-  Returns:
-    Map with verification results. Throws if any records missing XIDs."
+  "Throws unless every row of every existing entity table has an xid."
   []
   (log/info {:id ::verification-starting :data {:action :verifying :subject :xid-migration}} "Verifying XID migration")
   (let [tables (get-existing-entity-tables)
@@ -850,18 +589,7 @@ $$ LANGUAGE plpgsql;")
                         {:missing missing-tables
                          :verified false}))))))
 
-;;; ============================================================================
-;;; Migration Reset (Testing Only)
-;;; ============================================================================
-
 (defn drop-xid-column!
-  "Drop xid column from a table if it exists.
-
-  Args:
-    table-name - Name of the table
-
-  Returns:
-    :dropped or :not-exists"
   [table-name]
   (if (column-exists? table-name "xid")
     (do
@@ -872,34 +600,20 @@ $$ LANGUAGE plpgsql;")
     :not-exists))
 
 (defn reset-xid-migration!
-  "Drop all xid columns and revert models — for testing only.
-
-  WARNING: This is destructive!
-
-  Steps:
-  1. Revert stored models to euuid format
-  2. Revert relation table names (XID-based → EUUID-based)
-  3. Drop xid columns from all tables
-  4. Clear the stored format stamp
-  5. Restore the euuid provider (full inverse of the import's step 6)
-
-  Returns:
-    Map with results"
+  "DESTRUCTIVE: fully reverts the xid import (models, relation names, xid columns, stamp, provider)."
   []
   (log/warn {:id ::reset-starting}
             "RESETTING XID MIGRATION")
 
-  ;; Step 1: Revert models to euuid format first (before dropping columns)
   (log/info {:id ::reset-step :data {:step 1 :of 5 :name "revert-stored-models"}}
             "Reverting stored models to euuid format")
   (let [model-result (model/transform-stored-models! :euuid)]
 
-    ;; Step 2: Revert relation table names (BEFORE dropping xid columns!)
+    ;; must run BEFORE dropping xid columns
     (log/info {:id ::reset-step :data {:step 2 :of 5 :name "revert-relation-tables"}}
               "Reverting relation table names")
     (let [revert-result (revert-relation-tables!)]
 
-      ;; Step 3: Find all tables with xid column and drop it
       (log/info {:id ::reset-step :data {:step 3 :of 5 :name "drop-xid-columns"}}
                 "Dropping xid columns")
       (let [tables-with-xid (get-all-tables-with-xid)
@@ -913,15 +627,12 @@ $$ LANGUAGE plpgsql;")
                                 tables-with-xid))
             dropped-count (count (filter #(= :dropped (:result %)) drop-results))]
 
-        ;; Step 4: Clear the format stamp — a stale "xid" stamp would boot the
-        ;; reverted DB as migrated.
+        ;; never skip — a stale "xid" stamp boots the reverted DB as migrated
         (log/info {:id ::reset-step :data {:step 4 :of 5 :name "clear-format-stamp"}}
                   "Clearing stored format stamp")
         (dataset/clear-format!)
 
-        ;; Step 5: Flip the provider back — the import gate reads the AMBIENT
-        ;; provider, so without this a same-process rerun skips as
-        ;; :already-synthigy.
+        ;; never skip — the import gate reads the ambient provider; a rerun would skip as :already-synthigy
         (log/info {:id ::reset-step :data {:step 5 :of 5 :name "restore-euuid-provider"}}
                   "Restoring euuid provider")
         (id/set-provider! (id/->UUIDProvider))
@@ -940,17 +651,8 @@ $$ LANGUAGE plpgsql;")
                   :total (count tables-with-xid)
                   :details drop-results}}))))
 
-;;; ============================================================================
-;;; ID Format Detection (PostgreSQL-specific)
-;;; ============================================================================
-
-(defn- ensure-id-trigger-function!
-  "Ensures the `prevent_<id>_update()` function exists for the ACTIVE id field.
-  Required before any id-immutability triggers can be created — in either xid
-  or euuid mode. The generic `postgres-id-trigger-function` keys on `(id/field)`,
-  so in xid mode it emits exactly the same `prevent_xid_update()` body as the
-  legacy xid-specific helper, and in euuid mode it emits `prevent_euuid_update()`
-  (previously never created — euuid per-table triggers referenced a missing fn)."
+(defn ensure-id-trigger-function!
+  "Creates `prevent_<id>_update()` for the active id field; per-table triggers need it."
   []
   (log/debug {:id ::id-trigger-function-ensuring :data {:id-key (id/key)}}
              "Ensuring id immutability trigger function exists")
@@ -961,10 +663,6 @@ $$ LANGUAGE plpgsql;")
    fresh install, \"euuid\" for a legacy layout."
   []
   (cond
-    ;; No dataset_version table → fresh install → xid. euuid is NOT a
-    ;; fresh-deploy format: it exists only as a legacy source brought in
-    ;; via import. A stray SYNTHIGY_ID_FORMAT=euuid is ignored (and flagged) so
-    ;; we never create a euuid provider over xid-only fresh-create DDL.
     (not (table-exists? "dataset_version"))
     (do
       (when (= "euuid" env/id-format)
@@ -974,10 +672,6 @@ $$ LANGUAGE plpgsql;")
                 "Fresh Postgres (no dataset_version), using xid")
       "xid")
 
-    ;; Has euuid only → legacy → euuid. A dataset_version WITH an xid column
-    ;; never reaches here — "migrated" is the stored format stamp, and the
-    ;; column-without-stamp case throws in detect-and-set-provider! as a
-    ;; partial migration.
     :else
     (do
       (log/info {:id ::id-format-legacy :data {:format "euuid"}}
@@ -985,11 +679,7 @@ $$ LANGUAGE plpgsql;")
       "euuid")))
 
 (defn partial-migration?
-  "True when the xid import started populating (dataset_version carries xid
-   VALUES) but never stamped completion (import step 6) — the DB is
-   half-migrated. Column presence alone is NOT a signal: boot patches add xid
-   columns to every table on first contact with a legacy DB, values stay NULL
-   until the import runs."
+  "True when dataset_version carries xid VALUES but no \"xid\" stamp — column presence alone is not a signal."
   []
   (and (not= "xid" (dataset/current-format))
        (table-exists? "dataset_version")
@@ -1010,9 +700,7 @@ $$ LANGUAGE plpgsql;")
       (partial-migration?)))                      ; => false
 
 (defn legacy-deployment?
-  "Returns true if this is a legacy Postgres deployment.
-  Legacy = has dataset_version table but no stored format in patcho.
-  Used to skip destructive setup operations on existing deployments."
+  "True when dataset_version exists but no ID format is stored."
   []
   (and (nil? (dataset/current-format))
        (table-exists? "dataset_version")))
@@ -1031,14 +719,12 @@ $$ LANGUAGE plpgsql;")
                  "(synthigy.dataset/set-format! \"xid\") and restart.")
             {:action :not-initialized :subject :id-format :state :partial-migration})))
   (if-let [stored (dataset/current-format)]
-    ;; Format stored - use it
     (do
       (log/info {:id ::id-format-stored-used :data {:format stored}}
                 "Using stored ID format")
       (dataset/initialize-provider! stored)
       (ensure-id-trigger-function!))
 
-    ;; Not stored - detect and store
     (let [format (detect-format)]
       (log/info {:id ::id-format-detected :data {:format format}}
                 "Detected ID format")
@@ -1046,19 +732,8 @@ $$ LANGUAGE plpgsql;")
       (ensure-id-trigger-function!)
       (dataset/set-format! format))))
 
-;;; ============================================================================
-;;; Legacy Schema Reconciliation (euuid → modern meta/audit layout)
-;;; ============================================================================
-
 (defn reconcile-legacy-meta-columns!
-  "Bridge a pre-`deployed_on` (legacy) deployment forward: idempotently add the
-   meta-model columns that newer dataset versions expect — `deployed_on` on
-   dataset_version, `active` on dataset_entity / dataset_relation — and backfill
-   sensible values (deployed_on from modified_on; active true). The boot-time
-   version detection (`deployed-versions`, `latest-deployed-version`) and the
-   model patches READ these columns, so they must exist BEFORE patcho runs —
-   otherwise the patch that would add them never gets to run (chicken-and-egg).
-   Idempotent (`ADD COLUMN IF NOT EXISTS`); a no-op on already-current schemas."
+  "Idempotently adds and backfills `deployed_on`/`active` on a legacy meta-schema; must run before patcho."
   []
   (doseq [stmt ["ALTER TABLE dataset_version  ADD COLUMN IF NOT EXISTS deployed_on timestamp"
                 "ALTER TABLE dataset_entity   ADD COLUMN IF NOT EXISTS active boolean"
@@ -1074,14 +749,7 @@ $$ LANGUAGE plpgsql;")
                   (.getMessage ex))))))
 
 (defn reconcile-legacy-audit-columns!
-  "Bring a legacy schema's audit columns up to the modern Synthigy layout.
-   Real legacy tables carry `modified_by`/`modified_on` (modified-auditing) but NOT
-   `created_by`/`created_on` — yet modern Synthigy's audit-augmented schema
-   declares and QUERIES created_by/created_on for every audited entity, so a
-   query against a legacy table fails with `column \"created_by\" does not exist`.
-   For every audited table (one carrying `modified_by`), add the missing
-   created-audit columns (plain — the FK + preserve triggers are (re)installed by
-   the IAM audit module at start). Idempotent plpgsql loop; no-op once present."
+  "Adds missing `created_by`/`created_on` to every legacy table carrying `modified_by`."
   []
   (try
     (sql/execute-one!
@@ -1102,37 +770,13 @@ $$ LANGUAGE plpgsql;")
       (log/warn {:id ::legacy-audit-reconcile-failed :data {:action :patching :subject :data-tables}}
                 (.getMessage ex)))))
 
-;;; ============================================================================
-;;; Legacy → Synthigy import (Postgres only)
-;;;
-;;; Synthigy is xid. euuid exists ONLY as a legacy source layout. This is
-;;; the one-time, idempotent importer that converts a connected legacy
-;;; (euuid) database into the native Synthigy (xid) layout. The runtime stays
-;;; xid-only; this is the only euuid-aware path besides boot detection.
-;;; ============================================================================
-
 (defn legacy-euuid-layout?
-  "True when the connected Postgres is running on a LEGACY euuid layout — i.e.
-   the active id format is euuid. Synthigy is xid-native; any euuid layout is a
-   legacy database to be imported to xid (one-time). Format, not structure,
-   is the right signal: a modern euuid deploy already carries `xid` columns on the
-   meta-schema, so a 'no xid column' test would miss it. After the import flips
-   the provider to xid this returns false — making the import gate idempotent."
+  "True when the active id format is euuid, i.e. a legacy database awaiting import."
   []
   (= :euuid (id/key)))
 
 (defn migrate->synthigy!
-  "One-time, idempotent forward migration of a LEGACY (euuid) Postgres
-   database into the native Synthigy (xid) layout. No-op (returns
-   `{:skipped :already-synthigy}`) on an already-native DB. After it runs the
-   database is xid forever and the runtime treats it like any native deploy.
-
-   Requires the active provider to be euuid (boot detection sets this when it
-   sees a legacy layout). Steps: (0) reconcile the legacy meta-columns the
-   migration reads (`deployed_on`, `active`), (1-6) `migrate-to-xid!`, then
-   verify every row carries an xid.
-
-   Postgres ONLY — SQLite/CRDB never carry a legacy euuid layout."
+  "One-time, idempotent import of a legacy euuid Postgres database into the xid layout."
   []
   (if-not (legacy-euuid-layout?)
     (do (log/info {:id ::migrate-skip :data {:action :migrating :subject :xid}}
@@ -1140,8 +784,7 @@ $$ LANGUAGE plpgsql;")
         {:skipped :already-synthigy})
     (do (log/warn {:id ::migrate-starting :data {:action :migrating :subject :xid}}
                   "Legacy database detected — migrating to Synthigy xid layout")
-        ;; transform-stored-models! reads dataset_version.deployed_on and the
-        ;; model patches read `active` — add those columns BEFORE migrating.
+        ;; must run BEFORE migrating — transform-stored-models! reads deployed_on
         (reconcile-legacy-meta-columns!)
         (let [result (migrate-to-xid!)]
           (verify-xid-migration)
@@ -1149,13 +792,9 @@ $$ LANGUAGE plpgsql;")
                     "Legacy → Synthigy xid migration complete and verified")
           (assoc result :migrated true)))))
 
-;; The operator console's migrate affordance — registered HERE so the verb
-;; exists exactly where the importer does (postgres classpath); a sqlite/bare
-;; boot answers method-not-found, which is honest.
 (supervisor/register-method! "migrate.xid"
   (fn [_]
-    ;; never drop this guard — serve! runs every frame on its own thread, so a
-    ;; second click would otherwise migrate the same tables concurrently
+    ;; never drop this guard — serve! runs each frame on its own thread; a second click would migrate concurrently
     (if-not (supervisor/progress-begin! :migration "starting")
       (throw (ex-info "A migration is already running on this engine."
                       {:code -32000 :running (supervisor/progress)}))

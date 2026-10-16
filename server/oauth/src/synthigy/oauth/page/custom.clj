@@ -9,8 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.page.custom
-  "Custom login pages: zip bundles stored through db/LoginPageStore, served
-   from memory at /login/<name>/*."
+  "Custom login pages: zip bundles in db/LoginPageStore, served from memory at /login/<name>/*."
   (:require
    [clojure.string :as str]
    [ring.util.codec :as codec]
@@ -109,8 +108,7 @@
           files)))))
 
 (defn strip-common-root
-  "Drop a single top-level folder when index.html lives inside it — the shape a
-   zipped directory has."
+  "Unwrap a single top-level folder holding index.html (a zipped directory)."
   [files]
   (let [roots (set (map #(first (str/split % #"/" 2)) (keys files)))
         root (first roots)]
@@ -151,8 +149,7 @@
    :files (read-bundle (db/login-page-zip db/*db* name version))})
 
 (defn refresh!
-  "Bring the in-memory bundles in line with the active rows; unchanged ones are
-   kept, a bundle that fails to load is logged and left out."
+  "Sync in-memory bundles with the active rows; a bundle that fails to load is left out."
   []
   (let [active (db/active-login-pages db/*db*)
         loaded (:pages @cache)
@@ -186,10 +183,6 @@
       pages)))
 
 (defn active? [name] (contains? (pages) name))
-
-;;; ----------------------------------------------------------------------------
-;;; Management
-;;; ----------------------------------------------------------------------------
 
 (defn upload!
   "Validate and store zip as the next inactive version of name."
@@ -227,10 +220,6 @@
 
 (defn export [name version] (db/login-page-zip db/*db* name version))
 
-;;; ----------------------------------------------------------------------------
-;;; Serving
-;;; ----------------------------------------------------------------------------
-
 (defn file-response [{:keys [digest files]} path request]
   (when-let [bs (get files path)]
     (let [etag (str "\"" digest "\"")]
@@ -245,8 +234,7 @@
          :body (ByteArrayInputStream. bs)}))))
 
 (defn serve-path
-  "Response for path in a loaded bundle, falling back to index.html for
-   extensionless paths."
+  "Response for path in a bundle; extensionless misses fall back to index.html."
   [page path request]
   (let [path (if (str/blank? path) "index.html" path)]
     (or (file-response page path request)
@@ -255,8 +243,7 @@
         not-found)))
 
 (defn handler
-  "Ring handler for /login/<name>/*; bare /login/<name> redirects to the
-   trailing-slash URL so relative asset paths resolve."
+  "Ring handler for /login/<name>/*; bare /login/<name> redirects to the trailing slash."
   [{:keys [uri query-string request-method] :as request}]
   (when (= :get request-method)
     (let [[_ name rest] (re-matches #"/login/([^/]+)(/.*)?" uri)

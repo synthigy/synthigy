@@ -63,8 +63,7 @@
   ([path]
    (str (or env/iam-root-url *domain*) path)))
 
-;; Rides the dataset DEK — fails closed when encryption is sealed, no node-local
-;; fallback
+;; Rides the dataset DEK — fails closed when sealed; never add a node-local fallback.
 (defn encrypt
   [data]
   (json/write-str (dataset-encryption/encrypt-data (json/write-str data))))
@@ -92,8 +91,7 @@
   (when (and (string? s) (pos? (count s)))
     (subs s 0 (min 6 (count s)))))
 
-;; Settings AND defaults are SECONDS — never util/hours|days (milliseconds):
-;; that was the ~83-day-token bug
+;; SECONDS — never util/hours|days (milliseconds): that was the ~83-day-token bug.
 (let [default (* 60 15)]
   (defn access-token-expiry
     [{{{expiry "access"} "token-expiry"} :settings}]
@@ -139,22 +137,11 @@
 (defn audience-key [audience] (or audience no-audience))
 
 (def oidc-audience
-  "The UNIVERSAL, IMPLICIT identity audience — 'who is this user', nothing
-   more. Every registered client gets it automatically: unlike
-   `synthigy.engine/platform-audience` (and any future per-integration
-   audience), it needs no `:iam/app`→`:apis` link, because it grants no
-   capability scopes to filter. A token request naming NO audience
-   resolves here (`synthigy.oauth.token/resolve-audience`) — /data access
-   is opt-in via an EXPLICIT, entitled audience, never the default.
-   /oauth/userinfo, /oauth/jwks, /.well-known/openid-configuration check
-   against this constant (see docs/plans/PLAN-AUDIENCE-BINDING.md)."
+  "Universal identity audience every client gets without an :apis link; carries no capability scopes."
   "https://synthigy.com/id")
 
 (def platform-audience
-  "THE audience a bearer token must carry to be answered at all. Mirrors
-   `synthigy.engine/platform-audience` — engine may not depend on oauth, so
-   both literals exist and `synthigy.iam.scope-contract-test` pins them to
-   each other and to resources/exports/api_synthigy.json."
+  "Audience a bearer token must carry to be answered; must equal `synthigy.engine/platform-audience`."
   "https://synthigy.com")
 
 (defn session-row
@@ -204,8 +191,7 @@
                                         :secret nil :active nil :settings nil}}]})))
 
 (defn resolve-resource-owner
-  "Fetch a full resource-owner (person_info + roles/groups as xid sets) for any
-   identifier."
+  "Full resource-owner (person_info, roles/groups as xid sets) for any identifier."
   [identifier]
   (when-let [xid (:xid (iam.context/get-user-context identifier))]
     (some-> (iam.context/get-user-details {:xid xid})
@@ -247,8 +233,7 @@
   (update-in tokens [:access_token :scope] (fnil conj []) scope))
 
 (defmulti claims-for
-  "Scope descriptor {:claims [...] :resolve (fn [session] {...})}; nil :resolve
-   reads person_info."
+  "Scope descriptor {:claims :resolve}; nil :resolve reads person_info."
   identity)
 
 (defmethod claims-for :default [_] nil)
@@ -286,8 +271,7 @@
    :zoneinfo           :zone_info})
 
 (defn user-claims
-  "Assemble a user's OIDC claims; public-profile wins, person-info is the
-   fallback."
+  "A user's OIDC claims; public-profile wins over person-info."
   [{:keys [person_info public_profile]}]
   (merge person_info
          (reduce-kv (fn [m claim k]
@@ -360,16 +344,14 @@
       (catch Exception _ nil))))
 
 (defn loopback-redirect-matches?
-  "RFC 8252 §7.3: loopback redirect_uri must match a registered entry on
-   scheme+host+path — only the port is exempt."
+  "RFC 8252 §7.3: loopback redirect_uri matches a registered scheme+host+path — only the port is exempt."
   [redirect-uri redirections]
   (when (localhost-redirect? redirect-uri)
     (when-let [target (strip-port redirect-uri)]
       (boolean (some #(= target (strip-port %)) redirections)))))
 
 (defn redirect-allowed?
-  "Whether a client with these registered redirections may be sent to uri:
-   exact match, or a loopback match ignoring the port."
+  "Exact match against registered redirections, or a loopback match ignoring the port."
   [uri redirections]
   (boolean (or (some #{uri} redirections)
                (loopback-redirect-matches? uri redirections))))
@@ -406,8 +388,7 @@
               (contains? loopback (some-> (strip-port origin) uri-origin)))))))
 
 (defn validate-resource-owner
-  "Verify resource-owner credentials via the connector chain; user map on
-   success, nil on deny."
+  "Verify resource-owner credentials via the connector chain; nil on deny."
   [username password]
   (connector/authenticate {:username username :password password}))
 
@@ -485,8 +466,7 @@
           client)))))
 
 (defn get-client-login-url
-  "Login URL for a client: its named bundle, else the default bundle, else the
-   built-in page; a setting that is not a bundle name throws."
+  "Client login URL: its bundle, else the default bundle, else built-in; a non-bundle-name setting throws."
   [client]
   (let [page (not-empty (get-in client [:settings "login-page"]))
         client-name (:name client)]
@@ -504,9 +484,14 @@
       (custom/active? custom/default-name) (custom/page-url custom/default-name)
       :else "/oauth/login")))
 
+(defn login-hint
+  "An OIDC login_hint as the login pages use it: trimmed, at most 256 characters, nil when blank."
+  [s]
+  (when-let [h (some-> s str str/trim not-empty)]
+    (subs h 0 (min 256 (count h)))))
+
 (defn get-session
-  "Assemble the legacy session map from the row; keys are absent (not nil) when
-   unset."
+  "Legacy session map from the row; keys are absent (not nil) when unset."
   [id]
   (when id
     (when-let [row (session-row id
@@ -528,8 +513,7 @@
           scopes (assoc :scopes scopes))))))
 
 (defn remove-session
-  "Hard-delete a session row (pre-auth/error cleanup); authenticated sessions go
-   through kill-session."
+  "Hard-delete a session row; authenticated sessions go through kill-session."
   [id]
   (when id
     (dataset/delete-entity (id/entity :oauth/session) {:id id})
@@ -593,8 +577,7 @@
         context (select-keys error-data [:client-name :invalid-value])]
     (when session (remove-session session))
     (case t
-      ;; RFC 6749 §4.1.2.1: invalid/missing redirect_uri MUST NOT redirect —
-      ;; render error page
+      ;; RFC 6749 §4.1.2.1: invalid/missing redirect_uri MUST NOT redirect — render error page
       ("no_redirections"
        "missing_redirect"
        "redirect_missmatch"
@@ -627,8 +610,7 @@
   "Record activity on `session`; throttled, so most calls do no IO at all."
   [session]
   (when (and session (not (cache/has? @session-touch-cache session)))
-    ;; recorded BEFORE the write so a dead cookie hammering us costs one
-    ;; existence check per window, not one per request
+    ;; record BEFORE the write — a replayed dead cookie costs one existence check per window
     (swap! session-touch-cache cache/miss session true)
     (when (session-exists? session)
       (dataset/stack-entity (id/entity :oauth/session)
@@ -764,8 +746,7 @@
       (str/split decoded #":" 2))))
 
 (defn wrap-basic-authorization
-  "Ring middleware parsing HTTP Basic Authorization into
-   :client_id/:client_secret params."
+  "Ring middleware parsing HTTP Basic Authorization into :client_id/:client_secret params."
   [handler]
   (fn [request]
     (let [authorization (get-in request [:headers "authorization"])]
@@ -840,8 +821,7 @@
   (util/days 30))
 
 (defn clean-sessions
-  "Kill sessions that never reached authorization past `timeout`, or authorized
-   sessions past the idle/absolute TTLs."
+  "Kill never-authorized sessions past `timeout` and authorized ones past the idle/absolute TTLs."
   ([] (clean-sessions (util/minutes 1)))
   ([timeout]
    (let [cutoff (java.util.Date. (- (util/now) timeout))
@@ -871,8 +851,7 @@
 (def ^:private client-monitor-sub-key ::client-cache-monitor)
 
 (defn monitor-client-change
-  "Idempotent: (re)registers the App-entity delta subscription that evicts the
-   client cache."
+  "Idempotently register the App delta subscription that evicts the client cache."
   []
   (when-let [app-xid (some-> (id/entity :iam/app) str)]
     (delta/subscribe! client-monitor-sub-key

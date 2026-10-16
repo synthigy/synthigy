@@ -37,7 +37,6 @@ An **attribute** becomes a column. Types:
 | `json` | any JSON document |
 | `encrypted` | JSON encrypted at rest ([ENCRYPTION.md](ENCRYPTION.md)) |
 | `hashed` | a one-way hash, e.g. a password — the plain value is never stored |
-| `transit` | Clojure data in Transit encoding |
 | `user`, `group`, `role` | a reference to an IAM user, group or role |
 
 Each attribute has a constraint: optional (the default), `mandatory`

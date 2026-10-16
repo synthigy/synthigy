@@ -166,12 +166,6 @@
                 "Record history erased")
       n)))
 
-(defn principal-tenant-xid
-  "MVP per Q11: the install's primary dataset xid is the (inescapable) tenant
-   boundary."
-  [_principal]
-  (some-> (id/data :dataset/id) str))
-
 (defn stringify-opt-keys
   "Shallow-convert an opts map's keys to strings so in-process callers can pass
    keyword opts; nested values are left untouched."
@@ -237,10 +231,5 @@
     (when (str/blank? op)
       (throw (ex-info "op is required" {:code "OP_REQUIRED" :status 400})))
     (access/with-principal principal
-      (let [tenant (principal-tenant-xid principal)
-            ;; String key — wire-get only looks up strings; a keyword :tenant
-            ;; here silently disables tenant pruning.
-            full   (cond-> opts
-                     tenant (assoc "tenant" tenant))]
-        {:op op :result (filter-result op (execute-op audit/*audit-provider* op full) (denied))}))))
+      {:op op :result (filter-result op (execute-op audit/*audit-provider* op opts) (denied))})))
 

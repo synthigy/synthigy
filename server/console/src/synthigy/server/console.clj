@@ -18,6 +18,7 @@
    [synthigy.dataset.encryption :as denc]
    [synthigy.iam :as iam]
    [synthigy.iam.access :as access]
+   [synthigy.iam.context :as iam.context]
    [synthigy.info :as info]
    [synthigy.json :as json]
    [synthigy.log :as log]
@@ -122,6 +123,13 @@
       (if-let [user (and (not (str/blank? username))
                          (not (str/blank? password))
                          (oauth/validate-resource-owner username password))]
+        (if-not (access/with-principal (iam.context/get-user-context (:xid user))
+                  (ui/console-admin?))
+          (do (log/info {:id ::login-refused
+                         :data {:action :refused :subject :console :user (:name user)}}
+                        "Console login refused: no admin rights")
+              (html-response (login-page/render (str "This console is for administrators. "
+                                                     "Manage your account in the app you use."))))
         (let [sid (oauth/gen-session-id)]
           (oauth/create-session! sid (merge {:user user :flow "console"
                                              :authorized-at (java.util.Date.)
@@ -132,7 +140,7 @@
                     "Console login")
           {:status 303
            :headers {"Location" "/console"}
-           :cookies (oauth.login/session-cookie sid)})
+           :cookies (oauth.login/session-cookie sid)}))
         (html-response (login-page/render "Invalid username or password."))))))
 
 (defn logout!
@@ -166,8 +174,7 @@
             {:status 303 :headers {"Location" "/console/sessions"}})))))
 
 (defn system-action!
-  "POST /console/system/<verb> — role-gated module lifecycle control; the
-   handler is the guard, the page's buttons are only affordances."
+  "POST /console/system/<verb> — role-gated module lifecycle control."
   [request verb]
   (let [{:strs [module]} (query-params request)
         topic     (system/parse-module module)
@@ -195,11 +202,7 @@
       (act! #(lifecycle/start! topic)))))
 
 (defn rotate-dek!
-  "POST /console/encryption/rotate-dek — key ROLLOVER, Robert's call: cut a
-   fresh active DEK (denc/create-dek); existing cells stay readable under
-   their own DEKs and re-encrypt organically on write. The eager
-   walk-every-cell denc/rotate-dek! stays a REPL/compromise-response tool.
-   Step-up gated; every outcome lands back on the page as a visible notice."
+  "POST /console/encryption/rotate-dek — step-up gated key rollover via `denc/create-dek`."
   [request]
   (let [datastar? (some? (get-in request [:headers "datastar-request"]))
         land      (fn [q]
@@ -307,7 +310,7 @@
 
 (defn preview-login-page
   [request]
-  (when-let [[_ name version rest] (re-matches #"/console/login-pages/preview/([^/]+)/(\d+)(/.*)?" (:uri request))]
+  (when-let [[_ name version rest] (re-matches #"/console/custom-pages/preview/([^/]+)/(\d+)(/.*)?" (:uri request))]
     (when-let [page (and (custom/valid-name? name) (preview-page name (parse-long version)))]
       (if rest
         (custom/serve-path page (codec/url-decode (subs rest 1)) request)
@@ -595,12 +598,13 @@
     (when-let [row (data/detail-row spec xid)]
       (let [sig     (signals request)
         request (assoc request ::signals sig)
-        params  (or (form-params request) {})]
+        params  (merge sig (form-params request))]
         (if (and reauth? (not (reauthenticated? request)))
           (html-response
            (ui/detail request spec row
                       [:warn "Please confirm your password and try again."]))
-          (let [{:keys [notice panel-notice]} (run spec row params)
+          (let [{:keys [notice panel-notice]} (binding [oauth/*domain* (oauth/original-uri request)]
+                                                (run spec row params))
                 row (or (data/detail-row spec xid) row)]
             (html-response
              (ui/detail request spec row notice panel-notice))))))))
@@ -677,8 +681,7 @@
            (owned-params (:owned create) raw))))
 
 (defn wizard-values
-  "The wizard's chosen discriminator, off the query string — only ever a value
-   the spec itself declares a config layout for."
+  "The wizard's chosen discriminator from the query string, when the spec declares a layout for it."
   [spec request]
   (when-let [by (and (get-in spec [:create :wizard]) (get-in spec [:detail :config :by]))]
     (let [v (get (query-params request) (name by))]
@@ -824,6 +827,9 @@
   (session/wrap-session
    (fn [request]
      (let [uri (:uri request)]
+       (if-not (ui/console-admin?)
+         {:status 403 :headers {"Content-Type" "text/html; charset=utf-8"}
+          :body (ui/not-admin-page)}
        (case uri
          ("/console" "/console/")  {:status 303 :headers {"Location" "/console/sessions"}}
          "/console/sessions"       (html-response (sessions/render request))
@@ -871,22 +877,22 @@
          (when (and (= :post (:request-method request))
                     (data/system-operator?))
            (rotate-dek! request))
-         "/console/login-pages"
+         "/console/custom-pages"
          (when (and (= :get (:request-method request)) (data/system-operator?))
            (html-response (login-pages/render request (login-pages-notice request))))
-         "/console/login-pages/upload"
+         "/console/custom-pages/upload"
          (when (and (= :post (:request-method request)) (data/system-operator?))
            (upload-login-page! request))
-         ("/console/login-pages/activate" "/console/login-pages/deactivate" "/console/login-pages/delete")
+         ("/console/custom-pages/activate" "/console/custom-pages/deactivate" "/console/custom-pages/delete")
          (when (and (= :post (:request-method request)) (data/system-operator?))
-           (login-page-action! request (subs uri (count "/console/login-pages/"))))
-         "/console/login-pages/export"
+           (login-page-action! request (subs uri (count "/console/custom-pages/"))))
+         "/console/custom-pages/export"
          (when (and (= :get (:request-method request)) (data/system-operator?))
            (export-login-page request))
          "/console/transfer/export" (when (= :get (:request-method request))
                                       (transfer-export request))
          (or (when (and (= :get (:request-method request))
-                        (str/starts-with? uri "/console/login-pages/preview/")
+                        (str/starts-with? uri "/console/custom-pages/preview/")
                         (data/system-operator?))
                (preview-login-page request))
              (when-let [[_ nm] (and (= :post (:request-method request))
@@ -936,9 +942,6 @@
                    (and (= tail "new") (nil? link-key))
                    (when (:create spec)
                      (case (:request-method request)
-                       ;; A wizard has no chooser step — the index's cards ARE
-                       ;; the chooser — so arriving without a valid discriminator
-                       ;; means there is nothing to render. Send them to pick.
                        :get  (let [values (wizard-values spec request)]
                                (if (and (get-in spec [:create :wizard]) (nil? values))
                                  {:status 303
@@ -959,9 +962,7 @@
                    (run-action! request spec tail
                                 (cond-> link-key action (str "/" action)))
 
-                   ;; `tail` is a row xid ONLY when nothing follows it — an
-                   ;; unrecognized sub-path must 404, never fall through to a
-                   ;; WRITE on that row.
+                   ;; never let an unknown sub-path fall through to a write — `tail` is a row xid only when nothing follows
                    (nil? link-key)
                    (when (and (:detail spec) (= :get (:request-method request)))
                      (detail-page request spec tail)))))
@@ -975,7 +976,7 @@
                       (filter-params spec qp) sort-k dir))
 
                    (and tail (nil? more) (:detail spec))
-                   (live/detail-stream request spec tail))))))))))
+                   (live/detail-stream request spec tail)))))))))))
 
 (defn route
   [request]
@@ -987,8 +988,7 @@
                                   :post (login! request)
                                   nil)
       (= uri "/console/logout") (when (= :post request-method) (logout! request))
-      ;; Unauthenticated on purpose: it carries no data, and a silent-renew
-      ;; iframe must reach it even when the console session has lapsed.
+      ;; unauthenticated on purpose — a silent-renew iframe must reach it after the session lapses
       (= uri "/console/tools/callback") (when (and (= :get request-method)
                                                    (ui/tools-available?))
                                           (html-response (ui/tools-callback-page)))
@@ -1023,8 +1023,7 @@
     (not (some #{uri} urls)) (conj uri)))
 
 (defn register-tools-redirect!
-  "Registers the loopback tools callbacks, and this deployment's root-URL callback
-   and logout landing when SYNTHIGY_IAM_ROOT_URL is set, with the Synthigy Tools client."
+  "Add-only registration of the console tools callbacks with the Synthigy Tools client."
   []
   (let [root (ui/root-url)
         callbacks (cond-> ui/loopback-callbacks

@@ -768,11 +768,7 @@
        :role (not-empty (env :synthigy-vault-role))
        :mount (not-empty (env :synthigy-vault-mount))
        :jwt-path (not-empty (env :synthigy-vault-jwt-path))
-       ;; not-empty, not just some->: the operator console CLEARS a custody
-       ;; key by writing "KEY=" into .env, which environ reads as "" — and
-       ;; (Long/parseLong "") throws, failing the encryption module and
-       ;; SEALING the engine on the next boot. Found walking local -> vault,
-       ;; where clearing is exactly what the previous step did.
+       ;; not-empty, never bare some-> — a cleared key reads as "" and parseLong "" seals the engine
        :timeout-ms (some-> (not-empty (env :synthigy-vault-timeout-ms)) Long/parseLong)})))
 
 (defn webhook-config
@@ -809,7 +805,7 @@
         (catch Throwable _ false))
       true)))
 
-;; "encrypted" seals HERE at INSERT/SELECT, never via TypeCodec — encode needs the row xid, which doesn't exist yet
+;; "encrypted" seals HERE at INSERT/SELECT, never via TypeCodec — it needs the active DEK and writes a JSON envelope
 (defn seal-cell
   "Encrypt `value` for storage under the active DEK; nil for nil."
   [value]
@@ -874,7 +870,7 @@
 (defonce vault-latest-cache (atom nil))
 
 (defn vault-status
-  "Vault key-version report when custody is vault-transit: stored DEK wrapper versions vs the transit key's latest (probed by wrapping throwaway bytes — encrypt returns the latest version, so no extra Vault policy is needed), cached 60s."
+  "Vault key-version report when custody is vault-transit: stored DEK wrapper versions vs the transit key's latest."
   []
   (let [tag (some-> *key-wrap-provider* provider-tag)]
     (when (and tag (str/starts-with? tag "vault-transit:"))
@@ -886,9 +882,6 @@
                           distinct sort vec)
               now (System/currentTimeMillis)
               latest (let [{:keys [at latest]} @vault-latest-cache]
-                       ;; 15s: one throwaway transit encrypt per expiry — cheap
-                       ;; enough that the operator never catches the panel blind
-                       ;; after rotating inside Vault
                        (if (and at (< (- now at) 15000))
                          latest
                          (let [v (-> (wrap-dek *key-wrap-provider* (byte-array 32))
@@ -902,7 +895,7 @@
         (catch Throwable _ nil)))))
 
 (defn rewrap-deks!
-  "Rewrap every DEK under the CURRENT provider — same custody, fresh wrap; this is how vault-wrapped rows pick up a rotated transit key's latest version. Never use migrate-provider! for this: its tag-collision guard refuses a target whose tag is already on a row."
+  "Rewrap every DEK under the CURRENT provider — same custody, fresh wrap; never use migrate-provider! for this."
   []
   (let [target *key-wrap-provider*
         target-tag (provider-tag target)

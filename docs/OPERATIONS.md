@@ -26,6 +26,21 @@ synthigy logs -f       # engine process output: boot and crashes
 synthigy down          # stop the engine and the portal
 ```
 
+## Health check
+
+`GET /health` answers without authentication, for load balancers, orchestrators and
+uptime monitors:
+
+| Status | Body `status` | Meaning |
+|---|---|---|
+| 200 | `ok` | Serving. |
+| 200 | `degraded` | Serving, but audit or logs are behind ([DATALINE.md](DATALINE.md)). Keep the node in service. |
+| 503 | `unavailable` | The database does not answer within 2 seconds, or the engine is not fully started. Take the node out. |
+
+```json
+{"status": "ok", "checks": {"database": true, "modules": {"synthigy/dataset": true, "synthigy/iam": true}, "dataline": "ok"}}
+```
+
 ## Starting at boot
 
 ```bash
@@ -122,7 +137,8 @@ so nothing is downloaded at start; the instance lives on a volume
 (`SYNTHIGY_HOME=/data`); the engine binds every interface
 (`SYNTHIGY_SERVER_HOST=0.0.0.0`) and port 7887 is published. With
 `SYNTHIGY_BUNDLE` and the database settings in the environment, the engine
-starts without the setup page. `synthigy pull` at build time bakes a bundle
+starts without the setup page; point the health check at `GET /health`.
+`synthigy pull` at build time bakes a bundle
 into the image for hosts without network access.
 
 The portal binds 127.0.0.1 inside the container and is not published. The

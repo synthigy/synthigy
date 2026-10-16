@@ -9,12 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.log.topics
-  "Topic classification for log signals — what a signal is ABOUT, an axis
-   orthogonal to level (how severe it is). Lenses subscribe to a topic
-   (`:system`, `:dataset`, `:auth`, `:traffic`, …) drawn from the closed
-   `all-topics` vocabulary instead of guessing from ns+level; `classify`
-   derives it from explicit `:topics` plus rules over `:id`/`:data`/`:ns`/`:level`,
-   with `:system` as the operator catch-all."
+  "Topic classification for log signals: what a signal is ABOUT, orthogonal to its level."
   (:require
    [clojure.string :as str]))
 
@@ -23,8 +18,7 @@
   #{:system :dataset :auth :traffic :audit :diagnostic})
 
 (def child-topics
-  "The closed set of two-level topics (`parent/child`); a child never appears
-   without its parent. Locked 2026-07-22 (traffic family only)."
+  "The closed set of two-level topics (`parent/child`); a child never appears without its parent."
   #{:traffic/request :traffic/op :traffic/sse
     :traffic/subscription :traffic/delta})
 

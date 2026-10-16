@@ -48,11 +48,9 @@
       :else (char-at source i))))
 
 (defn marker-before-current-word
-  "Return `:arrow` when `->` immediately precedes the current word, `:dash` for
-   `-`, else nil."
+  "`:arrow` when `->` immediately precedes the current word, `:dash` for `-`, else nil."
   [^String source from]
   (let [from (if (= ":" (char-at source (dec from)))
-               ;; step back over `alias:` to the alias's own start
                (loop [i (- from 2)]
                  (if (ident-char? (char-at source i))
                    (recur (dec i))
@@ -124,7 +122,6 @@
   (current-line-indent-text source pos))
 
 (defn line-start-offset
-  "Offset of the first character of the line containing `offset`."
   [^String source offset]
   (loop [s offset]
     (if (and (pos? s) (not= "\n" (char-at source (dec s))))
@@ -147,8 +144,7 @@
     (and (>= offset from) (<= offset to))))
 
 (defn innermost-with-ancestors
-  "Find the innermost AST node whose span contains `offset`, returning `[node
-   ancestors]`."
+  "Innermost AST node whose span contains `offset`, as `[node ancestors]`."
   [root offset source]
   (let [descend (fn [start anc0]
                   (loop [n start anc anc0]
@@ -193,8 +189,7 @@
           (:children rel-node))))
 
 (defn collect-relations-before
-  "Collect relation nodes starting before `offset` as `{:name :indent :from
-   :kind}` entries."
+  "Relation nodes starting before `offset`, as `{:name :indent :from :kind}` entries."
   [root source offset]
   (let [acc (volatile! [])
         rel-tags #{:relation :count-child :agg-relation}]
@@ -212,8 +207,7 @@
     @acc))
 
 (defn enclosing-relation-target-by-indent
-  "Resolve the entity context for a line at `child-indent` from the innermost
-   preceding relation at smaller indent."
+  "Entity context for a line at `child-indent`, from the innermost preceding relation at smaller indent."
   [root source offset child-indent schema root-entity]
   (let [root-def (get-in schema [:entities root-entity])]
     (when root-def
@@ -260,8 +254,7 @@
 ;; ── Schema walks ─────────────────────────────────────────────────────────
 
 (defn resolve-attr-from-path-node
-  "Walk a :path AST node against the current entity, returning the final
-   attr-def or nil."
+  "Final attr-def of a :path AST node walked from the current entity, or nil."
   [path-node current-entity schema]
   (when current-entity
     (let [segs (filterv #(= :identifier (:node %)) (:children path-node))]
@@ -320,11 +313,7 @@
     (current-line-indent-text source (first (:span indent-tok)))))
 
 (defn entity-stack-from-ancestors
-  "Push relation-target entities for ancestors whose block/parens contain
-   offset; agg-relation bodies (no :block) are detected via their :indent
-   child. Cursor-column hint (see docs): a body-indent past the cursor's
-   column treats the relation as logically closed, so completion doesn't
-   stay stuck inside a trailing blank-line block."
+  "Push relation-target entities for ancestors whose block/parens contain offset, honoring the cursor-column hint."
   [ancestors offset source schema entity-stack]
   (let [cursor-col (current-line-indent-text source offset)
         outdented? (fn [body-indent]
@@ -365,8 +354,7 @@
       ancestors)))
 
 (defn attr-def-for-value-position
-  "Attr-def of the field being predicated when the cursor is right after
-   a binary op (`=`, `!=`, `<`, …), for value-position completion."
+  "Attr-def of the field being predicated when the cursor is right after a binary op."
   [resolved ancestors current-entity schema]
   (let [pred-op (enclosing-of-tag resolved ancestors :pred-op)]
     (when (and pred-op
@@ -383,9 +371,7 @@
               (get-in current-entity [:attributes (:text field-id)]))))))))
 
 (defn scope-parent-node
-  "AST node whose direct children are the sibling statements at the
-   cursor's scope: root `:query` at column 0, else the innermost
-   ancestor `:block` whose body indent is ≤ the cursor column."
+  "AST node whose direct children are the sibling statements at the cursor's scope."
   [tree ancestors source offset]
   (let [cursor-col (current-line-indent-text source offset)
         block-anc  (->> ancestors
@@ -397,9 +383,7 @@
     (or block-anc tree)))
 
 (defn sibling-bare-names
-  "Bare attr/relation identifiers already used at this scope, as
-   `{:attrs #{names} :rels #{names}}` — see docs for why duplicates
-   matter and how the in-progress statement is excluded."
+  "Bare attr/relation names already used at this scope, as `{:attrs #{} :rels #{}}`."
   [scope-parent source offset]
   (let [attrs (volatile! #{})
         rels  (volatile! #{})
@@ -432,9 +416,7 @@
     {:attrs @attrs :rels @rels}))
 
 (defn unaliased-child-names
-  "Bare (unaliased) child names of a `_count`/`_agg` body — its
-   :count-child/:agg-relation nodes sit directly under the block, so
-   `sibling-bare-names` never sees them."
+  "Bare (unaliased) child names of a `_count`/`_agg` body."
   [block-node child-tag offset]
   (into #{}
         (keep (fn [c]
@@ -447,8 +429,7 @@
         (:children block-node)))
 
 (defn agg-attr-names-of
-  "Attr names already aggregated in an :agg-relation body (`value: avg`),
-   excluding the line the cursor is on (the one being typed)."
+  "Attr names already aggregated in an :agg-relation body, excluding the cursor's line."
   [agg-rel-node offset]
   (into #{}
         (keep (fn [c]
@@ -470,7 +451,6 @@
         (:children agg-attr-node)))
 
 (defn last-leaf-of
-  "Rightmost leaf of a node's subtree."
   [n]
   (if-let [cs (seq (:children n))]
     (recur (last cs))
@@ -513,9 +493,7 @@
 (def ^:private order-spec-re #"^\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:asc|desc))?\s*$")
 
 (defn order-by-slot
-  "Which slot of an `order by` / `_order_by` spec list `offset` sits in:
-   `:attr` while the sort column is being typed, `:dir` once it is
-   complete, nil anywhere else."
+  "`:attr` or `:dir` slot of an `order by` spec list at `offset`, else nil."
   [^String source offset]
   (let [source (or source "")
         start (if-let [p (innermost-open-paren source offset)] (inc p) 0)
@@ -534,7 +512,6 @@
             words (into [] (remove str/blank?) (str/split body #"\s+"))
             trailing-ws? (boolean (re-find #"\s$" body))]
         (cond
-          ;; `?sort:order(…)` replaces the whole spec list — not a column slot.
           (str/starts-with? (str (first words)) "?") nil
           (and (empty? words) head (not trailing-ws?)) nil
           (empty? words) :attr
@@ -543,8 +520,7 @@
           :else nil)))))
 
 (defn complete-predicate-stmt?
-  "True when an :arg-stmt ends in a literal value or a null test — a
-   meta-key stmt (`_limit 100`) or a half-typed predicate is not."
+  "True when an :arg-stmt ends in a literal value or a null test (meta-key stmts never)."
   [stmt]
   (and (nil? (ast/find-child stmt :meta-key))
        (let [leaf (last-leaf-of stmt)]
@@ -567,9 +543,6 @@
         siblings (sibling-bare-names scope-parent source offset)
         value-attr (attr-def-for-value-position
                      resolved ancestors current-entity schema)
-        ;; Closing quote ends a string value definitively (unlike a
-        ;; number, where more digits may follow) — already the joiner
-        ;; slot, not a value-edit position.
         after-closed-string? (and (= :string (:node resolved))
                                   (= offset (second (:span resolved)))
                                   (let [t (:text resolved)]
@@ -577,9 +550,7 @@
                                          (= "\"" (subs t (dec (count t)))))))
         order-slot (order-by-slot source offset)]
     (cond
-      ;; `order by` has its own two-slot grammar (Identifier asc|desc) —
-      ;; it must win over the generic predicate branches below, which
-      ;; would otherwise offer comparison operators after the column.
+      ;; `order by` branches must stay first — the predicate branches would offer operators after the column
       (= :attr order-slot)
       {:kind :order-attr :entity-stack entity-stack}
 
@@ -631,9 +602,6 @@
             path-target-entity (when (= prev-char ".")
                                  (resolved-path-target
                                    source offset current-entity schema))
-            ;; Attribute of the current entity right before the cursor
-            ;; with >=1 space between (same line). nil while still
-            ;; typing the identifier or if it isn't a known attribute.
             inline-attr-after-space
             (let [i (loop [i (dec offset)]
                       (if (and (>= i 0) (ws-or-tab? (char-at source i)))
@@ -646,9 +614,6 @@
                               (if (and (>= j 0) (ident-char? (char-at source j)))
                                 (recur (dec j)) (inc j)))]
                   (get-in current-entity [:attributes (subs source start end)]))))
-            ;; A COMPLETE predicate right before the cursor: the joiner
-            ;; slot (`and`/`or` continue the arg-stmt). Walks all
-            ;; :arg-predicate nodes deep, so grouping parens take joiners too.
             joiner-stmt (when (and in-args?
                                     (not= prev-char "(") (not= prev-char ","))
                           (when-let [al (or (enclosing-of-tag resolved ancestors :arg-list)
@@ -691,10 +656,6 @@
             :else
             {:kind :arg-list-start :entity-stack entity-stack})
 
-          ;; Unterminated relation parens: span-based resolution can't
-          ;; see the cursor is still inside, so detect the joiner slot
-          ;; lexically instead (unclosed depth + arg segment ends in a
-          ;; literal value, not a `_meta` key).
           (and (pos? (open-paren-depth source offset))
                (let [seg (str/trim (current-arg-text source offset))]
                  (and (seq seg)
@@ -702,8 +663,6 @@
                       (re-find #"(\d|\"|\bnull|\btrue|\bfalse)$" seg))))
           {:kind :after-predicate-value :entity-stack entity-stack}
 
-          ;; Inline scalar predicate with a trailing space (`xid != "a" |`):
-          ;; the parens-free joiner slot, only when the tail is complete.
           (when-let [sc (enclosing-of-tag resolved ancestors :scalar)]
             (when-let [tail (or (ast/find-child sc :scalar-filter)
                                 (ast/find-child sc :pred-op))]
@@ -713,12 +672,6 @@
                      (complete-predicate-stmt? tail)))))
           {:kind :after-predicate-value :entity-stack entity-stack}
 
-          ;; Scalar-filter parens (`title(…)`) are a different node
-          ;; family from :parens/:arg-list — needs its own branch, or
-          ;; the body-statement fallthrough would wrongly offer
-          ;; attributes/relations/_count here. Operator-first grammar:
-          ;; after `(` or a joiner the slot is an operator; after a
-          ;; binary op it's a value.
           (or (enclosing-of-tag resolved ancestors :scalar-filter)
               (when (pos? (open-paren-depth source offset))
                 (when-let [op-pos (innermost-open-paren source offset)]
@@ -736,9 +689,6 @@
               {:kind :value-suggestion :entity-stack entity-stack :attr-def attr-def}
               {:kind :after-attr-in-pred :entity-stack entity-stack :attr-def attr-def}))
 
-          ;; AggAttr: cursor before the (silently-consumed) colon is the
-          ;; attr-name slot, at/past it is the fn slot; no identifier
-          ;; parsed yet also means attr-name.
           (enclosing-of-tag resolved ancestors :agg-attr)
           (let [agg-attr-node (enclosing-of-tag resolved ancestors :agg-attr)
                 attr-id       (ast/find-child agg-attr-node :identifier)
@@ -751,9 +701,6 @@
               {:kind :agg-fn        :entity-stack entity-stack
                :used-fns (agg-fn-names-of agg-attr-node)}))
 
-          ;; Inside a `_count` body: only relations of the parent
-          ;; entity are valid (count-child's own parens fall through
-          ;; to arg-list logic instead).
           (and (enclosing-of-tag resolved ancestors :count-block)
                (not parens))
           {:kind :count-block-body :entity-stack entity-stack
@@ -761,13 +708,6 @@
                         (enclosing-of-tag resolved ancestors :count-block)
                         :count-child offset)}
 
-          ;; `_agg` header line (choosing what to aggregate over): only
-          ;; relation names of the parent entity are valid. Distinguished
-          ;; from the body by `:agg-attr` rather than `:agg-relation` —
-          ;; the cursor is already inside an eagerly-parsed :agg-relation
-          ;; while typing the header, and `:agg-attr` only appears on
-          ;; body lines. A blank line under the header has no :agg-attr
-          ;; yet either; it falls through to the indent-based :else.
           (and (enclosing-of-tag resolved ancestors :agg-block)
                (not (enclosing-of-tag resolved ancestors :agg-attr))
                (not parens)
@@ -781,16 +721,12 @@
                         (enclosing-of-tag resolved ancestors :agg-block)
                         :agg-relation offset)}
 
-          ;; Bare attribute + space (`xid |`): only an operator can
-          ;; follow. Below the agg/count checks: `value |` in an _agg
-          ;; body is the `value: avg` slot, not a predicate.
+          ;; must stay below the agg/count branches — `value |` in an _agg body is the `value: avg` slot
           inline-attr-after-space
           {:kind :after-attr-in-pred
            :entity-stack entity-stack
            :attr-def inline-attr-after-space}
 
-          ;; Indent-based fallback for mid-typing relations whose Block
-          ;; hasn't formed yet.
           :else
           (let [line-indent (current-line-indent-text source offset)]
             (cond
@@ -824,22 +760,16 @@
 
 ;; ── Option emission ──────────────────────────────────────────────────────
 
-;; Audit-injected columns (created_on/modified_on, created_by/modified_by)
-;; are offered like any other field — real, queryable runtime columns.
-
 (defn sorted-attr-keys
-  "Sorted attribute keys for option emission."
   [entity-def]
   (sort (keys (:attributes entity-def))))
 
 (defn sorted-relation-keys
-  "Sorted relation keys for option emission."
   [entity-def]
   (sort (keys (:relations entity-def))))
 
 (defn many-relation-keys
-  "Sorted to-many relation keys — the only kind `_count`/`_agg` can
-   meaningfully aggregate over."
+  "Sorted to-many relation keys, the only kind `_count`/`_agg` can aggregate."
   [entity-def]
   (->> (:relations entity-def)
        (filter (fn [[_ r]] (= "many" (:cardinality r))))
@@ -847,8 +777,7 @@
        sort))
 
 (defn numeric-attr-options
-  "Number-typed attribute options, for `_agg` relation bodies. `used`
-   (optional) drops attrs already aggregated in this body."
+  "Number-typed attribute options minus `used`, for `_agg` relation bodies."
   ([entity-def] (numeric-attr-options entity-def #{}))
   ([entity-def used]
    (when entity-def
@@ -860,18 +789,14 @@
           (mapv (fn [a] {:label a :type "attribute" :section "Attributes"}))))))
 
 (defn alias-template-option
-  "Completion option for a relation already projected bare at this scope:
-   a snippet inserting `alias:rel` with the alias placeholder selected,
-   rather than hiding the relation. `prefix` carries a `->` join marker."
+  "Snippet option inserting `alias:rel` for a relation already projected bare at this scope."
   [rel prefix]
   {:label rel :type "relation" :section "Relations"
    :detail "already used — alias it"
    :snippet (str prefix "${alias}:" rel)})
 
 (defn options-for-entity
-  "Attribute + relation options for an entity, attrs first. `:siblings`
-   (optional) is `{:attrs #{} :rels #{}}` already used at this scope —
-   filtered from attrs, flipped to alias templates for relations."
+  "Attribute + relation options for an entity, attrs first, used siblings filtered or aliased."
   [entity-def {:keys [relation-prefix relation-detail siblings]}]
   (let [used-attrs (:attrs siblings #{})
         used-rels  (:rels  siblings #{})
@@ -889,9 +814,7 @@
             (sorted-relation-keys entity-def)))))
 
 (defn bare-relation-options
-  "Plain relation options, no `-`/`->` prefix — for when the user
-   already typed the marker. `siblings` (optional) flips already-used
-   relations to alias templates, mirroring `options-for-entity`."
+  "Relation options without a `-`/`->` prefix, for when the user already typed the marker."
   ([entity-def] (bare-relation-options entity-def nil))
   ([entity-def siblings]
    (when entity-def
@@ -912,7 +835,6 @@
       (if marker
         (bare-relation-options entity-def (:siblings ctx))
         (concat
-          ;; Default to `->` (left join) — see docs for rationale.
           (when entity-def
             (options-for-entity entity-def {:relation-prefix "->"
                                             :siblings (:siblings ctx)}))
@@ -935,8 +857,6 @@
             [{:label "_count" :type "keyword" :section "Operators" :detail "aliased counters" :apply :block-opener}
              {:label "_agg"   :type "keyword" :section "Operators" :detail "aggregates"       :apply :block-opener}])))
 
-      ;; Attrs + meta-keys only — a relation's args belong in its own
-      ;; header parens; dotted paths complete via :path-continuation.
       :arg-list-start
       (concat
         (mapv (fn [a] {:label a :type "attribute" :section "Attributes"})
@@ -948,8 +868,6 @@
             allowed (or (ops-by-type type) (ops-by-type "string"))]
         (mapv (fn [op] {:label op :type "operator"}) allowed))
 
-      ;; Joiners continue the SAME arg-stmt; a comma starts a fresh one.
-      ;; `:insert` carries a trailing space so the next pick doesn't glue.
       :after-predicate-value
       [{:label "and" :type "keyword" :section "Operators"
         :detail "both must match" :insert "and "}
@@ -1037,12 +955,9 @@
       [])))
 
 ;; ── Op-specific option filters (multimethod) ────────────────────────────
-;; Methods take `[op ctx options entity-def]` and return a new option
-;; vector; new ops register a `defmethod`.
 
 (defmulti op-complete-options
-  "Transform completion options for op-specific surface. Dispatches on
-   the wire op string; `:default` is identity."
+  "Op-specific transform of completion options, dispatched on the wire op string."
   (fn [op _ctx _options _entity-def] (or op :default)))
 
 (defmethod op-complete-options :default
@@ -1052,8 +967,6 @@
 (defmethod op-complete-options "get"
   [_ {:keys [kind]} options entity-def]
   (case kind
-    ;; Root level: mark unique-constrained attrs so the user sees
-    ;; which can carry an identity predicate.
     :line-start-root
     (let [unique? (fn [name]
                     (boolean (get-in entity-def [:attributes name :unique])))
@@ -1067,12 +980,10 @@
                      (assoc opt :detail "unique — identity")
                      opt)))))
 
-    ;; Other contexts fall back to the default option list.
     options))
 
 (defn tree-op-options
-  "Tree ops (@search-tree/@get-tree) surface `_on <self-relation>` in
-   the root arg-list only (entity-stack still just the root there)."
+  "Tree ops surface `_on <self-relation>` in the root arg-list only."
   [_ {:keys [kind entity-stack]} options _]
   (if (and (= :arg-list-start kind) (<= (count entity-stack) 1))
     (conj (vec options)
@@ -1089,15 +1000,10 @@
 ;; ── Public entry ─────────────────────────────────────────────────────────
 
 (defn complete
-  "Compute completion options at `offset` in `source`. `:op` is the
-   wire op string (\"search\" / \"get\" / …); when provided, op-specific
-   filters apply (see `op-complete-options`)."
+  "Completion options at `offset` in `source`; `:op` applies op-specific filters."
   [{:keys [source offset schema root-entity op]
     :or {offset 0}}]
   (let [tree (parser/parse (or source ""))
-        ;; Rooted XSQL is self-describing: the query-root entity wins
-        ;; over the (legacy) external arg, which is only a fallback for
-        ;; a bodyless source.
         root-entity (or (some-> (:root-entity tree) :text) root-entity)
         [resolved ancestors] (innermost-with-ancestors tree offset (or source ""))
         ctx (context-at tree resolved ancestors source offset schema root-entity)
@@ -1110,9 +1016,6 @@
     {:from from :to to :options options}))
 
 ;; ── Persistent scope panel (as opposed to token-position completion) ────
-;; `scope-at` buckets `context-at`'s resolution for a panel that stays
-;; stable while the cursor wanders, rather than one popup position: see
-;; docs/core/synthigy/xsql/complete.md for the :args/:scope/:root split.
 
 (def ^:private args-kinds
   #{:value-suggestion :after-is :after-is-not :after-not :after-like
@@ -1120,8 +1023,7 @@
     :path-continuation :agg-fn :order-attr :order-dir})
 
 (defn scope-path-by-indent
-  "Breadcrumb of relation names enclosing the cursor, rooted at the
-   entity name, using the same indent logic that decides scope."
+  "Breadcrumb of relation names enclosing the cursor, via the same indent walk that decides scope."
   [tree source offset root-entity]
   (let [rels (collect-relations-before tree source offset)]
     (loop [i (dec (count rels))
@@ -1142,16 +1044,7 @@
         ctx (context-at tree resolved ancestors source offset schema root-entity)
         entity-stack (:entity-stack ctx)
         current-entity (peek entity-stack)
-        ;; Cursor's physical line indent, not `(count entity-stack)` —
-        ;; the indent-based fallback in context-at truncates the stack
-        ;; to `[target]` on a blank child line, so depth alone would
-        ;; misjudge nesting there.
         indent (max 2 (current-line-indent-text source offset))
-        ;; Sitting on a relation's own header line resolves to ITS
-        ;; target instead of the parent's scope; only overrides a plain
-        ;; :block-start/:line-start-root result, and only when
-        ;; context-at hasn't already descended into it (would
-        ;; double-descend otherwise). Additive to scope-at only.
         header-rel (when (#{:block-start :line-start-root} (:kind ctx))
                      (when-let [rel (enclosing-of-tag resolved ancestors :relation)]
                        (when (= (line-start-offset source offset)
@@ -1163,21 +1056,11 @@
                               target (when rel-def (get-in schema [:entities (:target rel-def)]))]
                           (when (and target (not= target current-entity))
                             target)))
-        ;; Same idea one level up: a resolved root-entity line shows
-        ;; that entity's own scope instead of the entity picker.
         root-target (when (and (= :root-entity-line (:kind ctx)) (seq root-entity))
                       (get-in schema [:entities root-entity]))
-        ;; Sibling-safety: when context-at's indent heuristic truncated
-        ;; the stack to `[target]` (blank child line, no parsed block
-        ;; yet), ctx's own :siblings would be inherited from the
-        ;; PARENT's block — report empty instead of wrong siblings. See
-        ;; docs/core/synthigy/xsql/complete.md for the full analysis.
         indent-heuristic-only? (and (= 1 (count entity-stack))
                                     (not= current-entity
                                           (get-in schema [:entities root-entity])))
-        ;; A REAL parsed relation block's own statements are the
-        ;; authoritative sibling set (same cursor-column dedent hint
-        ;; as entity-stack-from-ancestors) — wins over the guard above.
         enclosing-rel-block (when-let [rel (enclosing-of-tag resolved ancestors :relation)]
                               (when-let [block (ast/find-child rel :block)]
                                 (let [[from to] (:span block)

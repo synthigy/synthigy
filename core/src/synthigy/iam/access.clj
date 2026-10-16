@@ -91,9 +91,7 @@
    :browse :iam/role->browse-entities})
 
 (def relation-grants
-  "[traversal-direction rule] -> the User Role grant relation carrying it. The
-   direction is deliberately the opposite of the relation's name — see the
-   name-by-TARGET section in docs iam/access.md."
+  "[traversal-direction rule] -> the User Role grant relation carrying it; direction is deliberately opposite to the name."
   {[:to   :read]   :iam/role->from-read-relations
    [:to   :write]  :iam/role->from-write-relations
    [:to   :delete] :iam/role->from-delete-relations
@@ -102,9 +100,7 @@
    [:from :delete] :iam/role->to-delete-relations})
 
 (defn grant-field
-  "Wire field on User Role for a grant relation, or nil when that relation is
-   not in the deployed model. Derived from the deployed labels so a renamed
-   grant follows automatically — never hardcode the field name."
+  "Wire field on User Role for a grant relation, or nil when not deployed; never hardcode the field name."
   [relation-key]
   (let [role-id (id/entity :iam/user-role)
         {:keys [from from-label to-label]}
@@ -148,8 +144,7 @@
              result
              relations))]
     (let [field (fn [rule->relation k] (grant-field (get rule->relation k)))
-          ;; pre-CRUDOB models carry ONE relation for both halves (create
-          ;; entities IS write entities renamed), so it must satisfy :update too
+          ;; pre-CRUDOB models carry ONE relation for both halves — it must satisfy :update too
           merged-write? (nil? (field entity-grants :update))
           granted (fn [role-data f] (when f (map id/extract (get role-data f))))]
       (reduce
@@ -222,9 +217,7 @@
   (and attribute (= (id/data :iam.user/password) (id/extract attribute))))
 
 (defn attribute-allows?
-  "Whether the principal may perform `op` (:read / :write) on `attribute` of
-   `entity`. The login credential is superuser-only either way — writing it is
-   becoming that user, reading it is holding the auth material."
+  "Whether the principal may perform `op` (:read / :write) on `attribute`; the login credential is superuser-only."
   ([entity attribute op] (attribute-allows? entity attribute op (role-xids)))
   ([entity attribute op roles]
    (boolean
@@ -335,9 +328,7 @@
                    (core/focus-entity-relations model role)))))
 
 (defn load-scopes
-  "Scopes are OAuth's model, not IAM's — on installations where the OAuth
-   store hasn't deployed (or leveled) yet, there is no scope concept and
-   *scopes* stays nil, which disables scope checks by design."
+  "Load role scopes; without the OAuth store model `*scopes*` stays nil and scope checks are off."
   []
   (if (scopes-deployed?)
     (alter-var-root #'*scopes* (fn [_] (transform-scope-data (get-roles-scope-data))))

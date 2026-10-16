@@ -31,9 +31,7 @@
    [synthigy.dataset.access :as dataset.access]
    [synthigy.dataset.core :as core]
    [synthigy.dataset.id :as id]
-   [synthigy.dataset.sql.naming :refer [entity->table-name]]
    synthigy.iam.keys  ; register well-known :iam/* ids — shared with frontend
-   [synthigy.db :refer [*db*]]
    [synthigy.iam.access :as access :refer [with-principal]]
    [synthigy.iam.audit]
    [synthigy.iam.context :as context]
@@ -54,8 +52,7 @@
 (def publisher events/publisher)
 (def publish events/publish)
 
-;; Privilege checks: use access/superuser?; never a bare ROOT-role predicate —
-;; it misses the nil-principal and SYNTHIGY-service-user escapes.
+;; Privilege checks: access/superuser?, never a bare ROOT-role predicate — it misses nil-principal and SYNTHIGY.
 
 (comment
   (delete-user (context/get-user-details {:name "oauth_test"})))
@@ -154,8 +151,7 @@
 
 (defn ensure-public
   []
-  ;; preserve :active across boots — the operator's public-access toggle
-  ;; must survive a restart; only a missing row gets the inactive default
+  ;; preserve :active — the operator's public-access toggle must survive a restart
   (let [existing (dataset/get-entity
                   :iam/user
                   {(id/key) (id/extract *PUBLIC_USER*)}
@@ -165,13 +161,6 @@
      (assoc *PUBLIC_USER*
             :active (boolean (:active existing))
             :roles [*PUBLIC_ROLE*]))))
-
-(defn current-version
-  "Returns the IAM model from resources, adapted to current ID provider format."
-  []
-  (dataset/<-resource "dataset/iam.json"))
-
-(patch/current-version :synthigy.iam/model (:name (current-version)))
 
 (defn ensure-system-user-name
   "Migrated legacy databases carry the system user under its old name."
@@ -237,8 +226,7 @@
         (log/error! {:id ::service-user-sync-failed :data {:client client-xid}} e)))))
 
 (defn cleanup-orphaned-profiles!
-  "Delete profile satellite rows that no longer link to any user; returns {label
-   deleted-count}."
+  "Delete profile satellite rows that no longer link to any user."
   []
   (reduce
    (fn [result label]
@@ -275,34 +263,21 @@
                  (catch Throwable e
                    (log/error! {:id ::profile-cleanup-failed} e)))))))))
 
-(defn register-reference-types!
-  "Registers the user/group/role attribute types. Must run before ANY model
-   carrying one is mounted — an unregistered type compiles to a bare `user`
-   column."
-  []
-  (doseq [[type-name entity-key] [["user" :iam/user]
-                                  ["group" :iam/user-group]
-                                  ["role" :iam/user-role]]]
-    (core/register-reference-type!
-     type-name (id/entity entity-key)
-     {:table-fn #(entity->table-name
-                  (or (core/get-entity (dataset/deployed-model) (id/entity entity-key))
-                      (core/get-entity (:model (current-version)) (id/entity entity-key))))})))
-
 (defn start
   []
   (log/info {:id ::initializing} "Initializing IAM")
   (try
-    (register-reference-types!)
-    ;; dataset/start already compiled the schema before reference types existed — recompile now, or any ref-typed field (e.g. Owner Group) resolves :reference/entity nil until the reload below.
+    (dataset/register-reference-types!)
+    ;; recompile now — the cached schema predates reference types; never read it before this
     (dataset/reload)
 
-    (supervisor/progress-patching! :synthigy.iam/model
-                                   (patch/deployed-version :synthigy.iam/model)
-                                   (patch/version :synthigy.iam/model))
-    (patch/level! :synthigy.iam/model
+    (supervisor/progress-patching! :synthigy/model
+                                   (patch/deployed-version :synthigy/model)
+                                   (patch/version :synthigy/model))
+    (patch/level! :synthigy/model
                   :synthigy/iam
                   :synthigy.iam/audit)
+    (dataset/retire-datasets!)
 
     (context/start)
 
@@ -351,23 +326,17 @@
     (alter-var-root #'context/*user-context-provider* (constantly nil))))
 
 (defn setup-schema
-  "Deploy the IAM dataset schema and the OAuth store dataset."
+  "Ensure the Synthigy system model is deployed, then deploy the OAuth store dataset."
   []
-  (log/info {:id ::loading-schema} "Loading IAM schema from dataset/iam.json")
-  ;; setup runs BEFORE start — the IAM model carries user/group-typed
-  ;; attributes, and mounting it unregistered emits a bare `user` column type
-  (register-reference-types!)
-  (let [iam-schema (dataset/<-resource "dataset/iam.json")]
-    (as-> iam-schema model
-      (core/mount *db* model)
-      (core/reload *db* model))
-    (log/info {:id ::schema-mounted} "Mounted IAM schema")
+  ;; setup runs BEFORE start — mounting unregistered emits a bare `user` column type
+  (dataset/register-reference-types!)
+  ;; dataset setup normally deployed it; a DB whose dataset setup predates synthigy.json did not
+  (when-not (dataset/latest-deployed-version (id/data :synthigy/id))
+    (log/info {:id ::deploying-synthigy-model :data {:action :deploying :subject :synthigy-model}}
+              "Deploying Synthigy model from dataset/synthigy.json")
+    (dataset/deploy! (dataset/current-synthigy-version)))
 
-    (dataset/deploy! iam-schema)
-    (log/info {:id ::schema-deployed :data {:action :deployed :subject :iam-schema}} "Deployed IAM schema to history"))
-
-  ;; OAuth store must deploy before setup-default-data imports apps/APIs into
-  ;; it.
+  ;; OAuth store must deploy before setup-default-data imports apps/APIs into it.
   (log/info {:id ::loading-oauth-store} "Deploying OAuth store schema from dataset/oauth_session.json")
   (dataset/deploy! (dataset/<-resource "dataset/oauth_session.json"))
   (dataset/reload))
@@ -399,9 +368,6 @@
                   "exports/role_iam_admin.json"
                   "exports/role_user_admin.json"
                   "exports/role_role_admin.json"
-                  ;; App Developer + Identity Admin: deferred presets, not
-                  ;; seeded — see docs iam/default-roles.md. Files stay for
-                  ;; historical patches.
                   "exports/role_iam_auditor.json"
                   "exports/role_internal_member.json"
                   "exports/role_access_admin.json"
@@ -433,8 +399,7 @@
            (log/info {:id ::lifecycle-start :data {:action :starting}} "Starting IAM")
            (supervisor/progress-phase! "starting :synthigy/iam")
            (start)
-           ;; Keep access/start out of `start` — the :setup path would run it
-           ;; before setup-default-data has imported the roles.
+           ;; Keep access/start out of `start` — :setup would run it before the roles are imported.
            (access/start)
            (log/info {:id ::lifecycle-started :data {:action :started}} "IAM started"))
   :stop (fn []

@@ -10,8 +10,7 @@
 
 (ns synthigy.dataset.runtime
   "Composes the runtime model — deployed model augmented with identity, audit, and
-   reference-typed attrs as first-class entries. Composition order matters in
-   `build`: identity, then audit, then reference. See memory: project_runtime_model_plan.md"
+   reference-typed attrs as first-class entries."
   (:require
    [synthigy.dataset.core :as core]
    [synthigy.dataset.enhance :as enhance]
@@ -41,8 +40,7 @@
           (fn [es] (into {} (map (fn [[k v]] [k (f v)])) es))))
 
 (defn system-attrs-for
-  "Emits only the active provider's id attr (xid under NanoID, euuid under UUID) — emitting
-   both leaked the non-active id onto /schema and /data."
+  "Emits only the active provider's id attr (xid under NanoID, euuid under UUID)."
   [provider entity]
   (let [eid   (id/extract* provider entity)
         field (name (id/key* provider))]
@@ -64,8 +62,7 @@
 
 (defn audit-attrs-for [entity]
   (let [eid (id/extract entity)]
-    ;; who-columns come from core/audit-ref-attrs — same derived ids RLS
-    ;; resolves against, never inline this again
+    ;; who-columns come from core/audit-ref-attrs — never inline, RLS resolves against those ids
     (into
      (cond-> []
        (core/audit-modified? entity)
@@ -124,8 +121,7 @@
               new-rels))))
 
 (defn build
-  "Composes the runtime view: identity attrs + audit attrs + reference-typed-attrs-as-relations.
-   Idempotent; nil-safe."
+  "Composes the runtime view: identity attrs + audit attrs + reference-typed-attrs-as-relations."
   [model]
   (when model
     (->> model

@@ -9,8 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.page.error
-  "OAuth error page for cases where the server MUST NOT redirect (RFC 6749
-   §4.1.2.1). See docs/core/synthigy/oauth/page/error.md."
+  "OAuth error page for cases where the server MUST NOT redirect (RFC 6749 §4.1.2.1)."
   (:require
    [hiccup2.core :refer [html raw]]
    [synthigy.oauth.page.custom :as login]))

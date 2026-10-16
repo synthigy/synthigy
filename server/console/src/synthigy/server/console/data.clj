@@ -142,7 +142,7 @@
                                                  not-empty parse-long)]
                                  :when n]
                              [sub n]))
-      :login-page    (not-empty (str/trim (str v)))
+      (:login-page :url) (not-empty (str/trim (str v)))
       (not-empty (str v)))))
 
 (defn check-setting!
@@ -150,6 +150,9 @@
   (when (and (= :login-page kind) v (not (custom/valid-name? v)))
     (throw (ex-info (str label " must name a login page bundle — lowercase letters, "
                          "digits and dashes.")
+                    {})))
+  (when (and (= :url kind) v (not (re-matches #"https?://[^\s/]+(/\S*)?" v)))
+    (throw (ex-info (str label " must be a full http(s) address, e.g. https://app.example.com/.")
                     {}))))
 
 (defn settings-value
@@ -655,12 +658,7 @@
                         (:fields create))]
       (if missing
         [:error (str missing " is required.")]
-        ;; `:prepare` mints server-owned values (an OAuth client_id) into the
-        ;; payload at WRITE time, the way the dataset layer mints xid. Never a
-        ;; hidden form field: `oauth_client` has UNIQUE(id), which makes `id`
-        ;; sync's MATCH KEY — a posted id that already exists UPDATES that row
-        ;; instead of creating one, so a client-supplied value turns this form
-        ;; into "overwrite any client".
+        ;; never take server-owned values (client_id) from the form — UNIQUE(id) makes a posted id overwrite that client
         [:ok (embedded/sync (:entity spec)
                             (cond-> data
                               (:prepare create) ((:prepare create)))
@@ -771,8 +769,7 @@
     (group-by #(if (linked (:provider %)) :linked :available) all)))
 
 (defn has-password?
-  "Whether `user-xid` has a local password set; an LDAP/webhook connector can
-   still authenticate a user this reports false for."
+  "Whether `user-xid` has a local password set."
   [user-xid]
   (some? (access/with-principal nil
            (:password (embedded/get :user {:xid user-xid} [:password])))))
@@ -792,8 +789,7 @@
        true))))
 
 (defn set-password!
-  "Set `user-xid`'s password. SYSTEM write — the caller must already have proven
-   presence; `user-xid` must come from the session row, NEVER from a parameter."
+  "SYSTEM write of `user-xid`'s password; `user-xid` must come from the session row, never a parameter."
   [user-xid password]
   ;; plaintext — the dataset layer derives `hashed` attributes on write
   (try
@@ -806,8 +802,7 @@
         [:error (ex-message e)]))))
 
 (defn kill-other-sessions!
-  "Sign `user-xid` out everywhere except the session holding `current-id`.
-   Returns how many were killed."
+  "Sign `user-xid` out everywhere except the session holding `current-id`, returning the count."
   [user-xid current-id]
   (let [others (->> (access/with-principal nil
                       (embedded/search :oauth_session
@@ -857,7 +852,7 @@
       (some #(when (= nm (name (first %))) [:person_info %]) person-info-fields)))
 
 (defn save-profile-field!
-  "Write one of `user-xid`'s profile fields only when it differs. SYSTEM write — `user-xid` must come from the session, NEVER from a parameter."
+  "SYSTEM write of one of `user-xid`'s profile fields when it differs; `user-xid` must come from the session."
   [user-xid nm params]
   (when-let [[rel [k _ kind :as f]] (profile-field nm)]
     (try

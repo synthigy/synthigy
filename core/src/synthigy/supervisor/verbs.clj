@@ -100,9 +100,7 @@
       (vec found))))
 
 (defn add-client!
-  "Create an OAuth client with role/API grants named rather than by id —
-   no server, no OAuth round-trip. What a container build uses to seed a
-   demo client (PLAN-SANDBOX-LOCAL.md's image/seed.sh) with no network."
+  "Create an OAuth client with role/API grants named rather than by id."
   [{:keys [id name type secret settings roles apis]}]
   (require-started! :synthigy/iam)
   (when (str/blank? name)
@@ -186,8 +184,7 @@
     {:success true}))
 
 (defn doctor-state
-  "Health-check snapshot: module states, DB connectivity, encryption,
-   ROOT_URL."
+  "Health-check snapshot: module states, DB connectivity, encryption, ROOT_URL."
   []
   (let [dataset-started? (lifecycle/started? :synthigy/dataset)
         iam-started? (lifecycle/started? :synthigy/iam)
@@ -217,23 +214,15 @@
                      (not (false? console-started?))
                      (or (not encryption-started?) (:initialized enc-status))
                      (or (not db-connected) db-connected))
-        ;; a boot in flight is not a broken instance — the console says
-        ;; "starting", and only a module error makes it "degraded"
         busy? (and (not all-ok?)
                    (empty? @lifecycle/module-errors)
                    (supervisor/progress-running?))]
     (cond-> {:status (cond all-ok? "ok" busy? "starting" :else "degraded")
-             ;; boot failures, for the operator console: encryption gets its
-             ;; own field (drives the enter-master-key form), everything else
-             ;; surfaces generically
              :encryption_error (some-> (get @lifecycle/module-errors :synthigy.dataset/encryption)
                                        :error boot/root-cause-message)
              :boot_error (some->> (vals @lifecycle/module-errors)
                                   first :error boot/root-cause-message)
              :checks {:dataset dataset-started?
-                      ;; xid-native runtime on a legacy euuid layout — the
-                      ;; operator console renders the migrate affordance off
-                      ;; this. Backend-neutral: the provider IS the signal.
                       :legacy_euuid (= :euuid (id/key))
                       :iam iam-started?
                       :encryption encryption-started?
@@ -261,9 +250,7 @@
   (let [database db/*db*
         ds       (:datasource database)
         backend  (str/lower-case (.getSimpleName (class database)))
-        ;; Reflective on purpose: Hikari ships with the DATABASE module, not
-        ;; with this one, so naming the class here would make the server
-        ;; module refuse to compile without a backend on the classpath.
+        ;; never type-hint Hikari here — the server module would not compile without a backend
         pool     (try
                    (let [mx (.getHikariPoolMXBean ds)]
                      {:active  (.getActiveConnections mx)
@@ -287,16 +274,7 @@
       (:size row)    (assoc :size (:size row)))))
 
 (defn run-initialize!
-  "Create the first superuser. Throws ex-info on refusal, `:type` one of
-   #{:validation-error :service-not-started :already-initialized
-     :superuser-creation-failed}; every type's ex-data carries whatever
-   :steps completed before the refusal.
-
-   Dataset encryption is guaranteed initialized by the time this runs — a
-   misconfigured/unresolvable provider fails boot loudly instead of leaving
-   the system running sealed (see
-   synthigy.dataset.encryption/ensure-initialized!), so there is no unseal
-   step here."
+  "Create the first superuser; refusals throw ex-info with `:type` and `:steps`."
   [username password]
   (let [steps (atom [])]
     (when (or (str/blank? username) (str/blank? password))
@@ -393,8 +371,6 @@
                 :let [code (patch/version topic)
                       installed (try (patch/deployed-version topic) (catch Throwable _ nil))]
                 :when code]
-            ;; "0" is patcho's never-deployed marker — a component that
-            ;; keeps no store version is untracked, not behind
             {:topic (str topic)
              :installed (when (not= "0" installed) installed)
              :code code
@@ -404,11 +380,6 @@
   (fn [_] (dataset-encryption/encryption-status)))
 
 (supervisor/register-method! "encryption.rewrap"
-  ;; Same-custody rewrap: unwrap+wrap every DEK through the CURRENT provider.
-  ;; Vault's encrypt always uses the transit key's latest version, so this is
-  ;; how stored wrappers catch up after a rotation inside Vault — no config
-  ;; change, no restart. encryption.migrate cannot do this: its tag-collision
-  ;; guard refuses a target whose tag is already on a row.
   (fn [_]
     (when-not (:initialized (dataset-encryption/encryption-status))
       (throw (ex-info "Encryption not initialized" {:code -32001})))
@@ -418,10 +389,6 @@
 (supervisor/register-method! "iam.add-client"
   (fn [params] (add-client! params)))
 
-;; The teardown half. A demo that seeds a client must be able to hand the
-;; instance back the way it found it, and over the supervision channel the
-;; loopback bind IS the credential — no token to obtain on an instance that
-;; has just been created.
 (supervisor/register-method! "iam.remove-client"
   (fn [params] (remove-client! params)))
 
@@ -435,14 +402,6 @@
   (fn [{:keys [active]}] (set-public! active)))
 
 (supervisor/register-method! "key.rotate"
-  ;; Rewrap every DEK under a fresh generated LOCAL master key and hand the
-  ;; key back to the DAEMON, which owns persisting it (.env) — the operator
-  ;; never handles key material. This is also the federated->local RETURN
-  ;; path: migrate-local-key! resolves each row's own wrap_provider (vault/
-  ;; webhook/local, whichever is active) and rewraps under the new local
-  ;; key, so rotating while already local and migrating BACK from a
-  ;; federated provider are the same operation. It never touches the
-  ;; federated provider's own root key.
   (fn [_]
     (when-not (:initialized (dataset-encryption/encryption-status))
       (throw (ex-info "Encryption not initialized" {:code -32001})))
@@ -451,21 +410,14 @@
       {:success true :master_key k :migrated migrated-count})))
 
 (defn custody-provider
-  "KeyWrapProvider for a custody target built from RPC params, not this
-   process's env — the daemon writes .env and only restarts afterwards, so
-   the new config exists nowhere else yet. Shared by encryption.probe and
-   encryption.migrate so a config that tests green cannot be interpreted
-   differently by the migration that follows it."
+  "KeyWrapProvider for a custody target built from RPC params, not env."
   [{:keys [target addr transit_key transit_mount token role mount jwt_path
            url secret timeout_ms]}]
   (case target
     "vault"   (do (when (or (str/blank? (str addr)) (str/blank? (str transit_key)))
                     (throw (ex-info "Vault custody needs both addr and transit_key"
                                     {:code -32602})))
-                  ;; the whole map reaches vault-token, which reads :token
-                  ;; (static) or falls back to Kubernetes auth via
-                  ;; :role/:mount/:jwt-path — drop them and every migration
-                  ;; tries k8s auth and fails on a laptop
+                  ;; never drop :token/:role/:mount/:jwt-path — vault-token falls back to k8s auth
                   (dataset-encryption/->VaultTransitKeyWrapProvider
                     {:addr addr :transit-key transit_key
                      :transit-mount transit_mount :timeout-ms timeout_ms
@@ -481,11 +433,6 @@
                     {:code -32602}))))
 
 (supervisor/register-method! "encryption.probe"
-  ;; Wrap/unwrap a throwaway 32 bytes through a candidate provider and
-  ;; check they survive the round trip. Constructed LOCALLY and never
-  ;; registered, so a failed probe leaves no trace in the provider registry
-  ;; and no DEK is touched — the operator console can offer Test before a
-  ;; migration commits, the same way db.probe/obs.probe do before launch.
   (fn [params]
     (try
       (let [p     (custody-provider params)
@@ -495,11 +442,6 @@
         (if (java.util.Arrays/equals ^bytes bytes ^bytes back)
           {:ok true :message "Round-trip OK — the provider wraps and unwraps correctly."}
           {:ok false :message "The provider answered, but the unwrapped key did not match — refusing."}))
-      ;; Only the PARAM validation above is a protocol error (-32602, the
-      ;; console renders it as a refusal). A provider that answers badly —
-      ;; wrong token, denied path, 5xx — is a probe VERDICT, not a broken
-      ;; request, and its status/body is the most useful thing an operator
-      ;; can be told, so it must not escape as a bare RPC error.
       (catch clojure.lang.ExceptionInfo e
         (if (= -32602 (:code (ex-data e)))
           (throw e)
@@ -513,9 +455,6 @@
                                  (or (not-empty (ex-message e)) (.getSimpleName (class e))))}))))
 
 (supervisor/register-method! "encryption.migrate"
-  ;; Rewrap every DEK under a DIFFERENT custody provider. Local
-  ;; master-key rotation is key.rotate's job, not this one: two local
-  ;; providers both tag "default" and migrate-provider! refuses that.
   (fn [params]
     (when-not (:initialized (dataset-encryption/encryption-status))
       (throw (ex-info "Encryption not initialized" {:code -32001})))

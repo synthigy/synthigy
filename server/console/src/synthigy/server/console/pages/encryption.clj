@@ -123,7 +123,7 @@
        [:div.console-guide
         [:p "Moving custody lives in the "
          [:strong "portal"]
-         " — run " [:code "synthigy console"] " on the host that runs this "
+         " — run " [:code "synthigy portal"] " on the host that runs this "
          "deployment. A migration is three things that have to happen "
          "together: rewrap every data key, change the environment, restart "
          "onto it. Only the portal can do all three; this page "

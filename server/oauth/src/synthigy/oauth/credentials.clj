@@ -9,8 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.credentials
-  "Subject-driven credential change — the authenticated owner of an account
-   replaces its own password. See docs/core/synthigy/oauth/credentials.md."
+  "The authenticated owner of an account replaces its own password."
   (:require
    [clojure.string :as str]
    [synthigy.dataset :as dataset]

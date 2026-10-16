@@ -71,7 +71,7 @@ Any other `reason` refuses the sign-in, as do a non-200 status and a body that
 is not one of these shapes.
 
 Verify the signature over the **raw** request body, before parsing it — a
-re-serialized body will not match — and compare in constant time:
+re-serialized body will not match — and compare in constant time. In Node:
 
 ```js
 import crypto from "node:crypto"
@@ -90,20 +90,6 @@ app.post("/verify", express.text({ type: "application/json" }), (req, res) => {
 })
 ```
 
-```python
-import base64, hashlib, hmac, json, os
-
-@app.post("/verify")
-async def verify(request: Request):
-    raw = await request.body()
-    expected = b"hmac-sha256=" + base64.b64encode(
-        hmac.new(os.environ["SECRET"].encode(), raw, hashlib.sha256).digest())
-    if not hmac.compare_digest(expected, request.headers.get("X-Synthigy-Signature", "").encode()):
-        raise HTTPException(401)
-    data = json.loads(raw)
-    # check data["username"] and data["password"] against your directory
-    return {"ok": True, "user": {"name": data["username"]}}
-```
 
 **LDAP and Active Directory** have no built-in connector: run a small webhook
 that binds against the directory and answers as above.

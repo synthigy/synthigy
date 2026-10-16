@@ -37,14 +37,12 @@
 (defn pending-upgrades [installed]
   (vec (for [[topic ver] (try (patch/available-versions) (catch Throwable _ {}))
              :let [inst (get installed (str topic))]
-             ;; model topics read their version from the DB — nil in a probe
-             ;; engine, and an unknown target is not a pending upgrade
+             ;; model topics answer nil in a probe engine — an unknown target is not pending
              :when (and inst ver (not= inst ver))]
          (str topic " " inst " → " ver))))
 
 (defn synthigy-verdict
-  "Shared verdict for a database carrying a Synthigy layout. `legacy-aware?`
-   is postgres-only: sqlite is structurally xid-only and never legacy."
+  "Shared verdict for a database carrying a Synthigy layout; `legacy-aware?` is postgres-only."
   [installed legacy-aware?]
   (let [fmt     (get installed ":synthigy/id-format")
         pending (pending-upgrades installed)]
@@ -59,17 +57,10 @@
                   "Connected. Existing Synthigy database, fully current — the engine will attach to it.")})))
 
 (defn dek-rows
-  "__deks rows at `conn` (an ad-hoc probe connection, not db/*db*), or [] when
-   the table doesn't exist. `select *`, not named columns: a pre-migration
-   legacy `__deks` predates the `wrap_provider`/`wrap_key_version` columns
-   entirely (added later by `ensure-deks-columns!`, which hasn't run yet on
-   a database this engine has never booted against) — naming the column
-   would throw and get caught as `[]`, silently reporting no encrypted data
-   on exactly the legacy dump this check exists to catch. A row with no such
-   key reads as nil `:wrap_provider`, which `local-custody?` already treats
-   as local — correct: a legacy DEK has no other custody to be under."
+  "__deks rows at an ad-hoc probe connection, or [] when the table doesn't exist."
   [conn]
   (try
+    ;; select *, never named columns — a legacy __deks lacks wrap_provider and would read as no DEKs
     (jdbc/execute! conn ["select * from __deks"]
                    {:builder-fn rs/as-unqualified-lower-maps})
     (catch Exception _ [])))
@@ -79,7 +70,7 @@
   (contains? #{nil "default" "manual"} wrap-provider))
 
 (defn pgobject-value
-  "Value of a raw JDBC PGobject, duck-typed (no compile-time driver dep) — a probe connection isn't a synthigy.db record, so db/Dialect (which dispatches on *db*) doesn't apply here."
+  "Value of a raw JDBC PGobject, duck-typed to avoid a compile-time driver dependency."
   [v]
   (if (and v (= "org.postgresql.util.PGobject" (.getName (class v))))
     (.invoke (.getMethod (class v) "getValue" (into-array Class [])) v (into-array Object []))
@@ -96,13 +87,7 @@
           (catch Throwable _ false)))))
 
 (defn dek-verdict
-  "Layers __deks custody onto a Synthigy verdict: local rows need a verified
-   master key before launch, federated rows just need their own env config.
-   Every branch APPENDS to the underlying verdict's message and keeps its
-   `:kind` in `:layout` — a key problem is an EXTRA finding, not a
-   replacement for what the layout probe already established. Overwriting
-   the message meant an operator who mistyped the key stopped being told
-   the database was legacy euuid at all."
+  "Layer __deks custody onto a Synthigy verdict, appending to its message, never replacing it."
   [verdict conn master-key]
   (let [rows  (dek-rows conn)
         local (first (filter (comp local-custody? :wrap_provider) rows))
@@ -160,10 +145,6 @@
                       :message (str "Connected to the server, but database \"" dbname "\" does not exist.")}
           #{"28P01" "28000"} {:ok false :kind "auth-failed"
                               :message "Authentication failed — check the user and password."}
-          ;; The driver refuses an empty password before it ever asks the
-          ;; server, so this arrives with no SQLSTATE to match on — and its
-          ;; own wording ("the password is an empty string") is not what an
-          ;; operator who simply left the field blank needs to read.
           (if (str/includes? (str (.getMessage e)) "password is an empty string")
             {:ok false :kind "auth-failed"
              :message "This server requires a password and none was given."}

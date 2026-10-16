@@ -64,6 +64,9 @@
     // Carry the opaque state from this page's URL into the form.
     var STATE = new URLSearchParams(location.search).get('state') || '';
     document.getElementById('state').value = STATE;
+    // The app's OIDC login_hint, when it sent one, pre-fills the username.
+    var HINT = new URLSearchParams(location.search).get('login_hint');
+    if (HINT) document.getElementById('username').value = HINT;
 
     // Federated sign-in: discover active providers and render one link each.
     // The link target is a plain server redirect — /oauth/federated/start

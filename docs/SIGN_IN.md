@@ -127,19 +127,11 @@ value: the backend resolves the user from its own session. A call without
 When the browser reaches Synthigy at a different URL than your server does
 (containers, proxies), pass that URL as `publicEndpoint` to `login.start`.
 
-## 4. Sessions and signing out
+## 4. Signing out
 
-Your app owns its session. Synthigy's own session, the one the login page and
-silent renewal ride on, ends after 24 hours without activity and after 30 days
-in any case; `GET /oauth/logout` ends it now. Access tokens last 15 minutes
-and refresh tokens 24 hours, both changeable per client ([OAUTH.md](OAUTH.md)).
+Your app owns its session. `GET /oauth/logout` ends Synthigy's own session, the one
+silent renewal rides on. Token and session lifetimes: [OAUTH.md](OAUTH.md#flows).
 
-## What the token says
-
-`sub` is the username and `xid` the user's record id. Profile claims (`name`,
-`email`) come from `GET /oauth/userinfo`, not from the id_token; the browser
-login merges them in with `loadUserInfo: true`.
-
-Which sign-in methods a user sees — password, Google, a corporate directory —
-is the login page's business, configured in the console, not your app's
-([OAUTH.md](OAUTH.md#identity-providers), [IAM_CONNECTORS.md](IAM_CONNECTORS.md)).
+`sub` in the token is the username and `xid` the user's record id. Profile claims
+(`name`, `email`) come from `GET /oauth/userinfo`; the browser login merges them in
+with `loadUserInfo: true`.

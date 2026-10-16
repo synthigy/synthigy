@@ -59,11 +59,6 @@
                      [(keyword op)]))
                  ops))))
 
-;; normalize-entity-item / normalize-relation-item / translate-delta are
-;; ^:no-doc PUBLIC
-;; (not private) because embedded.subscription shares them — see
-;; docs/core/synthigy/engine/subscription.md.
-
 (defn ^:no-doc normalize-entity-item
   "Validate a {:type \"entity\" ...} item; resolve names to entity-xids,
    RBAC-checking read on each."
@@ -139,8 +134,7 @@
          :ops         (parse-operations item)}))))
 
 (defn denied-attribute-xids
-  "Attribute-xid keywords denied to roles on entity; walks every attribute since
-   deltas carry the full record, not a client selection."
+  "Attribute-xid keywords denied to roles on entity, across every attribute."
   [entity roles]
   (when entity
     (into #{}
@@ -203,8 +197,6 @@
                              (event-for to-xid from-xid)]
             from?           [(event-for from-xid to-xid)]
             to?             [(event-for to-xid from-xid)]
-            ;; Neither endpoint subscribed — shouldn't happen (matcher already
-            ;; gated by :endpoint-xids)
             :else           [])))
 
       nil))))

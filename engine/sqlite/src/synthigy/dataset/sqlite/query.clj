@@ -9,16 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.sqlite.query
-  "SQLite query implementation - ported from Postgres with SQL syntax adaptations.
-
-  This namespace contains the full query implementation including:
-  - Relation pulling (one-to-many, many-to-one, junction tables)
-  - Nested relations (recursive pulling)
-  - Tree operations (recursive CTEs)
-  - Aggregations
-  - All complex query logic
-
-  SQL syntax differences are handled via the SQLDialect protocol."
+  "SQLite ModelQueryProtocol: roots + pull reads, writes, deletes, trees."
   (:require
    clojure.set
    [clojure.string :as str]
@@ -57,23 +48,12 @@
    [synthigy.db SQLite]))
 
 (extend-protocol p/SettableParameter
-  ;; Java Time type conversion:
   clojure.lang.Keyword
   (set-parameter [^clojure.lang.Keyword v ^PreparedStatement s ^long i]
     (.setString s i (name v))))
 
-; (def known-errors
-;   {"23502" :null_constraint
-;    "23505" :unique_violation})
-
-(defn- write-entity
-  "SQLite write path for the sync/stack protocol methods. Opens a fresh
-   transaction, binds the tx-local audit GUCs, runs the shared
-   `sql-query/set-entity`, then wakes the audit drainer — SQLite has no
-   LISTEN/NOTIFY, so the drainer must be pinged explicitly after commit.
-   `*fetch-mode*` is forced :serial: the SQLite pool is size 1, so a
-   parallel pull-cursors fan-out would self-deadlock. `stack?` picks
-   sync (false) vs stack (true)."
+(defn write-entity
+  "sync (stack? false) or stack in a fresh tx, then wakes the drainer."
   [entity-id data stack?]
   (binding [sql-query/*fetch-mode* :serial]
     (let [r (with-open [connection (jdbc/get-connection (:datasource *db*))]
@@ -83,10 +63,8 @@
       (plug/wake-drainer!)
       r)))
 
-(defn- distinct-attributes->group-by
-  "Converts _distinct {:attributes [...]} to GROUP BY clause for SQLite.
-   PostgreSQL uses DISTINCT ON, but SQLite doesn't support it.
-   We use GROUP BY on the specified attributes instead."
+(defn distinct-attributes->group-by
+  "GROUP BY for `_distinct {:attributes …}`; SQLite has no DISTINCT ON."
   [schema]
   (when-let [attrs (get-in schema [:args :_distinct :attributes])]
     (let [{:keys [entity/as]} schema]
@@ -94,13 +72,7 @@
            (str/join ", " (map #(str (name as) "." (name %)) attrs))))))
 
 (defn search-entity-roots
-  "Find root-entity `_eid`s matching the schema's filters.
-
-  Roots are filtered by the root entity's own predicates plus a correlated
-  `EXISTS (...)` per INNER relation (`inner-exists`) — never by JOINing
-  through relation tables. A JOIN multiplies root rows (one per matching
-  child), so `_limit` would slice the *joined* set and under-count roots;
-  `EXISTS` keeps one row per root, so `_limit`/`_order_by` are exact."
+  "Root `_eid`s matching the schema's filters; INNER relations scope via correlated EXISTS, never JOIN."
   ([schema]
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (search-entity-roots connection schema)))
@@ -108,18 +80,11 @@
    (let [focused-schema (focus-order schema)
          root-as  (:entity/as focused-schema)
          root-tbl (:entity/table focused-schema)
-         ;; Root's OWN field predicates only — dissoc :relations so
-         ;; search-stack-args never emits predicates against relation
-         ;; aliases that the EXISTS rewrite does not join into FROM.
+         ;; never keep :relations here — EXISTS does not join relation aliases into FROM
          [where where-data] (search-stack-args (dissoc focused-schema :relations))
-         ;; INNER relations scope the root via correlated EXISTS.
          [exists-sql exists-data] (inner-exists focused-schema root-as)
          where-all (clojure.string/join
                     " and " (remove clojure.string/blank? [where exists-sql]))
-         ;; SQLite has no DISTINCT ON — plain DISTINCT for attribute-less
-         ;; _distinct, GROUP BY for attribute-scoped _distinct. The old
-         ;; JOIN-dedup DISTINCT-on-_limit hotfix is gone: EXISTS does not
-         ;; multiply root rows.
          distinct-attrs  (get-in schema [:args :_distinct :attributes])
          distinct-on     (when (and (not distinct-attrs)
                                     (get-in schema [:args :_distinct]))
@@ -139,8 +104,6 @@
                               (nil? group-by-clause)
                               (not (some #{:_limit :_offset :_order_by}
                                          (keys (:args schema)))))
-                       ;; Whole-table query — no filter / paging / ordering.
-                       ;; nil signals the caller to pull the whole table.
                        nil
                        (do
                          (log/trace {:id :synthigy.dataset.sql/roots-query
@@ -164,10 +127,6 @@
    (with-open [connection (jdbc/get-connection (:datasource *db*))]
      (search-entity connection entity-id args selection operations)))
   ([connection entity-id args selection operations]
-   ; (def entity-id entity-id)
-   ; (def args args)
-   ; (def selection selection)
-   ; (def operations operations)
    (entity-accessible? entity-id operations)
    #_(comment
        (def con connection)
@@ -185,10 +144,6 @@
          (pull-roots connection schema roots))))))
 
 (defn purge-entity
-  ;; See PG purge-entity for the rationale on dropping the previous
-  ;; `enforce-purge` gate (2026-06-02). RLS via search-entity-roots is
-  ;; the per-row protection; we don't add a second schema-equivalence
-  ;; check on top.
   ([entity-id args selection]
    (let [r (with-open [connection (jdbc/get-connection (:datasource *db*))]
              (jdbc/with-transaction [tx connection]
@@ -203,7 +158,6 @@
                                            :data {:table table :count (count _eids)
                                                   :eids (str/join ", " _eids)}}
                                           "Constructing purge for eids")
-                               ;; SQLite: IN clause (no =any(?))
                                (let [placeholders (str/join "," (repeat (count _eids) "?"))]
                                  (into [(str "delete from \"" table "\" where _eid IN (" placeholders ")")] _eids)))
                              (process-statement [r k v]
@@ -222,7 +176,7 @@
      r)))
 
 (defn get-entity
-  "See PG get-entity for the IDENTITY_REQUIRED rationale (2026-06-03)."
+  "Single entity by identity; empty args throws IDENTITY_REQUIRED."
   ([entity-id args selection]
    (get-entity entity-id args selection #{:read :get}))
   ([entity-id args selection operations]
@@ -332,7 +286,6 @@
                                     (update schema :args dissoc :_distinct :_limit :_offset))]
                           (not-empty (get found-roots (keyword as)))))]
           (cond
-            ;; If there some targets are found with search-entity-roots
             (not-empty targets)
             (let [sql (format
                        "with recursive tree(_eid,link,path,cycle) as (
@@ -382,11 +335,9 @@
                    (map
                     :_eid
                     (sql/execute! connection sql-final core/*return-type*)))})))
-            ;; If schema is targeted but no results are found
             (and targeting? (empty? targets))
             nil
             :else
-            ;; If targets aren't found
             (let [ranked-init-selection (if (not-empty order-by)
                                           (format
                                            "(select _eid, %s, row_number() over (%s) as _rank from %s where %s is null)"
@@ -425,12 +376,7 @@
 (declare delete-entity-batch)
 
 (defn delete-entity
-  "See PG delete-entity for the RLS-injection rationale (2026-06-02) and
-   the RLS-denied vs nonexistent disambiguation (2026-06-03). `args` is
-   filtered to unique-constraint keys (+ id-key); no unique key surviving
-   the filter throws UNIQUE_KEY_REQUIRED, a matched-row count above 1
-   throws NON_UNIQUE_MATCH. A vector `args` is multirow delete by id-key —
-   see `delete-entity-batch`."
+  "RLS-scoped unique-key delete: true when deleted or missing, DELETE_FORBIDDEN when hidden."
   ([entity-id args]
    (let [r (with-open [connection (jdbc/get-connection (:datasource *db*))]
              (jdbc/with-transaction [tx connection]
@@ -487,9 +433,7 @@
                   true))))))))))
 
 (defn delete-entity-batch
-  "Multirow delete by a vector of id-key values. See PG's
-   `delete-entity-batch` for the rationale — same shape, SQLite's `IN
-   (placeholders)` instead of PG's `= ANY(array)`."
+  "Multirow delete by id-key values; returns the deleted count, any hidden id throws DELETE_FORBIDDEN."
   [connection entity-id xids]
   (binding [*operation-rules* #{:delete}]
     (let [xids (sql-query/check-delete-batch! xids)
@@ -545,14 +489,7 @@
              (when args
                (if (vector? args)
                  (some targeting-args? args)
-                 ;; SLICE IS ALWAYS INNER. It removes exactly the links the
-                 ;; caller named — join mode is a READ concern (how to project
-                 ;; parents), never a write one, so `:_join` must not influence
-                 ;; which link rows get deleted. Same for :_order_by /
-                 ;; :_distinct / :_on: all query metadata, not row constraints.
-                 ;; Counting `:_join` here made a bare relation look "targeted",
-                 ;; which built a target subselect carrying no real predicate
-                 ;; and slice silently stopped cutting links.
+                 ;; SLICE IS ALWAYS INNER — never count :_join or other read metadata as a row constraint
                  (let [args' (dissoc args :_offset :_limit :_join :_order_by :_distinct :_on)
                        some-constraint? (not-empty (dissoc args' :_and :_or :_where :_maybe))]
                    (if some-constraint?

@@ -118,9 +118,7 @@
        :public_profile (assoc copied :name (or (:name copied) (:account_name row)))})))
 
 (defn migrate-public-profiles!
-  "Copy the OIDC profile claims off person-info onto user-public-profile for
-   every user without one yet; idempotent, non-destructive. Returns the number
-   of profiles written."
+  "Copy OIDC profile claims off person-info onto user-public-profile; idempotent, non-destructive."
   []
   (let [rows (pending-profiles)
         writes (vec (keep profile-row rows))]

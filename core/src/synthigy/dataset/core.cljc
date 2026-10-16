@@ -74,8 +74,7 @@
 ;;; Reference Type API
 
 (def reference-type-names
-  "Attribute types that resolve to an IAM entity FK. Fixed vocabulary — the
-   registry says which are CURRENTLY resolvable, this says which ever are."
+  "Attribute types that can ever resolve to an IAM entity FK."
   #{"user" "group" "role"})
 
 (defn reference-types []
@@ -303,15 +302,13 @@
 ;;; Attribute Name Validation
 
 (defn find-attribute-by-normalized-name
-  "Finds an attribute whose name matches (case-insensitive). Returns attribute
-   or nil."
+  "Finds an attribute whose name matches, ignoring case."
   [attributes name]
   (let [normalized (str/lower-case name)]
     (some #(when (= normalized (str/lower-case (:name %))) %) attributes)))
 
 (defn check-attribute-name-conflict!
-  "Throws if attribute name conflicts with existing attribute (different ID,
-   same name ignoring case)."
+  "Throws if another attribute id carries the same name, ignoring case."
   [attributes new-attribute]
   (when-let [found (find-attribute-by-normalized-name attributes (:name new-attribute))]
     (let [found-id (id/extract found)
@@ -576,9 +573,7 @@
       entity2)))
 
 (defn reconcile-rls-guards
-  "Replaces every entity's RLS with what the latest deployed version of each
-   dataset declares — a model with RLS off contributes nothing. No-op when
-   `models` is empty."
+  "Replaces every entity's RLS with what the latest deployed version of each dataset declares."
   [model models]
   (let [declared (reduce
                   (fn [acc m]
@@ -766,6 +761,22 @@
          (and (not-empty claims)
               (empty? (clojure.set/difference claims version-set)))))
      (get-relations model))))
+
+(defn creation-order
+  "Entities ordered so every reference-attribute target is created before the entity pointing at it."
+  [entities]
+  (let [by-id (into {} (map (juxt id/extract identity)) entities)
+        deps (fn [e]
+               (->> (:attributes e)
+                    (keep #(when (reference-type? (:type %)) (reference-entity-id (:type %))))
+                    (filter #(and (contains? by-id %) (not= % (id/extract e))))))
+        visit (fn visit [[order seen :as acc] e]
+                (let [eid (id/extract e)]
+                  (if (contains? seen eid)
+                    acc
+                    (let [[order seen] (reduce visit [order (conj seen eid)] (map by-id (deps e)))]
+                      [(conj order e) seen]))))]
+    (first (reduce visit [[] #{}] entities))))
 
 ;;; Projection Helper Functions
 
@@ -1008,17 +1019,14 @@
   (let [guards (get-rls-guards entity)
         guard-idx (find-guard-index guards guard-id)]
     (if guard-idx
-      ;; Toggle condition on existing guard
       (let [conditions (get-in guards [guard-idx :conditions] [])
             matching-condition (some #(when (condition-matches-path? % path) %) conditions)
             new-conditions (if matching-condition
                              (vec (remove #(condition-matches-path? % path) conditions))
                              (conj conditions (path->condition path)))]
-        ;; Auto-remove guard if no conditions left
         (if (empty? new-conditions)
           (remove-rls-guard entity guard-id)
           (assoc-in entity [:configuration :rls :guards guard-idx :conditions] new-conditions)))
-      ;; Guard not found - create new guard with this condition
       (let [new-guard {:id (id/generate)
                        :operation #{}
                        :conditions [(path->condition path)]}]
@@ -1086,15 +1094,12 @@
 
                :hybrid
                (and (seq (:steps condition))
-                    ;; all relations in the path exist
                     (every? #(contains? model-relations (:relation-id %))
                             (:steps condition))
-                    ;; final entity + its referenced attribute exist
                     (let [final-entity (get-entity model (:entity-id (last (:steps condition))))]
                       (and final-entity
                            (entity-active-attribute? final-entity (:attribute condition)))))
 
-               ;; Unknown type - treat as invalid
                false)]
          (update acc (if valid? :valid :invalid) conj condition)))
      {:valid []
@@ -1151,16 +1156,15 @@
   (mapv path->condition paths))
 
 (defn add-rls-guard-with-paths
-  "Adds a new RLS guard for the given paths with default READ permission; nil if
-   a duplicate."
-  [entity paths]
-  (let [guards (get-rls-guards entity)
-        duplicate? (some #(guard-matches-paths? % paths) guards)]
-    (when-not duplicate?
-      (let [new-guard {:id (id/generate)
-                       :operation #{:read}
-                       :conditions (paths->conditions paths)}]
-        (add-rls-guard entity new-guard)))))
+  "Adds a new RLS guard for the given paths (default READ); nil if a duplicate."
+  ([entity paths] (add-rls-guard-with-paths entity paths #{:read}))
+  ([entity paths operations]
+   (let [guards (get-rls-guards entity)
+         duplicate? (some #(guard-matches-paths? % paths) guards)]
+     (when-not duplicate?
+       (add-rls-guard entity {:id (id/generate)
+                              :operation (set operations)
+                              :conditions (paths->conditions paths)})))))
 
 (defn update-rls-guard-paths
   "Updates an existing guard's paths; nil if it would duplicate another guard."
@@ -1204,8 +1208,7 @@
     :else nil))
 
 (defn discover-ref-paths*
-  "Discovers user/group/role-typed attrs as direct :ref paths to IAM entities.
-   Audit who-columns excluded — see docs."
+  "Discovers user/group/role-typed attrs as direct :ref paths to IAM entities, audit who-columns excluded."
   [entity iam-uuids start-idx]
   (let [ref-types #{"user" "group" "role"}
         attributes (or (:attributes entity) [])]

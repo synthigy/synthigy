@@ -9,10 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.server.subscription
-  "Server-agnostic subscription management with full-set-replace semantics: POST
-   /data/subscription/set replaces the full session state, GET
-   /data/subscription/status lists it, GET /data/events is the SSE stream. See
-   docs/core/synthigy/server/subscription.md for the wire spec."
+  "Server-agnostic /data subscriptions: full-set-replace sessions streamed over SSE."
   (:require
    [clojure.core.async :as async]
    [clojure.set :as set]
@@ -45,31 +42,7 @@
 ;;; ============================================================================
 
 (def supported-types
-  "Subscription types currently implemented.
-
-  - \"data\"           — Per-record envelopes (record-shaped 2026-06-01).
-                         Required: `records`. Optional: `operations`.
-                         Emits `record/insert`/`update`/`delete` and
-                         `relation/link`/`unlink` with the trim spec —
-                         no entity-name / element / from-eid / to-eid
-                         decoration; relation events ship
-                         `data: [yours, other]`.
-  - \"entity\"         — Coalesced cache-invalidation pokes per entity
-                         name. Required: `entities`. Optional:
-                         `operations`. Emits `entity/touched` carrying
-                         only `{type, entity, ts}`; `entity` echoes the
-                         client's verbatim original string.
-  - \"relation\"       — Coalesced pokes per relation; names accept any
-                         separator in `.`, `->`, ` - `, or `-` between
-                         entity and label. Required: `relations`.
-                         Optional: `operations`. Emits `relation/touched`
-                         echoing the client's verbatim original string.
-  - \"deployed-model\" — raw deployed model deploys (modeler).
-  - \"runtime-model\"  — augmented runtime model deploys (data console).
-
-  Both model subscription types share one publisher topic
-  (:model/deployed) and one model-loop per identity; the loop fans out
-  one event per *type* the identity is subscribed to."
+  "Subscription types currently implemented."
   #{"data" "entity" "relation" "deployed-model" "runtime-model"})
 
 ;;; ============================================================================
@@ -78,17 +51,12 @@
 
 (defonce ^:private subscriptions-state (atom {}))
 
-;; SSE output channels per identity: {identity-key #{<channels>}}
 (defonce ^:private event-streams (atom {}))
 
-;; Per-identity set of running loop kinds:
-;; {identity-key #{:data :entity :relation :model}}
-;; Replaces four parallel sets so cleanup is a single swap!.
 (defonce ^:private loops (atom {}))
 
 (defn claim-loop!
-  "Atomically claim the loop slot for [identity-key kind]; true iff this caller
-   won it. One swap! so two concurrent SSE connects can't both spawn a go-loop."
+  "Atomically claim the loop slot for [identity-key kind]; true iff this caller won it."
   [identity-key kind]
   (let [[old _] (swap-vals! loops update identity-key (fnil conj #{}) kind)]
     (not (contains? (get old identity-key) kind))))
@@ -119,20 +87,9 @@
 ;;; ============================================================================
 
 (defn data-sub-key
-  "delta-registry key for an identity's single data subscription —
-   re-registering replaces the prior interest."
   [identity-key]
   [::data identity-key])
 
-;; Data-track drop->resync: batch-chan is a FIXED buffer so offer! returning
-;; false is the
-;; drop signal; :lagged flags it and the go-loop heals in place by replaying
-;; missed record
-;; events from the durable store (see data-resync-envelopes), bounded by
-;; max-data-resyncs
-;; so a persistently-slow client can't loop forever. Entity/relation/model
-;; tracks stay
-;; sliding — their pokes are idempotent, so a dropped signal is harmless.
 (def ^:private max-data-resyncs 5)
 
 (defn ensure-batch-chan
@@ -152,15 +109,11 @@
   (some-> (get-in @subscriptions-state [identity-key :data :lagged]) (reset! true)))
 
 (defn collect-data-interest
-  "Compute the plug interest descriptor from the identity's current :data
-   state; the watched record xids serve both :record-xids and :endpoint-xids
-   (OR-match on either side of a relation)."
+  "Compute the plug interest descriptor from the identity's current :data state."
   [identity-key]
   (let [records (get-in @subscriptions-state [identity-key :data :records])
         ops     (get-in @subscriptions-state [identity-key :data :operations])
         ops-set (when (seq ops)
-                  ;; Expand coarse vocabulary to the fine ops the plug
-                  ;; matcher sees.
                   (set (mapcat (fn [op]
                                  (case op
                                    "change" [:insert :update]
@@ -177,8 +130,7 @@
       ops-set       (assoc :ops ops-set))))
 
 (defn recompute-data-subscription!
-  "Re-register the identity's single delta subscription with the current union
-   interest; unsubscribe entirely when nothing is subscribed. Idempotent."
+  "Re-register the identity's delta subscription with its current interest, or unsubscribe when empty."
   [identity-key]
   (let [interest (collect-data-interest identity-key)
         sub-key  (data-sub-key identity-key)]
@@ -189,15 +141,11 @@
          (fn [envelope]
            (when-not (async/offer! ch envelope)
              (flag-data-lagged! identity-key)))
-         ;; on-drop from delta's own fixed buffer, upstream of the batch-chan.
          (fn [_env] (flag-data-lagged! identity-key))))
       (delta/unsubscribe! sub-key))))
 
 (defn data-resync-envelopes
-  "If the identity's data stream was flagged lagged, replay missed record events
-   from the durable store, filtered to this subscriber's interest with the same
-   delta/matches? the live path uses. CAS so one go-loop pass wins; degrades
-   past max-data-resyncs."
+  "Replay missed record events from the store when the identity's data stream was flagged lagged."
   [identity-key]
   (let [{:keys [lagged last-seq resyncs]} (get-in @subscriptions-state [identity-key :data])]
     (when (and lagged (compare-and-set! lagged true false))
@@ -206,8 +154,6 @@
               envs     (filterv #(delta/matches? interest %)
                                 (replay/replay-envelopes @last-seq 10000))]
           (swap! resyncs inc)
-          ;; :info not :debug — a resync is the observable success path of the
-          ;; replay machinery.
           (log/info {:id ::data-resync
                      :data {:action :recovering :subject :delta
                             :from @last-seq :count (count envs)}}
@@ -219,9 +165,7 @@
             nil)))))
 
 (defn normalize-data-item
-  "Validate a {:type \"data\" ...} subscription item; requires records,
-   hard-rejects legacy entity-firehose fields with a migration message (no
-   transparent shim, semantics differ)."
+  "Validate a data subscription item; legacy entity-firehose fields are hard-rejected."
   [item]
   (let [legacy-keys (set/intersection (set (keys item))
                                       #{"entity" "entities" "relations" "firehose"
@@ -248,15 +192,6 @@
                         {:code "EMPTY_RECORDS"})))
       {:records    records
        :operations operations})))
-
-;; Entity/relation tracks are the cache-invalidation siblings of data: coalesced
-;; entity/touched or relation/touched pokes per name per 100ms window,
-;; provenance fully
-;; redacted. RBAC-checked at subscribe time (cheap one-shot, prevents name
-;; enumeration);
-;; no per-envelope RLS — too expensive on the delivery path and unnecessary
-;; since a poke
-;; leaks no record-level info.
 
 (defn coalesce-loop!
   "Per-identity go-loop draining batch-chan, batching for 100ms, translating +
@@ -290,8 +225,6 @@
 (defn entity-sub-key   [identity-key] [::entity   identity-key])
 (defn relation-sub-key [identity-key] [::relation identity-key])
 
-;; Relation name separators accepted on the wire: see
-;; engine.subscription/relation-separator-re.
 (defn recompute-entity-subscription!
   [identity-key]
   (let [names   (get-in @subscriptions-state [identity-key :entity :name-by-xid])
@@ -357,10 +290,6 @@
     (coalesce-loop! identity-key :relation batch-chan
                     translate (comp :relation :data))))
 
-;; Pure state-transformer fns, one per track — set-subscriptions! threads all
-;; three
-;; through a single swap! so a POST's whole session transition is one atomic
-;; step.
 (defn apply-data-track
   [state identity-key validated records ops]
   (if (seq validated)
@@ -427,23 +356,11 @@
                                          (let [t (item-type item)]
                                            (when (#{"deployed-model" "runtime-model"} t) t))))
                                  items)
-            ;; Model-deploy notification is an ENGINE event, not an entity read
-            ;; — RBAC has no
-            ;; handle on "the schema was redeployed" — so this track alone is
-            ;; scope-gated
-            ;; (dataset:subscription; succeeds GraphQL's refreshedGlobalDataset
-            ;; gate).
-            ;; Deliberately NOT applied to data/entity/relation: those ARE
-            ;; entity reads,
-            ;; already RBAC-gated per entity — scoping them too would duplicate
-            ;; RBAC.
             _              (when (seq model-types)
                              (engine/assert-scope! "dataset:subscription"))
             validated-data     (mapv normalize-data-item     data-items)
             validated-entity   (mapv trans/normalize-entity-item   entity-items)
             validated-relation (mapv trans/normalize-relation-item relation-items)
-            ;; first-wins preserves the client's earliest form when equivalent
-            ;; names collide.
             first-wins (fn [a _b] a)
             all-records (reduce set/union #{} (map :records validated-data))
             all-operations (if (and (seq validated-data)
@@ -458,17 +375,13 @@
                                        (map :name-by-xid validated-relation))
             all-relation-ops   (when (and (seq validated-relation) (every? :ops validated-relation))
                                  (reduce set/union #{} (map :ops validated-relation)))]
-        ;; data / entity / relation tracks — one atomic transition.
         (swap! subscriptions-state
                (fn [s]
                  (-> s
                      (apply-data-track     identity-key validated-data     all-records         all-operations)
                      (apply-entity-track   identity-key validated-entity   all-entity-names    all-entity-ops)
                      (apply-relation-track identity-key validated-relation all-relation-names  all-relation-ops))))
-        ;; model track — owns its own channel + go-loop lifecycle, can't be
-        ;; folded.
         (replace-model-state! identity-key model-types principal)
-        ;; recompute every plug sub
         (recompute-data-subscription!     identity-key)
         (recompute-entity-subscription!   identity-key)
         (recompute-relation-subscription! identity-key)
@@ -565,29 +478,12 @@
 (declare destroy-event-stream)
 
 (def ^:private stream-max-lifetime-ms
-  "Hard lifetime for one SSE stream, after which the server closes it and the
-   client reconnects. `SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` overrides; 0 disables.
-
-   This exists because a disconnected client is NOT reliably detectable, so
-   `destroy-event-stream` cannot be left to the adapter's on-close callback
-   alone. Measured on http-kit, including a hard-killed container
-   disconnecting over a real network interface: `:on-close` never fired,
-   `open?` kept returning true, and every write succeeded — small SSE frames
-   just sit in the TCP send buffer. A dev server that had been up a week was
-   holding 64 streams for 2 identities, none of them reachable, and because
-   `cleanup-identity!` only runs when the LAST stream for an identity goes,
-   every delta subscription behind them was pinned too.
-
-   Every SDK (JS/Python/Clojure) reconnects with backoff and re-flushes its
-   subscription set, so an expiring stream is transparent to clients; the
-   cost is one reconnect per interval per stream. Generous by default to keep
-   that churn negligible."
+  "Hard lifetime for one SSE stream; `SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` overrides, 0 disables."
   (let [default 900000
         raw     (env :synthigy-server-sse-max-lifetime-ms)]
     (if (nil? raw)
       default
-      ;; A malformed value must not take the namespace down at load time —
-      ;; `parse-long` returns nil, which `pos?` would then throw on.
+      ;; never let a malformed value reach `pos?` — it throws at ns load
       (or (parse-long (str/trim (str raw)))
           (do (log/warn {:id ::bad-sse-lifetime
                          :data {:action :ignored :subject :sse-connection
@@ -602,10 +498,6 @@
         [user-xid client-id] identity-key
         stream-count (inc (count (get @event-streams identity-key)))]
     (swap! event-streams update identity-key (fnil conj #{}) ch)
-    ;; Reclaim on a timer (stream-max-lifetime-ms); closing the channel tears
-    ;; down the
-    ;; HTTP connection too. Guarded on still-registered — no-op if on-close
-    ;; already ran.
     (when (pos? stream-max-lifetime-ms)
       (async/go
         (async/<! (async/timeout stream-max-lifetime-ms))
@@ -662,16 +554,11 @@
                          :event-count (count events)}}
                  "SSE payload pushed"))
     (doseq [stream streams]
-      ;; offer! returns nil on a closed channel — any nil mid-burst means the
-      ;; stream is gone.
       (when (some #(nil? (async/offer! stream %)) events)
         (destroy-event-stream identity-key stream)))))
 
 (defn ensure-delta-loop!
-  "Per-identity delta processing go-loop: drains the batch channel, accumulates a 100ms
-   window, translates each envelope into 0-2 SSE events. principal resolves to a role-xid
-   set ONCE and closes over it for the loop's lifetime — attribute RBAC strips denied
-   fields per delta, since this loop runs outside any request's with-principal binding."
+  "Per-identity go-loop translating batched delta envelopes into SSE events under the principal's roles."
   [identity-key principal]
   (when (claim-loop! identity-key :data)
     (let [batch-chan (get-in @subscriptions-state [identity-key :data :batch-chan])
@@ -683,10 +570,6 @@
                           (if (and val (= port batch-chan))
                             (recur (conj batch val))
                             batch)))
-                ;; Heal drops in place: fold store-replayed envelopes into this
-                ;; batch,
-                ;; deduped by seq (live full-fidelity envelope wins over the
-                ;; reconstruction).
                 replay       (data-resync-envelopes identity-key)
                 all          (if (seq replay)
                                (->> (concat replay batch)
@@ -727,8 +610,6 @@
                               (reset! fingerprint new-fp)
                               true)))]
             (when notify?
-              ;; One event per active model subscription type; client re-fetches
-              ;; via the matching /data op.
               (let [types (get-in @subscriptions-state [identity-key :model :types])
                     ts    (str (Instant/now))]
                 (when (seq types)
@@ -776,8 +657,6 @@
   "Ring handler for POST /data/subscription/set — replaces the full subscription
    state for the request's identity."
   [request]
-  ;; Same optional-IAM contract as /data: token mandatory when :synthigy/iam is
-  ;; running, else allow-all facade.
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam         (when iam-active? (auth/authenticate-request request))]
     (if (and iam-active? (not iam))
@@ -815,12 +694,7 @@
 
 (lifecycle/register-module!
  :synthigy/subscriptions
- ;; plug owns the drainer that calls delta/dispatch! — it must be up first
- ;; or
- ;; subscribers register interest and silently never receive events. No
- ;; :synthigy/iam
- ;; dep — bare-server operation is intended (allow-all facade when IAM isn't
- ;; running).
+ ;; never drop :synthigy/plug — it runs the delta drainer; without it subscribers silently get nothing
  {:depends-on [:synthigy/dataset :synthigy/plug]
   :doc "Live /data subscriptions — record/stats deltas over SSE"
   :start (fn []

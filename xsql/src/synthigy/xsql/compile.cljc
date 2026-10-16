@@ -48,8 +48,7 @@
         :string)))
 
 (defn lookup-param
-  "Resolve a :param-ref leaf's value from bound params, inline default, or the
-   absent sentinel."
+  "Resolve a :param-ref leaf's value from bound params, inline default, or the absent sentinel."
   [param-ref-node]
   (let [nm (:param-name param-ref-node)]
     (cond
@@ -66,8 +65,7 @@
                        :span (:span param-ref-node)})))))
 
 (defn resolve-param-ref
-  "Resolve a :param-ref leaf to its bound literal value, type-checking against
-   the declared type."
+  "Resolve a :param-ref leaf to its bound literal value, type-checked."
   [param-ref-node]
   (let [type   (param-type-kw param-ref-node)
         array? (:array? param-ref-node)
@@ -89,15 +87,13 @@
 ;; ── Op-specific rewrites (multimethod) ───────────────────────────────────
 
 (defmulti op-compile-rewrite
-  "Rewrite the compiled result map for op-specific semantics; dispatches on the
-   wire op string."
+  "Rewrite the compiled result for op-specific semantics, dispatched on the wire op string."
   (fn [op _result] (or op :default)))
 
 (defmethod op-compile-rewrite :default [_ result] result)
 
 (defn root-scalar-args-entry?
-  "Detect the `[{:args {…}}]` wire shape compile-scalar emits for inline scalar
-   predicates."
+  "Detect the `[{:args {…}}]` shape compile-scalar emits for inline scalar predicates."
   [v]
   (and (vector? v)
        (= 1 (count v))
@@ -220,8 +216,7 @@
      :filter filter}))
 
 (defn scalar-colon-error?
-  "True when the scalar carries a `:` error node (attempted scalar alias) and
-   must stay off the wire."
+  "True when the scalar carries a `:` error node (attempted scalar alias)."
   [scalar-node]
   (boolean (some #(and (= :error (:node %)) (= ":" (:text %)))
                  (:children scalar-node))))
@@ -346,8 +341,7 @@
              (some #(and (= :param-ref (:node %)) (:optional? %)
                          (absent? (lookup-param %)))
                    (tree-seq :children :children parens)))
-      ;; Every predicate evaporated via absent optional params — drop the JOIN
-      ;; too.
+      ;; every predicate evaporated via absent optional params — drop the JOIN too
       parent
       (assoc parent (keyword field) (conj (vec existing) wrapped)))))
 
@@ -380,8 +374,7 @@
 ;; ── _agg ────────────────────────────────────────────────────────────────
 
 (defn compile-agg-block
-  "Wire shape for `_agg` — envelope-per-child; each aggregate fn is its own
-   entry."
+  "Wire shape for `_agg`: envelope-per-child, each aggregate fn its own entry."
   [agg-node]
   (let [children (ast/find-children agg-node :agg-relation)
         grouped
@@ -429,8 +422,7 @@
       {})))
 
 (defn deep-merge-args
-  "AND-fold sibling arg maps — same-field operator maps merge keys; colliding
-   combinators restructure instead of clobbering."
+  "AND-fold sibling arg maps; colliding combinators restructure instead of clobbering."
   [a b]
   (reduce-kv
     (fn [m k v]
@@ -467,8 +459,7 @@
     (ast/find-children list-node :arg-stmt)))
 
 (defn throw-optional-in-or
-  "Absent optional under `or` is an error — dropping a disjunct silently narrows
-   the result."
+  "Absent optional under `or` is an error: dropping a disjunct silently narrows the result."
   [node]
   (throw (ex-info "optional `?name?` param under `or` — dropping a disjunct is ambiguous; restructure or supply the value"
                   {:code "PARAM_OPTIONAL_IN_OR" :span (:span node)})))
@@ -622,8 +613,7 @@
                     (update acc :vals conj v))))))
           {:vals [] :dropped? false}
           (ast/find-children list-node :value))]
-    ;; A list emptied by absent optionals takes the whole predicate with it —
-    ;; never fabricate `_in []`.
+    ;; a list emptied by absent optionals drops the whole predicate — never fabricate `_in []`
     (if (and dropped? (empty? vals)) absent vals)))
 
 ;; ── MetaKey ─────────────────────────────────────────────────────────────
@@ -713,8 +703,7 @@
   node)
 
 (defn enforce-order-scoping
-  "Apply selection-scoping to tagged order params across root and relation
-   configs."
+  "Apply selection-scoping to tagged order params across root and relation configs."
   [{:keys [selections] :as result}]
   (check-order-scope result selections)
   (letfn [(walk-sel [sel]

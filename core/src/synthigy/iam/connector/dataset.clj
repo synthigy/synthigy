@@ -9,10 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.iam.connector.dataset
-  "Dataset-backed CredentialsProvider — connectors are normal
-   `:iam/auth-connector` entities, cache-invalidated via `delta/subscribe!`;
-   replaces the old Postgres/SQLite/Cockroach per-backend providers. Patch 2.0.0
-   migrates rows out of the legacy `__iam_auth_connector` side-table."
+  "Dataset-backed CredentialsProvider over `:iam/auth-connector` entities, cache-invalidated by deltas."
   (:require
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]

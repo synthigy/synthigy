@@ -28,13 +28,12 @@ in the project's `.synthigy/.env` and hands them to your program:
 synthigy env init                     # once: this project gets .synthigy/
 synthigy up                           # a local server, if you need one
 
-synthigy iam add-client "My App" --id my-app --type confidential \
-  --grant client_credentials --role "Dataset Explorer" --api Synthigy --local
-synthigy connect http://localhost:7887 --client-id my-app
+synthigy connect http://localhost:7887 --client-id my-app   # client from Getting started
 
 synthigy exec -- node app.js          # or python, go run, clj …
 ```
 
+Create the client first ([Getting started](GETTING_STARTED.md#4-let-an-application-in)).
 `connect` stores the endpoint and the identity — a client id and secret, or a
 user's browser sign-in. `exec` runs your program with that environment, and
 the SDK picks it up without configuration (`connect()` with no arguments). A

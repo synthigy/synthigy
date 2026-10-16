@@ -9,9 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.xsql.program
-  "Operation-document PROGRAM layer for XSQL — first-class `@`-declarations.
-   A buffer is a PROGRAM of one or more operations; this ns owns declarations
-   so lint/complete/compile never strip headers themselves."
+  "Operation-document PROGRAM layer for XSQL: first-class `@`-declarations."
   (:refer-clojure :exclude [compile])
   (:require [clojure.string :as str]
             [synthigy.xsql.compile :as compile-impl]
@@ -26,13 +24,11 @@
   #{"search" "get" "search-tree" "get-tree" "sql-template" "slice" "purge"})
 
 (def tree-verbs
-  "Recursive read verbs — walk a self-relation named by `_on` in the root
-   parens; return a flat row list (see docs for why recursion is a verb)."
+  "Recursive read verbs walking the self-relation named by `_on`; they return a flat row list."
   #{"search-tree" "get-tree"})
 
 (def mutate-verbs
-  "Mutation verbs — body is `?var:Entity[]` (a data variable carrying the
-   entity), not a rooted XSQL query. Data is filled at run time."
+  "Mutation verbs: the body is a `?var:Entity[]` data variable, not a rooted XSQL query."
   #{"sync" "stack" "delete"})
 
 (def ^:private raw-verbs
@@ -60,7 +56,7 @@
 ;; ── Chunking ────────────────────────────────────────────────────────────────
 
 (defn chunk-ops
-  "Split lines into per-operation chunks at each flush-left `@<doc-verb>`."
+  "Split lines into per-declaration chunks at each flush-left op verb or `@batch` line."
   [lines]
   (loop [ls lines, chunks [], cur []]
     (if (empty? ls)
@@ -73,19 +69,15 @@
 ;; ── Per-operation parse ──────────────────────────────────────────────────────
 
 (def ^:private header-directives
-  "Op-doc header declarations — @namespace/@watch/@returns/@description,
-   between the @verb line and the body. Not operation boundaries."
+  "Op header directives, between the @verb line and the body; not boundaries."
   #{"description" "namespace" "watch" "returns"})
 
 (def ^:private buffer-directives
-  "Buffer-level declarations, flush-left before the first operation and
-   ignored by codegen: @workspace."
+  "Buffer-level directives, flush-left before the first op; ignored by codegen."
   #{"workspace"})
 
 (defn parse-header
-  "Consume header-directive lines after the @verb declaration, stopping at
-   the first non-directive line. Returns
-   `[{:description :namespace :watch :returns :offsets} remaining-lines]`."
+  "Consume header-directive lines after the @verb line; returns `[header remaining-lines]`."
   [lines]
   (loop [ls lines, h {}]
     (let [[text off] (first ls)
@@ -98,8 +90,6 @@
         (let [head (str/trim (subs text (count "@description")))
               to1  (+ off (count text))]
           (if (str/starts-with? head "\"")
-            ;; Quoted form: closing quote may sit lines below, newlines
-            ;; preserved verbatim, no escape syntax — first `"` closes.
             (let [opened (subs head 1)
                   qi     (str/index-of opened "\"")]
               (if qi
@@ -166,8 +156,7 @@
         {:keys [description namespace watch returns offsets desc-error]} header
         anchor     (fn [dir] (get offsets dir [decl-off decl-to]))
         body-lines (drop-while (fn [[t _]] (str/blank? t)) rest-lines)
-        ;; Empty body starts past the decl line's newline, never ON it —
-        ;; see docs for the completion-guard bug this avoids.
+        ;; empty body starts past the decl line's newline, never ON it — else an empty body completes on the decl line
         body-off   (if (seq body-lines) (second (first body-lines)) (inc decl-to))
         body       (str/join "\n" (map first body-lines))
         errors     (cond-> []
@@ -213,16 +202,10 @@
        :namespace namespace :watch watch :returns returns
        ;; directive name → [from to] of its own line, for anchored edits/lints.
        :header-offsets offsets
-       ;; Root entity (first body token) — the namespace an op falls under when
-       ;; it
-       ;; declares no @namespace. nil for raw @sql bodies (they need
-       ;; @namespace — `missing-namespace-errors`).
        :root (when (and (not sql?) (seq (str/trim (or body ""))))
                (some-> (re-find #"^\s*([\w.-]+)" body) (nth 1)))
        :body body :body-offset body-off :decl-offset decl-off
        :errors (cond-> errors
-                 ;; Directives that are carried but meaningless on this verb —
-                 ;; warn instead of silently ignoring downstream.
                  (and returns (not sql?))
                  (conj (let [[from to] (anchor "returns")]
                          {:severity :warning
@@ -248,9 +231,6 @@
 
 (defn parse-anonymous [chunk-lines]
   (let [[_ off] (first chunk-lines)
-        ;; Buffer-level directives (picked up by
-        ;; buffer-namespace/workspace-name)
-        ;; are not body — drop them so they aren't lint-parsed as XSQL.
         kept (remove (fn [[t _]]
                        (let [d (second (re-find #"^@([\w-]+)" (or t "")))]
                          (or (header-directives d) (buffer-directives d))))
@@ -262,8 +242,7 @@
      :decl-offset off :errors []}))
 
 (defn buffer-namespace
-  "Flush-left `@namespace <Ident>` before the first op — the buffer-level
-   default namespace for ops that omit their own. nil if none."
+  "Flush-left `@namespace` before the first op: the buffer-level default namespace, or nil."
   [lines]
   (loop [ls lines]
     (when-let [[text _] (first ls)]
@@ -273,9 +252,7 @@
         :else                                     (recur (rest ls))))))
 
 (defn workspace-name
-  "Flush-left `@workspace \"<name>\"` before the first op — the buffer's
-   console identity. Quoted since the name may contain spaces; an old
-   unquoted single-token form still reads. nil if none."
+  "Flush-left `@workspace \"<name>\"` before the first op: the buffer's console identity, or nil."
   [source]
   (loop [ls (lines-with-offsets (or source ""))]
     (when-let [[text _] (first ls)]
@@ -288,8 +265,7 @@
         :else (recur (rest ls))))))
 
 (defn parse-batch
-  "Parse a `@batch <name>: <op> <op> …` declaration into `{:batch true
-   :name :members …}`."
+  "Parse a `@batch <name>: <op> <op> …` declaration."
   [[[text off] & _]]
   (let [m       (re-find #"^@batch\s+(\S+)\s*:\s*(.*)$" text)
         name    (nth m 1 nil)
@@ -307,10 +283,7 @@
                       :from off :to to}))}))
 
 (defn parse
-  "Parse a buffer into a vector of declaration maps. Operations:
-   `{:op :name :description :sql? :body :body-offset :decl-offset :errors}`.
-   Batches: `{:batch true :name :members :decl-offset :errors}`.
-   `:errors` are declaration-level diagnostics in full-buffer coordinates."
+  "Parse a buffer into a vector of operation/batch declaration maps, errors in full-buffer offsets."
   [source]
   (let [lines      (lines-with-offsets source)
         default-ns (buffer-namespace lines)
@@ -327,9 +300,7 @@
           (chunk-ops lines))))
 
 (defn watch-toggle-edit
-  "Editor transaction `{:from :to :insert :watch}` toggling the `@watch`
-   header of the op declared at `decl-offset` (never a content replace —
-   the console must keep cursor/undo). nil for `@batch`/mutation ops."
+  "Editor transaction `{:from :to :insert :watch}` toggling `@watch` on the op at `decl-offset`."
   [source decl-offset]
   (let [source (or source "")
         {:keys [op batch mutate header-offsets] :as decl}
@@ -346,9 +317,7 @@
 ;; ── Program-level lint / compile / complete ─────────────────────────────────
 
 (defn op-namespace
-  "The namespace an op falls under — its declared `@namespace`, else its root
-   entity. The SAME default every emitter applies (bare op = method on the
-   root entity's generated class; @namespace = detached module)."
+  "The namespace an op falls under: its `@namespace`, else its root entity (the emitters' default)."
   [{:keys [namespace root entity]}]
   (some-> (or namespace root entity) str/lower-case))
 
@@ -358,9 +327,7 @@
   (str (op-namespace op) "/" (some-> name str/lower-case)))
 
 (defn resolve-batch-member
-  "Resolve a `@batch` member reference — bare `name` or qualified `ns/name` —
-   against `decls` (parse OR compile output; both carry the identity keys).
-   → `{:op <decl>}` | `{:ambiguous [<decl> …]}` | `{:missing true}`."
+  "Resolve a bare or `ns/name` batch member to `{:op}`, `{:ambiguous}` or `{:missing true}`."
   [decls ref]
   (let [ops     (filter :name (remove :batch decls))
         [ns nm] (if (str/includes? ref "/")
@@ -424,8 +391,7 @@
      :from decl-offset :to (or end-decl (inc decl-offset))}))
 
 (defn directive-errors
-  "Flush-left `@` lines that aren't valid declarations at their position
-   (unknown, misplaced buffer directive, or detached header directive)."
+  "Flush-left `@` lines that aren't valid declarations at their position."
   [source decls]
   (let [first-op-off (when-let [xs (seq (keep #(when (or (:op %) (:batch %)) (:decl-offset %))
                                               decls))]
@@ -441,8 +407,7 @@
                              (when op [decl-offset body-offset]))
                            decls)
         in-header?   (fn [off] (boolean (some (fn [[a b]] (and (>= off a) (< off b))) header-spans)))
-        ;; lines INSIDE a quoted multiline @description are prose, not
-        ;; declarations — an `@…` there must not lint as a misplaced directive.
+        ;; lines inside a quoted multiline @description are prose, not declarations
         desc-spans   (keep #(get-in % [:header-offsets "description"]) decls)
         in-desc?     (fn [off] (boolean (some (fn [[a b]] (and (> off a) (<= off b))) desc-spans)))]
     (for [[text off] (lines-with-offsets (or source ""))
@@ -452,9 +417,7 @@
                      (not (doc-verbs d)) (not (mutate-verbs d)) (not= "batch" d)
                      (not (in-sql? off))
                      (not (in-desc? off)))
-          :let [;; namespaces live in the entity naming universe — snake_case
-                ;; (emitters re-case per language: movie_genre → MovieGenre).
-                ns-casing
+          :let [ns-casing
                 (fn []
                   (when (and (= d "namespace")
                              (when-let [v (second (re-find #"^@namespace\s+(\S+)" text))]
@@ -476,8 +439,7 @@
 
                   (and (header-directives d) (not (in-header? off)))
                   (if (or (nil? first-op-off) (< off first-op-off))
-                    ;; Before the first op only @namespace means something
-                    ;; (the buffer-level default) — the rest attach to nothing.
+                    ;; before the first op only @namespace (the buffer default) means something
                     (if (= d "namespace")
                       (ns-casing)
                       {:severity :warning
@@ -494,10 +456,7 @@
 ;; ── sql-template placeholder validation ──────────────────────────────────────
 
 (def ^:private sql-join-split
-  "Join operators inside a `{…}` placeholder — mirrors the server-side
-   template resolver's join-pattern. Whitespace is optional: identifiers
-   are strict snake_case, so `-` can never be part of a name and
-   `{a->b.f}` parses identically to `{a -> b.f}`."
+  "Join operators inside a `{…}` placeholder; mirrors the server resolver's join pattern."
   #"\s*(?:=>|->|<-|-)\s*")
 
 (def ^:private sql-ident-pattern #"[a-z][a-z0-9_]*")
@@ -513,9 +472,7 @@
       acc)))
 
 (defn sql-placeholder-errors
-  "Validate every `{…}` placeholder of a raw-SQL body against the schema
-   (snake_case identifiers, entity/relation/attribute chain must resolve).
-   Offsets are body-local; `lint` shifts them. nil-schema → no checks."
+  "Validate every `{…}` placeholder of a raw-SQL body against the schema, in body-local offsets."
   [^String body schema]
   (when (:entities schema)
     (for [[open close inner] (sql-placeholder-spans body)
@@ -557,10 +514,7 @@
 (declare sql-output-columns)
 
 (defn sql-restriction-set-warnings
-  "Warn (not error) when a `?name:order(cols…)` restriction-set entry
-   doesn't match a detected output column — `sql-output-columns` is a
-   regex heuristic that can miss legitimate columns, so a false positive
-   here must never block Execute."
+  "Warn when a `?name:order(cols…)` entry isn't a detected output column (heuristic, so never an error)."
   [^String body]
   (let [known (set (sql-output-columns body))]
     (when (seq known)
@@ -574,8 +528,7 @@
          :from from :to to}))))
 
 (defn sql-param-errors
-  "Wire `sql-params/analyze`'s param-level checks into the console's live
-   lint for `@sql-template` bodies (previously server-only)."
+  "`sql-params/analyze` param checks for `@sql-template` bodies."
   [^String body]
   (let [{:keys [errors warnings]} (sql-params/analyze body)]
     (concat
@@ -584,12 +537,7 @@
      (sql-restriction-set-warnings body))))
 
 (defn lint
-  "Lint every declaration in `source` against `schema`. Declaration errors
-   (missing name, duplicate alias, @batch unknown members, misplaced/unknown
-   directives) plus each rooted body's diagnostics, all in full-buffer
-   offsets. `@sql` bodies get placeholder validation (every `{…}` chain
-   checked against the schema) instead of XSQL body lint; `@batch`
-   declarations get neither."
+  "Lint every declaration in `source` against `schema`, in full-buffer offsets."
   [source schema]
   (let [decls (parse source)]
     (vec
@@ -617,9 +565,7 @@
        decls)))))
 
 (defn lift-tree-shape
-  "Tree ops carry `on` (and `root` for @get-tree) as top-level wire keys,
-   not args; lift `:_on` out of :args, and for @get-tree the root-parens
-   identity becomes wire :root with args dropped entirely."
+  "Lift tree-op `:_on` (and get-tree's root identity) out of :args into top-level wire keys."
   [op {:keys [args] :as compiled}]
   (let [on    (:_on args)
         args' (not-empty (dissoc args :_on))]
@@ -632,10 +578,7 @@
         on (assoc :on on)))))
 
 (defn parse-compiled
-  "Parse a document into declaration maps with each rooted body PRE-PARSED
-   to an AST under `:body-ast` — the cacheable half of `compile`. The
-   ASTs are immutable; `compile-parsed` binds params per call, so one
-   parse serves every request for the same document."
+  "Parse a document with each rooted body pre-parsed to `:body-ast`, the cacheable half of `compile`."
   [source]
   (mapv (fn [decl]
           (if (and (:op decl) (not (:sql? decl)) (not (:batch decl))
@@ -645,15 +588,12 @@
         (parse source)))
 
 (defn compile-parsed
-  "Bind `params` into a `parse-compiled` result. Identical output to
-   `compile` on the same source."
+  "Bind `params` into a `parse-compiled` result; same output as `compile`."
   [decls params]
   (mapv (fn [{:keys [op name description namespace watch returns body body-ast sql? batch mutate] :as decl}]
           (cond
             batch  decl
             mutate decl
-            ;; carry identity/metadata only when present — keeps directive-less
-            ;; ops byte-identical to the pre-namespace wire shape.
             sql?   (cond-> {:op op :name name :description description :sql body}
                      namespace (assoc :namespace namespace)
                      watch     (assoc :watch watch)
@@ -668,11 +608,7 @@
         decls))
 
 (defn compile
-  "Compile every declaration to its wire shape, preserving order. Rooted ops →
-   `{:op :name :description :entity :selections :args}`; tree ops add
-   top-level `:on` (and `:root` for get-tree); `@sql` →
-   `{:op :name :description :sql <raw>}`; `@batch` passes through unchanged
-   (`{:batch true :name :members}`)."
+  "Compile every declaration to its wire shape, preserving order."
   ([source] (compile source nil))
   ([source params]
    (compile-parsed (parse-compiled source) params)))
@@ -687,8 +623,7 @@
           (range n) ops)))
 
 (defn op-at-offset
-  "The operation whose span contains `offset` (the op the cursor is in), or the
-   last op when past the end. nil for an empty program. Used for run-at-cursor."
+  "The operation containing `offset` (last op when past the end), or nil for an empty program."
   [source offset]
   (let [spans (op-spans (parse (or source "")) (or source ""))]
     (or (some (fn [o] (when (and (>= offset (:decl-offset o))
@@ -697,8 +632,7 @@
         (last spans))))
 
 (defn op-index-at-offset
-  "The 0-based index of the operation the cursor (`offset`) is in — same order
-   as `parse`/`compile`. Last op when past the end; 0 for an empty program."
+  "0-based index of the operation containing `offset` (last when past the end, 0 when empty)."
   [source offset]
   (let [spans (op-spans (parse (or source "")) (or source ""))]
     (or (some (fn [[i o]] (when (and (>= offset (:decl-offset o))
@@ -707,9 +641,7 @@
         (max 0 (dec (count spans))))))
 
 (def ^:private verb-options
-  "Completion options for the `@`-directive slot of a declaration line.
-   The op NAME after the verb is free-form (a codegen identifier) and
-   never completed."
+  "Completion options for the `@`-token of a declaration line."
   [{:label "@search"       :type "keyword" :section "Operations" :detail "query — matching rows"}
    {:label "@get"          :type "keyword" :section "Operations" :detail "query — one row by identity"}
    {:label "@search-tree"  :type "keyword" :section "Operations" :detail "query — matches + ancestors via _on"}
@@ -728,8 +660,7 @@
    {:label "@batch"        :type "keyword" :section "Directives" :detail "named composition of ops"}])
 
 (def ^:private scalar-type-names
-  "Bind-param scalar type vocabulary — mirrors sql-params/canonical-types
-   minus `order`, which is never a plain scalar (see `xsql-param-type-completion`)."
+  "Bind-param scalar types: sql-params/canonical-types minus `order`."
   ["int" "float" "string" "boolean" "timestamp" "uuid"])
 
 (def ^:private returns-type-options
@@ -738,8 +669,7 @@
         scalar-type-names))
 
 (defn returns-type-completion
-  "Type vocabulary when the cursor sits right after `:` on a flush-left
-   `@returns` line, else nil."
+  "Type vocabulary right after `:` on a flush-left `@returns` line, else nil."
   [^String source offset]
   (let [ls (loop [i offset]
              (if (and (pos? i) (not= \newline (.charAt source (dec i))))
@@ -764,8 +694,7 @@
                         (sort (keys (:entities schema))))}))))
 
 (defn decl-verb-completion
-  "Verb/directive vocabulary when the cursor sits inside the leading
-   `@word` token of a flush-left line, else nil."
+  "Verb/directive vocabulary inside the leading `@word` of a flush-left line, else nil."
   [^String source offset]
   (let [ls (loop [i offset]
              (if (and (pos? i) (not= \newline (.charAt source (dec i))))
@@ -782,8 +711,7 @@
 ;; ── sql-template body completion ─────────────────────────────────────────────
 
 (defn sql-chain-target
-  "Resolve a placeholder chain [root rel …] to the entity it lands on,
-   or nil when any hop is unknown."
+  "Entity a placeholder chain [root rel …] lands on, or nil when a hop is unknown."
   [schema [root & rels]]
   (reduce (fn [ename rel]
             (or (get-in schema [:entities ename :relations rel :target])
@@ -808,9 +736,7 @@
         (sort-by key (get-in schema [:entities ename :attributes]))))
 
 (defn sql-placeholder-completion
-  "Completion inside an unclosed `{…}` placeholder: entity names at `{`,
-   relations after a join operator, attributes after `.`; an unknown
-   hop goes silent rather than guessing."
+  "Completion inside an unclosed `{…}` placeholder: entities, relations after a join, attributes after `.`."
   [^String body offset schema]
   (let [prefix (subs body 0 offset)
         open   (str/last-index-of prefix "{")
@@ -852,8 +778,7 @@
              :options (sql-relation-options schema target)}))))))
 
 (defn sql-output-columns
-  "Output-column names of a raw-SQL body: `AS` aliases plus bare
-   `{entity.field}` items directly followed by a comma, newline, or EOF."
+  "Output-column names of a raw-SQL body: `AS` aliases plus bare `{entity.field}` items."
   [body]
   (distinct
    (concat
@@ -861,9 +786,7 @@
     (map second (re-seq #"\{[^{}]*\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*(?=,|\n|$)" body)))))
 
 (defn sql-clause-completion
-  "After an ORDER BY / GROUP BY in a raw-SQL body, offer output columns.
-   Keyword detection is last-match, not paren-depth aware — harmless,
-   these are suggestions, not validation."
+  "Output-column options after ORDER BY / GROUP BY in a raw-SQL body."
   [^String body offset]
   (let [prefix (subs body 0 offset)
         typed  (or (re-find #"[A-Za-z_][A-Za-z0-9_]*$" prefix) "")
@@ -880,15 +803,12 @@
                           cols)})))))
 
 (defn sql-type-completion
-  "Completion for `?name:type` inside a `@sql-template` body: `order` is
-   valid only inside ORDER BY / GROUP BY, reusing sql-params's exact
-   `re-identifier-position` regex so completion and lint can't drift."
+  "`?name:type` completion in a `@sql-template` body; `order` only in identifier position."
   [^String body offset]
   (let [prefix (subs body 0 offset)]
     (when-let [[whole typed] (re-find #"\?[a-z_][a-z0-9_]*\??:([a-zA-Z]*)$" prefix)]
       (let [typed       (or typed "")
-            ;; Must see the prefix up to the `?`, not the `?name:` text
-            ;; itself, or "order by ?sort:" never matches.
+            ;; regex must see the prefix up to the `?`, not `?name:` — else "order by ?sort:" never matches
             param-start (- (count prefix) (count whole))
             types (if (re-find sql-params/re-identifier-position (subs prefix 0 param-start))
                     ["order"]
@@ -897,9 +817,7 @@
          :options (mapv (fn [t] {:label t :type "type"}) types)}))))
 
 (defn sql-order-restriction-completion
-  "Completion inside `?name:order(...)`'s restriction set in a
-   `@sql-template` body — sourced from `sql-output-columns` (the query's
-   own output columns, not a schema entity)."
+  "Output-column options inside a `@sql-template` `?name:order(...)` restriction set."
   [^String body offset]
   (let [open (loop [i (dec offset) depth 0]
                (cond
@@ -916,8 +834,7 @@
            :options (mapv (fn [c] {:label c :type "property" :detail "output column"}) cols)})))))
 
 (defn returns-name-completion
-  "On a flush-left `@returns` line, complete column names from the
-   body's output columns, skipping already-declared ones."
+  "Output-column names on a flush-left `@returns` line, minus already-declared ones."
   [^String source offset cur]
   (when (and cur (:sql? cur) (seq (:body cur)))
     (let [ls (loop [i offset]
@@ -938,10 +855,7 @@
                               cols)})))))))
 
 (defn xsql-in-order-by?
-  "True when body-local `offset` sits inside an `order by` clause of the
-   current arg-list, bounded to the innermost unclosed paren. Textual
-   approximation of lint.cljc's AST-walked check — a mis-scoped
-   suggestion is a UX nit here, not a wire-safety issue."
+  "True when body-local `offset` sits in an `order by` clause of the innermost unclosed paren."
   [^String body offset]
   (let [open (loop [i (dec offset) depth 0]
                (cond
@@ -958,9 +872,7 @@
                           after))))))))
 
 (defn xsql-param-type-completion
-  "Completion for `?name:type` inside a regular XSQL body, position-
-   restricted to match lint.cljc's collect-param-ref-errors exactly:
-   `order` is valid only inside `order by`, every other type elsewhere."
+  "`?name:type` completion in an XSQL body; `order` only inside `order by`, like lint."
   [^String body offset]
   (let [prefix (subs body 0 offset)]
     (when-let [[_ typed] (re-find #"\?[a-z_][a-z0-9_]*\??:([a-zA-Z]*)$" prefix)]
@@ -972,9 +884,7 @@
          :options (mapv (fn [t] {:label t :type "type"}) types)}))))
 
 (defn xsql-order-restriction-completion
-  "Completion inside `?name[:type](...)`'s restriction set — only
-   attribute names are valid, so filter `complete-impl/complete`'s
-   generic 'inside args' result down to attributes."
+  "Attribute-only options inside an XSQL `?name[:type](...)` restriction set."
   [^String body offset schema op]
   (let [open (loop [i (dec offset) depth 0]
                (cond
@@ -991,13 +901,7 @@
           (assoc r :options attrs))))))
 
 (defn complete
-  "Context-aware completion across a program. Finds the operation containing
-   `:offset` and completes its rooted body (root derived from the body),
-   mapping positions back to the full buffer. On a declaration line only
-   the `@`-directive token itself completes (the verb vocabulary); the
-   free-form op name is silent. Raw SQL bodies complete `{…}` placeholders
-   (entities / relations / attributes) and ORDER BY / GROUP BY output
-   columns; descriptions stay silent."
+  "Context-aware completion across a program, mapped back to full-buffer offsets."
   [{:keys [source offset schema] :or {offset 0}}]
   (let [source (or source "")
         spans (op-spans (parse source) source)
@@ -1038,10 +942,7 @@
           {:from offset :to offset :options []}))))
 
 (defn scope-at
-  "Persistent-panel counterpart to `complete` (see complete.cljc/scope-at):
-   resolves scope in the containing op's isolated body and threads back
-   `:op`/`:body-offset`/`:body-end` so the caller can bound edits to
-   this declaration only."
+  "Panel scope in the containing op's body, threading back `:op`/`:body-offset`/`:body-end`."
   [{:keys [source offset schema] :or {offset 0}}]
   (let [spans (op-spans (parse (or source "")) (or source ""))
         cur   (or (some (fn [o] (when (and (>= offset (:decl-offset o))
@@ -1061,9 +962,7 @@
       {:mode :none})))
 
 (defn batch-member-ops
-  "The compiled ops referenced by the `@batch` named `batch-name`, in member
-   order — bare or `ns/name`-qualified references (ambiguous bare refs resolve
-   to nothing; lint flags them). nil if no such batch."
+  "Compiled ops referenced by the `@batch` named `batch-name`, in member order, or nil."
   ([source batch-name] (batch-member-ops source batch-name nil))
   ([source batch-name params]
    (let [compiled (compile source params)]
@@ -1077,8 +976,6 @@
   [{:keys [op name description namespace watch returns body]}]
   (str "@" op (when name (str " " name)) "\n"
        (when (seq description)
-         ;; quoted is the canonical form (multiline-safe); a description
-         ;; that itself contains `"` falls back to the legacy bare line.
          (if (str/includes? description "\"")
            (str "@description " (str/replace description "\n" " ") "\n")
            (str "@description \"" description "\"\n")))

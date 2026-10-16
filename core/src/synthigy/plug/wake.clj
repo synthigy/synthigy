@@ -9,9 +9,7 @@
 ;   r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.plug.wake
-  "Pluggable wake-signal source for the plug drainer — see
-   docs/core/synthigy/plug/wake.md for the built-in implementations and the
-   *wake-source* override pattern."
+  "Pluggable wake-signal source for the plug drainer."
   (:require
     [clojure.core.async :as async]
     [synthigy.log :as log]))

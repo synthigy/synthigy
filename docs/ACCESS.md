@@ -84,8 +84,7 @@ returns fewer rows, and an update of a hidden record does not happen
 own `User` record.
 
 A deploy is refused when a guard would stop working — for example because a
-new version removes an attribute the guard depends on. Without that check the
-guard would quietly deny the operation for everyone.
+new version removes an attribute the guard depends on.
 
 ## Scopes
 

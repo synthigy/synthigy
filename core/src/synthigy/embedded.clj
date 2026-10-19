@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.embedded
   "The Synthigy data API in-process — the SDK surface, dispatched straight at
@@ -29,7 +30,8 @@
    [synthigy.iam.context :as iam.context]
    [synthigy.engine :as data]
    [synthigy.engine.history :as history]
-   synthigy.log.store))
+   synthigy.log.store
+   [synthigy.wire :as wire]))
 
 (def ^:dynamic *key-format*
   "Process-wide default response key format; a per-call :key-format wins."
@@ -75,9 +77,9 @@
                                              {:ok false
                                               :error {:message (ex-message e)
                                                       :code (:code (ex-data e) "INTERNAL_ERROR")}
-                                              :synthigy.server.data/throwable e})
+                                              :synthigy.engine/throwable e})
                        (throw e)))]
-        (data/shape-data key-fn (select-keys ctx [:entity :entity-id :selections]) result)))))
+        (wire/shape key-fn (select-keys ctx [:entity :entity-id :selections]) result)))))
 
 (defn search
   "Search for entities matching args; returns a vector, never nil."

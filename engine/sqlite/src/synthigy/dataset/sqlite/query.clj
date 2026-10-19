@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.sqlite.query
   "SQLite ModelQueryProtocol: roots + pull reads, writes, deletes, trees."
@@ -64,9 +65,9 @@
       r)))
 
 (defn distinct-attributes->group-by
-  "GROUP BY for `_distinct {:attributes …}`; SQLite has no DISTINCT ON."
+  "GROUP BY for a `_distinct` field list; SQLite has no DISTINCT ON."
   [schema]
-  (when-let [attrs (get-in schema [:args :_distinct :attributes])]
+  (when-let [attrs (sql-query/distinct-fields (get-in schema [:args :_distinct]))]
     (let [{:keys [entity/as]} schema]
       (str "GROUP BY "
            (str/join ", " (map #(str (name as) "." (name %)) attrs))))))
@@ -85,7 +86,7 @@
          [exists-sql exists-data] (inner-exists focused-schema root-as)
          where-all (clojure.string/join
                     " and " (remove clojure.string/blank? [where exists-sql]))
-         distinct-attrs  (get-in schema [:args :_distinct :attributes])
+         distinct-attrs  (sql-query/distinct-fields (get-in schema [:args :_distinct]))
          distinct-on     (when (and (not distinct-attrs)
                                     (get-in schema [:args :_distinct]))
                            "DISTINCT")
@@ -313,10 +314,10 @@
                   sql-final [(format
                               "with recursive tree(_eid,link,path,prank,cycle) as (
                                select
-                               g._eid, g.%s, ',' || g._eid || ',', ',' || g._rank || ',', 0
+                               g._eid, g.%s, ',' || g._eid || ',', ',' || printf('%%019d', g._rank) || ',', 0
                                from %s g
                                union all
-                               select g._eid, g.%s, o.path || g._eid || ',', o.prank || g._rank || ',',
+                               select g._eid, g.%s, o.path || g._eid || ',', o.prank || printf('%%019d', g._rank) || ',',
                                       CASE WHEN INSTR(o.path, ',' || g._eid || ',') > 0 THEN 1 ELSE 0 END
                                from %s g, tree o
                                where g.%s = o._eid and not cycle
@@ -351,10 +352,10 @@
                   sql-final [(format
                               "with recursive tree(_eid,link,path,prank,cycle) as (
                                select
-                               g._eid, g.%s, ',' || g._eid || ',', ',' || g._rank || ',', 0
+                               g._eid, g.%s, ',' || g._eid || ',', ',' || printf('%%019d', g._rank) || ',', 0
                                from %s g
                                union all
-                               select g._eid, g.%s, o.path || g._eid || ',', o.prank || g._rank || ',',
+                               select g._eid, g.%s, o.path || g._eid || ',', o.prank || printf('%%019d', g._rank) || ',',
                                       CASE WHEN INSTR(o.path, ',' || g._eid || ',') > 0 THEN 1 ELSE 0 END
                                from %s g, tree o
                                where g.%s = o._eid and not cycle

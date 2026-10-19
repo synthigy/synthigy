@@ -40,8 +40,8 @@ including terms different from the license the project uses today, and
 including proprietary or commercial terms.
 
 This is the clause the project actually depends on. Synthigy is distributed
-under the Elastic License 2.0 and is also offered under commercial terms to
-those who need what the Elastic License 2.0 does not allow. Without this grant, any contributed
+under the Business Source License 1.1 and is also offered under commercial terms to
+those who need what the Business Source License does not allow. Without this grant, any contributed
 code could not appear in a commercially licensed build, and the project would
 fragment into parts that can be dual-licensed and parts that cannot.
 

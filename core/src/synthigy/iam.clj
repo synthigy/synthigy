@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.iam
   (:require
@@ -149,6 +150,21 @@
     :secret nil
     :type nil
     :settings nil}))
+
+(def first-party-clients
+  ["exports/app_synthigy_tools.json"
+   "exports/app_synthigy_desktop.json"])
+
+(defn ensure-first-party-clients
+  "Re-import any first-party OAuth client this engine is missing."
+  []
+  (with-principal nil
+    (doseq [export first-party-clients
+            :when (not (get-client (:id (transfer/read-payload export))))]
+      (transfer/import-app export)
+      (log/info {:id ::imported-first-party-client
+                 :data {:action :importing :subject :oauth-clients :export export}}
+                "First-party OAuth client imported"))))
 
 (defn ensure-public
   []
@@ -362,6 +378,7 @@
     (log/info {:id ::importing-default-data} "Importing default IAM data")
     (transfer/import-app "exports/app_synthigy_tools.json")
     (transfer/import-api "exports/api_synthigy.json")
+    (transfer/import-app "exports/app_synthigy_desktop.json")
     (doseq [role ["exports/role_dataset_developer.json"
                   "exports/role_dataset_modeler.json"
                   "exports/role_dataset_explorer.json"
@@ -400,6 +417,7 @@
            (log/info {:id ::lifecycle-start :data {:action :starting}} "Starting IAM")
            (supervisor/progress-phase! "starting :synthigy/iam")
            (start)
+           (ensure-first-party-clients)
            ;; Keep access/start out of `start` — :setup would run it before the roles are imported.
            (access/start)
            (log/info {:id ::lifecycle-started :data {:action :started}} "IAM started"))

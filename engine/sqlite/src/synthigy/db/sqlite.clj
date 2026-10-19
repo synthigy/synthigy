@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.db.sqlite
   "SQLite connection management and lifecycle"
@@ -31,6 +32,22 @@
     [synthigy.db SQLite])
   (:gen-class))
 
+(defn human-version
+  "ICU version behind the driver's HUMAN collation; closes the pool and throws when the driver has none."
+  [^HikariDataSource datasource]
+  (try
+    (with-open [conn (jdbc/get-connection datasource)]
+      (:v (jdbc/execute-one! conn ["SELECT human_version() AS v"])))
+    (catch SQLiteException e
+      (.close datasource)
+      (log/error! {:id ::human-collation-missing
+                   :msg "SQLite driver has no HUMAN collation; com.synthigy/sqlite-jdbc is required"
+                   :data {:action :starting :subject :db-backend}}
+                  e)
+      (throw (ex-info "SQLite driver has no HUMAN collation; com.synthigy/sqlite-jdbc is required"
+                      {:driver (some-> (Class/forName "org.sqlite.JDBC") .getProtectionDomain .getCodeSource .getLocation str)}
+                      e)))))
+
 (defn connect
   "Opens a Hikari pool over the SQLite file at `path`; returns the SQLite record."
   [{:keys [path max-connections]
@@ -53,15 +70,16 @@
     (try
       (with-open [conn (jdbc/get-connection datasource)]
         (jdbc/execute-one! conn ["SELECT 1"]))
-      (log/info {:id ::connected :data {:path path :pool-size max-connections}}
-                "Connected to SQLite database")
-      (db/map->SQLite (assoc config :datasource datasource))
       (catch Exception e
         (log/error! {:id ::connect-failed :data {:path path}} e)
         (throw (ex-info "Couldn't connect to SQLite"
                         {:path path
                          :error (.getMessage e)}
-                        e))))))
+                        e))))
+    (let [icu (human-version datasource)]
+      (log/info {:id ::connected :data {:path path :pool-size max-connections :icu icu}}
+                "Connected to SQLite database")
+      (db/map->SQLite (assoc config :datasource datasource)))))
 
 (defn from-env
   "SQLite connection config: the instance's db/synthigy.db, pool size from SQLITE_POOL_SIZE."

@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.oauth.core
   (:require
@@ -366,12 +367,22 @@
           (str (.getScheme u) "://" (.getHost u) (when (pos? (.getPort u)) (str ":" (.getPort u))))))
       (catch Exception _ nil))))
 
+(def native-app-origins
+  "Tauri webview origins (macOS/Linux, Windows) — no web page can claim them."
+  ["tauri://localhost" "http://tauri.localhost"])
+
+(defn native-client?
+  "OIDC Registration application_type native: its redirects return to the app itself and are never browser origins."
+  [client]
+  (= "native" (get-in client [:settings "application-type"])))
+
 (defn load-browser-origins
   []
   (let [redirects (->> (dataset/search-entity :iam/app {} {:active nil :settings nil})
                        (filter :active)
+                       (remove native-client?)
                        (mapcat #(get-in % [:settings "redirections"])))]
-    {:exact (into #{} (keep uri-origin) (concat redirects env/allowed-origins [env/iam-root-url (domain+)]))
+    {:exact (into #{} (keep uri-origin) (concat redirects native-app-origins env/allowed-origins [env/iam-root-url (domain+)]))
      :loopback (into #{} (comp (filter localhost-redirect?) (keep strip-port) (keep uri-origin)) redirects)
      :loaded-at (System/currentTimeMillis)}))
 

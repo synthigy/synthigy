@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.info
   "Public discovery data — is auth required, and if so, where."
@@ -18,6 +19,9 @@
 
 (def modeler-public-client-id
   "ZMETOIKCJISOUMBAXRLOXOLKNSTVSMSGUZLMZOAFPIBJGCSF")
+
+(def desktop-public-client-id
+  "IFGSBNADPUUWVSRWUOXHPEARTSTXMAHZIMSLHERFZJZEWYNF")
 
 (defn model-info
   "Deploy timestamps only — version NAMES are human labels and must not leak
@@ -46,6 +50,7 @@
       (assoc-in [:auth :oidc]
                 {:discovery "/.well-known/openid-configuration"
                  :client_id modeler-public-client-id
+                 :desktop_client_id desktop-public-client-id
                  :audience engine/platform-audience})
 
       datasets

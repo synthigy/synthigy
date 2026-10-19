@@ -129,6 +129,12 @@ parents that have a match.
 Operators: `_eq`, `_neq`, `_lt`, `_le`, `_gt`, `_ge`, `_in`, `_not_in`,
 `_like`, `_ilike` (case-insensitive), `_is_null`.
 
+Text and enum fields sort the way people read them, the same on PostgreSQL and
+SQLite: case-insensitive first (case breaks ties), digits as numbers, accents by
+Unicode — `apple`, `Apple`, `Auto2`, `Auto11`, `čevapi`, `Zebra`. `_lt`/`_gt`
+follow the same order. Equality is exact: `_eq` on `"apple"` does not match
+`"Apple"`. In `asc` order nulls come first, in `desc` order last.
+
 ### Counts and aggregates
 
 `_count` and `_agg` compute over a relation in the database, without sending

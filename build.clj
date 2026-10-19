@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns build
   "Uberjar for a chosen backend combo. Combo via SYNTHIGY_COMBO env,
@@ -433,8 +434,8 @@
                              [:url "https://github.com/synthigy/synthigy"]
                              [:licenses
                               [:license
-                               [:name "Elastic License 2.0"]
-                               [:url "https://www.elastic.co/licensing/elastic-license"]]]]})
+                               [:name "Business Source License 1.1"]
+                               [:url "https://mariadb.com/bsl11/"]]]]})
     (b/jar {:class-dir class-dir :jar-file jar-file})
     (println "Built" jar-file)))
 

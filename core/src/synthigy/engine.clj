@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.engine
   "The operation engine — data in, data out, no transport. Every /data verb
@@ -1217,63 +1218,12 @@
       :else
       {:principal user-ctx})))
 
-(defn strip-eid
-  "Recursively remove the internal :_eid (Postgres serial PK) from a result
-   value — a storage detail, never the client's business."
-  [v]
-  (cond
-    (map? v)        (reduce-kv (fn [m k val]
-                                 (if (= k :_eid) m (assoc m k (strip-eid val))))
-                               {} v)
-    (sequential? v) (mapv strip-eid v)
-    :else           v))
-
-(defn ^:no-doc shape-data
-  "Shape one operation's data like the wire does: strip keys not in :selections,
-   then apply key-fn if given."
-  [key-fn op data]
-  (cond
-    (::count-only? (meta data))
-    data
-
-    (and (:entity op) (coll? data))
-    (let [entity-id (or (:entity-id op) (sql-query/resolve-entity (:entity op)))
-          sel (when (map? (:selections op))
-                (dataset/normalize-selection (:selections op)))
-          strip #(dataset/strip-to-selection entity-id sel %)
-          key-xf #(dk/transform-result entity-id key-fn % sel)
-          xf (cond
-               (and sel key-fn) (comp key-xf strip)
-               sel strip
-               key-fn (comp strip-eid key-xf)
-               :else strip-eid)]
-      (if (sequential? data) (mapv xf data) (xf data)))
-
-    (and (nil? (:entity op)) key-fn (sequential? data))
-    (mapv #(update-keys % key-fn) data)
-
-    :else data))
-
-(defn transform-results
-  "Shape each operation's result: strip to :selections and apply key-fn; skips
-   failed results and entity-less ops."
-  [key-fn operations results]
-  (mapv (fn [op result]
-          (let [op (merge op (::op-shape result))
-                result (dissoc result ::op-shape ::throwable)]
-            (if (:ok result)
-              (assoc result :data (shape-data key-fn op (:data result)))
-              result)))
-        operations results))
-
 (defn execute
-  "Run a /data (or /logs) request body and return {:results [...]} — the plane
-   with no HTTP, auth, parsing, or negotiation around it."
-  [{:keys [operations key_format acting_as]} auth]
+  "Run a /data (or /logs) request body and return {:results [...]}, unshaped; synthigy.wire formats them for a client."
+  [{:keys [operations acting_as]} auth]
   (when (empty? operations)
     (throw (ex-info "No operations provided" {:code "NO_OPERATIONS"})))
-  (let [key-fn   (dk/format->key-fn (or key_format "snake"))
-        user-ctx (if acting_as (resolve-acting-as acting_as) auth)]
+  (let [user-ctx (if acting_as (resolve-acting-as acting_as) auth)]
     (access/with-principal (:principal user-ctx)
       (let [operations (mapv ensure-tree-on-relation operations)
             results (execute-operations
@@ -1283,5 +1233,5 @@
                       ;; always present: operation-context merges the op body UNDER this map
                       :client (:client auth)}
                      operations)]
-        {:results (transform-results key-fn operations results)}))))
+        {:results results}))))
 

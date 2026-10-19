@@ -10,7 +10,7 @@ first superuser, Stop/Start/Restart, logs, versions and module health.
 
 ```clojure
 ;; deps.edn
-{:deps {com.synthigy/sqlite-bundle {:mvn/version "0.3.0"}}}
+{:deps {com.synthigy/sqlite-bundle {:mvn/version "0.3.1"}}}
 ```
 
 Register a patcho (`dev.gersak/patcho`) lifecycle module. Depend on

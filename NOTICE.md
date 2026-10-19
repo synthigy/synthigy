@@ -1,6 +1,6 @@
 # NOTICE
 
-Synthigy itself is licensed under the Elastic License 2.0 (see LICENSE),
+Synthigy itself is licensed under the Business Source License 1.1 (see LICENSE),
 and is also available under a commercial license (see COMMERCIAL.md). The
 bundled web components (tooling.js) are MIT. The GitHub release jars are
 uberjars: they bundle the third-party libraries below, each under its own
@@ -40,6 +40,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## Embedded native code (Unicode License V3)
+
+com.synthigy/sqlite-jdbc statically links ICU 78.3 (https://icu.unicode.org)
+into its native libraries for the HUMAN collation. ICU is licensed under the
+Unicode License V3; the full text ships inside that jar at
+`META-INF/licenses/ICU-LICENSE`.
+
 ## Apache License 2.0
 
 - buddy/buddy-core 1.12.0-430
@@ -55,13 +62,13 @@ SOFTWARE.
 - com.fasterxml.jackson.datatype/jackson-datatype-jsr310 2.18.2
 - com.googlecode.json-simple/json-simple 1.1.1
 - com.lambdaworks/scrypt 1.4.0
+- com.synthigy/sqlite-jdbc 3.47.1.0-icu78.3
 - com.zaxxer/HikariCP 6.2.1
 - commons-codec/commons-codec 1.17.1
 - commons-io/commons-io 2.16.1
-- http-kit/http-kit 2.8.0
+- http-kit/http-kit 2.9.0-beta3
 - org.apache.commons/commons-fileupload2-core 2.0.0-M1
 - org.msgpack/msgpack 0.6.12
-- org.xerial/sqlite-jdbc 3.47.1.0
 
 ## BSD 2-Clause
 

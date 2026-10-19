@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.sqlite
   (:require
@@ -36,6 +37,7 @@
    [synthigy.dataset.system :as system]
     ;; required: extends ModelQueryProtocol for SQLite (no direct refs)
    synthigy.dataset.sqlite.query
+   [synthigy.dataset.sqlite.collation :as collation]
     ;; required for its load-time patch registrations (no direct refs)
    synthigy.dataset.sqlite.patch
    [synthigy.db
@@ -137,12 +139,12 @@
                  :reference-type t}))
         (case t
         "currency" "TEXT"
-        ("avatar" "string" "hashed") "TEXT"
+        ("string" "enum") collation/human-ddl
+        ("avatar" "hashed") "TEXT"
         "timestamp" "TEXT"
         ("json" "encrypted" "timeperiod") "TEXT"
         "transit" "TEXT"
         "int" "INTEGER"
-        "enum" "TEXT"
         t)))
     (catch Throwable e
       (throw (ex-info
@@ -388,11 +390,16 @@
             (as-> statements
                   (do
                     (check-stored-values! conn entity attribute old-table column type)
-                    (log/debug {:id ::column-type-change-no-ddl
-                                :data {:table old-table :column column
-                                       :from-type dt :to-type type}}
-                               "No DDL needed for type change (dynamic typing)")
-                    statements))
+                    (if (= (contains? collation/human-types dt) (contains? collation/human-types type))
+                      (do
+                        (log/debug {:id ::column-type-change-no-ddl
+                                    :data {:table old-table :column column
+                                           :from-type dt :to-type type}}
+                                   "No DDL needed for type change (dynamic typing)")
+                        statements)
+                      (conj statements
+                            (fn [tx]
+                              (collation/swap-columns! tx old-table {(normalize-name name) (type->ddl type)}))))))
             (and (= type "enum") (nil? dt))
             (as-> statements
                   (let [id-key (id/key)
@@ -708,7 +715,9 @@
                       :data {:entity n :sql statement}}
                      "Executing statement")
           (try
-            (execute-one! tx [statement])
+            (if (fn? statement)
+              (statement tx)
+              (execute-one! tx [statement]))
             (catch Throwable e
               (throw (errors/deploy-ddl-error
                       (format "Failed to execute DDL statement for entity '%s'" n)
@@ -718,8 +727,8 @@
                        :entity-name n
                        :entity-id (id/extract entity)
                        :table-name (entity->table-name entity)
-                       :sql statement}
-                      entity statement e tx))))))
+                       :sql (when (string? statement) statement)}
+                      entity (when (string? statement) statement) e tx))))))
       (when (not-empty cr)
         (log/info {:id ::checking-changed-relations}
                   "Checking changed trans entity relations"))
@@ -1489,6 +1498,7 @@
   :start (fn []
            (log/info {:id ::lifecycle-starting :data {:action :starting}} "Starting dataset system")
            (dataset/start)
+           (collation/check-version!)
            (log/info {:id ::lifecycle-started :data {:action :started}} "Dataset system started"))
 
   :stop (fn []

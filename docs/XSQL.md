@@ -38,7 +38,10 @@ match, so the relation scopes its parent.
 ## Parameters
 
 `?name:type=default` — typed, with an optional default. Without a default the
-parameter is required.
+parameter is required. `?name?:type` is optional: when the caller leaves it out, the
+predicate that uses it is dropped (`title (ilike ?q?:string)` filters only when `q` is
+given). An optional parameter is not allowed under `or`, where dropping one branch would
+silently narrow the result.
 
 ```
 ?since:int=1980
@@ -135,6 +138,11 @@ FROM m, r
 
 Use one CTE per entity rather than scalar subqueries, so each is checked on its
 own. `float?` marks a column that may be null.
+
+Text columns sort in human order (see [DATA.md](DATA.md#filters-and-modifiers)).
+On SQLite, an expression over a text column — `lower(x)`, `coalesce(x, '')`,
+`x || ''` — falls back to byte order; write `order by lower(x) collate human` to
+keep it. PostgreSQL keeps the column's order through expressions.
 
 ## Editor support
 

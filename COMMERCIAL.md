@@ -1,42 +1,43 @@
 # Commercial Licensing
 
-Synthigy is licensed under the **Elastic License 2.0** ([LICENSE](LICENSE)),
+Synthigy is licensed under the **Business Source License 1.1** ([LICENSE](LICENSE)),
 and is also available under a commercial license. This file describes when
-you need the second one — which, for most people, is never.
+you need the second one.
 
-## 1. What the Elastic License 2.0 gives you, free
+## 1. Free, under the Business Source License
 
-No revenue threshold, no company-size limit, no feature held back. Anyone —
-an individual, a startup, an enterprise — may:
+- **Anyone** may read, copy, modify and redistribute the code, and use it for
+  development, testing and evaluation.
+- **In production, free** for:
+  - individuals, for personal, non-commercial use;
+  - non-profit organisations and accredited educational or research
+    institutions, at any size;
+  - companies whose Total Finances (with affiliates) are **EUR 5M or less** —
+    including building and selling your own products on Synthigy.
 
-- use Synthigy for any purpose, including inside their business;
-- modify it and self-host it;
-- build their own products and services on it and sell them — an ERP, a SaaS,
-  an internal platform with Synthigy as its data layer;
-- redistribute it, keeping the license and notices intact.
+"Total Finances" is the greater of gross revenue and capital raised (equity
+or debt) in the last twelve months.
 
-## 2. What it does not allow
+## 2. When you need a commercial license
 
-You may not **provide Synthigy to third parties as a hosted or managed
-service** that gives users access to a substantial set of its features —
-"Synthigy as a service", sold or free. Your product built on Synthigy is fine;
-Synthigy itself, offered as the product, is not.
-
-You may also not remove or obscure the licensing and copyright notices, and
-the license grants no rights to the Synthigy name or marks.
-
-## 3. The commercial license
-
-You need one when you want to do what section 2 excludes, or want what a
-source-available license cannot give:
-
-- **hosting** Synthigy, or a service whose main value is Synthigy, for
-  others — cloud, platform and managed-service providers;
-- **OEM / reseller** arrangements — distributing Synthigy under your own
-  name or as a product in its own right;
-- a **warranty**, support terms, and an indemnity.
+- **Your organisation is over EUR 5M.** Banks, telcos, enterprises, public
+  bodies of that size.
+- **You deploy Synthigy for a client over EUR 5M.** System integrators,
+  consultancies and agencies installing, operating or customising Synthigy
+  for a specific client — or shipping it to them as part of a product the
+  client runs — need a license when that client is over the threshold. An
+  integrator over the threshold needs one for any production use.
+- **You offer Synthigy itself as a hosted or managed service**, at any size.
+- **OEM / reseller** arrangements, a warranty, support terms, or an indemnity.
 
 Contact: **r.gersak@gmail.com**
+
+## 3. Every version becomes open source
+
+Four years after a version is first released, that version converts to the
+**GNU GPL v2.0 or later, or the Apache License 2.0** at your option, with no
+restrictions. Newer versions stay under the Business Source License until
+their own date.
 
 ## 4. What is separate
 
@@ -48,5 +49,5 @@ Contact: **r.gersak@gmail.com**
 ## 5. Contributions
 
 Contributions are accepted under a CLA ([CLA.md](CLA.md)) that grants the
-right to license contributed code under both the Elastic License 2.0 and
+right to license contributed code under both the Business Source License and
 commercial terms. You keep your copyright.

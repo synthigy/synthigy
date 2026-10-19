@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.postgres
   (:require
@@ -22,6 +23,7 @@
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
    synthigy.dataset.operations
+   [synthigy.dataset.postgres.collation :as collation]
    ;; required for its load-time patch registrations (no direct refs)
    synthigy.dataset.postgres.patch
    [synthigy.dataset.postgres.xid :as xid]
@@ -135,12 +137,12 @@
                  :reference-type t}))
         (case t
         "currency" "jsonb"
-        ("avatar" "string" "hashed") "text"
+        ("string" "enum") collation/human-ddl
+        ("avatar" "hashed") "text"
         "timestamp" "timestamp"
         ("json" "encrypted" "timeperiod") "jsonb"
         "transit" "text"
         "int" "bigint"
-        "enum" "text"
         t)))
     (catch Throwable e
       (throw (ex-info
@@ -1515,6 +1517,8 @@
   :headline true
   :doc "ERD model — schema deploy, /data query engine"
   :setup (fn []
+           ;; never deploy before this — every string/enum column is collated human
+           (collation/ensure-human-collation!)
             ;; legacy check BEFORE detect-and-set-provider! — it stores the format
            (let [legacy? (xid/legacy-deployment?)]
 
@@ -1584,6 +1588,7 @@
                             "this database to the Synthigy xid layout. Until then the system "
                             "runs against the legacy euuid layout.")))
            (dataset/start)
+           (collation/check-version!)
            (log/info {:id ::lifecycle-started :data {:action :started}}
                      "Dataset system started"))
 

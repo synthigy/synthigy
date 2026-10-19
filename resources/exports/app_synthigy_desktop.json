@@ -1,0 +1,33 @@
+{
+  "description": "Public OAuth client for the Synthigy desktop app. Signs in through the system browser with a loopback redirect (RFC 8252): any port on 127.0.0.1, PKCE required. Refresh tokens are kept in the OS keychain.",
+  "name": "Synthigy Desktop",
+  "settings": {
+    "application-type": "native",
+    "logo-url": null,
+    "login-page": null,
+    "allow-signup": false,
+    "redirections": [
+      "http://127.0.0.1/callback"
+    ],
+    "token-expiry": {
+      "id": 600,
+      "access": 3600,
+      "refresh": 129600
+    },
+    "allowed-grants": [
+      "authorization_code",
+      "refresh_token"
+    ],
+    "logout-redirections": []
+  },
+  "apis": [
+    {
+      "xid": "RtCFQ86BSUfiC5YTTBt2eQ"
+    }
+  ],
+  "type": "public",
+  "secret": null,
+  "xid": "21FjgqUFJ6uxwQuSFwptJb",
+  "active": true,
+  "id": "IFGSBNADPUUWVSRWUOXHPEARTSTXMAHZIMSLHERFZJZEWYNF"
+}

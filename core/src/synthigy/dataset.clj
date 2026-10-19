@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset
   "High-level dataset API (database-agnostic)."
@@ -600,7 +601,7 @@
         (throw e)))))
 
 (defn recall!
-  "Recall (delete) a dataset version, rolling back its schema and rebuilding the global model."
+  "Recall (delete) a dataset version, rolling back its schema and rebuilding the global model; true when done."
   [version]
   (let [actor   (log/current-principal-xid)
         summary (version-summary version)
@@ -615,19 +616,19 @@
                      :data (assoc base :action :recalled :deployed? false)}
                     (str "Deleted undeployed dataset version "
                          (or (:version-name summary) (:version-xid summary) "")))
-          nil)
+          true)
       (do
         (log/info {:id ::recalling
                    :data (assoc base :action :recalling)}
                   (str "Recalling dataset version "
                        (or (:version-name summary) (:version-xid summary) "")))
         (try
-          (let [result (model-change :recall nil (:name stored) #(core/recall! *db* version))]
-            (log/info {:id ::recalled
-                       :data (assoc base :action :recalled)}
-                      (str "Recalled dataset version "
-                           (or (:version-name summary) (:version-xid summary) "")))
-            result)
+          (model-change :recall nil (:name stored) #(core/recall! *db* version))
+          (log/info {:id ::recalled
+                     :data (assoc base :action :recalled)}
+                    (str "Recalled dataset version "
+                         (or (:version-name summary) (:version-xid summary) "")))
+          true
           (catch Throwable e
             (log/error! {:id ::recall-failed
                          :data (assoc base :action :recall-failed)}

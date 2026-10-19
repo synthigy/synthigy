@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.sqlite.patch
   "SQLite bodies of the :synthigy/dataset feature patches."
@@ -16,6 +17,7 @@
     [next.jdbc.result-set]
     [patcho.patch :as patch]
     [synthigy.dataset :as dataset]
+    [synthigy.dataset.sqlite.collation :as collation]
     [synthigy.dataset.sql.query :as sql-query]
     [synthigy.plug.sqlite :as plug]
     [synthigy.db :refer [*db*]]
@@ -178,3 +180,20 @@
                                   :data {:action :upgrading :subject :dataset-features :version "1.5.0"}} e)
                      (throw e)))))
 
+(patch/upgrade :synthigy/dataset
+               "1.7.0"
+               (when (instance? synthigy.db.SQLite *db*)
+                 (log/info {:id ::v170-human-collation
+                            :data {:action :upgrading :subject :dataset-features :version "1.7.0"}}
+                           "Collating string and enum columns with HUMAN (SQLite)")
+                 (try
+                   (let [collated (collation/collate-columns!)]
+                     (log/info {:id ::v170-complete
+                                :data {:action :upgraded :subject :dataset-features :version "1.7.0"
+                                       :tables (count collated)
+                                       :columns (reduce + (map count (vals collated)))}}
+                               "String and enum columns collated HUMAN (SQLite)"))
+                   (catch Throwable e
+                     (log/error! {:id ::v170-failed
+                                  :data {:action :upgrading :subject :dataset-features :version "1.7.0"}} e)
+                     (throw e)))))

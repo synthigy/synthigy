@@ -3,6 +3,80 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.3.1] — 2026-10-19
+
+### License
+- **Synthigy is now under the Business Source License 1.1** (0.3.0 and earlier:
+  Elastic License 2.0). Production use is free while the Total Finances of you
+  and your affiliates (the greater of revenue and capital raised in the last
+  twelve months) stay at or under EUR 5,000,000, and the same limit applies to a
+  third party you install or run it for. Offering it to others as a hosted or
+  managed service is not covered. The limit doesn't apply to individuals using
+  it for personal, non-commercial purposes, non-profits, or accredited
+  education and research. Each version becomes GPL-2.0-or-later or Apache-2.0
+  four years after its release. Full terms in [LICENSE](LICENSE); other
+  arrangements in [COMMERCIAL.md](COMMERCIAL.md).
+
+### Added
+- **A sign-in client for the Synthigy desktop app.** Every engine now has a
+  public OAuth client, Synthigy Desktop: it signs in through the system browser
+  to a loopback address on any port (RFC 8252), with PKCE.
+  `/.well-known/synthigy` names it as `auth.oidc.desktop_client_id`. The desktop
+  app's own origins, `tauri://localhost` and `http://tauri.localhost`, are always
+  allowed browser origins.
+- **Client setting `"application-type": "native"`** (OIDC client registration's
+  `application_type`). A native client's redirect URIs no longer count as
+  allowed browser origins; its sign-in redirects work as before. The desktop
+  client carries it, so its `http://127.0.0.1` redirect does not let local web
+  pages call the engine.
+
+### Changed
+- **Text sorts the way people read it.** `string` and `enum` attributes use the
+  `human` collation: case-insensitive first (case breaks ties), digits compare
+  as numbers, accents follow Unicode — `apple Apple Auto2 Auto11 čevapi Zebra`.
+  PostgreSQL and SQLite return the same order. Equality is unchanged
+  (`Auto2` ≠ `Auto02`, `apple` ≠ `Apple`), so unique constraints and lookups
+  behave as before.
+- **Existing databases are converted on first boot** (dataset feature 1.7.0).
+  PostgreSQL rebuilds only the indexes on those columns; SQLite rewrites each
+  converted column.
+
+### Fixed
+- **The modeler loads system datasets again.** Engine 0.3.0 answered the
+  modeler's `synthigy-datasets` request with `INTERNAL_ERROR` every time, so
+  the modeler showed an error on open and the Synthigy and OAuth datasets were
+  not read only for users who aren't superusers. More generally, an operation
+  whose result is a list of plain values (not records) no longer breaks the
+  response.
+- **Deleting a dataset version answers `true`.** A deployed version answered
+  `{"update_count": 1}` and an undeployed one `null`.
+- **Failed `synthigy.embedded` calls are audited with their stack trace.** The
+  audit row's `error_trace` was empty.
+- **`_distinct` with a field list works on SQLite.** A list from the wire or the
+  Clojure API was ignored there; both engines now read the list and the form
+  XSQL sends the same way.
+- **SQLite `search-tree` keeps the order past the ninth sibling.** Roots and
+  siblings ranked 10 and above used to sort before rank 2.
+- **SQLite `_agg` min/max with a relation filter** follows the text sort order
+  (it returned `Apple` before `apple`).
+
+### Breaking
+- **`synthigy.engine/execute` returns unshaped results.** Trimming to the
+  selection and renaming keys to `key_format` moved to `synthigy.wire`; an
+  in-process caller that wants what `/data` returns runs
+  `(synthigy.wire/results (synthigy.wire/key-fn key-format) results)`. `/data`,
+  the SDKs and `synthigy.embedded` return exactly what they did.
+- **PostgreSQL needs ICU.** The engine refuses to boot on a server without ICU
+  collations. RDS, Aurora, Neon and the official images have them.
+- **SQLite runs on `com.synthigy/sqlite-jdbc`** (sqlite-jdbc with ICU built in)
+  instead of `org.xerial/sqlite-jdbc`; boot refuses the stock driver. A database
+  file can still be opened by other SQLite tools, but anything there that uses an
+  index on its text columns (ordering, comparing, even a `count(*)` the planner
+  answers from such an index) fails with `no such collation sequence: HUMAN`.
+  The driver ships native libraries for Linux (glibc and musl) on x86_64 and
+  arm64, macOS on Intel and Apple Silicon, and Windows on x86_64; 32-bit
+  systems, Windows on ARM and FreeBSD are not covered.
+
 ## [0.3.0] — 2026-10-16
 
 ### Breaking

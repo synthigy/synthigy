@@ -92,12 +92,15 @@ Contributors sign a one-time CLA ([CLA.md](CLA.md)).
 
 ## License
 
-**Elastic License 2.0** (SPDX `Elastic-2.0`), see [LICENSE](LICENSE). Use, modify and
-self-host it in any company, and build and sell your own products on it. Not
-allowed: offering Synthigy itself to third parties as a hosted or managed service.
+**Business Source License 1.1** (SPDX `BUSL-1.1`), see [LICENSE](LICENSE). Source-available:
+free in production for individuals, non-profits, education and organisations up
+to EUR 5M, including building and selling your own products on it. Development,
+testing and evaluation are free for everyone. Each version becomes GPL-2.0-or-later /
+Apache-2.0 four years after its release.
 
-A **commercial license** covers hosting as a service, OEM, resale, warranty and
-support: [COMMERCIAL.md](COMMERCIAL.md), r.gersak@gmail.com.
+A **commercial license** covers organisations over EUR 5M, integrators deploying
+for them, hosting Synthigy as a service, OEM, warranty and support:
+[COMMERCIAL.md](COMMERCIAL.md), r.gersak@gmail.com.
 
 The client SDKs and the bundled web components (`tooling.js`) are MIT. Third-party
 dependencies keep their own licenses: [NOTICE.md](NOTICE.md).

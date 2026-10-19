@@ -1,12 +1,13 @@
 ;   Synthigy — model-driven IAM and data platform
 ;   Copyright (C) 2026 Robert Geršak
-;   SPDX-License-Identifier: Elastic-2.0
+;   SPDX-License-Identifier: BUSL-1.1
 ;
-;   Licensed under the Elastic License 2.0 — see LICENSE, or
-;   <https://www.elastic.co/licensing/elastic-license>. Free to use, modify
-;   and build your own products on; you may not provide Synthigy to third
-;   parties as a hosted or managed service. Commercial licensing:
-;   r.gersak@gmail.com  See COMMERCIAL.md.
+;   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+;   production for individuals, non-profits, education and organisations
+;   up to EUR 5M; larger organisations, integrators deploying for them and
+;   hosted-service providers need a commercial license. Each version
+;   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.sql.query
   "Database-agnostic SQL query core: schema caching, 
@@ -1803,6 +1804,12 @@
   [statements]
   (clojure.string/join " and " statements))
 
+(defn distinct-fields
+  "Fields of a `_distinct`: a list (the wire form) or `{:attributes [...]}` (XSQL)."
+  [d]
+  (not-empty (vec (cond (sequential? d) d
+                        (map? d) (:attributes d)))))
+
 (defn distinct->sql
   "Emits a `distinct on (\"f1\", \"f2\") ` prefix for the root SELECT.
 
@@ -1810,8 +1817,8 @@
    supported — the level-oriented pull builds one SELECT per level and
    never joins child tables into the root, so there's nothing to be
    distinct *on* across levels."
-  [{{fields :_distinct} :args}]
-  (when (seq fields)
+  [{{d :_distinct} :args}]
+  (when-let [fields (distinct-fields d)]
     (str "distinct on ("
          (clojure.string/join ", " (map #(str \" (name %) \") fields))
          ") ")))
@@ -2524,18 +2531,18 @@
                                                       1 (first stmts)
                                                       (str "(" (str/join " and " stmts) ")"))]
                                       [(conj statements
+                                             ;; never wrap the column in case/coalesce — SQLite drops its collation (min/max of text)
                                              (format
-                                              "%s(%s) as %s$%s$%s"
+                                              "%s(%s.%s)%s as %s$%s$%s"
                                               (case operation
                                                 :min "min"
                                                 :max "max"
                                                 :avg "avg"
                                                 :sum "sum")
+                                              ent-as (name field-key)
                                               (if (nil? cond-stmt)
-                                                (str ent-as "." (name field-key))
-                                                (str "case when " cond-stmt
-                                                     " then " ent-as "." (name field-key)
-                                                     " else null end"))
+                                                ""
+                                                (str " filter (where " cond-stmt ")"))
                                               (name rkey) (name operation) (name target-key)))
                                        (if (seq stmt-data) (into data stmt-data) data)]))
                                   result

@@ -267,7 +267,6 @@
   {:slug "providers" :entity :federation_provider :key :id-federation/provider
    :label "Identity Providers" :icon :globe
    :table {:query cx/providers-table
-           :watch cx/watch-providers-table
            :sortable #{"provider" "active"}}
    :subtitle (str "Upstream identity providers for federated sign-in — one slot per "
                   "provider (Microsoft is a single tenant). An active row renders as "

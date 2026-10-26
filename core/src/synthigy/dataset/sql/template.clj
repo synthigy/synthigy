@@ -201,6 +201,11 @@
 ;;; Relation Chain Walker (pure — returns updated state)
 ;;; ============================================================================
 
+(defn entity-ref
+  "An entity's table reference, tagged so inject-rls can swap in its guarded view; the tag is an SQL comment, inert when no guard applies."
+  [table alias]
+  (format "/*rls:%s*/\"%s\" %s" alias table alias))
+
 (defn walk-relation-chain
   "Walk a relation chain collecting JOINs, returning [final-alias
    updated-state]."
@@ -215,10 +220,7 @@
             join-key [current-id label]
             state (cond-> (update state :entities conj target-id)
                     (:relation rel)
-                    (update :relations conj (select-keys rel [:relation :from :to]))
-
-                    (not (get-in state [:aliases [:entity target-id]]))
-                    (assoc-in [:aliases [:entity target-id]] target-alias))]
+                    (update :relations conj (select-keys rel [:relation :from :to])))]
         (if (contains? (:join-keys-seen state) join-key)
           [target-id target-alias state]
           (case (:kind rel)
@@ -226,22 +228,35 @@
             (let [[link-alias state] (get-alias state [:link current-id label])
                   state (-> state
                             (update :join-keys-seen conj join-key)
+                            (update :refs conj
+                                    {:alias target-alias :entity target-id}
+                                    {:alias link-alias :entity target-id
+                                     :join (if (= "LEFT" join-type) "INNER" join-type)
+                                     :link (:table rel) :to-field (:to/field rel)
+                                     :from-entity current-id :from-field (:from/field rel)})
                             (update :joins conj
-                                    (format "%s JOIN \"%s\" %s ON %s._eid=%s.%s"
-                                            join-type (:table rel) link-alias
-                                            current-alias link-alias (:from/field rel)))
-                            (update :joins conj
-                                    (format "%s JOIN \"%s\" %s ON %s.%s=%s._eid"
-                                            join-type table target-alias
-                                            link-alias (:to/field rel) target-alias)))]
+                                    (if (= "LEFT" join-type)
+                                      (format "LEFT JOIN (%s INNER JOIN %s ON %s.%s=%s._eid) ON %s._eid=%s.%s"
+                                              (entity-ref (:table rel) link-alias)
+                                              (entity-ref table target-alias)
+                                              link-alias (:to/field rel) target-alias
+                                              current-alias link-alias (:from/field rel))
+                                      (str (format "%s JOIN %s ON %s._eid=%s.%s"
+                                                   join-type (entity-ref (:table rel) link-alias)
+                                                   current-alias link-alias (:from/field rel))
+                                           "\n"
+                                           (format "%s JOIN %s ON %s.%s=%s._eid"
+                                                   join-type (entity-ref table target-alias)
+                                                   link-alias (:to/field rel) target-alias)))))]
               [target-id target-alias state])
 
             (:fk-self :fk-ref)
             (let [state (-> state
                             (update :join-keys-seen conj join-key)
+                            (update :refs conj {:alias target-alias :entity target-id})
                             (update :joins conj
-                                    (format "%s JOIN \"%s\" %s ON %s._eid=%s.%s"
-                                            join-type table target-alias
+                                    (format "%s JOIN %s ON %s._eid=%s.%s"
+                                            join-type (entity-ref table target-alias)
                                             target-alias current-alias (:fk-column rel))))]
               [target-id target-alias state])))))
     [entity-id entity-alias state]
@@ -324,6 +339,7 @@
                     :joins []
                     :columns {}
                     :join-keys-seen #{}
+                    :refs []
                     :root-entities {}
                     :replacements []
                     :errors (mapv (fn [t]
@@ -344,9 +360,11 @@
                     (fn [state entity-name]
                       (let [id (sql-query/resolve-entity entity-name)
                             [alias state] (get-alias state [:entity id])]
-                        [id alias (-> state
-                                      (update :entities conj id)
-                                      (update :root-entities assoc id alias))]))]
+                        [id alias (cond-> (-> state
+                                              (update :entities conj id)
+                                              (update :root-entities assoc id alias))
+                                    (not (get-in state [:root-entities id]))
+                                    (update :refs conj {:alias alias :entity id}))]))]
                 (case (:type parsed)
                   :invalid
                   (update state :errors conj
@@ -356,7 +374,7 @@
                   (let [[id alias state] (resolve-root state (:entity parsed))
                         {:keys [table]} (sql-query/deployed-schema-entity id)]
                     (update state :replacements conj
-                            {:raw raw :replacement (format "\"%s\" %s" table alias)}))
+                            {:raw raw :replacement (entity-ref table alias)}))
 
                   :field
                   (let [[id alias state] (resolve-root state (:entity parsed))
@@ -374,7 +392,7 @@
                         [target-id target-alias state] (walk-relation-chain id alias joins-spec state)
                         {:keys [table]} (sql-query/deployed-schema-entity target-id)]
                     (update state :replacements conj
-                            {:raw raw :replacement (format "\"%s\" %s" table target-alias)}))
+                            {:raw raw :replacement (entity-ref table target-alias)}))
 
                   :relation-field
                   (let [[id alias state] (resolve-root state (:entity parsed))
@@ -404,7 +422,7 @@
             from-parts (mapv
                          (fn [[id alias]]
                            (let [{:keys [table]} (sql-query/deployed-schema-entity id)]
-                             (format "\"%s\" %s" table alias)))
+                             (entity-ref table alias)))
                          root-entities)
             from-clause (str "FROM " (str/join ", " from-parts))
             has-from? (top-level-match #"(?i)\bFROM\b" resolved-sql)
@@ -429,6 +447,8 @@
          :entities (:entities final-state)
          :relations (:relations final-state)
          :aliases (:aliases final-state)
+         :refs (:refs final-state)
+         :rls-shape 2
          :columns (into {} (remove (comp #{::ambiguous} val)) (:columns final-state))}))))
 
 ;;; ============================================================================
@@ -615,73 +635,118 @@
               :else
               [ctes' (subs t after-body)])))))))
 
-(defn count-question-marks
-  "Count ? parameter placeholders in s, ignoring ? inside single-quoted
-   literals."
+(defn scan-sql
+  "Indexes of every character of s that is live SQL — outside '…' literals and \"…\" identifiers (doubled quotes escape)."
   [^String s]
-  (loop [i 0 in-str? false n 0]
+  (loop [i 0 quote nil acc (transient [])]
     (if (>= i (.length s))
-      n
+      (persistent! acc)
       (let [c (.charAt s i)]
         (cond
-          (and in-str? (= c \'))
-          (if (and (< (inc i) (.length s)) (= \' (.charAt s (inc i))))
-            (recur (+ i 2) true n)         ; escaped ''
-            (recur (inc i) false n))       ; closing quote
+          quote (if (= c quote)
+                  (if (and (< (inc i) (.length s)) (= quote (.charAt s (inc i))))
+                    (recur (+ i 2) quote acc)
+                    (recur (inc i) nil acc))
+                  (recur (inc i) quote acc))
+          (or (= c \') (= c \")) (recur (inc i) c acc)
+          :else (recur (inc i) nil (conj! acc i)))))))
 
-          in-str?
-          (recur (inc i) true n)
+(defn assert-plain-literals!
+  "Reject PG dollar-quoted and E'' strings — scan-sql cannot see their ends, so ?-counting and guard placement would disagree with the driver."
+  [^String s]
+  (doseq [i (scan-sql s)
+          :let [c (.charAt s i)
+                prev (when (pos? i) (.charAt s (dec i)))]]
+    (when (or (and (= c \$) (re-find #"^\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$" (subs s i)))
+              (and (#{\E \e} c)
+                   (< (inc i) (.length s)) (= \' (.charAt s (inc i)))
+                   (not (and prev (or (Character/isLetterOrDigit prev) (= prev \_))))))
+      (throw (ex-info "Dollar-quoted and E'' strings are not supported in templates; use a plain '...' literal."
+                      {:code "TEMPLATE_ERROR" :position i})))))
 
-          (= c \')
-          (recur (inc i) true n)           ; opening quote
+(defn count-question-marks
+  "Count ? parameter placeholders in s, ignoring ? inside literals and quoted identifiers."
+  [^String s]
+  (count (filter #(= \? (.charAt s %)) (scan-sql s))))
 
-          (= c \?)
-          (recur (inc i) false (inc n))
-
-          :else
-          (recur (inc i) false n))))))
+(defn live-indexes-of
+  "Indexes where needle starts as live SQL (not inside a literal or quoted identifier)."
+  [^String s ^String needle]
+  (let [live (set (scan-sql s))]
+    (loop [from 0 acc []]
+      (let [i (.indexOf s needle (int from))]
+        (if (neg? i)
+          acc
+          (recur (inc i) (if (live i) (conj acc i) acc)))))))
 
 ;;; ============================================================================
 ;;; RLS Injection
 ;;; ============================================================================
 
-(defn split-at-tail-clauses
-  "Split sql at the first top-level tail clause so an RLS predicate lands inside
-   WHERE, not after LIMIT."
-  [sql]
-  (if-let [idx (top-level-match
-                #"(?i)\b(?:ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET|FETCH\s+FIRST)\b"
-                sql)]
-    [(subs sql 0 idx) (subs sql idx)]
-    [sql ""]))
+(defn read-guard
+  "[sql params] of entity's compiled :read guard against alias, or nil when no guard applies."
+  [entity-id alias]
+  (let [{{:keys [enabled guards]} :rls} (sql-query/deployed-schema-entity entity-id)]
+    (when (and enabled (rls/should-apply-guards? entity-id :read))
+      (let [{rls-sql :sql rls-params :params} (rls/compile-guards-to-sql alias guards :read)]
+        (if rls-sql [rls-sql rls-params] ["1=0" []])))))
+
+(defn endpoint-visible
+  "[sql params] EXISTS-ing that the row a junction column points at is readable, or nil when that entity has no guard."
+  [entity-id link-alias field t]
+  (when-let [[g gp] (read-guard entity-id t)]
+    (let [{:keys [table]} (sql-query/deployed-schema-entity entity-id)]
+      [(format "EXISTS (SELECT 1 FROM \"%s\" %s WHERE %s._eid = %s.%s AND %s)"
+               table t t link-alias field g)
+       gp])))
+
+(def link-ends
+  "Which junction ends need their own check, by join type: INNER (also the inside of a LEFT junction unit) already pairs links with readable rows on both sides, RIGHT leaves the source side unpaired, FULL both."
+  {"INNER" #{}
+   "RIGHT" #{:source}
+   "FULL OUTER" #{:source :target}})
+
+(defn guarded-view
+  "[sql params] replacing one tagged reference: the entity's readable rows, or for a junction only the links whose unjoined ends are readable."
+  [{:keys [alias entity link to-field from-entity from-field join]}]
+  (if link
+    (let [checked (get link-ends join #{:source :target})
+          ends (keep identity [(when (checked :source)
+                                 (endpoint-visible from-entity alias from-field (str alias "s")))
+                               (when (checked :target)
+                                 (endpoint-visible entity alias to-field (str alias "t")))])]
+      (when (seq ends)
+        [(format "(SELECT %s.* FROM \"%s\" %s WHERE %s) %s"
+                 alias link alias (str/join " AND " (map first ends)) alias)
+         (vec (mapcat second ends))]))
+    (when-let [[g gp] (read-guard entity alias)]
+      (let [{:keys [table]} (sql-query/deployed-schema-entity entity)]
+        [(format "(SELECT %s.* FROM \"%s\" %s WHERE %s) %s" alias table alias g alias) gp]))))
+
+(defn guard-ref
+  "Swap every live occurrence of ref's tag for its guarded view; a guard with nowhere to go fails closed."
+  [[sql params] {:keys [alias entity link] :as ref}]
+  (if-let [[view view-params] (guarded-view ref)]
+    (let [tag (entity-ref (or link (:table (sql-query/deployed-schema-entity entity))) alias)
+          ats (live-indexes-of sql tag)]
+      (when (empty? ats)
+        (throw (ex-info "RLS guard has no table reference to attach to"
+                        {:code "TEMPLATE_RLS_UNPLACED" :alias alias})))
+      (reduce (fn [[sql params] at]
+                (let [n (count-question-marks (subs sql 0 at))]
+                  [(str (subs sql 0 at) view (subs sql (+ at (count tag))))
+                   (-> [] (into (take n params)) (into view-params) (into (drop n params)))]))
+              [sql params]
+              (reverse ats)))
+    [sql params]))
 
 (defn inject-rls
-  "Inject compiled :read RLS guards into this scope's WHERE clause, before any
-   tail clause — call once per CTE body/outer SELECT, never around a scalar
-   subquery (its alias would be out of scope)."
-  [sql params entities aliases]
-  (if-not (rls/should-apply-guards?)
-    [sql params]
-    (reduce
-     (fn [[sql params] entity-id]
-       (let [alias (get aliases [:entity entity-id])
-             {:keys [rls]} (sql-query/deployed-schema-entity entity-id)
-             {:keys [enabled guards]} rls]
-         (if (and enabled alias
-                  (rls/should-apply-guards? entity-id :read))
-           (let [{rls-sql :sql rls-params :params}
-                 (rls/compile-guards-to-sql alias guards :read)
-                 effective-sql    (or rls-sql "1=0")
-                 effective-params (if rls-sql rls-params [])
-                 [head tail] (split-at-tail-clauses sql)
-                 head' (if (top-level-match #"(?i)\bWHERE\b" head)
-                         (str (str/trimr head) " AND " effective-sql)
-                         (str (str/trimr head) " WHERE " effective-sql))]
-             [(if (empty? tail) head' (str head' " " tail))
-              (into params effective-params)])
-           [sql params])))
-     [sql (vec params)]
-     entities)))
+  "Replace every entity table reference in one scope with the rows the principal may read — call once per CTE body/outer SELECT."
+  [sql params {:keys [refs rls-shape]}]
+  (cond
+    (not (rls/should-apply-guards?)) [sql (vec params)]
+    (not= 2 rls-shape) (throw (ex-info "Stale template resolution" {:code "TEMPLATE_RLS_STALE"}))
+    :else (reduce guard-ref [sql (vec params)] refs)))
 
 ;;; ============================================================================
 ;;; Execution
@@ -692,7 +757,7 @@
    per call — never behind the memo, which is keyed by text alone."
   [body cached?]
   (let [resolved (if cached?
-                   (or (sql-query/cached-template body)
+                   (or (let [c (sql-query/cached-template body)] (when (= 2 (:rls-shape c)) c))
                        (let [resolved (resolve-template body)]
                          (when-not (:errors resolved)
                            (sql-query/cache-template body resolved))
@@ -738,6 +803,7 @@
   ([template params opts]
    (let [template          (strip-sql-comments template)
          _                 (validate-select-only! template)
+         _                 (assert-plain-literals! template)
          {rw-sql :sql rw-params :params rw-types :types rw-errors :errors}
          (sql-params/rewrite template params)
          _ (when (seq rw-errors)
@@ -767,11 +833,11 @@
                  scopes)
          resolved-scopes
          (mapv (fn [{:keys [body user-params] :as scope}]
-                 (let [{:keys [sql entities aliases columns] :as r}
+                 (let [{:keys [sql entities columns] :as r}
                        (resolve-scope-cached body cached?)]
                    (throw-on-errors! r)
                    (let [[final-sql final-params]
-                         (inject-rls sql user-params entities aliases)]
+                         (inject-rls sql user-params r)]
                      (assoc scope
                             :sql final-sql
                             :params final-params

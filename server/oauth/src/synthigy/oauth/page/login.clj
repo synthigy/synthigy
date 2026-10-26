@@ -12,7 +12,6 @@
 (ns synthigy.oauth.page.login
   (:require
     [clojure.string :as str]
-    [hiccup2.core :refer [html]]
     [ring.util.codec :as codec]
     [synthigy.oauth.authorization-code :as ac]
     [synthigy.oauth.core :as core]
@@ -20,49 +19,43 @@
     [synthigy.oauth.federated.registry :as registry]
     [synthigy.oauth.page.assets :as assets]))
 
-;; Lucide icons (MIT) — stroke-based; color/size come from .ficon in login.css.
-(def password-icon
-  [:svg.ficon
-   {:id "password-icon"
-    :viewBox "0 0 24 24"
-    :fill "none"
-    :stroke "currentColor"
-    :stroke-width "2"
-    :stroke-linecap "round"
-    :stroke-linejoin "round"}
-   [:rect {:width "18" :height "11" :x "3" :y "11" :rx "2" :ry "2"}]
-   [:path {:d "M7 11V7a5 5 0 0 1 10 0v4"}]])
+(defn text-field
+  [{:keys [id label icon] :as attrs}]
+  [:div.sy-field
+   [:div.sy-label-row [:label.sy-label {:for id} label]]
+   [:div.sy-control
+    (when icon [:span.sy-input-icon (assets/icon icon)])
+    [:input.sy-input (dissoc attrs :label :icon)]]])
 
-(def user-icon
-  [:svg.ficon
-   {:id "username-icon"
-    :viewBox "0 0 24 24"
-    :fill "none"
-    :stroke "currentColor"
-    :stroke-width "2"
-    :stroke-linecap "round"
-    :stroke-linejoin "round"}
-   [:path {:d "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"}]
-   [:circle {:cx "12" :cy "7" :r "4"}]])
+(defn password-field
+  "Password input with a reveal toggle and a Caps Lock tag in its label row."
+  [{:keys [id label icon] :as attrs}]
+  [:div.sy-field
+   [:div.sy-label-row
+    [:label.sy-label {:for id} label]
+    [:span.sy-tag {:data-sy-caps id} "Caps Lock"]]
+   [:div.sy-control
+    (when icon [:span.sy-input-icon (assets/icon icon)])
+    [:input.sy-input (-> attrs (dissoc :label :icon) (assoc :type "password"))]
+    [:button.sy-input-btn {:type "button"
+                           :data-sy-reveal id
+                           :aria-label "Show password"
+                           :aria-pressed "false"}
+     (assets/icon :eye "when-hidden")
+     (assets/icon :eye-off "when-shown")]]])
 
-(def alert-icon
-  [:svg.ficon
-   {:viewBox "0 0 24 24"
-    :fill "none"
-    :stroke "currentColor"
-    :stroke-width "2"
-    :stroke-linecap "round"
-    :stroke-linejoin "round"}
-   [:circle {:cx "12" :cy "12" :r "10"}]
-   [:line {:x1 "12" :x2 "12" :y1 "8" :y2 "12"}]
-   [:line {:x1 "12" :x2 "12.01" :y1 "16" :y2 "16"}]])
+(defn submit-button [label]
+  [:button.sy-btn.sy-btn--primary {:type "submit"}
+   [:span.sy-btn-label label]
+   [:span.sy-spin {:aria-hidden "true"}]])
 
-(defn error-slot
-  "Fixed-height slot under the fields, so a message never moves the form."
-  [msg]
-  [:div.sy-error-slot
-   (when-not (str/blank? msg)
-     [:div.sy-error {:role "alert"} alert-icon [:span msg]])])
+(defn provider-buttons
+  [providers href-fn]
+  [:div.sy-stack
+   (for [{:keys [label] :as p} providers]
+     [:a.sy-btn.sy-btn--secondary {:href (href-fn p)}
+      (assets/provider-mark p)
+      [:span.sy-btn-label "Continue with " label]])])
 
 (defn federated-buttons
   "Render a \"Continue with X\" link per active federation provider, carrying
@@ -71,14 +64,12 @@
   (when raw-state
     (when-let [providers (seq (registry/list-providers))]
       (list
-        [:div.sy-fed-divider [:span "or"]]
-        [:div.sy-federated
-         (for [{:keys [name label] :as p} providers]
-           [:a.sy-fed-btn
-            {:href (str "/oauth/federated/start?"
-                        (codec/form-encode {:provider name :state raw-state}))}
-            (assets/provider-mark p)
-            [:span "Continue with " label]])]))))
+        [:div.sy-divider "or"]
+        (provider-buttons
+          providers
+          (fn [{:keys [name]}]
+            (str "/oauth/federated/start?"
+                 (codec/form-encode {:provider name :state raw-state}))))))))
 
 (def federated-errors
   "Codes `oauth.federated` redirects back here with, in words."
@@ -114,6 +105,7 @@
                      (str/replace (subs (str error) 4) "_" " ") "."))
               "Could not sign in. Try again.")))
 
+
 (defn login-html
   [{error     :synthigy.oauth.login/error
     username  :synthigy.oauth.login/username
@@ -122,124 +114,101 @@
   (let [client (cond
                  authorization-code (ac/get-code-client authorization-code)
                  device-code (dc/get-code-client device-code))
-        ;; Per-client logo wins; otherwise show the Synthigy brand lockup.
-        logo (get-in client [:settings "logo-url"])]
-    (html
-      [:head
-       [:meta {:charset "UTF-8"}]
-       [:meta {:name "viewport"
-               :content "width=device-width, initial-scale=1.0"}]
-       [:title "Synthigy Login"]
-       [:link {:rel "icon"
-               :type "image/png"
-               :href "/oauth/images/favicon.png"}]
-       [:link {:rel "preconnect"
-               :href "https://fonts.googleapis.com"}]
-       [:link {:rel "preconnect"
-               :href "https://fonts.gstatic.com"
-               :crossorigin true}]
-       [:link {:rel "stylesheet"
-               :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"}]
-       [:link {:rel "stylesheet"
-               :href "/oauth/css/login.css"}]]
-      [:body
-       [:div.sy-login
-        (if logo
-          [:img#logo-image {:src logo}]
-          [:div.sy-lockup
-           [:span.sy-login-mark assets/figurative]
-           [:span.sy-login-verbal assets/verbal]])
-        [:form {:method "post"}
-         [:div.row
-          user-icon
-          [:input
+        client-name (not-empty (str (:name client)))
+        logo (get-in client [:settings "logo-url"])
+        invalid (when (= error :credentials) "true")]
+    (assets/document
+      {:title (str "Sign in · " (or client-name "Synthigy"))
+       :css "login.css"
+       :chip client-name
+       :status [:span.sy-status-item [:span.sy-key "Enter"] [:span "sign in"]]
+       :scripts ["/oauth/js/login.js"]}
+      [:div.sy-card
+       [:div.sy-card-head
+        (when logo [:img.sy-card-logo {:src logo :alt ""}])
+        [:h1.sy-card-title "Sign in"]
+        (assets/voice {:id "voice"}
+                      (if client-name
+                        (list "to continue to " [:b client-name])
+                        "Enter your credentials to continue.")
+                      (error-text error))]
+       [:div.sy-card-body
+        [:form.sy-form {:method "post" :data-sy-busy ""}
+         (text-field
            {:id "username"
             :name "username"
-            :placeholder "Username"
+            :label "Username"
+            :icon :user-round
             :value (or username
                        (some-> authorization-code ac/get-code-request :login_hint core/login-hint)
                        "")
             :autocomplete "username"
             :autocapitalize "off"
-            :spellcheck false}]]
-         [:div.row
-          password-icon
-          [:input
+            :spellcheck "false"
+            :aria-invalid invalid})
+         (password-field
            {:id "password"
             :name "password"
-            :type "password"
-            :placeholder "Password"
+            :label "Password"
+            :icon :lock
             :autocomplete "current-password"
             :autocorrect "off"
-            :spellcheck false}]]
-         (error-slot (error-text error))
-         [:button
-          [:h4 "SIGN IN"]]]
-        (federated-buttons raw-state)
-        (when (and (or authorization-code device-code) raw-state)
-          [:a.sy-cancel
+            :spellcheck "false"
+            :aria-invalid invalid})
+         (submit-button "Sign In")]
+        (federated-buttons raw-state)]
+       (when (and (or authorization-code device-code) raw-state)
+         [:div.sy-card-foot
+          [:a.sy-link.sy-cancel
            {:href (str "/oauth/login?"
                        (codec/form-encode {:state raw-state :cancel 1}))}
-           (cond
-             device-code "Cancel this sign-in"
-             (not-empty (str (:name client))) (str "Cancel and return to " (:name client))
-             :else "Cancel")])]
-       [:script {:src "/oauth/js/starfield.js"}]
-       [:script {:src "/oauth/js/login.js"}]])))
+           (assets/icon :arrow-left)
+           [:span (cond
+                    device-code "Cancel this sign-in"
+                    client-name (str "Cancel and return to " client-name)
+                    :else "Cancel")]]])])))
 
 (defn claim-html
   "Onboarding claim page: the invited user finishes the account `token` targets
    by linking an IdP or setting a password, whichever `providers`/`password?`
    allow."
   [token providers password? & [error]]
-  (html
-    [:head
-     [:meta {:charset "UTF-8"}]
-     [:meta {:name "viewport" :content "width=device-width, initial-scale=1.0"}]
-     [:title "Set up your account"]
-     [:link {:rel "icon" :type "image/png" :href "/oauth/images/favicon.png"}]
-     [:link {:rel "stylesheet"
-             :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"}]
-     [:link {:rel "stylesheet" :href "/oauth/css/login.css"}]]
-    [:body
-     [:div.sy-login
-      [:div.sy-lockup
-       [:span.sy-login-mark assets/figurative]
-       [:span.sy-login-verbal assets/verbal]]
-      [:h4 {:style "margin:0;font-weight:600;"} "Set up your account"]
-      [:p {:style "margin:0;font-size:0.85rem;opacity:0.7;text-align:center;"}
-       "Choose how you'll sign in from now on."]
+  (assets/document
+    {:title "Set up your account · Synthigy"
+     :css "login.css"
+     :scripts ["/oauth/js/login.js"]}
+    [:div.sy-card
+     [:div.sy-card-head
+      [:h1.sy-card-title "Set up your account"]
+      (assets/voice {:id "claim-msg"} "Choose how you'll sign in from now on." error)]
+     [:div.sy-card-body
       (when password?
-        (list
-          [:form {:method "post" :action "/oauth/claim/password" :id "claim-password-form"}
-           [:input {:type "hidden" :name "token" :value token}]
-           [:div.row
-            password-icon
-            [:input {:id "claim-password" :name "password" :type "password"
-                     :placeholder "New password" :autocomplete "new-password"
-                     :autocorrect "off" :spellcheck false}]]
-           [:div.row
-            password-icon
-            [:input {:id "claim-password-confirm" :type "password"
-                     :placeholder "Confirm password" :autocomplete "new-password"
-                     :autocorrect "off" :spellcheck false}]]
-           (error-slot error)
-           [:button [:h4 "SET PASSWORD"]]]
-          ;; ponytail: match-check only — the real one-time/target guard is
-          ;; server-side.
-          [:script "document.getElementById('claim-password-form').addEventListener('submit', function (e) {
-  var p = document.getElementById('claim-password').value;
-  var c = document.getElementById('claim-password-confirm').value;
-  if (p !== c) { e.preventDefault(); alert('Passwords do not match.'); }
-});"]))
+        [:form.sy-form {:method "post"
+                        :action "/oauth/claim/password"
+                        :id "claim-password-form"
+                        :data-sy-busy ""}
+         [:input {:type "hidden" :name "token" :value token}]
+         (password-field
+           {:id "claim-password"
+            :name "password"
+            :label "New password"
+            :icon :lock
+            :autocomplete "new-password"
+            :autocorrect "off"
+            :spellcheck "false"})
+         (password-field
+           {:id "claim-password-confirm"
+            :label "Confirm password"
+            :icon :lock
+            :autocomplete "new-password"
+            :autocorrect "off"
+            :spellcheck "false"})
+         (submit-button "Set Password")])
       (when (seq providers)
         (list
-          (when password? [:div.sy-fed-divider [:span "or"]])
-          [:div.sy-federated
-           (for [{:keys [name label] :as p} providers]
-             [:a.sy-fed-btn
-              {:href (str "/oauth/federated/start?"
-                          (codec/form-encode {:provider name :mode "claim" :state token}))}
-              (assets/provider-mark p)
-              [:span "Continue with " label]])]))]
-     [:script {:src "/oauth/js/starfield.js"}]]))
+          (when password? [:div.sy-divider "or"])
+          (provider-buttons
+            providers
+            (fn [{:keys [name]}]
+              (str "/oauth/federated/start?"
+                   (codec/form-encode {:provider name :mode "claim" :state token}))))))]]))

@@ -14,34 +14,52 @@
    [ring.util.codec :as codec]
    [synthigy.oauth.federated.registry :as registry]
    [synthigy.oauth.page.assets :as assets]
-   [synthigy.server.console.ui :as ui]))
+   [synthigy.oauth.page.login :as oauth.login]))
 
 (defn render
-  [& [error logged-out?]]
-  (ui/bare-shell
-   {:title "Sign in"
-    :body
-    [:div.console-login
-     (ui/lockup)
-     [:div.console-login-hint "administration"]
-     (when error [:div.console-login-error error])
-     [:form {:method "post" :action "/console/login"
-             :onkeydown (str "if (event.key === 'Enter') { event.preventDefault(); "
-                             "this.requestSubmit(); }")}
-      [:ty-input {:type "text" :name "username" :label "Username"
-                  :autofocus true :autocomplete "username"}]
-      [:ty-input {:type "password" :name "password" :label "Password"
-                  :autocomplete "current-password"}]
-      [:ty-button {:type "submit" :flavor "neutral" :wide true} "Sign in"]]
-     (when-let [providers (seq (registry/list-providers))]
-       (list
-        [:div.console-fed-divider [:span "or"]]
-        [:div.console-federated
-         (for [{:keys [name label] :as p} providers]
-           [:a.console-fed-btn
-            {:href (str "/oauth/federated/start?"
-                        (codec/form-encode
-                         (cond-> {:provider name :mode "console"}
-                           logged-out? (assoc :prompt "select_account"))))}
-            [:span.console-fed-mark (assets/provider-mark p)]
-            [:span "Continue with " label]])]))]}))
+  [& [{:keys [error tone username invalid? logged-out?]}]]
+  (str
+   (assets/document
+    {:title "Sign in · Console"
+     :css "login.css"
+     :chip "Console"
+     :status [:span.sy-status-item [:span.sy-key "Enter"] [:span "sign in"]]
+     :scripts ["/oauth/js/login.js"]}
+    [:div.sy-card
+     [:div.sy-card-head
+      [:h1.sy-card-title "Sign in"]
+      (assets/voice {:id "voice" :tone tone}
+                    (list "to continue to " [:b "Console"])
+                    error)]
+     [:div.sy-card-body
+      [:form.sy-form {:method "post" :data-sy-busy ""}
+       (oauth.login/text-field
+        {:id "username"
+         :name "username"
+         :label "Username"
+         :icon :user-round
+         :value (or username "")
+         :autocomplete "username"
+         :autocapitalize "off"
+         :spellcheck "false"
+         :aria-invalid (when invalid? "true")})
+       (oauth.login/password-field
+        {:id "password"
+         :name "password"
+         :label "Password"
+         :icon :lock
+         :autocomplete "current-password"
+         :autocorrect "off"
+         :spellcheck "false"
+         :aria-invalid (when invalid? "true")})
+       (oauth.login/submit-button "Sign In")]
+      (when-let [providers (seq (registry/list-providers))]
+        (list
+         [:div.sy-divider "or"]
+         (oauth.login/provider-buttons
+          providers
+          (fn [{:keys [name]}]
+            (str "/oauth/federated/start?"
+                 (codec/form-encode
+                  (cond-> {:provider name :mode "console"}
+                    logged-out? (assoc :prompt "select_account"))))))))]])))

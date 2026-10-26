@@ -202,7 +202,8 @@
                           {:name   (relation-name-of n)
                            :indent (line-start-indent source (first (:span n)))
                            :from   (first (:span n))
-                           :kind   (:node n)}))
+                           :kind   (:node n)
+                           :node   n}))
                 (run! walk (:children n))))]
       (walk root))
     @acc))
@@ -528,6 +529,17 @@
          (or (#{:number :string :param-ref} (:node leaf))
              (#{"null" "true" "false"} (:text leaf))))))
 
+(defn value-slot
+  "Attribute name when `offset` sits where an `=`, `!=` or `in (…)` value goes, and whether inside an open quote."
+  [source offset]
+  (let [t (subs source (line-start-offset source offset) offset)
+        eq (re-find #"([A-Za-z_][A-Za-z0-9_]*)\s*(?:!=|=)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)
+        in (re-find #"([A-Za-z_][A-Za-z0-9_]*)\s+(?:not\s+)?in\s*\(((?:\s*(?:\"[^\"]*\"|[^\s,()\"]+)\s*,)*)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)]
+    (cond
+      eq {:attr (nth eq 1) :in-string? (str/starts-with? (nth eq 2) "\"")}
+      in {:attr (nth in 1) :in-string? (str/starts-with? (nth in 3) "\"")
+          :taken (into #{} (map second) (re-seq #"\"([^\"]*)\"" (nth in 2)))})))
+
 (defn context-at
   [tree resolved ancestors source offset schema root-entity]
   (let [base-stack (cond-> []
@@ -549,7 +561,9 @@
                                   (let [t (:text resolved)]
                                     (and (> (count t) 1)
                                          (= "\"" (subs t (dec (count t)))))))
-        order-slot (order-by-slot source offset)]
+        order-slot (order-by-slot source offset)
+        slot (value-slot source offset)
+        slot-attr (when slot (get-in current-entity [:attributes (:attr slot)]))]
     (cond
       ;; `order by` branches must stay first — the predicate branches would offer operators after the column
       (= :attr order-slot)
@@ -557,6 +571,13 @@
 
       (= :dir order-slot)
       {:kind :order-dir :entity-stack entity-stack}
+
+      slot-attr
+      {:kind :value-suggestion
+       :entity-stack entity-stack
+       :attr-def slot-attr
+       :in-string? (:in-string? slot)
+       :taken (:taken slot)}
 
       (and value-attr (not after-closed-string?))
       {:kind :value-suggestion
@@ -948,8 +969,13 @@
 
       :value-suggestion
       (case (get-in ctx [:attr-def :type])
-        "boolean" [{:label "true"  :type "constant"}
-                   {:label "false" :type "constant"}]
+        "boolean" (if (:in-string? ctx)
+                    []
+                    [{:label "true"  :type "constant"}
+                     {:label "false" :type "constant"}])
+        "enum" (mapv (fn [v] {:label (if (:in-string? ctx) v (str "\"" v "\""))
+                              :type "constant" :detail "enum"})
+                     (remove (or (:taken ctx) #{}) (get-in ctx [:attr-def :values])))
         ;; Other types are hand-typed literals — empty suppresses the popup.
         [])
 
@@ -1037,6 +1063,11 @@
             (recur (dec i) (:indent r) (conj acc (:name r)))
             (recur (dec i) col acc)))))))
 
+(defn innermost-relation-by-indent
+  [tree source offset]
+  (let [col (current-line-indent-text source offset)]
+    (some #(when (< (:indent %) col) %) (rseq (collect-relations-before tree source offset)))))
+
 (defn scope-at
   [{:keys [source offset schema root-entity]}]
   (let [tree (parser/parse (or source ""))
@@ -1062,7 +1093,8 @@
         indent-heuristic-only? (and (= 1 (count entity-stack))
                                     (not= current-entity
                                           (get-in schema [:entities root-entity])))
-        enclosing-rel-block (when-let [rel (enclosing-of-tag resolved ancestors :relation)]
+        enclosing-rel (enclosing-of-tag resolved ancestors :relation)
+        enclosing-rel-block (when-let [rel enclosing-rel]
                               (when-let [block (ast/find-child rel :block)]
                                 (let [[from to] (:span block)
                                       body-ind (block-body-indent block source)]
@@ -1071,7 +1103,15 @@
                                                        (< (current-line-indent-text source offset)
                                                           body-ind))))
                                     block))))
+        deeper-rel (when-let [r (innermost-relation-by-indent tree source offset)]
+                     (when (and (= :relation (:kind r))
+                                (or (nil? enclosing-rel-block)
+                                    (> (:from r) (first (:span enclosing-rel)))))
+                       r))
         safe-siblings (cond
+                        deeper-rel (if-let [block (ast/find-child (:node deeper-rel) :block)]
+                                     (sibling-bare-names block source offset)
+                                     {:attrs #{} :rels #{}})
                         enclosing-rel-block (sibling-bare-names enclosing-rel-block source offset)
                         indent-heuristic-only? {:attrs #{} :rels #{}}
                         :else (:siblings ctx))]

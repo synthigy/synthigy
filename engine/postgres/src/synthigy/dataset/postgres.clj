@@ -1383,23 +1383,30 @@
        {:euuid nil
         :name nil}))
     (let [id (id/extract record)
-          {all-versions :versions} (dataset/get-entity
-                                    :dataset/dataset
-                                    (if id
-                                      {(id/key) id}
-                                      {:name name})
-                                    {:name nil
-                                     (id/key) nil
-                                     :versions [{:args {:_order_by [{:deployed_on :asc}]
-                                                        :_where {:deployed {:_eq true}}}
-                                                 :selections {:name nil
-                                                              (id/key) nil
-                                                              :model nil}}]})]
+          stored (dataset/get-entity
+                  :dataset/dataset
+                  (if id
+                    {(id/key) id}
+                    {:name name})
+                  {:name nil
+                   (id/key) nil
+                   :versions [{:args {:_order_by [{:deployed_on :asc}]}
+                               :selections {:name nil
+                                            (id/key) nil
+                                            :deployed nil}}]})
+          {deployed true drafts false} (group-by (comp boolean :deployed) (:versions stored))]
       (log/info {:id ::dataset-destroying
-                 :data {:dataset (or name id) :version-count (count all-versions)}}
+                 :data {:dataset (or name id)
+                        :version-count (count deployed)
+                        :draft-count (count drafts)}}
                 "Destroying dataset: recalling versions in reverse order")
-      (doseq [version all-versions]
-        (core/recall! this {(id/key) (id/extract version)}))))
+      (doseq [version deployed]
+        (core/recall! this {(id/key) (id/extract version)}))
+      (doseq [version drafts]
+        (dataset/delete-entity :dataset/version {(id/key) (id/extract version)}))
+      (when-let [dataset-id (id/extract stored)]
+        (when (dataset/get-entity :dataset/dataset {(id/key) dataset-id} {(id/key) nil})
+          (dataset/delete-entity :dataset/dataset {(id/key) dataset-id})))))
   (core/get-model
     [_]
     (dataset/deployed-model))

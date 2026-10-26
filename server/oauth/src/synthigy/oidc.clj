@@ -203,7 +203,7 @@
                 :iat (to-timestamp (java.util.Date.))
                 :exp (to-timestamp
                       (java.util.Date. (+ (util/now) (* 1000 (id-token-expiry client)))))
-                :sid session
+                :sid (core/session-sid session)
                 :auth_time authorized-at
                 :acr acr
                 :amr amr})))
@@ -264,7 +264,8 @@
    :introspection_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
    :revocation_endpoint_auth_methods_supported ["client_secret_basic" "client_secret_post"]
    :response_types_supported ["code"]
-   :response_modes_supported ["query" "fragment"]
+   :response_modes_supported ["query" "fragment" "form_post"]
+   :authorization_response_iss_parameter_supported true
    :grant_types_supported ["authorization_code"
                            "refresh_token"
                            "client_credentials"

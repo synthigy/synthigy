@@ -19,9 +19,8 @@
    "SERVICE"      [:server "Service"]
    "SECRET"       [:lock   "Secret"]
    "ROBOT"        [:bot    "Robot"]
+   "AI_AGENT"     [:sparkles "AI agent"]
    "OAUTH_CLIENT" [:box    "OAuth client"]
-   "ACCESS"       [:shield "Access"]
-   "ROBOTICS"     [:bot    "Robotics"]
    "public"       [:globe  "Public"]
    "confidential" [:lock   "Confidential"]
    "GOOGLE"       [:globe  "Google"]
@@ -163,7 +162,7 @@
                (icon/icon (if (= "Device" flow) :tv :globe) {:size "11" :slot "start"})
                flow])
             (when current?
-              [:ty-tag {:size "xs" :flavor "primary" :pill true
+              [:ty-tag {:size "xs" :flavor "primary"
                         :style "margin-left:8px"}
                (icon/icon :monitor {:size "11" :slot "start"})
                "this device"])]

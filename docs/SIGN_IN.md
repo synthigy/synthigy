@@ -34,8 +34,10 @@ of a connected server. Things that bite first-timers:
 
 - **The redirect URI must match character for character** what your app
   sends: `/auth/callback` is not `/auth/callback/`, `http` is not `https`.
-  A loopback URI (`localhost`, `127.0.0.1`) may use any port. Register one
-  `--redirect` per URI, production included; the console edits them later.
+  A loopback URI (`localhost`, `127.0.0.1`) registered with a port matches only
+  that port. Leave the port out to accept any port while the engine runs on
+  localhost. Register one `--redirect` per URI, production included; the
+  console edits them later.
 - **`--api Synthigy` is what makes the backend's own tokens usable.** `/data`
   checks the token's audience; a client with roles but no API gets tokens
   that `/data` refuses.
@@ -130,7 +132,8 @@ When the browser reaches Synthigy at a different URL than your server does
 ## 4. Signing out
 
 Your app owns its session. `GET /oauth/logout` ends Synthigy's own session, the one
-silent renewal rides on. Token and session lifetimes: [OAUTH.md](OAUTH.md#flows).
+silent renewal rides on. Send the `id_token_hint`: without it, Synthigy asks the user
+to confirm on a Sign out? page before it ends the session. Token and session lifetimes: [OAUTH.md](OAUTH.md#flows).
 
 `sub` in the token is the username and `xid` the user's record id. Profile claims
 (`name`, `email`) come from `GET /oauth/userinfo`; the browser login merges them in

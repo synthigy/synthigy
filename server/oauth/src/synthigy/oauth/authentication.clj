@@ -93,8 +93,7 @@
                        jti       (assoc :jti jti)
                        client_id (assoc :client client_id)
                        user      (assoc :user user)
-                       ;; short form only — the full id IS the idsrv.session cookie
-                       sid       (assoc :session (oauth/short-id sid))
+                       sid       (assoc :sid sid)
                        aud       (assoc :audience aud)
                        (= :expired rejected)
                        (assoc :expired-at (str (java.time.Instant/ofEpochSecond (long exp)))))}
@@ -130,7 +129,7 @@
          {:keys [sid jti client_id]} :claims}
         (try (token->user-context (extract-bearer-token request) :audience first-party-audiences)
              (catch Throwable _ nil))
-        session (or sid (session-cookie request))]
+        session (or (oauth/sid-session sid) (session-cookie request))]
     (cond-> {}
       xid       (assoc :user-xid xid)
       tenant    (assoc :tenant tenant)

@@ -182,16 +182,33 @@
                                  (scan-while s def-start
                                              #(and % (not (#{" " "\t" "\n" "\r"
                                                              "," ")" "]"} %))))))
-                end          (if has-default? def-end final-end)]
-            (cond-> {:type :param-ref
-                     :from pos :to end
-                     :text (subs s pos end)
-                     :param-name param-name
-                     :param-type-raw type-raw
-                     :array? array?}
-              optional?    (assoc :optional? true)
-              type-args    (assoc :param-type-args type-args)
-              has-default? (assoc :param-default (subs s def-start def-end)))))))))
+                end          (if has-default? def-end final-end)
+                default      (when has-default? (subs s def-start def-end))]
+            (cond
+              (and optional? has-default?)
+              {:type :error :from pos :to end
+               :text (subs s pos end)
+               :message (str "?" param-name "? is optional, so it can't have a default — drop `?` "
+                             "to always filter, or drop `=" default "` to skip the predicate when absent")}
+
+              (and has-default? (#{"string" "text"} type-raw) (not array?)
+                   (not (and (>= (count default) 2)
+                             (str/starts-with? default "\"") (str/ends-with? default "\""))))
+              {:type :error :from pos :to end
+               :text (subs s pos end)
+               :message (str "?" param-name ":" type-raw " default must be double-quoted — write =\""
+                             (str/replace default #"^'|'$" "") "\"")}
+
+              :else
+              (cond-> {:type :param-ref
+                       :from pos :to end
+                       :text (subs s pos end)
+                       :param-name param-name
+                       :param-type-raw type-raw
+                       :array? array?}
+                optional?    (assoc :optional? true)
+                type-args    (assoc :param-type-args type-args)
+                has-default? (assoc :param-default default)))))))))
 
 (defn lex-content-token
   "Lex one mid-line content token at `pos` (not newline or whitespace)."

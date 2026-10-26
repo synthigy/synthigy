@@ -11,31 +11,59 @@
  *   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
  */
 
-// Segmented device-code entry (PIN/OTP style).
-// Drives the .code-box inputs: auto-advance, backspace, arrows, paste, and
-// assembles the value into the hidden #user_code field as XXXX-XXXX.
-// Read-only boxes (the confirm step) are skipped — nothing to drive there.
+// Device code entry: segmented boxes composed into #user_code as XXXX-XXXX,
+// and the busy state on whichever confirm-step action was pressed.
 (function () {
+  var form = document.getElementById('device-form');
+  var hidden = document.getElementById('user_code');
   var boxes = Array.prototype.slice
     .call(document.querySelectorAll('.code-box'))
     .filter(function (b) { return !b.readOnly && !b.disabled; });
-  if (!boxes.length) return;
 
-  var hidden = document.getElementById('user_code');
-  var ALLOWED = /[A-Z0-9]/; // server validates the exact charset
+  function clean(text) {
+    return (text || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  }
+
+  function code() {
+    return boxes.map(function (b) { return b.value; }).join('');
+  }
 
   function assemble() {
     if (!hidden) return;
-    var v = boxes.map(function (b) { return b.value; }).join('');
+    var v = code();
     hidden.value = v.length > 4 ? v.slice(0, 4) + '-' + v.slice(4) : v;
   }
-  function focusBox(i) { if (boxes[i]) { boxes[i].focus(); boxes[i].select(); } }
+
+  function focusBox(i) {
+    var b = boxes[i];
+    if (b) { b.focus(); b.select(); }
+  }
+
+  function firstEmpty() {
+    for (var i = 0; i < boxes.length; i++) if (!boxes[i].value) return i;
+    return -1;
+  }
+
+  function valid() {
+    boxes.forEach(function (b) { b.removeAttribute('aria-invalid'); });
+  }
+
+  function fill(i, text) {
+    var start = text.length >= boxes.length ? 0 : i;
+    for (var j = 0; j < text.length && start + j < boxes.length; j++) {
+      boxes[start + j].value = text[j];
+    }
+    focusBox(Math.min(start + text.length, boxes.length - 1));
+    assemble();
+  }
 
   boxes.forEach(function (box, i) {
     box.addEventListener('input', function () {
-      var m = box.value.toUpperCase().match(ALLOWED);
-      box.value = m ? m[0] : '';
-      if (box.value && i < boxes.length - 1) focusBox(i + 1);
+      valid();
+      var v = clean(box.value);
+      if (v.length > 1) { fill(i, v.slice(0, boxes.length)); return; }
+      box.value = v;
+      if (v && i < boxes.length - 1) focusBox(i + 1);
       assemble();
     });
     box.addEventListener('keydown', function (e) {
@@ -43,17 +71,51 @@
       else if (e.key === 'ArrowLeft' && i > 0) focusBox(i - 1);
       else if (e.key === 'ArrowRight' && i < boxes.length - 1) focusBox(i + 1);
     });
+    box.addEventListener('click', function () { box.select(); });
     box.addEventListener('paste', function (e) {
       e.preventDefault();
-      var text = ((e.clipboardData && e.clipboardData.getData('text')) || '')
-        .toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, boxes.length);
-      for (var j = 0; j < text.length && (i + j) < boxes.length; j++) {
-        boxes[i + j].value = text[j];
-      }
-      focusBox(Math.min(i + text.length, boxes.length - 1));
-      assemble();
+      var v = clean(e.clipboardData && e.clipboardData.getData('text')).slice(0, boxes.length);
+      if (!v) return;
+      valid();
+      fill(i, v);
     });
   });
 
-  focusBox(0);
+  if (boxes.length && form) {
+    form.addEventListener('submit', function (e) {
+      assemble();
+      var gap = firstEmpty();
+      if (gap < 0) return;
+      e.preventDefault();
+      boxes.forEach(function (b) { if (!b.value) b.setAttribute('aria-invalid', 'true'); });
+      if (window.SynthigyPage) {
+        window.SynthigyPage.message('voice', 'Enter all ' + boxes.length + ' characters of the code.');
+      }
+      focusBox(gap);
+    });
+    assemble();
+    var gap = firstEmpty();
+    focusBox(gap < 0 ? 0 : gap);
+  }
+
+  var actions = form ? form.querySelectorAll('button[name="action"]') : [];
+  if (actions.length) {
+    var pressed = null;
+    Array.prototype.forEach.call(actions, function (btn) {
+      btn.addEventListener('click', function () { pressed = btn; });
+    });
+    form.addEventListener('submit', function (e) {
+      var btn = e.submitter || pressed;
+      if (!btn || btn.name !== 'action') return;
+      btn.classList.add('is-busy');
+      btn.setAttribute('aria-busy', 'true');
+    });
+    addEventListener('pageshow', function (e) {
+      if (!e.persisted) return;
+      Array.prototype.forEach.call(actions, function (btn) {
+        btn.classList.remove('is-busy');
+        btn.removeAttribute('aria-busy');
+      });
+    });
+  }
 })();

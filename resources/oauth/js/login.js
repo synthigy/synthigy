@@ -11,38 +11,33 @@
  *   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
  */
 
-// Synthigy Login
+// Synthigy sign-in and account setup
+(function () {
+  var user = document.getElementById('username');
+  var pass = document.getElementById('password');
 
-(function() {
-  var userInput = document.getElementById('username');
-  var passwordInput = document.getElementById('password');
+  if (user && user.value && pass) pass.focus();
+  else if (user) user.focus();
 
-  function setupRow(input) {
-    if (!input) return;
-    var row = input.closest('.row');
-    if (!row) return;
-
-    function updateActive() {
-      if (input.value !== '' || document.activeElement === input) {
-        row.classList.add('active');
-      } else {
-        row.classList.remove('active');
+  var claim = document.getElementById('claim-password-form');
+  if (claim) {
+    var first = document.getElementById('claim-password');
+    var confirm = document.getElementById('claim-password-confirm');
+    first.focus();
+    claim.addEventListener('submit', function (e) {
+      if (!first.value) {
+        e.preventDefault();
+        window.SynthigyPage.message('claim-msg', 'Choose a password.');
+        first.focus();
+      } else if (first.value !== confirm.value) {
+        e.preventDefault();
+        confirm.setAttribute('aria-invalid', 'true');
+        window.SynthigyPage.message('claim-msg', 'Passwords do not match.');
+        confirm.focus();
       }
-    }
-
-    input.addEventListener('focus', updateActive);
-    input.addEventListener('blur', updateActive);
-    input.addEventListener('input', updateActive);
-
-    updateActive();
-  }
-
-  setupRow(userInput);
-  setupRow(passwordInput);
-
-  if (userInput && userInput.value && passwordInput) {
-    passwordInput.focus();
-  } else if (userInput) {
-    userInput.focus();
+    });
+    confirm.addEventListener('input', function () {
+      confirm.removeAttribute('aria-invalid');
+    });
   }
 })();

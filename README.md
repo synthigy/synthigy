@@ -94,11 +94,11 @@ Contributors sign a one-time CLA ([CLA.md](CLA.md)).
 
 **Business Source License 1.1** (SPDX `BUSL-1.1`), see [LICENSE](LICENSE). Source-available:
 free in production for individuals, non-profits, education and organisations up
-to EUR 5M, including building and selling your own products on it. Development,
+to EUR 3M, including building and selling your own products on it. Development,
 testing and evaluation are free for everyone. Each version becomes GPL-2.0-or-later /
 Apache-2.0 four years after its release.
 
-A **commercial license** covers organisations over EUR 5M, integrators deploying
+A **commercial license** covers organisations over EUR 3M, integrators deploying
 for them, hosting Synthigy as a service, OEM, warranty and support:
 [COMMERCIAL.md](COMMERCIAL.md), r.gersak@gmail.com.
 

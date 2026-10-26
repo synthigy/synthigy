@@ -11,83 +11,60 @@
  *   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
  */
 
-/* Synthigy OAuth - Error Page (shared theme lives in common.css) */
+/* Synthigy OAuth: authorization error */
 
 @import url('common.css');
 
-.error-card {
-  padding: 2.5rem 2.25rem;
-  max-width: 460px;
-  text-align: center;
-  background: var(--sy-glass);
-  border: 1px solid var(--sy-glass-border);
-  border-radius: 16px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+.sy-card-body > * + * {
+  margin-top: 18px;
 }
 
-.error-card .header {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  padding: 0.5rem 0 1rem;
-  user-select: none;
+/* The long explanation sits under the hero, set apart */
+.sy-card-head + .sy-card-body {
+  margin-top: 30px;
+  padding-top: 26px;
+  border-top: 1px solid var(--sy-border-subtle);
 }
 
-.error-card .icon {
-  width: 3.5rem;
-  height: 3.5rem;
-  margin-bottom: 1rem;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
-.error-card .icon svg {
-  width: 100%;
-  height: 100%;
-}
-
-.error-card .icon.security svg { color: #f87171; }
-.error-card .icon.config svg   { color: #fbbf24; }
-
-.error-card h1,
-.error-card h2 {
-  user-select: none;
+.sy-dev {
+  padding-top: 18px;
+  border-top: 1px solid var(--sy-border-subtle);
+  font-size: 13px;
+  line-height: 1.55;
   color: var(--sy-text);
+  overflow-wrap: anywhere;
+}
+
+.sy-dev b {
   font-weight: 600;
-  margin-bottom: 0.5rem;
+  color: var(--sy-text-p);
 }
 
-.error-card .message {
-  padding: 0.75rem 0;
-  font-weight: 400;
-  font-size: 0.9375rem;
-  color: var(--sy-text-m);
+.sy-dev-label {
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--sy-text-s);
   user-select: none;
-  line-height: 1.6;
 }
 
-.error-card .message.security { color: #f87171; }
-
-.error-card .message b { color: var(--sy-text); }
-
-.error-card .error-code {
-  margin-top: 1.5rem;
-  padding: 0.75rem 1rem;
+.sy-codeblock,
+.sy-prose .sy-codeblock {
+  display: block;
+  max-width: none;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--sy-border);
+  border-radius: var(--sy-radius);
   background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--sy-field-border);
-  border-radius: 8px;
-  font-size: 0.8125rem;
-  color: var(--sy-text-m);
+  font: 500 12.5px/1.55 var(--sy-mono);
+  color: var(--sy-text-p);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   user-select: all;
-  font-family: 'Roboto Mono', monospace;
+  cursor: text;
 }
 
-.error-card .help-text {
-  margin-top: 1rem;
-  font-size: 0.8125rem;
-  color: var(--sy-text-m);
-  user-select: none;
+.sy-codeblock:hover {
+  border-color: var(--sy-border-strong);
 }

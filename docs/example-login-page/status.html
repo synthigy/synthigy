@@ -16,10 +16,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign-in status</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Sign-in status · Acme</title>
   <link rel="icon" type="image/png" href="/oauth/images/favicon.png">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="preload" href="/oauth/css/fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
   <link rel="stylesheet" href="/oauth/css/status.css">
+  <style>
+    /* Your brand. The built-in pages put the Synthigy lockup (.sy-lockup) here. */
+    .acme-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      height: 100%;
+      padding-left: 14px;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--sy-text-pp);
+    }
+
+    .acme-mark svg {
+      width: 17px;
+      height: 17px;
+    }
+  </style>
 </head>
 <body>
   <!--
@@ -37,73 +58,206 @@
       client, client_name  the app a device login was for (internal id, display name)
       provider           federated provider (e.g. after linking an account)
     Terminal page: no state, nothing to POST.
+
+    The card reads: icon tile + title (the outcome), what happened (body), the error
+    code when there is one, and what to do next (foot).
   -->
-  <div class="oauth-container">
-    <div class="status-card" id="card">
-      <div class="header"><h2 id="title">Sign-in status</h2></div>
-      <div class="message" id="message"></div>
-    </div>
+  <div class="sy-shell">
+    <header class="sy-bar">
+      <span class="acme-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 21.5 20h-19z"/></svg>
+        <span>Acme</span>
+      </span>
+      <span class="sy-spacer"></span>
+      <!-- The app a device login was for, from ?client_name=. -->
+      <span class="sy-bar-chip" id="chip">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/></svg>
+        <span id="chip-name"></span>
+      </span>
+    </header>
+
+    <main class="sy-stage">
+      <div class="sy-card">
+        <div class="sy-card-head">
+          <div class="sy-tile" id="tile"></div>
+          <div><h1 class="sy-card-title" id="title">Authorization status</h1></div>
+        </div>
+        <div class="sy-card-body">
+          <div class="sy-prose"><p id="message"></p></div>
+          <div class="sy-kv" id="code-row">
+            <span class="sy-kv-key">Error code</span>
+            <span class="sy-kv-val" id="code"></span>
+          </div>
+        </div>
+        <div class="sy-card-foot" id="foot"></div>
+      </div>
+    </main>
+
+    <footer class="sy-status">
+      <span class="sy-status-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span data-sy-host></span>
+      </span>
+      <span class="sy-spacer"></span>
+      <span class="sy-status-item" id="status"><span id="status-code"></span></span>
+    </footer>
   </div>
 
-  <script src="/oauth/js/starfield.js"></script>
+  <!-- Runs before the shared scripts so the card is filled before the first paint. -->
   <script>
-    var q = new URLSearchParams(location.search);
-    var value = q.get('value') || 'unknown';
-    var error = q.get('error');
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var value = q.get('value');
+      var error = q.get('error');
+      var flow = q.get('flow');
+      var user = q.get('user');
+      var clientName = q.get('client_name');
+      var provider = q.get('provider');
 
-    // Every code the server sends here — generated from oauth/page/status.clj.
-    // retry = the person can start again; support = only an admin can fix it.
-    var CODES = {
-      access_denied: ["support", "Access was denied."],
-      already_authorized: ["retry", "Someone already authenticated using this code."],
-      broken_flow: ["retry", "The authorization flow is broken."],
-      callback_error: ["support", "The identity provider returned an error."],
-      cancelled: ["retry", "You cancelled the sign-in."],
-      challenge: ["retry", "A potentially malicious challenge change was detected."],
-      claim_invalid: ["retry", "This invitation link is invalid or has already been used."],
-      claim_method_not_allowed: ["support", "This invitation doesn't allow that sign-in method."],
-      device_code_expired: ["retry", "The code you entered has expired."],
-      email_exists: ["retry", "An account with this email already exists. Sign in with your existing method, then link this identity."],
-      expired_code: ["retry", "Your login grace period has expired."],
-      identity_already_linked: ["support", "This external identity is already linked to an account."],
-      ip_address: ["retry", "A potentially malicious IP-address change was detected."],
-      link_reauth_required: ["retry", "For your security, please sign in again before linking a new login method."],
-      link_requires_login: ["retry", "You must be signed in to link an external account."],
-      link_session_mismatch: ["support", "Account-link verification failed. Please try linking again."],
-      no_code: ["retry", "The identity provider sent no authorization code."],
-      no_flow: ["support", "The sign-in request carried no flow to continue."],
-      not_linked: ["retry", "This external identity isn't linked to any account."],
-      provider_disabled: ["support", "That sign-in method is switched off."],
-      provider_unknown: ["support", "That sign-in method doesn't exist."],
-      provider_unsupported: ["retry", "Could not reach that identity provider."],
-      provision_failed: ["support", "We couldn't create your account."],
-      reauth_identity_mismatch: ["retry", "You verified with a different account than the one signed in."],
-      state_invalid: ["retry", "That sign-in link expired."],
-      token_invalid: ["support", "The identity provider's response couldn't be verified."],
-      user_agent: ["retry", "A potentially malicious app change was detected."]
-    };
+      function $(id) { return document.getElementById(id); }
 
-    function message() {
-      if (error) {
-        var c = CODES[error];
-        if (c) return c[1] + (c[0] === 'retry' ? ' Please start again.' : ' Please contact support.');
-        if (error.indexOf('idp_') === 0) return 'The identity provider refused: ' + error.slice(4).replace(/_/g, ' ') + '.';
-        return q.get('error_description') || ('Sign-in error: ' + error);
+      // Every code the server sends here — generated from oauth/page/status.clj.
+      // retry = the person can start again; support = only an admin can fix it.
+      var CODES = {
+        access_denied: ["support", "Access was denied."],
+        already_authorized: ["retry", "Someone already authenticated using this code."],
+        broken_flow: ["retry", "The authorization flow is broken."],
+        callback_error: ["support", "The identity provider returned an error."],
+        cancelled: ["retry", "You cancelled the sign-in."],
+        challenge: ["retry", "A potentially malicious challenge change was detected."],
+        claim_invalid: ["retry", "This invitation link is invalid or has already been used."],
+        claim_method_not_allowed: ["support", "This invitation doesn't allow that sign-in method."],
+        device_code_expired: ["retry", "The code you entered has expired."],
+        email_exists: ["retry", "An account with this email already exists. Sign in with your existing method, then link this identity."],
+        expired_code: ["retry", "Your login grace period has expired."],
+        identity_already_linked: ["support", "This external identity is already linked to an account."],
+        ip_address: ["retry", "A potentially malicious IP-address change was detected."],
+        link_reauth_required: ["retry", "For your security, please sign in again before linking a new login method."],
+        link_requires_login: ["retry", "You must be signed in to link an external account."],
+        link_session_mismatch: ["support", "Account-link verification failed. Please try linking again."],
+        no_code: ["retry", "The identity provider sent no authorization code."],
+        no_flow: ["support", "The sign-in request carried no flow to continue."],
+        not_linked: ["retry", "This external identity isn't linked to any account."],
+        provider_disabled: ["support", "That sign-in method is switched off."],
+        provider_unknown: ["support", "That sign-in method doesn't exist."],
+        provider_unsupported: ["retry", "Could not reach that identity provider."],
+        provision_failed: ["support", "We couldn't create your account."],
+        reauth_identity_mismatch: ["retry", "You verified with a different account than the one signed in."],
+        state_invalid: ["retry", "That sign-in link expired."],
+        token_invalid: ["support", "The identity provider's response couldn't be verified."],
+        user_agent: ["retry", "A potentially malicious app change was detected."]
+      };
+      var GUIDANCE = {
+        retry: 'Start the sign-in again from your application.',
+        support: "Contact your administrator or the application's support."
+      };
+
+      // success | canceled | retry | support | unknown — picks the tile, title and foot.
+      function outcome() {
+        if (value === 'canceled' || error === 'cancelled') return 'canceled';
+        if (error || value === 'error') {
+          var c = CODES[error];
+          return c && c[0] === 'support' ? 'support' : 'retry';
+        }
+        return value === 'success' ? 'success' : 'unknown';
       }
-      if (value === 'success') {
-        if (q.get('user') && q.get('client_name'))
-          return q.get('client_name') + ' is authorized by ' + q.get('user') + '. You can close this window.';
-        if (q.get('provider')) return 'Your ' + q.get('provider') + ' account is now linked.';
-        return 'You may now return to your application.';
-      }
-      if (value === 'canceled') return 'You canceled the authorization. You can close this window.';
-      return '';
-    }
 
-    var TITLES = { success: 'Signed in', error: 'Sign-in failed', canceled: 'Canceled' };
-    document.getElementById('card').classList.add(value);
-    document.getElementById('title').textContent = TITLES[value] || 'Sign-in status';
-    document.getElementById('message').textContent = message();
+      function title(kind) {
+        if (kind === 'success') {
+          if (flow === 'onboarding_claim') return 'Account ready';
+          if (provider) return 'Account linked';
+          if (user && clientName) return 'Device authorized';
+          return 'Signed in';
+        }
+        if (kind === 'canceled') return 'Sign-in cancelled';
+        if (kind === 'retry' || kind === 'support') {
+          if (flow === 'federated_link') return 'Linking failed';
+          if (flow === 'onboarding' || flow === 'onboarding_claim') return 'Setup failed';
+          return 'Sign-in failed';
+        }
+        return 'Authorization status';
+      }
+
+      function bold(text) {
+        var b = document.createElement('b');
+        b.textContent = text;
+        return b;
+      }
+
+      // [what happened, what to do next]; either may be empty.
+      function message() {
+        if (error) {
+          var c = CODES[error];
+          if (c) return [c[1], GUIDANCE[c[0]]];
+          if (error.indexOf('idp_') === 0)
+            return ['The identity provider refused: ' + error.slice(4).replace(/_/g, ' ') + '.'];
+          return [q.get('error_description') || ('Authentication error: ' + error)];
+        }
+        if (user && clientName) {
+          var p = document.createDocumentFragment();
+          p.append(bold(clientName), ' is now signed in as ', bold(user), '.');
+          return [p];
+        }
+        if (value === 'success' && flow === 'onboarding_claim') {
+          return [!provider || provider === 'password'
+            ? 'Your password is set. Use it to sign in from now on.'
+            : 'Your ' + provider + ' account is linked. Use it to sign in from now on.'];
+        }
+        if (value === 'success') {
+          return [provider ? 'Your ' + provider + ' account is now linked.'
+                           : 'You may now return to your application.'];
+        }
+        if (value === 'canceled') return ['You cancelled the authorization.', 'You can close this window.'];
+        return [];
+      }
+
+      var LOOK = {
+        success: ['tone-success', '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>'],
+        canceled: ['', '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>'],
+        retry: ['tone-error', '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>'],
+        support: ['tone-warn', '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>'],
+        unknown: ['tone-info', '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>']
+      };
+      var FALLBACK = {
+        success: 'You are signed in.',
+        canceled: 'The sign-in was cancelled.',
+        retry: 'The sign-in could not be completed.',
+        support: 'The sign-in could not be completed.',
+        unknown: 'There is no sign-in result to show.'
+      };
+
+      var kind = outcome();
+      var look = LOOK[kind];
+      var glyph = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"' +
+        ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + look[1] + '</svg>';
+      var parts = message();
+      var heading = title(kind);
+      var code = error || (kind === 'success' || kind === 'canceled' ? kind : value || 'no_status');
+
+      document.title = heading + ' · Acme';
+      $('title').textContent = heading;
+      $('message').append(parts[0] || FALLBACK[kind]);
+      $('foot').textContent = parts[1] || GUIDANCE[kind] || 'You can close this window.';
+      if (look[0]) {
+        $('tile').classList.add(look[0]);
+        $('status').classList.add(look[0]);
+      }
+      $('tile').innerHTML = glyph;
+      $('status').insertAdjacentHTML('afterbegin', glyph);
+      $('status-code').textContent = code;
+
+      if (error && kind !== 'canceled') $('code').textContent = error;
+      else $('code-row').remove();
+
+      if (clientName) {
+        $('chip').title = clientName;
+        $('chip-name').textContent = clientName;
+      } else {
+        $('chip').remove();
+      }
+    })();
   </script>
+  <script src="/oauth/js/starfield.js"></script>
+  <script src="/oauth/js/shell.js"></script>
 </body>
 </html>

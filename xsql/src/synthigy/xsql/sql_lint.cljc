@@ -93,17 +93,30 @@
                                            (recur end :normal (conj out {:word (subs s i end) :from i :to end})))
               :else                      (recur (inc i) :normal out))))))))
 
+(defn aliases
+  "Upper-cased names declared with `AS` among `words`."
+  [words]
+  (into #{}
+        (comp (filter (fn [[a _]] (= "AS" (str/upper-case (:word a)))))
+              (map (fn [[_ b]] (str/upper-case (:word b)))))
+        (partition 2 1 words)))
+
 (defn keyword-typo-warnings
-  "A warning per bare word (4+ chars) one edit away from a SQL keyword it isn't."
+  "A warning per bare word (4+ chars) one edit away from a SQL keyword it isn't, skipping aliases and placeholder args."
   [body]
-  (for [{:keys [word from to]} (bare-words body)
-        :let [uc (str/upper-case word)]
-        :when (and (>= (count word) 4) (not (known-words uc)))
-        :let [hit (some #(when (one-edit-away? uc %) %) suggest-vocab)]
-        :when hit]
-    {:severity :warning
-     :message  (str "Unknown word '" word "' — did you mean '" hit "'?")
-     :from from :to to}))
+  (let [words  (bare-words body)
+        named  (aliases words)
+        spans  (map (juxt :from :to) (sql-params/scan-placeholders body))
+        in-arg? (fn [i] (some (fn [[f t]] (<= f i (dec t))) spans))]
+    (for [{:keys [word from to]} words
+          :let [uc (str/upper-case word)]
+          :when (and (>= (count word) 4) (not (known-words uc))
+                     (not (named uc)) (not (in-arg? from)))
+          :let [hit (some #(when (one-edit-away? uc %) %) suggest-vocab)]
+          :when hit]
+      {:severity :warning
+       :message  (str "Unknown word '" word "' — did you mean '" hit "'?")
+       :from from :to to})))
 
 ;; ── Array placeholder context ────────────────────────────────────────────────
 

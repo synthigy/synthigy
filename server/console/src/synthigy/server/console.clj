@@ -108,10 +108,10 @@
     {:status 303 :headers {"Location" "/console"}}
     (let [{:strs [error logged_out]} (query-params request)]
       (html-response
-       (login-page/render (or (federated-login-errors error)
-                              (when error
-                                "Could not sign in. Try again or use your password."))
-                          (some? logged_out))))))
+       (login-page/render {:error (or (federated-login-errors error)
+                                      (when error
+                                        "Could not sign in. Try again or use your password."))
+                           :logged-out? (some? logged_out)})))))
 
 (defn login!
   [request]
@@ -129,8 +129,10 @@
           (do (log/info {:id ::login-refused
                          :data {:action :refused :subject :console :user (:name user)}}
                         "Console login refused: no admin rights")
-              (html-response (login-page/render (str "This console is for administrators. "
-                                                     "Manage your account in the app you use."))))
+              (html-response (login-page/render {:error (str "This console is for administrators. "
+                                                             "Manage your account in the app you use.")
+                                                 :tone :warn
+                                                 :username username})))
         (let [sid (oauth/gen-session-id)]
           (oauth/create-session! sid (merge {:user user :flow "console"
                                              :authorized-at (java.util.Date.)
@@ -141,8 +143,10 @@
                     "Console login")
           {:status 303
            :headers {"Location" "/console"}
-           :cookies (oauth.login/session-cookie sid)}))
-        (html-response (login-page/render "Invalid username or password."))))))
+           :cookies (oauth.login/session-cookie sid request)}))
+        (html-response (login-page/render {:error "Wrong username or password."
+                                           :username username
+                                           :invalid? true}))))))
 
 (defn logout!
   [request]
@@ -921,6 +925,11 @@
                         request spec link q sel
                         (max 0 (or (parse-long (str offset)) 0)))))
 
+                   (= tail "chips")
+                   (let [{:strs [link sel]} (query-params request)]
+                     (when (string? link)
+                       (live/link-chips-response request spec link sel)))
+
                    (= tail "filter-options")
                    (let [{:strs [link q sel offset]} (query-params request)]
                      (when (and (:filters spec) (string? link))
@@ -989,10 +998,6 @@
                                   :post (login! request)
                                   nil)
       (= uri "/console/logout") (when (= :post request-method) (logout! request))
-      ;; unauthenticated on purpose — a silent-renew iframe must reach it after the session lapses
-      (= uri "/console/tools/callback") (when (and (= :get request-method)
-                                                   (ui/tools-available?))
-                                          (html-response (ui/tools-callback-page)))
       :else (authed request))))
 
 (defn handler
@@ -1011,9 +1016,10 @@
                     e)
         {:status 500
          :headers {"Content-Type" "text/html; charset=utf-8"}
-         :body (ui/error-page (if (= "ENTITY_FORBIDDEN" code)
-                                "You don't have access to that."
-                                "Something went wrong."))}))))
+         :body (if (= "ENTITY_FORBIDDEN" code)
+                 (ui/error-page "No access" "You don't have access to that.")
+                 (ui/error-page "Something went wrong"
+                                "The request could not be completed. Try again, or go back to the console."))}))))
 
 (def wrapped-handler (wrap-cookies #'handler))
 
@@ -1023,23 +1029,47 @@
   (cond-> (vec urls)
     (not (some #{uri} urls)) (conj uri)))
 
+(def loopback-console-callbacks
+  (into ui/loopback-callbacks
+        ["http://localhost/console/tools/callback" "http://127.0.0.1/console/tools/callback"]))
+
 (defn register-tools-redirect!
-  "Add-only registration of the console tools callbacks with the Synthigy Tools client."
+  "Register the engine's callback page with the Synthigy Tools client; loopback ones only on a loopback or unset root."
   []
   (let [root (ui/root-url)
-        callbacks (cond-> ui/loopback-callbacks
-                    root (conj (str root "/console/tools/callback")))]
+        loopback? (or (nil? root) (oauth/localhost-redirect? root))
+        callbacks (cond-> (if loopback? ui/loopback-callbacks [])
+                    root (conj (str root ui/callback-path)))]
     (try
       (when (iam/update-client-settings!
              info/modeler-public-client-id
-             #(cond-> (update % "redirections" (fn [urls] (reduce ensure-redirect urls callbacks)))
-                root (update "logout-redirections" ensure-redirect (str root "/console/login?logged_out=1"))))
-        (log/info {:id ::tools-redirect-registered :data {:uris callbacks}}
+             #(update % "redirections"
+                      (fn [urls]
+                        (reduce ensure-redirect
+                                ;; never let a non-loopback engine hand its Tools token to any localhost page
+                                (if loopback? urls (vec (remove (set loopback-console-callbacks) urls)))
+                                callbacks))))
+        (log/info {:id ::tools-redirect-registered :data {:uris callbacks :loopback? loopback?}}
                   "Registered console tools callbacks"))
       (catch Throwable e
         (log/error! {:id ::tools-redirect-failed :msg "Registering console tools callbacks failed"
                      :data {:uris callbacks}}
                     e)))))
+
+(def callback-headers
+  {"Content-Type" "text/html; charset=utf-8"
+   "Content-Security-Policy" "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'"
+   "Referrer-Policy" "no-referrer"
+   "Cache-Control" "no-store"})
+
+(defn callback-handler
+  "The Synthigy Tools callback page; static, no script, unauthenticated so a renewal reaches it after the session lapses."
+  [{:keys [uri request-method]}]
+  (when (and (= uri ui/callback-path) (#{:get :head} request-method))
+    {:status 200
+     :headers callback-headers
+     :body (when (= :get request-method)
+             (slurp (io/resource "synthigy/console/callback.html")))}))
 
 (lifecycle/register-module!
  :synthigy/console
@@ -1051,10 +1081,12 @@
            (system/watch-lifecycle!)
            (register-tools-redirect!)
            (routes/register-prefix! ::console "/console" #'wrapped-handler)
+           (routes/register-prefix! ::callback ui/callback-path #'callback-handler)
            (log/info {:id ::started :data {:action :started :subject :console}}
                      "Console mounted at /console"))
   :stop (fn []
           (routes/unregister-prefix! ::console)
+          (routes/unregister-prefix! ::callback)
           (system/unwatch-lifecycle!)
           (log/info {:id ::stopped :data {:action :stopped :subject :console}}
                     "Console unmounted"))})

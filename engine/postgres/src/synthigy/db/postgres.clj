@@ -39,9 +39,13 @@
   ^Connection [^HikariDataSource ds]
   (DriverManager/getConnection (.getJdbcUrl ds) (.getUsername ds) (.getPassword ds)))
 
+(defn init-sql
+  [jit?]
+  (str "SET TIME ZONE 'UTC'" (when-not jit? "; SET jit = off")))
+
 (defn build-drainer-pool
   "Dedicated Hikari pool for the plug drainer (POSTGRES_DRAINER_POOL_SIZE, default 2)."
-  [{:keys [host port user db password]
+  [{:keys [host port user db password jit?]
     :as data}]
   (let [size (Integer/parseInt (env :postgres-drainer-pool-size "2"))
         url  (str "jdbc:postgresql://" host \: port \/ db)
@@ -53,7 +57,7 @@
                (.setPoolName "synthigy-drainer")
                (.setLeakDetectionThreshold 5000)
                (.setInitializationFailTimeout 0)
-               (.setConnectionInitSql "SET TIME ZONE 'UTC'")
+               (.setConnectionInitSql (init-sql jit?))
                (.setMaximumPoolSize size)
                (.setMinimumIdle 1)
                (.setConnectionTestQuery "select 1")
@@ -70,7 +74,7 @@
 
 (defn connect
   "Connects to PostgreSQL server and returns HikariDataSource instance"
-  [{:keys [host port user db password max-connections]
+  [{:keys [host port user db password max-connections jit?]
     :or {max-connections 2}
     :as data}]
   (let [url (str "jdbc:postgresql://" host \: port \/ db)
@@ -82,7 +86,7 @@
                      (.setPassword password)
                      (.setLeakDetectionThreshold 2000)
                      (.setInitializationFailTimeout 0)
-                     (.setConnectionInitSql "SET TIME ZONE 'UTC'")
+                     (.setConnectionInitSql (init-sql jit?))
                      (.setMaximumPoolSize max-connections)
                      (.setConnectionTestQuery "select 1")
                      (.setKeepaliveTime 30000)
@@ -117,6 +121,7 @@
                        :db db
                        :password password
                        :user user
+                       :jit? (= "on" (str/lower-case (str (env :postgres-jit "off"))))
                        :max-connections (Integer/parseInt (env :postgres-pool-size "20")))]
     (check-connection-params data)
     data))

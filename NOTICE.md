@@ -47,6 +47,14 @@ into its native libraries for the HUMAN collation. ICU is licensed under the
 Unicode License V3; the full text ships inside that jar at
 `META-INF/licenses/ICU-LICENSE`.
 
+## Fonts (SIL Open Font License 1.1)
+
+The sign-in pages and the console self-host Inter (Copyright (c) 2016 The Inter
+Project Authors, https://github.com/rsms/inter) and JetBrains Mono (Copyright
+2020 The JetBrains Mono Project Authors, https://github.com/JetBrains/JetBrainsMono),
+both under the SIL Open Font License 1.1. The sign-in page's Inter is a subset.
+The full license text ships beside the font files as `OFL.txt`.
+
 ## Apache License 2.0
 
 - buddy/buddy-core 1.12.0-430

@@ -21,10 +21,19 @@ A confidential client can be marked **trusted** (`--trusted`): it skips the
 consent screen, and it may run `/data` requests as its users
 ([Acting for a user](#acting-for-a-user)).
 
-A client lists the **redirect URIs** it may return to — exact matches, except
-that a loopback URI (`http://localhost`, `http://127.0.0.1`) may use any port.
-Its redirect origins are also the browser origins allowed to call the API
-([CORS.md](CORS.md)).
+A client lists the **redirect URIs** it may return to, matched exactly. Loopback
+URIs (`http://localhost`, `http://127.0.0.1`) have two exceptions:
+
+- a **native** app (application type `native`, such as the desktop app) may use
+  any port on any of its loopback URIs (RFC 8252);
+- for a web client, a loopback URI registered **without** a port
+  (`http://localhost/callback`) accepts any port, but only while the engine itself
+  runs on localhost. One registered with a port accepts only that port.
+
+A native app never gets a silent `prompt=none` answer: the engine replies
+`interaction_required`, because a loopback redirect can't prove which app is
+asking (RFC 8252 §8.6). Its redirect origins are also the browser origins
+allowed to call the API ([CORS.md](CORS.md)).
 
 ## Flows
 
@@ -48,7 +57,7 @@ hours without activity, and after 30 days in any case.
 | `POST /oauth/introspect` | Check a token |
 | `POST /oauth/revoke` | Revoke a token |
 | `GET /oauth/jwks` | Public keys that verify tokens |
-| `GET,POST /oauth/logout` | Sign out |
+| `GET,POST /oauth/logout` | Sign out (without `id_token_hint` the user confirms first) |
 
 ## APIs, audiences and scopes
 

@@ -150,6 +150,34 @@
       :session (get-in row [:session :id])}))
   nil)
 
+(defn token-payload
+  "A stored token's payload; read without a signature check, the engine wrote it."
+  [token]
+  (try
+    (some-> token (str/split #"\.") second
+            (#(String. (.decode (java.util.Base64/getUrlDecoder) ^String %) "UTF-8"))
+            json/read-str)
+    (catch Exception _ nil)))
+
+(defn token-client [token] (:client_id (token-payload token)))
+
+(defn token-scope
+  "The scope a refresh token was granted, or nil for one minted before it carried it."
+  [token]
+  (some-> (token-payload token) :scope set not-empty))
+
+(defn client-token-values
+  "Live token values of one kind that `client-id` holds on a session, newest first."
+  [session client-id token-key audience]
+  (filter #(= client-id (token-client %)) (session-token-values session token-key audience)))
+
+(defn revoke-client-tokens
+  "Revoke one client's live tokens on a session for an audience: its grant, never another client's."
+  [session client-id audience]
+  (doseq [token-key [:access_token :refresh_token]
+          token (client-token-values session client-id token-key audience)]
+    (revoke-token token-key token)))
+
 (defn revoke-session-tokens
   ([session] (revoke-session-tokens session :any))
   ([session audience]
@@ -163,15 +191,15 @@
   (revoke-session-tokens session))
 
 (defmethod sign-token :refresh_token
-  [session _ data]
-  (let [client (core/get-session-client session)]
+  [session _ {:keys [value client_id scope]}]
+  (let [client (or (some-> client_id core/get-client) (core/get-session-client session))]
     (encryption/sign-data
-     (hash-map :value data
-               :session session
-               :exp (->
-                     (System/currentTimeMillis)
-                     (quot 1000)
-                     (+ (refresh-token-expiry client))))
+     {:value value
+      :client_id client_id
+      :scope (vec scope)
+      :exp (-> (System/currentTimeMillis)
+               (quot 1000)
+               (+ (refresh-token-expiry client)))}
      {:alg :rs256})))
 
 (defmethod sign-token :access_token
@@ -193,31 +221,31 @@
 
 (def refresh-not-supported
   (token-error
-   "invalid_request"
+   "unauthorized_client"
    "The client configuration does not support"
    "token refresh requests."))
 
 (def authorization-code-not-supported
   (token-error
-   "invalid_request"
+   "unauthorized_client"
    "The client configuration does not support"
    "token authorization code requests"))
 
 (def device-code-not-supported
   (token-error
-   "invalid_request"
+   "unauthorized_client"
    "The client configuration does not support"
    "token device code requests"))
 
 (def client-credentials-not-supported
   (token-error
-   "invalid_request"
+   "unauthorized_client"
    "The client configuration does not support"
    "token client credentials requests"))
 
 (def cookie-session-missmatch
   (token-error
-   "invalid_request"
+   "invalid_grant"
    "You session is not provided by this server."
    "This action will be logged and processed!"))
 
@@ -349,7 +377,7 @@
 (defn generate
   "Mint session tokens; throws ex-info with :requested-audience when the client isn't linked to the audience."
   [{{allowed-grants "allowed-grants"} :settings
-    :as client} session {:keys [audience scope client_id sub nonce]}]
+    :as client} session {:keys [audience scope client_id sub nonce ::refresh-scope]}]
   (let [audience (or (resolve-audience client_id audience)
                      (throw (ex-info "invalid_target: client not authorized for requested audience"
                                       {:client_id client_id :requested-audience audience})))
@@ -367,8 +395,7 @@
              :audience audience
              :roles (:roles resource-owner)
              :api-scopes (set (vals (resolve-client-api-scopes client_id audience)))}
-        access-token {:session session
-                      :aud audience
+        access-token {:aud audience
                       :exp access-exp
                       :iss (core/domain+)
                       :sub user-name
@@ -376,7 +403,7 @@
                       :iat (quot (System/currentTimeMillis) 1000)
                       :jti (gen-token)
                       :client_id client_id
-                      :sid session
+                      :sid (core/session-sid session)
                       ;; Seeded empty — process-scope is the sole writer; a string seed breaks `conj`.
                       :scope []}
         refresh? (some #(= "refresh_token" %) allowed-grants)]
@@ -389,170 +416,168 @@
                       :jti (:jti access-token)
                       :audience audience}}
               "Generated access token")
-    (if (pos? access-exp)
-      (let [refresh-token (when (and refresh? session (contains? scope "offline_access"))
-                            (log/debug {:id ::creating-refresh-token
-                                        :data {:action :generated
-                                               :subject :access-token
-                                               :token-key :refresh_token
-                                               :client client_id
-                                               :session (core/short-id session)}}
-                                       "Creating refresh token")
-                            (gen-token))
-            tokens (reduce
-                    (fn [tokens scope]
-                      (process-scope ctx tokens scope))
-                    (if refresh-token
-                      {:access_token access-token
-                       :refresh_token refresh-token}
-                      {:access_token access-token})
-                    scope)
-            tokens (cond-> tokens
-                     (and nonce (:id_token tokens)) (assoc-in [:id_token :nonce] nonce))
-            granted (get-in tokens [:access_token :scope])
-            granted-str (str/join " " granted)
-            tokens (assoc-in tokens [:access_token :scope] granted-str)
-            signed-tokens (reduce-kv
-                           (fn [tokens token data]
-                             (assoc tokens token (sign-token session token data)))
-                           tokens
-                           tokens)]
-        (when session
-          (revoke-session-tokens session audience)
-          (set-session-tokens session audience signed-tokens)
-          ;; GRANTED, not requested — a refresh must never widen past what cleared process-scope.
-          (core/set-session-audience-scope session audience granted))
-        (iam/publish
-         :oauth.grant/tokens
-         {:tokens signed-tokens
-          :session session})
-        (assoc signed-tokens
-               :token_type "Bearer"
-               :scope granted-str
-               :expires_in (access-token-expiry client)))
-      (let [tokens (reduce
-                    (fn [tokens scope]
-                      (process-scope ctx tokens scope))
-                    {:access_token access-token}
-                    scope)
-            tokens (cond-> tokens
-                     (and nonce (:id_token tokens)) (assoc-in [:id_token :nonce] nonce))
-            granted (get-in tokens [:access_token :scope])
-            granted-str (str/join " " granted)
-            tokens (assoc-in tokens [:access_token :scope] granted-str)
-            signed-tokens (reduce-kv
-                           (fn [tokens token data]
-                             (assoc tokens token (sign-token session token data)))
-                           tokens
-                           tokens)]
-        (iam/publish
-         :oauth.grant/tokens
-         {:tokens signed-tokens
-          :session session})
-        (assoc signed-tokens
-               :expires_in (access-token-expiry client)
-               :scope granted-str
-               :token_type "Bearer")))))
+    (let [refresh-token (when (and refresh? session (contains? (set (or refresh-scope scope)) "offline_access"))
+                          (log/debug {:id ::creating-refresh-token
+                                      :data {:action :generated
+                                             :subject :access-token
+                                             :token-key :refresh_token
+                                             :client client_id
+                                             :session (core/short-id session)}}
+                                     "Creating refresh token")
+                          {:value (gen-token) :client_id client_id})
+          tokens (reduce
+                  (fn [tokens scope]
+                    (process-scope ctx tokens scope))
+                  (if refresh-token
+                    {:access_token access-token
+                     :refresh_token refresh-token}
+                    {:access_token access-token})
+                  scope)
+          tokens (cond-> tokens
+                   ;; aud is the client the token goes to — console sessions carry no client
+                   (and client_id (:id_token tokens)) (assoc-in [:id_token :aud] client_id)
+                   (and nonce (:id_token tokens)) (assoc-in [:id_token :nonce] nonce))
+          granted (get-in tokens [:access_token :scope])
+          granted-str (str/join " " granted)
+          tokens (cond-> (assoc-in tokens [:access_token :scope] granted-str)
+                   ;; GRANTED, not requested — a refresh must never widen past what cleared process-scope.
+                   (:refresh_token tokens) (assoc-in [:refresh_token :scope] (or refresh-scope granted)))
+          signed-tokens (reduce-kv
+                         (fn [tokens token data]
+                           (assoc tokens token (sign-token session token data)))
+                         tokens
+                         tokens)]
+      (when session
+        (revoke-client-tokens session client_id audience)
+        (set-session-tokens session audience signed-tokens))
+      (iam/publish
+       :oauth.grant/tokens
+       {:tokens signed-tokens
+        :session session})
+      (assoc signed-tokens
+             :token_type "Bearer"
+             :scope granted-str
+             :expires_in (access-token-expiry client)))))
 
 (def ^:dynamic *refresh-reuse-grace-ms* 10000)
 
-(defn reused-refresh-session
-  "Session of a revoked refresh token when its rotation is older than the grace window, or nil."
+(defn token-grant-client
+  "The client a refresh token belongs to: its own client_id, else the session's client."
+  [token session]
+  (or (some-> (token-client token) core/get-client) (core/get-session-client session)))
+
+(defn reused-refresh-grant
+  "{:session :client-id :audience} of a revoked refresh token presented after the grace window, or nil."
   [token]
   (when token
     (let [row (dataset/get-entity (token-entity :refresh_token) {:value token}
                                   {:revoked nil :audience nil
                                    :session [{:selections {:id nil} :args {:_join :left}}]})
-          session (get-in row [:session :id])]
+          session (get-in row [:session :id])
+          client-id (token-client token)]
       (when (and (:revoked row) session)
-        (let [current (get-session-refresh-token session (:audience row))
+        (let [current (first (client-token-values session client-id :refresh_token (:audience row)))
               rotated-at (when current
                            (- (inst-ms (core/expires-at current))
-                              (* 1000 (refresh-token-expiry (core/get-session-client session)))))]
+                              (* 1000 (refresh-token-expiry (token-grant-client token session)))))]
           (when (or (nil? rotated-at)
                     (> (- (System/currentTimeMillis) rotated-at) *refresh-reuse-grace-ms*))
-            session))))))
+            {:session session :client-id client-id :audience (:audience row)}))))))
 
 (defmethod grant-token "refresh_token"
-  [{:keys [refresh_token scope audience]
+  [{:keys [refresh_token scope audience client_id]
     cookie-session :idsrv/session
     :as request}]
-  (if (core/expired? refresh_token)
-    (do
-      (core/kill-session (get-token-session :refresh_token refresh_token))
-      (token-error
-       400
-       "invalid_request"
-       "Provided token is expired!"))
-    (if-let [session (get-token-session :refresh_token refresh_token)]
-      (let [{{:strs [allowed-grants]} :settings
-             :as client} (core/get-session-client session)
-            {:keys [active]} (core/get-session-resource-owner session)
-            audience (or
-                      audience
-                      (get-token-audience :refresh_token refresh_token))
-            ;; Narrow only (RFC 6749 §6) — never widen past the stored granted scope.
-            original-scope (core/get-session-audience-scope session audience)
-            scope (if scope
-                    (set/intersection (set scope) (set original-scope))
-                    original-scope)
-            current-refresh-token (get-session-refresh-token session audience)
-            grants (set allowed-grants)]
-        (cond
-          (not (contains? grants "refresh_token"))
-          (do
-            (core/kill-session session)
-            refresh-not-supported)
+  (let [token-client-id (token-client refresh_token)]
+    (cond
+      ;; RFC 6749 §6: a refresh token is bound to the client it was issued to
+      (and (not-empty client_id) token-client-id (not= client_id token-client-id))
+      (token-error 400 "invalid_grant" "Provided refresh token was issued to another client")
 
-          (not active)
-          (do
-            (core/kill-session session)
-            owner-not-authorized)
-
-          (and cookie-session (not= cookie-session session))
-          cookie-session-missmatch
-
-          (not= refresh_token current-refresh-token)
-          (token-error
-           400
-           "invalid_request"
-           "Provided token doesn't match session refresh token"
-           "Your request will be logged and processed")
-
-          ;; Rotate only after every check passed — earlier burns a valid token on a rejected request.
-          :else
-          (let [resource-owner (core/get-session-resource-owner session)]
-            (when current-refresh-token (revoke-token :refresh_token current-refresh-token))
-            (revoke-session-tokens session audience)
-            (core/touch-session! session)
-            (log/info {:id ::token-refreshed
-                       :user-xid (:xid resource-owner)
-                       :data {:action :refreshed
-                              :subject :access-token
-                              :session (core/short-id session)
-                              :client (:id client)
-                              :audience audience
-                              :scope (when scope (str/join " " scope))}}
-                      "Access token refreshed")
-            {:status 200
-             :headers {"Content-Type" "application/json;charset=UTF-8"
-                       "Pragma" "no-cache"
-                       "Cache-Control" "no-store"}
-             :body (json/write-str (generate client session (-> request (dissoc :nonce) (assoc :scope scope))))})))
+      (core/expired? refresh_token)
       (do
-        (when-let [session (reused-refresh-session refresh_token)]
-          (log/warn {:id ::refresh-token-reused
-                     :data {:action :rejected
-                            :subject :refresh-token
-                            :reason :reuse-detected
-                            :session (core/short-id session)}}
-                    "Rotated refresh token presented again — session killed")
-          (core/kill-session session))
+        (when-let [session (get-token-session :refresh_token refresh_token)]
+          (revoke-client-tokens session token-client-id (get-token-audience :refresh_token refresh_token)))
         (token-error
          400
          "invalid_grant"
-         "There is no valid session for refresh token that"
-         "was provided")))))
+         "Provided token is expired!"))
+
+      :else
+      (if-let [session (get-token-session :refresh_token refresh_token)]
+        (let [{{:strs [allowed-grants]} :settings
+               :as client} (token-grant-client refresh_token session)
+              client-id (or token-client-id (:id client))
+              {:keys [active]} (core/get-session-resource-owner session)
+              audience (or
+                        audience
+                        (get-token-audience :refresh_token refresh_token))
+              ;; Narrow only (RFC 6749 §6) — never widen past the stored granted scope.
+              original-scope (or (token-scope refresh_token)
+                                 (core/get-session-audience-scope session audience))
+              scope (if scope
+                      (set/intersection (set scope) (set original-scope))
+                      original-scope)
+              current-refresh-token (first (client-token-values session token-client-id :refresh_token audience))
+              grants (set allowed-grants)]
+          (cond
+            (not (contains? grants "refresh_token"))
+            (do
+              (revoke-client-tokens session token-client-id audience)
+              refresh-not-supported)
+
+            (not active)
+            (do
+              (core/kill-session session)
+              owner-not-authorized)
+
+            (and cookie-session (not= cookie-session session))
+            cookie-session-missmatch
+
+            (not= refresh_token current-refresh-token)
+            (token-error
+             400
+             "invalid_grant"
+             "Provided token doesn't match session refresh token"
+             "Your request will be logged and processed")
+
+            ;; Rotate only after every check passed — earlier burns a valid token on a rejected request.
+            :else
+            (let [resource-owner (core/get-session-resource-owner session)]
+              (revoke-client-tokens session token-client-id audience)
+              (core/touch-session! session)
+              (log/info {:id ::token-refreshed
+                         :user-xid (:xid resource-owner)
+                         :data {:action :refreshed
+                                :subject :access-token
+                                :session (core/short-id session)
+                                :client client-id
+                                :audience audience
+                                :scope (when scope (str/join " " scope))}}
+                        "Access token refreshed")
+              {:status 200
+               :headers {"Content-Type" "application/json;charset=UTF-8"
+                         "Pragma" "no-cache"
+                         "Cache-Control" "no-store"}
+               :body (json/write-str (generate client session (-> request
+                                                                  (dissoc :nonce)
+                                                                  (assoc :scope scope :client_id client-id :audience audience
+                                                                         ::refresh-scope original-scope))))})))
+        (do
+          (when-let [{:keys [session client-id audience]} (reused-refresh-grant refresh_token)]
+            (log/warn {:id ::refresh-token-reused
+                       :data {:action :rejected
+                              :subject :refresh-token
+                              :reason :reuse-detected
+                              :client client-id
+                              :session (core/short-id session)}}
+                      "Rotated refresh token presented again — that client's grant revoked")
+            (revoke-client-tokens session client-id audience))
+          (token-error
+           400
+           "invalid_grant"
+           "There is no valid session for refresh token that"
+           "was provided"))))))
 
 (defn validate-client-credentials
   "Validate client_credentials auth; public clients are always refused."

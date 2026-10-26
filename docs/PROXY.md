@@ -39,7 +39,11 @@ SYNTHIGY_SERVER_TRUST_PROXY=127.0.0.1/32,::1/128
 - **Raise the body limit** to about 64m for writes, deploys and IAM imports.
 - **Health check:** `GET /health`, 200 while the node can serve, 503 when it can't
   ([OPERATIONS.md](OPERATIONS.md#health-check)).
-- **Forward `X-Forwarded-Proto` and `X-Forwarded-Host`.**
+- **Set `SYNTHIGY_IAM_ROOT_URL`, or keep the public `Host`.** With neither, a proxy
+  that sends `Host: localhost` over plain http makes the engine treat itself as a
+  local dev install, and it issues the session cookie without `Secure`. Forwarding
+  `X-Forwarded-Proto` and `X-Forwarded-Host` helps only when the proxy is listed in
+  `SYNTHIGY_SERVER_TRUST_PROXY`; otherwise the engine drops those headers.
 - **Never proxy port 7888**, the portal: it trusts anything from 127.0.0.1, so a
   local proxy would publish it. Reach it with `ssh -L 7888:127.0.0.1:7888 <host>`.
 - **Firewall 7887** so nothing bypasses the proxy.

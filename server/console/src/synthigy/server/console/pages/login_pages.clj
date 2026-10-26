@@ -347,7 +347,7 @@ if (secure) {
 
 (defn guide-modal [{:keys [file title url summary sections]}]
   [:ty-modal {(keyword "data-attr:open") (guide-signal file)
-              :backdrop "true" :close-on-outside-click true :close-on-escape true
+              :no-zoom true
               (keyword "data-on:close") "$pageGuide = ''"}
    [:div.console-confirm.console-guide-modal
     [:div.console-guide-head

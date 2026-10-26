@@ -132,7 +132,7 @@
   {:slug "users" :entity :user :key :iam/user :label "Users" :icon :user
    :watch [:oauth_session]
    :table {:query cx/users-table
-           :watch cx/watch-users-table
+           :count cx/users-count
            :chips {:groups "groups" :roles "roles"}
            :sortable #{"name" "active" "sessions" "groups" "roles"}}
    :filters [[:groups "Groups" :user_group :users]
@@ -140,7 +140,7 @@
    :create {:fields [[:name "Name" :text {:required true}]
                      [:type "Type" :choices
                       {:required true :keyword? true
-                       :choices [["PERSON" "Person"] ["SERVICE" "Service"] ["ROBOT" "Robot"]]}]
+                       :choices [["PERSON" "Person"] ["SERVICE" "Service"] ["ROBOT" "Robot"] ["AI_AGENT" "AI agent"]]}]
                      [:active "Active" :switch {:default true}]]
             :links [role-link group-link]}
    :delete {:warning (str "Their sessions and sign-in methods stay in the database "

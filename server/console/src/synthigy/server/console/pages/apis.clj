@@ -32,7 +32,7 @@
 (def spec
   {:slug "apis" :entity :oauth_api :key :iam/api :label "APIs" :icon :layers
    :table {:query cx/apis-table
-           :watch cx/watch-apis-table
+           :count cx/apis-count
            :sortable #{"name" "apps" "scopes"}}
    :subtitle (str "Token audiences. An API owns the scopes apps may request "
                   "for it.")

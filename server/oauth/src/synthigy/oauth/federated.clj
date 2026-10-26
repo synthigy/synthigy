@@ -234,7 +234,7 @@
         (let [{:keys [redirect-uri response-mode cookies params]}
               (login/complete-authorization-code-login! ac-code (:user outcome) [(name provider)]
                                                         client-info)]
-          (login/authorization-response redirect-uri params response-mode cookies))))))
+          (core/authorization-response redirect-uri params response-mode cookies))))))
 
 (defn console-return
   "Sanitize a caller-supplied console return path; nil unless site-relative."

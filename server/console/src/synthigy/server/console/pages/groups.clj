@@ -24,20 +24,16 @@
 (def spec
   {:slug "groups" :entity :user_group :key :iam/user-group :label "Groups" :icon :users
    :table {:query cx/groups-table
-           :watch cx/watch-groups-table
+           :count cx/groups-count
            :sortable #{"name" "active" "users" "roles"}}
    :subtitle (str "Groups collect users so a role is granted once rather than "
                   "account by account.")
    :create {:fields [[:name "Name" :text {:required true}]
-                     [:type "Type" :choices
-                      {:required true :keyword? true
-                       :choices [["ACCESS" "Access"] ["ROBOTICS" "Robotics"] ["SERVICE" "Service"]]}]
                      [:active "Active" :switch {:default true}]]
             :links [roles-link users-link]}
    :delete {:warning "Every member loses whatever this group granted them, immediately."}
-   :columns [[:name "Name" :name] [:active "Status" :status] [:type "Type" :type]
+   :columns [[:name "Name" :name] [:active "Status" :status]
              [:users "Users" :agg :user] [:roles "Roles" :agg :shield]]
    :detail {:fields [[:name   "Name"   :text]
-                     [:active "Active" :switch]
-                     [:type   "Type"   :enum]]
+                     [:active "Active" :switch]]
             :links  [roles-link users-link]}})

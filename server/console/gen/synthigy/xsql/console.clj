@@ -15,7 +15,7 @@
   (:require [synthigy.embedded :as embedded]))
 
 (def ^:no-doc users-table-op
-  {:op "sql-template", :source "select {user.xid} as xid,\n       {user.name},\n       {user.active},\n       {user.type},\n       count(distinct {user->groups.xid}) as groups,\n       count(distinct {user->roles.xid}) as roles,\n       count(distinct {user->sessions.xid})\n         filter (where {user->sessions.active}) as sessions\nwhere {user.name} ilike ?q?\n  and {user->groups.xid} in ?groups?[]\n  and {user->roles.xid} in ?roles?[]\ngroup by {user.xid}, {user.name}, {user.active}, {user.type}\norder by ?sort:order(name, active, sessions, groups, roles)=\"name desc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "sql-template", :source "select {user.xid} as xid,\n       {user.name},\n       {user.active},\n       {user.type},\n       count(distinct {user->groups.xid}) as groups,\n       count(distinct {user->roles.xid}) as roles,\n       count(distinct {user->sessions.xid})\n         filter (where {user->sessions.active}) as sessions\nwhere {user.name} ilike ?q?\n  and {user->groups.xid} in ?groups?[]\n  and {user->roles.xid} in ?roles?[]\ngroup by {user.xid}, {user.name}, {user.active}, {user.type}\norder by ?sort:order(name, active, sessions, groups, roles)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
 
 (defn users-table
   "sql-template console — params: q, groups, roles, sort, limit, offset"
@@ -30,7 +30,7 @@
    (embedded/watch-xsql users-table-op params opts)))
 
 (def ^:no-doc groups-table-op
-  {:op "sql-template", :source "select {user_group.xid} as xid,\n       {user_group.name},\n       {user_group.active},\n       {user_group.type},\n       count(distinct {user_group->users.xid}) as users,\n       count(distinct {user_group->roles.xid}) as roles\nwhere {user_group.name} ilike ?q?\ngroup by {user_group.xid}, {user_group.name}, {user_group.active}, {user_group.type}\norder by ?sort:order(name, active, users, roles)=\"name desc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "sql-template", :source "select {user_group.xid} as xid,\n       {user_group.name},\n       {user_group.active},\n       count(distinct {user_group->users.xid}) as users,\n       count(distinct {user_group->roles.xid}) as roles\nwhere {user_group.name} ilike ?q?\ngroup by {user_group.xid}, {user_group.name}, {user_group.active}\norder by ?sort:order(name, active, users, roles)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
 
 (defn groups-table
   "sql-template console — params: q, sort, limit, offset"
@@ -45,7 +45,7 @@
    (embedded/watch-xsql groups-table-op params opts)))
 
 (def ^:no-doc roles-table-op
-  {:op "sql-template", :source "select {user_role.xid} as xid,\n       {user_role.name},\n       {user_role.active},\n       count(distinct {user_role->users.xid}) as users,\n       count(distinct {user_role->scopes.xid}) as scopes\nwhere {user_role.name} ilike ?q?\ngroup by {user_role.xid}, {user_role.name}, {user_role.active}\norder by ?sort:order(name, active, users, scopes)=\"name desc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "sql-template", :source "select {user_role.xid} as xid,\n       {user_role.name},\n       {user_role.active},\n       count(distinct {user_role->users.xid}) as users,\n       count(distinct {user_role->scopes.xid}) as scopes\nwhere {user_role.name} ilike ?q?\ngroup by {user_role.xid}, {user_role.name}, {user_role.active}\norder by ?sort:order(name, active, users, scopes)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
 
 (defn roles-table
   "sql-template console — params: q, sort, limit, offset"
@@ -60,7 +60,7 @@
    (embedded/watch-xsql roles-table-op params opts)))
 
 (def ^:no-doc apps-table-op
-  {:op "sql-template", :source "select {oauth_client.xid} as xid,\n       {oauth_client.name} as name,\n       {oauth_client.active} as active,\n       {oauth_client.type} as type,\n       count(distinct {oauth_client->apis.xid}) as apis\nwhere {oauth_client.name} ilike ?q?\ngroup by {oauth_client.xid}, {oauth_client.name}, {oauth_client.active}, {oauth_client.type}\norder by ?sort:order(name, active, apis)=\"name desc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "sql-template", :source "select {oauth_client.xid} as xid,\n       {oauth_client.name} as name,\n       {oauth_client.active} as active,\n       {oauth_client.type} as type,\n       count(distinct {oauth_client->apis.xid}) as apis\nwhere {oauth_client.name} ilike ?q?\ngroup by {oauth_client.xid}, {oauth_client.name}, {oauth_client.active}, {oauth_client.type}\norder by ?sort:order(name, active, apis)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
 
 (defn apps-table
   "sql-template console — params: q, sort, limit, offset"
@@ -75,7 +75,7 @@
    (embedded/watch-xsql apps-table-op params opts)))
 
 (def ^:no-doc apis-table-op
-  {:op "sql-template", :source "select {oauth_api.xid} as xid,\n       {oauth_api.name},\n       {oauth_api.audience},\n       count(distinct {oauth_api->clients.xid}) as apps,\n       count(distinct {oauth_api->scopes.xid}) as scopes\nwhere {oauth_api.name} ilike ?q?\ngroup by {oauth_api.xid}, {oauth_api.name}, {oauth_api.audience}\norder by ?sort:order(name, apps, scopes)=\"name desc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "sql-template", :source "select {oauth_api.xid} as xid,\n       {oauth_api.name},\n       {oauth_api.audience},\n       count(distinct {oauth_api->clients.xid}) as apps,\n       count(distinct {oauth_api->scopes.xid}) as scopes\nwhere {oauth_api.name} ilike ?q?\ngroup by {oauth_api.xid}, {oauth_api.name}, {oauth_api.audience}\norder by ?sort:order(name, apps, scopes)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
 
 (defn apis-table
   "sql-template console — params: q, sort, limit, offset"
@@ -118,3 +118,48 @@
   ([] (watch-connectors-table {}))
   ([{:keys [q sort limit offset] :as params} & {:as opts}]
    (embedded/watch-xsql connectors-table-op params opts)))
+
+(def ^:no-doc users-count-op
+  {:op "sql-template", :source "select count({user.xid}) as total"})
+
+(defn users-count
+  "sql-template console"
+  ([] (users-count {}))
+  ([params & {:as opts}]
+   (embedded/run-xsql users-count-op params opts)))
+
+(def ^:no-doc groups-count-op
+  {:op "sql-template", :source "select count({user_group.xid}) as total"})
+
+(defn groups-count
+  "sql-template console"
+  ([] (groups-count {}))
+  ([params & {:as opts}]
+   (embedded/run-xsql groups-count-op params opts)))
+
+(def ^:no-doc roles-count-op
+  {:op "sql-template", :source "select count({user_role.xid}) as total"})
+
+(defn roles-count
+  "sql-template console"
+  ([] (roles-count {}))
+  ([params & {:as opts}]
+   (embedded/run-xsql roles-count-op params opts)))
+
+(def ^:no-doc apps-count-op
+  {:op "sql-template", :source "select count({oauth_client.xid}) as total"})
+
+(defn apps-count
+  "sql-template console"
+  ([] (apps-count {}))
+  ([params & {:as opts}]
+   (embedded/run-xsql apps-count-op params opts)))
+
+(def ^:no-doc apis-count-op
+  {:op "sql-template", :source "select count({oauth_api.xid}) as total"})
+
+(defn apis-count
+  "sql-template console"
+  ([] (apis-count {}))
+  ([params & {:as opts}]
+   (embedded/run-xsql apis-count-op params opts)))

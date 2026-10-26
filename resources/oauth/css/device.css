@@ -11,189 +11,117 @@
  *   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
  */
 
-/* Synthigy OAuth - Device Code Flow (shared theme lives in common.css) */
+/* Synthigy OAuth: device code entry and confirmation */
 
 @import url('common.css');
 
-.device-card {
-  padding: 2.5rem 2.25rem;
-  max-width: 460px;
-  background: var(--sy-glass);
-  border: 1px solid var(--sy-glass-border);
-  border-radius: 16px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+.sy-otp {
+  display: flex;
+  align-items: center;
+  width: 100%;
 }
 
-.device-card .header {
+.sy-otp-group {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.sy-otp-sep {
   display: flex;
   justify-content: center;
-  align-items: center;
-  gap: 14px;
-  padding: 0.5rem 0 1rem;
-  user-select: none;
+  flex: 0 0 22px;
 }
 
-.device-card .sy-login-mark svg { height: 38px; }
-
-.device-card h1 {
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--sy-text);
-  user-select: none;
-}
-
-.device-card .description {
-  padding: 0.5rem 0 0.75rem;
-  text-align: center;
-  font-weight: 400;
-  font-size: 0.875rem;
-  color: var(--sy-text-m);
-  user-select: none;
-}
-
-/* Form */
-.device-form {
-  margin-block-end: 0;
-}
-
-/* Segmented PIN/OTP-style code entry — 8 boxes (XXXX-XXXX) */
-.device-form .code-boxes {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 1.25rem 0 0.75rem;
-}
-
-.device-form .code-box {
-  width: 2.75rem;
-  height: 3.25rem;
-  text-align: center;
-  font-size: 1.5rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: var(--sy-text);
-  background: var(--sy-glass);
-  border: 1px solid var(--sy-glass-border);
-  border-radius: 10px;
-  caret-color: var(--sy-text);
-  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
-}
-
-.device-form .code-box:focus {
-  outline: none;
-  border-color: var(--sy-field-border-active);
-  background: var(--sy-glass-hover);
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
-}
-
-/* filled confirm boxes — legible, non-interactive */
-.device-form .code-box[readonly] {
-  background: rgba(255, 255, 255, 0.04);
-  cursor: default;
-}
-
-/* the dash between the two groups of four */
-.device-form .code-sep {
-  width: 0.6rem;
+.sy-otp-sep::before {
+  content: '';
+  width: 8px;
   height: 2px;
   border-radius: 1px;
-  background: var(--sy-field-border);
-  flex: 0 0 auto;
+  background: var(--sy-text-mm);
 }
 
-@media (max-width: 420px) {
-  .device-form .code-boxes { gap: 0.3rem; }
-  .device-form .code-box { width: 2.1rem; height: 2.7rem; font-size: 1.2rem; }
+/* Joined slots: each box overlaps its neighbour's border, the hovered / focused one is lifted */
+.code-box {
+  position: relative;
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  height: 46px;
+  margin-left: -1px;
+  padding: 0;
+  font: 600 20px/1 var(--sy-mono);
+  text-align: center;
+  text-transform: uppercase;
+  color: var(--sy-text-p);
+  caret-color: var(--sy-text-pp);
+  background: var(--sy-field);
+  border: 1px solid var(--sy-border);
+  border-radius: 0;
+  outline: none;
+  transition: border-color 0.12s ease, background-color 0.12s ease, box-shadow 0.12s ease;
 }
 
-/* Error message */
-.device-form .error {
-  display: flex;
-  align-items: center;
-  min-height: 3rem;
-  width: 100%;
+.code-box:first-child {
+  margin-left: 0;
+  border-radius: var(--sy-radius) 0 0 var(--sy-radius);
 }
 
-.device-form .error .message {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  width: 100%;
-  padding: 0.6rem 0.85rem;
-  border-radius: 8px;
-  background: var(--sy-error-bg);
-  border: 1px solid var(--sy-error-border);
-  color: var(--sy-error);
-  font-size: 0.85rem;
-  font-weight: 500;
-  line-height: 1.35;
+.code-box:last-child {
+  border-radius: 0 var(--sy-radius) var(--sy-radius) 0;
 }
 
-.device-form .error .message::before {
-  content: "!";
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
+.code-box::selection {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.code-box:hover {
+  z-index: 1;
+  border-color: var(--sy-border-strong);
+  background: var(--sy-field-hover);
+}
+
+.code-box[aria-invalid='true'] {
+  z-index: 1;
+  border-color: color-mix(in srgb, var(--sy-error) 50%, var(--sy-border));
+}
+
+.code-box:focus {
+  z-index: 2;
+  border-color: var(--sy-focus);
+  background: var(--sy-field-focus);
+  box-shadow: 0 0 0 3px var(--sy-focus-ring);
+}
+
+.code-box[aria-invalid='true']:focus {
+  border-color: color-mix(in srgb, var(--sy-error) 70%, var(--sy-border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sy-error) 14%, transparent);
+}
+
+/* Confirm step: the code is settled, a plate to read, not a field to edit */
+.code-box[readonly] {
+  pointer-events: none;
+  color: var(--sy-text-pp);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--sy-border);
+}
+
+.code-box[readonly] + .code-box[readonly] {
+  border-left-color: var(--sy-border-subtle);
+}
+
+@media (max-width: 400px) {
+  .code-box {
+    height: 44px;
+    font-size: 18px;
+  }
+
+  .sy-otp-sep {
+    flex-basis: 16px;
+  }
+}
+
+/* Centred card: the field label follows the column */
+.sy-card--center .sy-label-row {
   justify-content: center;
-  width: 1.15rem;
-  height: 1.15rem;
-  border-radius: 50%;
-  background: var(--sy-error-strong);
-  color: #fff;
-  font-size: 0.7rem;
-  font-weight: 700;
-}
-
-/* Buttons */
-.device-form .actions {
-  display: flex;
-  justify-content: center;
-  gap: 0.75rem;
-  margin-top: 0.5rem;
-}
-
-.device-form .actions button {
-  min-width: 7rem;
-  height: 2.75rem;
-  padding: 0 1.25rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-/* primary (Continue / Confirm) — glassy pill */
-.device-form .actions .continue,
-.device-form .actions .confirm {
-  color: var(--sy-text);
-  background: var(--sy-glass);
-  border: 1px solid var(--sy-glass-border);
-}
-
-.device-form .actions .continue:hover,
-.device-form .actions .confirm:hover {
-  background: var(--sy-glass-hover);
-  color: #ffffff;
-  border-color: rgba(255, 255, 255, 0.22);
-}
-
-/* secondary (Cancel) — quiet text button */
-.device-form .actions .cancel {
-  color: var(--sy-text-m);
-  background: transparent;
-  border: 1px solid transparent;
-}
-
-.device-form .actions .cancel:hover {
-  color: var(--sy-text);
-}
-
-/* the two-button group renders inside a wrapping <div> */
-.device-form .actions > div {
-  display: flex;
-  gap: 0.75rem;
 }

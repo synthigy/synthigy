@@ -34,47 +34,6 @@
    [synthigy.oauth.token]
    [synthigy.util :as util]))
 
-(defn form-post-response
-  "Auto-submitting HTML form POST response (response_mode=form_post)."
-  [redirect-uri params]
-  (let [hidden-inputs (str/join "\n"
-                                (for [[k v] params]
-                                  (format "      <input type=\"hidden\" name=\"%s\" value=\"%s\"/>"
-                                          (name k) (str v))))]
-    {:status 200
-     :headers {"Content-Type" "text/html;charset=UTF-8"
-               "Cache-Control" "no-cache, no-store"
-               "Pragma" "no-cache"}
-     :body (str "<!DOCTYPE html>\n"
-                "<html>\n"
-                "<head><title>Submitting Authorization</title></head>\n"
-                "<body onload=\"document.forms[0].submit()\">\n"
-                "  <noscript>\n"
-                "    <p>JavaScript is required. Please click the button below.</p>\n"
-                "  </noscript>\n"
-                "  <form method=\"post\" action=\"" redirect-uri "\">\n"
-                hidden-inputs "\n"
-                "    <noscript><button type=\"submit\">Continue</button></noscript>\n"
-                "  </form>\n"
-                "</body>\n"
-                "</html>")}))
-
-(defn authorization-response
-  "Build the authorization response for the given response_mode."
-  [redirect-uri params response-mode]
-  (case response-mode
-    "form_post"
-    (form-post-response redirect-uri params)
-
-    "fragment"
-    {:status 302
-     :headers {"Location" (str redirect-uri "#" (codec/form-encode params))
-               "Cache-Control" "no-cache"}}
-
-    {:status 302
-     :headers {"Location" (str redirect-uri "?" (codec/form-encode params))
-               "Cache-Control" "no-cache"}}))
-
 (defn generate-code-challenge
   ([code-verifier] (generate-code-challenge code-verifier "S256"))
   ([code-verifier code-challenge-method]
@@ -171,11 +130,102 @@
           (cond-> {:state (core/encrypt state)}
             hint (assoc :login_hint hint))))))
 
+(defn authorize-code
+  "Answer a response_type=code request for an already validated client."
+  [request req-params client]
+  (let [{:keys [remote-addr]} request
+        {user-agent "user-agent"} (:headers request)
+        {cookie-session :idsrv/session
+         :keys [prompt state max_age response_mode redirect_uri]} req-params
+        client-id (id/extract client)
+        session (core/get-session cookie-session)
+        ;; never renew a killed or unknown session silently — revocation and session TTLs rely on it
+        session-live? (and (:active session) (some? (:resource-owner session)))
+        prompt-none? (= prompt "none")
+        prompt-login? (= prompt "login")
+        prompt-consent? (= prompt "consent")
+        prompt-select-account? (= prompt "select_account")
+        max-age-seconds (when max_age
+                          (try (Long/parseLong (str max_age))
+                               (catch Exception _ nil)))
+        session-auth-time (:authorized-at session)
+        auth-time-ms (when session-auth-time
+                       (if (instance? java.util.Date session-auth-time)
+                         (.getTime ^java.util.Date session-auth-time)
+                         (try (long session-auth-time) (catch Exception _ nil))))
+        session-too-old? (when (and max-age-seconds auth-time-ms)
+                           (> (- (System/currentTimeMillis) auth-time-ms)
+                              (* max-age-seconds 1000)))
+        silent? (and session-live? prompt-none? (not session-too-old?))
+        force-login? (or prompt-login? prompt-select-account? session-too-old?)
+        login-redirect (fn [flow-state]
+                         (let [code (gen-authorization-code)]
+                           (ac/create-code! code {:client client-id
+                                                  :agent user-agent
+                                                  :ip remote-addr
+                                                  :request req-params})
+                           {:status 302
+                            :headers {"Location" (login-location
+                                                  (core/get-client-login-url client)
+                                                  (assoc flow-state
+                                                         :authorization-code code
+                                                         :flow "authorization_code")
+                                                  req-params)
+                                      "Cache-Control" "no-cache"}}))]
+    (cond
+      ;; RFC 8252 §8.6: a loopback redirect can't prove which app it is — never answer it silently
+      (and prompt-none? (core/native-client? client))
+      (core/handle-request-error
+       {:request req-params
+        :type "interaction_required"
+        :description "A native client signs in interactively"})
+
+      (and prompt-none? (not session-live?))
+      (core/handle-request-error
+       {:request req-params
+        :type "login_required"
+        :description "User is not authenticated and prompt=none was requested"})
+
+      (and prompt-none? session-too-old?)
+      (core/handle-request-error
+       {:request req-params
+        :type "login_required"
+        :description (str "Authentication is older than max_age (" max_age " seconds)")})
+
+      silent?
+      (let [code (gen-authorization-code)
+            response-params (cond->
+                             {:code code
+                              :iss (core/domain+)}  ; RFC 9207
+                              (not-empty state) (assoc :state state))]
+        (ac/create-code! code {:issued? true
+                               :client client-id
+                               :agent user-agent
+                               :ip remote-addr
+                               :request req-params})
+        (mark-code-issued cookie-session code)
+        ;; the SPA's heartbeat — without this an actively renewing
+        ;; session reads as idle
+        (core/touch-session! cookie-session)
+        (core/authorization-response redirect_uri response-params response_mode))
+
+      force-login?
+      (assoc (login-redirect {:prompt prompt})
+             :cookies {"idsrv.session" {:value ""
+                                        :max-age 0
+                                        :path "/"}})
+
+      ;; TODO: full consent flow — for now treated like normal login
+      prompt-consent?
+      (login-redirect {:prompt prompt :force-consent true})
+
+      :else
+      (login-redirect {}))))
+
 (defn authorization-handler
   "OAuth 2.0 authorization endpoint handler."
   [request]
-  (let [{:keys [remote-addr params]} request
-        {user-agent "user-agent"} (:headers request)]
+  (let [{:keys [remote-addr params]} request]
     (log/info {:id ::authorize-requested
                :data {:action :requested
                       :subject :authorization-code
@@ -194,152 +244,39 @@
             (-> params
                 (split-spaces :scope)
                 (split-spaces :response_type))]
-        (cond
-          (empty? redirect_uri)
-          (core/handle-request-error
-           {:type "missing_redirect"
-            :request req-params})
+        (binding [core/*domain* (core/original-uri request)]  ; RFC 9207 issuer identification
+          (cond
+            (empty? redirect_uri)
+            (core/handle-request-error
+             {:type "missing_redirect"
+              :request req-params})
 
-          (empty? response_type)
-          (core/handle-request-error
-           {:type "missing_response_type"
-            :request req-params})
+            (empty? response_type)
+            (core/handle-request-error
+             {:type "missing_response_type"
+              :request req-params})
 
-          (contains? response_type "code")
-          (let [{cookie-session :idsrv/session
-                 :keys [prompt state max_age response_mode]} req-params
-                session (core/get-session cookie-session)
-                ;; never renew a killed or unknown session silently — revocation and session TTLs rely on it
-                session-live? (and (:active session) (some? (:resource-owner session)))
-                prompt-none? (= prompt "none")
-                prompt-login? (= prompt "login")
-                prompt-consent? (= prompt "consent")
-                prompt-select-account? (= prompt "select_account")
-                max-age-seconds (when max_age
-                                  (try (Long/parseLong (str max_age))
-                                       (catch Exception _ nil)))
-                session-auth-time (:authorized-at session)
-                auth-time-ms (when session-auth-time
-                               (if (instance? java.util.Date session-auth-time)
-                                 (.getTime ^java.util.Date session-auth-time)
-                                 (try (long session-auth-time) (catch Exception _ nil))))
-                session-too-old? (when (and max-age-seconds auth-time-ms)
-                                   (> (- (System/currentTimeMillis) auth-time-ms)
-                                      (* max-age-seconds 1000)))
-                silent? (and session-live? prompt-none? (not session-too-old?))
-                force-login? (or prompt-login? prompt-select-account? session-too-old?)]
-            (cond
-              (and prompt-none? (not session-live?))
-              (core/handle-request-error
-               {:request req-params
-                :type "login_required"
-                :description "User is not authenticated and prompt=none was requested"})
-
-              (and prompt-none? session-too-old?)
-              (core/handle-request-error
-               {:request req-params
-                :type "login_required"
-                :description (str "Authentication is older than max_age (" max_age " seconds)")})
-
-              (and silent? (contains? session :code))
-              (core/handle-request-error
-               {:request req-params
-                :type "invalid_request"
-                :description "Your session has unused access code active"})
-
-              silent?
-              (try
-                (let [client (validate-client req-params)
-                      client-id (id/extract client)
-                      code (gen-authorization-code)
-                      response-params (cond->
-                                       {:code code
-                                        :iss (core/domain+)}  ; RFC 9207
-                                        (not-empty state) (assoc :state state))]
-                  (ac/create-code! code {:issued? true
-                                         :client client-id
-                                         :agent user-agent
-                                         :ip remote-addr
-                                         :request req-params})
-                  (mark-code-issued cookie-session code)
-                  ;; the SPA's heartbeat — without this an actively renewing
-                  ;; session reads as idle
-                  (core/touch-session! cookie-session)
-                  (authorization-response redirect_uri response-params response_mode))
-                (catch clojure.lang.ExceptionInfo ex
-                  (core/handle-request-error (ex-data ex))))
-
-              force-login?
-              (try
-                (let [code (gen-authorization-code)
-                      client (validate-client req-params)
-                      client-id (id/extract client)
-                      login-url (core/get-client-login-url client)
-                      location (login-location login-url
-                                               {:authorization-code code
-                                                :flow "authorization_code"
-                                                :prompt prompt}
-                                               req-params)]
-                  (ac/create-code! code {:client client-id
-                                         :agent user-agent
-                                         :ip remote-addr
-                                         :request req-params})
-                  {:status 302
-                   :headers {"Location" location
-                             "Cache-Control" "no-cache"}
-                   :cookies {"idsrv.session" {:value ""
-                                              :max-age 0
-                                              :path "/"}}})
-                (catch clojure.lang.ExceptionInfo ex
-                  (core/handle-request-error (ex-data ex))))
-
-              ;; TODO: full consent flow — for now treated like normal login
-              prompt-consent?
-              (try
-                (let [code (gen-authorization-code)
-                      client (validate-client req-params)
-                      client-id (id/extract client)
-                      login-url (core/get-client-login-url client)
-                      location (login-location login-url
-                                               {:authorization-code code
-                                                :flow "authorization_code"
-                                                :prompt prompt
-                                                :force-consent true}
-                                               req-params)]
-                  (ac/create-code! code {:client client-id
-                                         :agent user-agent
-                                         :ip remote-addr
-                                         :request req-params})
-                  {:status 302
-                   :headers {"Location" location
-                             "Cache-Control" "no-cache"}})
-                (catch clojure.lang.ExceptionInfo ex
-                  (core/handle-request-error (ex-data ex))))
-
-              :else
-              (try
-                (let [code (gen-authorization-code)
-                      client (validate-client req-params)
-                      client-id (id/extract client)
-                      login-url (core/get-client-login-url client)
-                      location (login-location login-url
-                                               {:authorization-code code
-                                                :flow "authorization_code"}
-                                               req-params)]
-                  (ac/create-code! code {:client client-id
-                                         :agent user-agent
-                                         :ip remote-addr
-                                         :request req-params})
-                  {:status 302
-                   :headers {"Location" location
-                             "Cache-Control" "no-cache"}})
-                (catch clojure.lang.ExceptionInfo ex
-                  (core/handle-request-error (ex-data ex))))))
-
-          :else
-          (core/handle-request-error
-           {:type "server_error"
-            :request req-params}))))))
+            :else
+            (let [client (try (validate-client req-params)
+                              (catch clojure.lang.ExceptionInfo ex ex))]
+              (if (instance? clojure.lang.ExceptionInfo client)
+                (let [{t :type :as data} (ex-data client)]
+                  ;; never redirect a failure from before the redirect_uri check — it is unvalidated
+                  (if (:redirect-checked? data)
+                    (core/handle-request-error (assoc data :request req-params))
+                    (core/render-error-page (if (string? t) t "server_error")
+                                            (select-keys data [:client-name :invalid-value :redirect-uri]))))
+                (try
+                  (if (contains? response_type "code")
+                    (authorize-code request req-params client)
+                    (core/handle-request-error
+                     {:type "unsupported_response_type"
+                      :request req-params}))
+                  (catch clojure.lang.ExceptionInfo ex
+                    (let [data (ex-data ex)]
+                      (core/handle-request-error
+                       (cond-> (assoc data :request req-params)
+                         (nil? (:type data)) (assoc :type "server_error"))))))))))))))
 
 (defonce maintenance-agent (agent {:running true
                                    :period (util/seconds 30)}))

@@ -3,6 +3,118 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.4.0] — 2026-10-26
+
+Synthigy Tools 0.2.0 needs this engine: against 0.3.1 its Sign Out fails and
+the session stays signed in.
+
+### License
+- **The free threshold is EUR 3M** (was EUR 5M). Releases 0.3.1 and earlier keep
+  EUR 5M. See COMMERCIAL.md.
+- NOTICE now lists the self-hosted fonts (Inter, JetBrains Mono, SIL OFL 1.1),
+  and their license ships beside them as `OFL.txt`.
+
+### Security
+- **`sql-template` row-level security fixed (three bypasses).** Guard
+  parameters were bound out of order whenever a template had `?` after the
+  `WHERE` (for example `LIMIT ? OFFSET ?`), so a caller's own values landed in the
+  guard's principal slots and could select rows of other users. A joined entity
+  was guarded in the top-level `WHERE`, so a `->` join dropped parents whose
+  children are hidden. A second alias of the same entity was not guarded at
+  all. Every entity table reference, and every junction link, now reads through
+  a guarded view, with its parameters in place. A guard with nowhere to attach
+  fails the query instead of running unguarded. Templates containing
+  PostgreSQL dollar-quoted (`$$…$$`) or `E'…'` strings are now rejected with
+  `TEMPLATE_ERROR`; use a plain `'…'` literal.
+- **`response_mode=form_post` no longer reflects parameters unescaped.** The
+  auto-submitting form wrote `state` into the page as is, so a crafted silent
+  authorize request could run script on the engine's origin. Every value is now
+  escaped, the page carries a strict Content-Security-Policy, and `form_post` is
+  listed in discovery.
+- **Tokens no longer carry the session cookie.** The `sid` claim of id and access
+  tokens was the `idsrv.session` cookie value, so anyone holding a token could take
+  over the browser session. `sid` is now an opaque session id, and access and
+  refresh tokens no longer carry a `session` claim. Tokens issued before the
+  upgrade keep the old value.
+- **No redirect before the client is validated on `/oauth/authorize`.**
+  `prompt=none` without a session, and a stale `max_age`, used to redirect to any
+  `redirect_uri`, even for an unknown client. An unknown client or unregistered
+  redirect now gets the error page (RFC 6749 §4.1.2.1), and so does any failure
+  while the client is being looked up. Error redirects carry `iss` (RFC 9207),
+  and discovery says so.
+- **Loopback redirects match exactly unless RFC 8252 applies.** Any port is
+  allowed for a native app's loopback redirect, and for a web client's loopback
+  URI registered without a port while the engine itself runs on localhost. Every
+  other loopback URI matches its own port only, for CORS too. A native app's
+  `prompt=none` gets `interaction_required`. The console registers its localhost
+  Tools callbacks only on a localhost engine and removes them anywhere else.
+- **A logout without `id_token_hint` asks first.** The session cookie alone
+  used to end the session, so any site could sign a user out with an image or a
+  form. Without a hint, `/oauth/logout` now shows a Sign out? page, and only its
+  button ends the session (OIDC RP-Initiated Logout §2). A logout with a hint
+  is unchanged.
+- **Only an id_token is accepted as `id_token_hint`.** Access and refresh tokens
+  are signed by the same key, so a service holding a user's access token could
+  end that user's session with it. They are now refused with 400.
+- **The sign-in pages refuse to be framed.** The login, device activation, status,
+  account claim and logout pages send `frame-ancestors 'none'` and
+  `X-Frame-Options: DENY`.
+
+### Changed
+- **PostgreSQL JIT is off for engine connections.** Every pooled connection
+  runs `SET jit = off`. Measured on 100k users: JIT compilation added about 450 ms
+  to console and API queries that run in 70 to 200 ms without it.
+  `POSTGRES_JIT=on` keeps the server's own JIT setting.
+- **Logout follows OIDC RP-Initiated Logout.** An `id_token_hint` alone ends its
+  session, and an expired hint is accepted. `client_id` names the client when
+  there is no hint. `post_logout_redirect_uri` must be registered on that client,
+  and localhost is no longer always allowed. Logging out an already ended
+  session still answers, and a registered origin may POST it cross-origin.
+- **On plain-http localhost the session cookie is `SameSite=Lax` without
+  `Secure`**, so Safari keeps it in development. Everywhere else it stays
+  `Secure; SameSite=None`.
+- **A sign-in whose code was never exchanged no longer blocks silent renewal.**
+- **Console: one Synthigy Tools entry.** The console serves the static
+  `/synthigy-callback.html` and registers it on the Synthigy Tools app;
+  `/console/tools/callback` is gone.
+- **Clean system models: Synthigy 0.90.2, OAuth 0.2.12.** Fresh installs no
+  longer carry retired fields: User Group `Type`, User `Owner`, the old Person
+  Info profile claims, and the `currency`/`timeperiod`/`transit` attribute
+  types are gone. User `Type` gains `AI_AGENT`. Existing installs upgrade on
+  boot and keep the old columns and their data, inactive. The upgrade refuses
+  to run while any dataset still has an attribute of type currency, timeperiod
+  or transit. The console Groups page no longer shows a Type.
+- **XSQL parameter defaults are stricter.** An optional parameter can no longer
+  carry a default (`?q?:string="%"` is an error): a default always filtered, so
+  the `?` did nothing. String defaults must be double-quoted (`?q:string="%"`);
+  `'%'` used to bind the literal text `'%'` including the quotes. Both are
+  reported in the editor and rejected by the server.
+- **Clients sharing one browser session keep their own grants.** Signing in or
+  renewing with one client (for example Synthigy Tools) used to revoke every other
+  client's tokens on that session, and reusing one client's old refresh token ended
+  the whole session. Now each client's tokens, refresh token reuse and expiry
+  affect only that client; ending the session still revokes them all. A refresh
+  token is bound to its client: presenting it with another `client_id` is
+  `invalid_grant`.
+- **The refresh token carries its granted scope.** A refresh that asks for less
+  narrows only that access token, and a new refresh token always comes back,
+  even when `offline_access` is narrowed away; the next refresh without `scope`
+  gets the full grant again (RFC 6749 §6). A refresh can still never widen the grant. Refresh
+  tokens issued before the upgrade fall back to the session's stored scope.
+
+### Fixed
+- Token endpoint errors use the RFC 6749 §5.2 codes. An expired or unknown
+  refresh token or device code is `invalid_grant` (was `invalid_request`), and a
+  client not allowed the grant type gets `unauthorized_client`.
+- A refresh moved the grant to the identity audience when the request named no
+  `audience`: the refreshed access token lost the API's scopes. It now stays in
+  the audience of the refresh token.
+- A malformed `redirect_uri` answered 500; it now gets the error page.
+- The id_token `aud` was empty for sessions started in the console; it is now
+  the requesting client.
+- The SQL keyword-typo lint no longer flags aliases (`… AS groups`) or names in a
+  placeholder's argument list (`?sort:order(name, groups)`).
+
 ## [0.3.1] — 2026-10-19
 
 ### License

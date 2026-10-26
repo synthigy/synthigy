@@ -16,70 +16,217 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OAuth Error</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Authorization error · Acme</title>
   <link rel="icon" type="image/png" href="/oauth/images/favicon.png">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono&display=swap">
+  <link rel="preload" href="/oauth/css/fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
   <link rel="stylesheet" href="/oauth/css/error.css">
+  <style>
+    /* Your brand. The built-in pages put the Synthigy lockup (.sy-lockup) here. */
+    .acme-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      height: 100%;
+      padding-left: 14px;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--sy-text-pp);
+    }
+
+    .acme-mark svg {
+      width: 17px;
+      height: 17px;
+    }
+  </style>
 </head>
 <body>
   <!--
     CONTRACT
     ========
     The server redirects here as:  /login/default/error.html?error=<code>&secure=<bool>
-    (+ optional context keys, e.g. client-name, invalid-value). No POST, no token.
+    (+ optional context keys: client-name, invalid-value, redirect-uri). No POST, no token.
     `secure=true` → a potentially malicious client: warn "do not enter credentials".
     Every code is listed below and in the console: System -> Login pages -> Page reference.
+
+    The markup holds every part the page can show; the script fills them in and
+    removes the parts that do not apply to this error.
   -->
-  <div class="oauth-container">
-    <div class="error-card">
-      <div class="header"><h2 id="title">Authorization Error</h2></div>
-      <div class="message" id="message"></div>
-      <div class="error-code" id="code"></div>
-      <div class="help-text" id="help" hidden>
-        If you were redirected here unexpectedly, close this window.
+  <div class="sy-shell">
+    <header class="sy-bar">
+      <span class="acme-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 21.5 20h-19z"/></svg>
+        <span>Acme</span>
+      </span>
+      <span class="sy-spacer"></span>
+      <!-- The app that made the request, from ?client-name=. -->
+      <span class="sy-bar-chip" id="chip">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/></svg>
+        <span id="chip-name"></span>
+      </span>
+    </header>
+
+    <main class="sy-stage">
+      <div class="sy-card sy-card--wide">
+        <div class="sy-card-head">
+          <div class="sy-tile" id="tile"></div>
+          <div>
+            <h1 class="sy-card-title" id="title">Authorization error</h1>
+            <p class="sy-card-sub" id="sub"></p>
+          </div>
+        </div>
+
+        <div class="sy-card-body">
+          <!-- secure=true only -->
+          <div class="sy-msg tone-error" id="secure">
+            <span class="sy-msg-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+            </span>
+            <span class="sy-msg-text">Do not enter your password or any other credentials.</span>
+          </div>
+          <div class="sy-prose"><p id="message"></p></div>
+          <div class="sy-kv">
+            <span class="sy-kv-key">Error code</span>
+            <span class="sy-kv-val" id="code"></span>
+          </div>
+          <!-- redirect_missmatch / no_redirections with client-name + redirect-uri only -->
+          <div class="sy-dev" id="register">
+            <div class="sy-dev-label">For developers</div>
+            <p>To fix this, add this exact address to the Redirect URIs of <b id="register-client"></b>:</p>
+            <code class="sy-codeblock" id="register-uri" title="Redirect URI"></code>
+          </div>
+        </div>
+
+        <div class="sy-card-foot" id="foot"></div>
       </div>
-    </div>
+    </main>
+
+    <footer class="sy-status">
+      <span class="sy-status-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span data-sy-host></span>
+      </span>
+      <span class="sy-spacer"></span>
+      <span class="sy-status-item" id="status"><span id="status-code"></span></span>
+    </footer>
   </div>
 
-  <script src="/oauth/js/starfield.js"></script>
+  <!-- Runs before the shared scripts so the card is filled before the first paint. -->
   <script>
-    var q = new URLSearchParams(location.search);
-    var error = q.get('error') || 'unknown';
-    var secure = q.get('secure') === 'true';
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var error = q.get('error') || 'unknown';
+      var secure = q.get('secure') === 'true';
+      var clientName = q.get('client-name');
 
-    // Every code the server sends here — generated from oauth/page/error.clj.
-    var TITLES = {
-      client_not_registered: "Unknown Application",
-      corrupt_session: "Session Error",
-      invalid_login_page: "Configuration Error",
-      missing_redirect: "Invalid Request",
-      missing_response_type: "Invalid Request",
-      no_redirections: "Authorization Blocked",
-      redirect_missmatch: "Authorization Blocked",
-      unsupported_grant_type: "Unsupported Request"
-    };
-    var MESSAGES = {
-      client_not_registered: "This application is not recognized by the authorization server. Do not enter any credentials.",
-      corrupt_session: "Your authorization session could not be verified. Please try again or contact support.",
-      missing_redirect: "The authorization request is missing required information. Please contact the application developer.",
-      missing_response_type: "The authorization request is incomplete. Please contact the application developer.",
-      no_redirections: "This application has no configured redirect addresses. The authorization request cannot be completed safely.",
-      redirect_missmatch: "The return address provided by this application doesn't match its configuration. Do not enter any credentials.",
-      unsupported_grant_type: "The requested authorization method is not supported. Please contact the application developer.",
-      invalid_login_page: 'App "' + (q.get('client-name') || '?') + '" has an invalid Login page setting ("' +
-        (q.get('invalid-value') || '') + '"). It must name a login page bundle. Contact the application developer.'
-    };
+      function $(id) { return document.getElementById(id); }
 
-    document.getElementById('title').textContent = TITLES[error] || 'Authorization Error';
-    document.getElementById('message').textContent =
-      MESSAGES[error] || 'An error occurred during authorization. Please contact support.';
-    document.getElementById('code').textContent = 'Error: ' + error;
+      // Every code the server sends here, with the built-in page's copy.
+      // title / sub: card head; message: body; foot: what to do (not used when secure).
+      var PAGES = {
+        client_not_registered: {
+          title: 'Unknown application',
+          sub: 'No application with this client ID is registered here.',
+          message: 'This application is not recognized by the authorization server.'
+        },
+        corrupt_session: {
+          title: 'Session error',
+          sub: 'Your sign-in session could not be verified.',
+          message: 'Your authorization session could not be verified. Start the sign-in again from the application.',
+          foot: 'If this keeps happening, contact your administrator.'
+        },
+        invalid_login_page: {
+          title: 'Configuration error',
+          sub: "This application's login page setting is invalid.",
+          message: 'App "' + (clientName || '?') + '" has an invalid Login page setting ("' +
+            (q.get('invalid-value') || '') + '"). It must name a login page bundle (lowercase letters, digits and dashes).',
+          foot: 'Contact the developer of this application to fix it.'
+        },
+        missing_redirect: {
+          title: 'Invalid request',
+          sub: 'The request does not say where to return after sign-in.',
+          message: 'The authorization request is missing required information.',
+          foot: 'Contact the developer of this application to fix it.'
+        },
+        missing_response_type: {
+          title: 'Invalid request',
+          sub: 'The request does not say what it is asking for.',
+          message: 'The authorization request is incomplete: it carries no response type.',
+          foot: 'Contact the developer of this application to fix it.'
+        },
+        no_redirections: {
+          title: 'Authorization blocked',
+          sub: 'This application has no registered return address.',
+          message: 'The authorization request cannot be completed safely, so sign-in was stopped.'
+        },
+        redirect_missmatch: {
+          title: 'Authorization blocked',
+          sub: 'This application asked to return to an unregistered address.',
+          message: "The return address in this request doesn't match the application's configuration, so sign-in was stopped."
+        },
+        unsupported_grant_type: {
+          title: 'Unsupported request',
+          sub: 'This application asked for a sign-in method that is not supported.',
+          message: 'The requested authorization method is not supported by this server.',
+          foot: 'Contact the developer of this application to fix it.'
+        }
+      };
+      var FALLBACK = {
+        title: 'Authorization error',
+        sub: 'Sign-in could not continue.',
+        message: 'An error occurred during authorization.',
+        foot: 'If this keeps happening, contact support.'
+      };
 
-    if (secure) {
-      document.querySelector('.error-card').classList.add('security');
-      document.getElementById('message').classList.add('security');
-      document.getElementById('help').hidden = false;
-    }
+      // Lucide icons: shield-alert for a possible attack, wrench for a configuration fault.
+      var ICONS = {
+        shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+        wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>'
+      };
+      function svg(name) {
+        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"' +
+          ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICONS[name] + '</svg>';
+      }
+
+      var page = PAGES[error] || FALLBACK;
+      var tone = secure ? 'tone-error' : 'tone-warn';
+      var glyph = svg(secure ? 'shield' : 'wrench');
+
+      document.title = page.title + ' · Acme';
+      $('title').textContent = page.title;
+      $('sub').textContent = page.sub;
+      $('message').textContent = page.message;
+      $('code').textContent = error;
+      $('tile').classList.add(tone);
+      $('tile').innerHTML = glyph;
+      $('status').classList.add(tone);
+      $('status').insertAdjacentHTML('afterbegin', glyph);
+      $('status-code').textContent = error;
+      $('foot').textContent = secure
+        ? 'If you were redirected here unexpectedly, close this window.'
+        : page.foot || 'Contact the developer or administrator of this application.';
+
+      if (clientName) {
+        $('chip').title = clientName;
+        $('chip-name').textContent = clientName;
+      } else {
+        $('chip').remove();
+      }
+
+      if (!secure) $('secure').remove();
+
+      if (clientName && q.get('redirect-uri') &&
+          (error === 'redirect_missmatch' || error === 'no_redirections')) {
+        $('register-client').textContent = clientName;
+        $('register-uri').textContent = q.get('redirect-uri');
+      } else {
+        $('register').remove();
+      }
+    })();
   </script>
+  <script src="/oauth/js/starfield.js"></script>
+  <script src="/oauth/js/shell.js"></script>
 </body>
 </html>

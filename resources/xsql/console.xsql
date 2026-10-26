@@ -27,22 +27,21 @@ where {user.name} ilike ?q?
   and {user->groups.xid} in ?groups?[]
   and {user->roles.xid} in ?roles?[]
 group by {user.xid}, {user.name}, {user.active}, {user.type}
-order by ?sort:order(name, active, sessions, groups, roles)="name desc"
+order by ?sort:order(name, active, sessions, groups, roles)="name asc"
 limit ?limit:int=100
 offset ?offset:int=0
 
 @sql-template groups-table
 @watch
-@returns xid:string, name:string, active:boolean, type:string, users:int, roles:int
+@returns xid:string, name:string, active:boolean, users:int, roles:int
 select {user_group.xid} as xid,
        {user_group.name},
        {user_group.active},
-       {user_group.type},
        count(distinct {user_group->users.xid}) as users,
        count(distinct {user_group->roles.xid}) as roles
 where {user_group.name} ilike ?q?
-group by {user_group.xid}, {user_group.name}, {user_group.active}, {user_group.type}
-order by ?sort:order(name, active, users, roles)="name desc"
+group by {user_group.xid}, {user_group.name}, {user_group.active}
+order by ?sort:order(name, active, users, roles)="name asc"
 limit ?limit:int=100
 offset ?offset:int=0
 
@@ -56,7 +55,7 @@ select {user_role.xid} as xid,
        count(distinct {user_role->scopes.xid}) as scopes
 where {user_role.name} ilike ?q?
 group by {user_role.xid}, {user_role.name}, {user_role.active}
-order by ?sort:order(name, active, users, scopes)="name desc"
+order by ?sort:order(name, active, users, scopes)="name asc"
 limit ?limit:int=100
 offset ?offset:int=0
 
@@ -70,7 +69,7 @@ select {oauth_client.xid} as xid,
        count(distinct {oauth_client->apis.xid}) as apis
 where {oauth_client.name} ilike ?q?
 group by {oauth_client.xid}, {oauth_client.name}, {oauth_client.active}, {oauth_client.type}
-order by ?sort:order(name, active, apis)="name desc"
+order by ?sort:order(name, active, apis)="name asc"
 limit ?limit:int=100
 offset ?offset:int=0
 
@@ -84,7 +83,7 @@ select {oauth_api.xid} as xid,
        count(distinct {oauth_api->scopes.xid}) as scopes
 where {oauth_api.name} ilike ?q?
 group by {oauth_api.xid}, {oauth_api.name}, {oauth_api.audience}
-order by ?sort:order(name, apps, scopes)="name desc"
+order by ?sort:order(name, apps, scopes)="name asc"
 limit ?limit:int=100
 offset ?offset:int=0
 
@@ -111,3 +110,23 @@ where {auth_connector.name} ilike ?q?
 order by ?sort:order(priority, name, type, enabled)="priority asc, name asc"
 limit ?limit:int=100
 offset ?offset:int=0
+
+@sql-template users-count
+@returns total:int
+select count({user.xid}) as total
+
+@sql-template groups-count
+@returns total:int
+select count({user_group.xid}) as total
+
+@sql-template roles-count
+@returns total:int
+select count({user_role.xid}) as total
+
+@sql-template apps-count
+@returns total:int
+select count({oauth_client.xid}) as total
+
+@sql-template apis-count
+@returns total:int
+select count({oauth_api.xid}) as total

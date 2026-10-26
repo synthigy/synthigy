@@ -11,56 +11,10 @@
  *   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
  */
 
-/* Synthigy OAuth - Terminal Status Page (shared theme lives in common.css) */
+/* Synthigy OAuth: terminal status */
 
 @import url('common.css');
 
-.status-card {
-  padding: 2.5rem 2.25rem;
-  max-width: 460px;
-  text-align: center;
-  background: var(--sy-glass);
-  border: 1px solid var(--sy-glass-border);
-  border-radius: 16px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+.sy-card-body > * + * {
+  margin-top: 18px;
 }
-
-.status-card .header {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  gap: 0.9rem;
-  padding: 0.5rem 0 1rem;
-  user-select: none;
-}
-
-.status-card .icon {
-  width: 3rem;
-  height: 3rem;
-  color: var(--sy-icon-active);   /* neutral, monochrome */
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.status-card .icon svg { width: 100%; height: 100%; }
-
-.status-card h2 {
-  color: var(--sy-text);
-  font-weight: 600;
-  font-size: 1.25rem;
-}
-
-.status-card .message {
-  padding: 0.75rem 0 0.25rem;
-  font-weight: 400;
-  font-size: 0.9375rem;
-  line-height: 1.6;
-  color: var(--sy-text-m);
-  user-select: none;
-  white-space: pre-line;   /* render the "\n" in copy as line breaks */
-}
-
-.status-card .message b { color: var(--sy-text); font-weight: 600; }

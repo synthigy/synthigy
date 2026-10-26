@@ -7,18 +7,29 @@ browser. Synthigy answers those calls only for origins it knows:
 - the origin of every **redirect URI** registered on an active OAuth client.
   Registering `https://app.example.com/callback` allows
   `https://app.example.com`;
-- for a loopback redirect (`http://localhost:8000`), **any port** on the same
-  scheme and host — `http://localhost:3001` works too. `127.0.0.1` is a
+- for a loopback redirect registered without a port
+  (`http://localhost/callback`), **any port** on the same scheme and host, while
+  the engine itself runs on localhost: `http://localhost:3001` works too. With a
+  port (`http://localhost:8000`) only that origin is allowed. `127.0.0.1` is a
   different host and needs its own registration;
+- the desktop app's webview origins, `tauri://localhost` and
+  `http://tauri.localhost`, always;
 - anything listed in `SYNTHIGY_SERVER_ALLOWED_ORIGINS` (comma-separated), for
-  origins that call Synthigy without logging anyone in:
+  pages that read public data without an OAuth client of their own:
 
 ```bash
 SYNTHIGY_SERVER_ALLOWED_ORIGINS=https://status.example.com,https://docs.example.com
 ```
 
 Other origins get no CORS headers, so the browser refuses to read the
-response. Server-to-server calls (a backend using an SDK) are not affected —
+response.
+
+Cross-origin calls never carry cookies: Synthigy does not send
+`Access-Control-Allow-Credentials`, so a fetch with `credentials: 'include'`
+from another origin is refused. Send the access token in the `Authorization`
+header instead.
+
+Server-to-server calls (a backend using an SDK) are not affected —
 CORS is a browser rule. Discovery (`/.well-known/*`) stays readable from any
 origin.
 

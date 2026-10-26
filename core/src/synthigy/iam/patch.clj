@@ -68,14 +68,22 @@
               r))
           (core/get-relations model))))
 
+(defn person-info-claims
+  "The profile-claim-attrs whose Person Info column exists in the deployed model."
+  []
+  (let [columns (into #{}
+                      (map (comp keyword naming/normalize-name :name))
+                      (:attributes (core/get-entity (dataset/deployed-model) (id/entity :iam/person-info))))]
+    (filterv (comp columns first) profile-claim-attrs)))
+
 (defn query-pending
-  "SQL for the users still needing a profile, given both link relations."
-  [pi-rel pp-rel]
+  "SQL for the users still needing a profile, given both link relations and the claims to copy."
+  [pi-rel pp-rel claims]
   (let [pi-link  (naming/relation->table-name pi-rel)
         pp-link  (naming/relation->table-name pp-rel)
         pi-fk    (naming/entity->relation-field (:to pi-rel))
         user-fk  (naming/entity->relation-field (:from pi-rel))
-        cols     (str/join ", " (map (fn [[c _]] (str "pi.\"" (name c) "\"")) profile-claim-attrs))]
+        cols     (str/join ", " (map (fn [[c _]] (str "pi.\"" (name c) "\"")) claims))]
     (jdbc/execute!
      (:datasource *db*)
      [(format
@@ -93,15 +101,17 @@
    claim values."
   []
   (let [pi-rel (o2o-relation (id/entity :iam/person-info))
-        pp-rel (o2o-relation (id/entity :iam/user-public-profile))]
-    (if (and pi-rel pp-rel)
-      (query-pending pi-rel pp-rel)
+        pp-rel (o2o-relation (id/entity :iam/user-public-profile))
+        claims (person-info-claims)]
+    (if (and pi-rel pp-rel (seq claims))
+      (query-pending pi-rel pp-rel claims)
       (do (log/info {:id ::public-profiles-not-deployed
                      :data {:action :skipped
                             :subject :user-public-profile
                             :person-info? (some? pi-rel)
-                            :public-profile? (some? pp-rel)}}
-                    "Skipping public profile backfill — relations not deployed")
+                            :public-profile? (some? pp-rel)
+                            :claim-columns (count claims)}}
+                    "Skipping public profile backfill — relations or claim columns not deployed")
           []))))
 
 (defn profile-row

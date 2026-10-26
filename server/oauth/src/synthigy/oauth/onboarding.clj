@@ -152,7 +152,7 @@
   [client return-url]
   (let [{{redirections "redirections"} :settings} client]
     (or (some #(= (core/get-base-uri return-url) %) redirections)
-        (core/loopback-redirect-matches? return-url redirections))))
+        (core/loopback-redirect-matches? return-url redirections (core/native-client? client)))))
 
 (defn onboard-handler
   "POST /oauth/onboard {xid, reset?, ttl_seconds?, methods?, return_url?} — mint a one-time claim URL."

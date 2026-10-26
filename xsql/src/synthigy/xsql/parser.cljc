@@ -827,19 +827,15 @@
               (recur st' (conj children id)))
             [(container :meta-key start children) st]))))))
 
-;; OrderSpec → Identifier ("asc" | "desc")
+;; OrderSpec → Identifier ("asc" | "desc")?
 
 (defn parse-order-spec [st]
   (let [start (peek-tok st)
         [id st] (expect st :identifier "expected identifier in order-by")
-        children [id]
-        [dir st]
-        (cond
-          (or (id-text=? st "asc") (id-text=? st "desc"))
-          (consume-leaf st)
-          :else
-          [(error-node (peek-tok st) "expected asc or desc") st])
-        children (conj children dir)]
+        [children st]
+        (if (or (id-text=? st "asc") (id-text=? st "desc"))
+          (let [[dir st] (consume-leaf st)] [[id dir] st])
+          [[id] st])]
     [(container :order-spec start children) st]))
 
 ;; ── ScalarFilter family ─────────────────────────────────────────────────

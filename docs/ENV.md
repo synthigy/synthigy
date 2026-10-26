@@ -57,6 +57,7 @@ The `postgres` and `postgres-clickhouse` bundles. Synthigy never creates the dat
 | `POSTGRES_PASSWORD` |  | Password. |
 | `POSTGRES_POOL_SIZE` | `20` | Connections in the main pool. |
 | `POSTGRES_DRAINER_POOL_SIZE` | `2` | Connections of the separate pool that writes audit history. |
+| `POSTGRES_JIT` | `off` | PostgreSQL JIT for engine connections. `on` restores the server's own setting. Off by default because the engine's short queries pay hundreds of milliseconds of JIT compile time. |
 
 ## Logs and traffic (local)
 

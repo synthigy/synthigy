@@ -80,7 +80,6 @@
   {:slug "connectors" :entity :auth_connector :key :iam/auth-connector
    :label "Connectors" :icon :server
    :table {:query cx/connectors-table
-           :watch cx/watch-connectors-table
            :sortable #{"priority" "name" "type" "enabled"}}
    :subtitle (str "The credential-verification chain for password logins, in "
                   "execution order. The first connector that recognises a "

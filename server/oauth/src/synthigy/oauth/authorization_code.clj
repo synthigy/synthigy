@@ -131,6 +131,8 @@
        (ex-info
         "Client missing redirections"
         {:type "no_redirections"
+         :client-name (:name client)
+         :redirect-uri redirect_uri
          :request request}))
       ;;
       (empty? redirect_uri)
@@ -141,11 +143,13 @@
          :request request}))
       ;;
       (and (not-any? #(= base-redirect-uri %) redirections)
-           (not (core/redirect-allowed? redirect_uri redirections)))
+           (not (core/redirect-allowed? redirect_uri redirections (core/native-client? client))))
       (throw
        (ex-info
         "Client provided uri doesn't match available redirect URI(s)"
         {:type "redirect_missmatch"
+         :client-name (:name client)
+         :redirect-uri redirect_uri
          :request request}))
       ;;
       (not (contains? grants grant))
@@ -153,6 +157,7 @@
        (ex-info
         "Client doesn't support authorization_code flow"
         {:type "access_denied"
+         :redirect-checked? true
          :request request}))
       ;;
       :else
@@ -246,7 +251,7 @@
         (not active)
         (do
           (log/debug {:id ::resource-owner-inactive
-                      :data {:session session}}
+                      :data {:session (core/short-id session)}}
                      "Resource owner is not active")
           (delete code)
           (core/kill-session session)

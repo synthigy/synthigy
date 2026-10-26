@@ -22,6 +22,7 @@
    [synthigy.transit :as transit]
    [synthigy.log :as log]
    [clojure.walk :refer [keywordize-keys]]
+   [hiccup2.core :as hiccup]
    [nano-id.core :as nano-id]
    [ring.util.codec :as codec]
    [synthigy.dataset :as dataset]
@@ -150,6 +151,23 @@
   (when session
     (dataset/get-entity (id/entity :oauth/session) {:id session} selections)))
 
+(defn session-sid
+  "Public id of `session` for token `sid` claims; the session id is the cookie and stays in the engine."
+  [session]
+  (get (session-row session {(id/key) nil}) (id/key)))
+
+(defonce sid-sessions
+  (atom (cache/lru-cache-factory {} :threshold 4096)))
+
+(defn sid-session
+  "Session id behind a token's public `sid`, or nil."
+  [sid]
+  (when (some? sid)
+    (or (cache/lookup @sid-sessions sid)
+        (when-let [session (:id (dataset/get-entity (id/entity :oauth/session) {(id/key) sid} {:id nil}))]
+          (swap! sid-sessions cache/miss sid session)
+          session))))
+
 (defn session-context
   [session]
   (:context (session-row session {:context nil})))
@@ -181,7 +199,7 @@
 (defmethod sign-token :default
   [session token-key data]
   (log/error {:id ::sign-token-no-method
-              :data {:session session :token-key token-key}}
+              :data {:session (short-id session) :token-key token-key}}
              "Couldn't sign token (no method)")
   data)
 
@@ -319,11 +337,13 @@
            :error_description (str/join "\n" description)})})
 
 (defn get-base-uri
-  "Returns the base URI without query parameters from the given URL."
+  "Returns the base URI without query parameters from the given URL; nil when malformed."
   [url]
   (when (not-empty url)
-    (let [uri (java.net.URI. url)]
-      (str (java.net.URI. (.getScheme uri) (.getAuthority uri) (.getPath uri) nil nil)))))
+    (try
+      (let [uri (java.net.URI. url)]
+        (str (java.net.URI. (.getScheme uri) (.getAuthority uri) (.getPath uri) nil nil)))
+      (catch java.net.URISyntaxException _ nil))))
 
 (defn localhost-redirect?
   "Returns true if the URI is a loopback redirect (localhost or 127.0.0.1)."
@@ -344,18 +364,37 @@
         (str (java.net.URI. (.getScheme u) nil (.getHost u) -1 (.getPath u) nil nil)))
       (catch Exception _ nil))))
 
+(defn port-free?
+  "Whether a URI names no port, the RFC 8252 §7.3 form of a loopback registration."
+  [uri]
+  (try (= -1 (.getPort (java.net.URI. uri)))
+       (catch Exception _ false)))
+
+(defn local-engine?
+  "True when the engine runs on loopback: its root URL, else the bound request origin; unknown counts as local."
+  []
+  (let [origin (or (not-empty (str env/iam-root-url)) *domain*)]
+    (or (nil? origin) (boolean (localhost-redirect? origin)))))
+
+(defn port-free-registrations
+  "Registrations whose loopback port is exempt: all of a native client's, a web client's port-less ones on a local engine."
+  [redirections native?]
+  (cond
+    native?         redirections
+    (local-engine?) (filter port-free? redirections)))
+
 (defn loopback-redirect-matches?
-  "RFC 8252 §7.3: loopback redirect_uri matches a registered scheme+host+path — only the port is exempt."
-  [redirect-uri redirections]
+  "RFC 8252 §7.3: loopback redirect_uri matches a port-exempt registration on scheme+host+path."
+  [redirect-uri redirections native?]
   (when (localhost-redirect? redirect-uri)
     (when-let [target (strip-port redirect-uri)]
-      (boolean (some #(= target (strip-port %)) redirections)))))
+      (boolean (some #(= target (strip-port %)) (port-free-registrations redirections native?))))))
 
 (defn redirect-allowed?
-  "Exact match against registered redirections, or a loopback match ignoring the port."
-  [uri redirections]
+  "Exact match against registered redirections, or a loopback match ignoring the port where RFC 8252 allows it."
+  [uri redirections native?]
   (boolean (or (some #{uri} redirections)
-               (loopback-redirect-matches? uri redirections))))
+               (loopback-redirect-matches? uri redirections native?))))
 
 (defn uri-origin
   "scheme://host[:port] of a URI, or nil."
@@ -383,11 +422,11 @@
                        (remove native-client?)
                        (mapcat #(get-in % [:settings "redirections"])))]
     {:exact (into #{} (keep uri-origin) (concat redirects native-app-origins env/allowed-origins [env/iam-root-url (domain+)]))
-     :loopback (into #{} (comp (filter localhost-redirect?) (keep strip-port) (keep uri-origin)) redirects)
+     :loopback (into #{} (comp (filter localhost-redirect?) (filter port-free?) (keep strip-port) (keep uri-origin)) redirects)
      :loaded-at (System/currentTimeMillis)}))
 
 (defn origin-allowed?
-  "True for an origin of an active client's redirect URI (any port on loopback, RFC 8252) or SYNTHIGY_SERVER_ALLOWED_ORIGINS."
+  "True for an origin of an active client's redirect URI (any port for a port-less loopback one on a local engine) or SYNTHIGY_SERVER_ALLOWED_ORIGINS."
   [origin]
   (let [{:keys [exact loopback loaded-at]} @browser-origins
         {:keys [exact loopback]} (if (and loaded-at (< (- (System/currentTimeMillis) loaded-at) client-cache-ttl-ms))
@@ -396,6 +435,7 @@
     (boolean
      (or (contains? exact origin)
          (and (localhost-redirect? origin)
+              (local-engine?)
               (contains? loopback (some-> (strip-port origin) uri-origin)))))))
 
 (defn validate-resource-owner
@@ -585,7 +625,7 @@
                                       request
                                       (:request (get-session session)))
         base-redirect-uri (get-base-uri redirect_uri)
-        context (select-keys error-data [:client-name :invalid-value])]
+        context (select-keys error-data [:client-name :invalid-value :redirect-uri])]
     (when session (remove-session session))
     (case t
       ;; RFC 6749 §4.1.2.1: invalid/missing redirect_uri MUST NOT redirect — render error page
@@ -603,10 +643,59 @@
        :headers {"Location" (str base-redirect-uri "?"
                                  (codec/form-encode
                                   (cond->
-                                   {:error t}
+                                   {:error t
+                                    :iss (domain+)}
                                     description (assoc :error_description description)
                                     state (assoc :state state))))
                  "Cache-Control" "no-cache"}})))
+
+(def form-post-script "document.forms[0].submit();")
+
+(def form-post-csp
+  (str "default-src 'none'; base-uri 'none'; script-src 'sha256-"
+       (.encodeToString (Base64/getEncoder)
+                        (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                 (.getBytes ^String form-post-script "UTF-8")))
+       "'"))
+
+(defn form-post-page
+  [redirect-uri params]
+  (str "<!DOCTYPE html>\n"
+       (hiccup/html
+        [:html
+         [:head [:meta {:charset "utf-8"}] [:title "Submitting Authorization"]]
+         [:body
+          [:form {:method "post" :action redirect-uri}
+           (for [[k v] params]
+             [:input {:type "hidden" :name (name k) :value (str v)}])
+           [:noscript
+            [:p "JavaScript is required. Please click the button below."]
+            [:button {:type "submit"} "Continue"]]]
+          [:script (hiccup/raw form-post-script)]]])))
+
+(defn authorization-response
+  "Answer an authorization request in its response_mode: query, fragment or form_post."
+  ([redirect-uri params response-mode]
+   (authorization-response redirect-uri params response-mode nil))
+  ([redirect-uri params response-mode cookies]
+   (cond-> (case response-mode
+             "form_post"
+             {:status 200
+              :headers {"Content-Type" "text/html;charset=UTF-8"
+                        "Content-Security-Policy" form-post-csp
+                        "Cache-Control" "no-cache, no-store"
+                        "Pragma" "no-cache"}
+              :body (form-post-page redirect-uri params)}
+
+             "fragment"
+             {:status 302
+              :headers {"Location" (str redirect-uri "#" (codec/form-encode params))
+                        "Cache-Control" "no-cache"}}
+
+             {:status 302
+              :headers {"Location" (str redirect-uri "?" (codec/form-encode params))
+                        "Cache-Control" "no-cache"}})
+     cookies (assoc :cookies cookies))))
 
 (def session-touch-ms
   "How stale `last_seen` may get before a request re-stamps it."
@@ -781,6 +870,18 @@
    (or forwarded-proto (name scheme))
    (or forwarded-host host original-uri)))
 
+(defn loopback-http?
+  "True when the engine is reached over plain http on loopback, where Safari drops Secure cookies."
+  ([] (loopback-http? nil))
+  ([request]
+   (let [origin (or (not-empty (str env/iam-root-url))
+                    (when (or (:scheme request) (get-in request [:headers "x-forwarded-proto"]))
+                      (original-uri request))
+                    *domain*)]
+     (boolean (and origin
+                   (str/starts-with? origin "http://")
+                   (localhost-redirect? origin))))))
+
 (defn parse-body
   "Parse a request body by Content-Type (transit/edn/JSON); nil on any bad body."
   [request]
@@ -855,7 +956,7 @@
                             :absolute-expired)]
              :when reason]
        (log/debug {:id ::session-timed-out
-                   :data {:session session :reason reason}}
+                   :data {:session (short-id session) :reason reason}}
                   "Session timed out")
        (kill-session session)))))
 

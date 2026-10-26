@@ -300,6 +300,29 @@
                  ":order(col_a, col_b) for a caller-chosen one"))
           :from from :to to})))
 
+(defn quoted-string? [raw]
+  (and (>= (count raw) 2) (str/starts-with? raw "\"") (str/ends-with? raw "\"")))
+
+(defn default-errors
+  "`{:message :from :to}` for a default on an optional param and an unquoted string default."
+  [named]
+  (let [optional-names (into #{} (comp (filter :optional?) (map :name)) named)]
+    (concat
+     (for [{:keys [name default] :as o} named
+           :when (and default (optional-names name))]
+       {:message (str "?" name "? is optional, so it can't have a default — drop `?` "
+                      "to always filter, or drop `=" default "` to skip the predicate when absent")
+        :from (:from o) :to (:to o)})
+     (for [{:keys [name default raw-type type] :as o} named
+           :when (and default
+                      (not (str/starts-with? default "["))
+                      (or (= :string type) (nil? type))
+                      (not (quoted-string? default)))]
+       {:message (str "?" name (when raw-type (str ":" raw-type))
+                      " default must be double-quoted — write =\""
+                      (str/replace default #"^'|'$" "") "\"")
+        :from (:from o) :to (:to o)}))))
+
 (defn analyze
   "Analyze a raw SQL template's parameter use into `{:mode :params :positional-count :errors :warnings}`."
   [raw]
@@ -357,7 +380,8 @@
                         {:message (str "Template mixes named (?name) and "
                                        "positional (?) placeholders — use one style")
                          :from (:from o) :to (:to o)}))
-                (into (identifier-position-errors raw named)))
+                (into (identifier-position-errors raw named))
+                (into (default-errors named)))
             warnings
             (vec (for [p params
                        t (:unknown-types p)
@@ -526,7 +550,7 @@
         (#{:int :integer :float :number :currency :boolean} type))
     (try (edn/read-string raw) (catch #?(:clj Exception :cljs :default) _ raw))
     :else
-    (if (and (>= (count raw) 2) (str/starts-with? raw "\"") (str/ends-with? raw "\""))
+    (if (quoted-string? raw)
       (subs raw 1 (dec (count raw)))
       raw)))
 
@@ -691,6 +715,9 @@
 
       (not (or (nil? params) (map? params)))
       {:errors ["Named-parameter template requires params as an object {name: value}"]}
+
+      (seq (default-errors named))
+      {:errors (mapv :message (default-errors named))}
 
       :else
       (let [pmap    (->> params

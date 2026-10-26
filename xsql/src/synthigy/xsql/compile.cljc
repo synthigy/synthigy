@@ -665,7 +665,7 @@
                          dir (last (filter #(and (= :identifier (:node %))
                                                  (#{"asc" "desc"} (:text %)))
                                            (:children spec)))]
-                     [(:text id) (:text dir)]))
+                     [(:text id) (or (:text dir) "asc")]))
                  specs)}))
 
       "_distinct"

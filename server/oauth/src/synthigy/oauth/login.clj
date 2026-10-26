@@ -20,63 +20,23 @@
    [environ.core :refer [env]]
    [ring.util.codec :as codec]
    [synthigy.iam :as iam]
+   [synthigy.iam.encryption :as encryption]
    [synthigy.oauth.authorization-code :as ac]
    [synthigy.oauth.core :as core]
    [synthigy.oauth.device-code :as dc]
    [synthigy.oauth.page.login :refer [login-html]]
-   [synthigy.oauth.token :as token]))
-
-(defn form-post-response
-  "Auto-submitting HTML form for response_mode=form_post."
-  [redirect-uri params]
-  (let [hidden-inputs (str/join "\n"
-                                (for [[k v] params]
-                                  (format "      <input type=\"hidden\" name=\"%s\" value=\"%s\"/>"
-                                          (name k) (str v))))]
-    {:status 200
-     :headers {"Content-Type" "text/html;charset=UTF-8"
-               "Cache-Control" "no-cache, no-store"
-               "Pragma" "no-cache"}
-     :body (str "<!DOCTYPE html>\n"
-                "<html>\n"
-                "<head><title>Submitting Authorization</title></head>\n"
-                "<body onload=\"document.forms[0].submit()\">\n"
-                "  <noscript>\n"
-                "    <p>JavaScript is required. Please click the button below.</p>\n"
-                "  </noscript>\n"
-                "  <form method=\"post\" action=\"" redirect-uri "\">\n"
-                hidden-inputs "\n"
-                "    <noscript><button type=\"submit\">Continue</button></noscript>\n"
-                "  </form>\n"
-                "</body>\n"
-                "</html>")}))
-
-(defn authorization-response
-  "Generate authorization response based on response_mode with cookies."
-  [redirect-uri params response-mode cookies]
-  (let [base-response
-        (case response-mode
-          "form_post"
-          (form-post-response redirect-uri params)
-
-          "fragment"
-          {:status 302
-           :headers {"Location" (str redirect-uri "#" (codec/form-encode params))}}
-
-          {:status 302
-           :headers {"Location" (str redirect-uri "?" (codec/form-encode params))}})]
-    (if cookies
-      (assoc base-response :cookies cookies)
-      base-response)))
+   [synthigy.oauth.page.logout :as page.logout]))
 
 ;; No Max-Age/Expires = browser-session cookie (RFC 6265); never write "Expires=Session", it's malformed.
 (defn session-cookie
-  [session]
-  {"idsrv.session" {:value session
-                    :path "/"
-                    :http-only true
-                    :secure true
-                    :same-site :none}})
+  ([session] (session-cookie session nil))
+  ([session request]
+   {"idsrv.session" (merge {:value session
+                            :path "/"
+                            :http-only true}
+                           (if (core/loopback-http? request)
+                             {:secure false :same-site :lax}
+                             {:secure true :same-site :none}))}))
 
 (defn abort-authorization!
   "RFC 6749 §4.1.2.1: send the client its error the way a code would have been sent."
@@ -89,7 +49,7 @@
       (log/info {:id ::authorization-aborted
                  :data {:action :revoked :subject :authorization-code :error error}}
                 "Authorization abandoned by the resource owner")
-      (authorization-response
+      (core/authorization-response
        redirect-uri
        (cond-> {:error error
                 :iss (core/domain+)}          ; RFC 9207 — also on error responses
@@ -267,7 +227,7 @@
                                (merge {:ok true}
                                       (json-success-redirect redirect-uri params response-mode))
                                cookies)
-                    (authorization-response redirect-uri params response-mode cookies)))
+                    (core/authorization-response redirect-uri params response-mode cookies)))
 
                 :else
                 (if json?
@@ -377,78 +337,107 @@
              (str (if (str/includes? uri "?") "&" "?")
                   (codec/form-encode {:state state})))))
 
+(defn hint-claims
+  "Claims of an id_token_hint this engine signed; expired hints count (RP-Initiated Logout §2)."
+  [id-token-hint]
+  (when (not-empty id-token-hint)
+    (let [claims (try (encryption/unsign-data id-token-hint)
+                      (catch Exception _ nil))]
+      ;; access and refresh tokens are engine-signed too — only an id_token names a session to end
+      (when (and (map? claims) (not-any? #(contains? claims %) [:scope :client_id :value]))
+        claims))))
+
+(defn hint-client-id
+  [{:keys [azp aud]}]
+  (or azp (if (sequential? aud) (first aud) aud)))
+
+(defn end-session!
+  [session]
+  (when (:active (core/get-session session))
+    (let [{:keys [code flow]} (core/get-session session)
+          resource-owner (core/get-session-resource-owner session)
+          {client-id :id} (core/get-session-client session)]
+      (when code
+        (case flow
+          "authorization_code" (ac/delete code)
+          "device_code" (dc/delete code)
+          nil))
+      (log/info {:id ::logged-out
+                 :user-xid (:xid resource-owner)
+                 :data {:action :logged-out
+                        :subject :session
+                        :session (core/short-id session)
+                        :client client-id
+                        :flow flow}}
+                "User logged out")
+      (core/kill-session session))))
+
+(def logout-confirm-ttl-ms (* 10 60 1000))
+
+(defn logout-confirm-token [session]
+  (core/encrypt {:session session :exp (+ (System/currentTimeMillis) logout-confirm-ttl-ms)}))
+
+(defn logout-confirmed?
+  "Whether a POSTed confirm token is the one this engine rendered for `session`, unexpired."
+  [{:keys [request-method params]} session]
+  (let [{s :session exp :exp} (some-> (:confirm params) not-empty core/decrypt)]
+    (boolean (and (= :post request-method)
+                  session
+                  (= s session)
+                  (number? exp)
+                  (< (System/currentTimeMillis) exp)))))
+
 (defn logout-handler
-  "OAuth logout: terminate the session and optionally redirect to post_logout_redirect_uri."
+  "OIDC RP-Initiated Logout: end the hinted (or cookie) session, then redirect to a registered post_logout_redirect_uri."
   [request]
   (let [{:keys [params]} request
-        {:keys [post_logout_redirect_uri id_token_hint state]
+        {:keys [post_logout_redirect_uri id_token_hint state client_id]
          idsrv-session :idsrv/session} params
-        session (or (token/get-token-session :id_token id_token_hint) idsrv-session)
-        {client_id :id} (core/get-session-client session)
-        {{valid-redirections "logout-redirections"} :settings} (core/get-client client_id)
-        post-redirect-ok? (some #(when (= % post_logout_redirect_uri) true) valid-redirections)]
+        claims (hint-claims id_token_hint)
+        hinted-client (hint-client-id claims)
+        session (or (core/sid-session (:sid claims)) idsrv-session)
+        client-id (or (not-empty client_id)
+                      hinted-client
+                      (:id (core/get-session-client session)))
+        logout-client (core/get-client client-id)
+        logout-redirections (get-in logout-client [:settings "logout-redirections"])
+        bad-request (fn [message]
+                      {:status 400
+                       :headers {"Content-Type" "text/html"}
+                       :body (json/write-str message)})
+        clear-cookie (when (and idsrv-session (= session idsrv-session))
+                       {"idsrv.session" {:value "" :max-age 0 :path "/"}})]
     (cond
-      (nil? session)
-      {:status 400
-       :headers {"Content-Type" "text/html"}
-       :body (json/write-str "Session is not active")}
+      (and (not-empty id_token_hint) (nil? claims))
+      (bad-request "Provided 'id_token_hint' is not valid")
 
-      (and (nil? id_token_hint) (nil? idsrv-session))
-      {:status 400
-       :headers {"Content-Type" "text/html"}
-       :body (json/write-str "Token is not valid")}
+      (and (not-empty client_id) hinted-client (not= client_id hinted-client))
+      (bad-request "Provided 'client_id' does not match 'id_token_hint'")
 
-      ;; Invalid redirect URI (localhost always allowed per RFC 8252)
-      (and (some? post_logout_redirect_uri)
-           (not post-redirect-ok?)
-           (not (core/localhost-redirect? post_logout_redirect_uri)))
-      {:status 400
-       :headers {"Content-Type" "text/html"}
-       :body (json/write-str "Provided 'post_logout_redirect_uri' is not valid")}
+      (and (not-empty post_logout_redirect_uri)
+           (not (core/redirect-allowed? post_logout_redirect_uri logout-redirections (core/native-client? logout-client))))
+      (bad-request "Provided 'post_logout_redirect_uri' is not valid")
 
-      (some? post_logout_redirect_uri)
-      (let [{:keys [code flow]} (core/get-session session)
-            resource-owner (core/get-session-resource-owner session)]
-        ((case flow
-           "authorization_code" ac/delete
-           "device_code" dc/delete
-           identity) code)
-        (log/info {:id ::logged-out
-                   :user-xid (:xid resource-owner)
-                   :data {:action :logged-out
-                          :subject :session
-                          :session (core/short-id session)
-                          :client client_id
-                          :flow flow
-                          :redirect? true}}
-                  "User logged out")
-        (core/kill-session session)
-        {:status 302
-         :headers {"Location" (post-logout-location post_logout_redirect_uri state)
-                   "Cache-Control" "no-cache"}
-         :cookies {"idsrv.session" {:value ""
-                                    :max-age 0
-                                    :path "/"}}})
+      ;; OIDC RP-Initiated Logout §2: no hint, so the cookie alone can't prove the user asked
+      (and (nil? claims)
+           idsrv-session
+           (= session idsrv-session)
+           (:active (core/get-session session))
+           (not (logout-confirmed? request session)))
+      (page.logout/confirm-page {:confirm (logout-confirm-token session)
+                                 :client_id client_id
+                                 :post_logout_redirect_uri post_logout_redirect_uri
+                                 :state state}
+                                (:name logout-client))
 
       :else
-      (let [{:keys [code flow]} (core/get-session session)
-            resource-owner (core/get-session-resource-owner session)]
-        ((case flow
-           "authorization_code" ac/delete
-           "device_code" dc/delete) code)
-        (log/info {:id ::logged-out
-                   :user-xid (:xid resource-owner)
-                   :data {:action :logged-out
-                          :subject :session
-                          :session (core/short-id session)
-                          :client client_id
-                          :flow flow
-                          :redirect? false}}
-                  "User logged out")
-        (core/kill-session session)
-        {:status 200
-         :headers {"Content-Type" "text/html"}
-         :body "User logged out!"
-         :cookies {"idsrv.session" {:value ""
-                                    :max-age 0
-                                    :path "/"}}}))))
+      (do
+        (when session (end-session! session))
+        (cond-> (if (not-empty post_logout_redirect_uri)
+                  {:status 302
+                   :headers {"Location" (post-logout-location post_logout_redirect_uri state)
+                             "Cache-Control" "no-cache"}}
+                  {:status 200
+                   :headers {"Content-Type" "text/html"}
+                   :body "User logged out!"})
+          clear-cookie (assoc :cookies clear-cookie))))))

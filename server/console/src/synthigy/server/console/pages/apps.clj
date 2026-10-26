@@ -186,7 +186,7 @@
 (def spec
   {:slug "apps" :entity :oauth_client :key :iam/app :label "Apps" :icon :box
    :table {:query cx/apps-table
-           :watch cx/watch-apps-table
+           :count cx/apps-count
            :sortable #{"name" "active" "apis"}}
    :subtitle (str "OAuth clients registered against this deployment — every "
                   "app, service and device that can ask for a token.")

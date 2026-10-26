@@ -62,6 +62,12 @@
                   :when xids]
               [param (vec xids)])))))
 
+(defn browse-total
+  "How many rows of `spec`'s entity the caller may see; nil when the page counts nothing or RBAC denies."
+  [spec & {:as opts}]
+  (when-let [f (get-in spec [:table :count])]
+    (denied->nil #(some-> (apply f {} (mapcat identity opts)) first :total))))
+
 (defn browse-rows
   "One page of `spec`'s rows via its generated op, or nil when RBAC denies."
   ([spec] (browse-rows spec 0 nil nil nil nil))

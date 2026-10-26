@@ -108,7 +108,7 @@
 (defn lockup
   ([] (lockup true))
   ([verbal?]
-   [:span.sy-lockup
+   [:span.sy-lockup {:role "img" :aria-label "Synthigy"}
     [:span.sy-mark (raw (str assets/figurative))]
     (when verbal? [:span.sy-verbal (raw (str assets/verbal))])]))
 
@@ -121,25 +121,25 @@
   [hiccup]
   (str (html hiccup)))
 
-(defn bare-shell
-  [{:keys [title body]}]
-  (render
-   [:html {:class "dark" :data-theme "dark" :lang "en"}
-    (head title)
-    [:body
-     body
-     [:script {:src (asset "js/starfield.js") :defer true}]]]))
+(defn notice-page
+  [{:keys [title tone glyph heading body foot]}]
+  (str
+   (assets/document
+    {:title (str title " · Console") :css "status.css" :chip "Console"}
+    [:div.sy-card
+     [:div.sy-card-head
+      [:div.sy-tile {:class tone} (assets/icon glyph)]
+      [:div [:h1.sy-card-title heading]]]
+     [:div.sy-card-body [:div.sy-prose [:p body]]]
+     [:div.sy-card-foot foot]])))
 
 (defn error-page
   "Shell for an unhandled failure — says what happened, offers a way out."
-  [message]
-  (bare-shell
-   {:title "Error"
-    :body [:div.console-login
-           (lockup)
-           [:div.console-login-hint "console"]
-           [:div.console-login-error message]
-           [:a.console-back {:href "/console"} "← Back to console"]]}))
+  [heading message]
+  (notice-page
+   {:title "Error" :tone "tone-error" :glyph :triangle-alert
+    :heading heading :body message
+    :foot [:a.sy-link {:href "/console"} (assets/icon :arrow-left) [:span "Back to console"]]}))
 
 (defn console-admin?
   "Whether the current principal may use the console: a System Operator, or able to change rows on some administration page."
@@ -155,15 +155,12 @@
 (defn not-admin-page
   "What a signed-in account without admin rights sees instead of the console."
   []
-  (bare-shell
-   {:title "Not available"
-    :body [:div.console-login
-           (lockup)
-           [:div.console-login-hint "console"]
-           [:div.console-login-error
-            "This console is for administrators. Manage your account in the app you use."]
-           [:form {:method "post" :action "/console/logout"}
-            [:ty-button {:type "submit" :size "sm" :appearance "outlined" :wide true} "Sign out"]]]}))
+  (notice-page
+   {:title "Not available" :tone "tone-warn" :glyph :shield-alert
+    :heading "Administrators only"
+    :body "This console is for administrators. Manage your account in the app you use."
+    :foot [:form {:method "post" :action "/console/logout"}
+           [:button.sy-link {:type "submit"} (assets/icon :log-out) [:span "Sign out"]]]}))
 
 (defn nav
   []
@@ -184,16 +181,13 @@
                      {:href "/console/encryption" :label "Encryption" :icon :key}
                      {:href "/console/custom-pages" :label "Custom pages" :icon :globe}]}))))
 
-(def tools
-  [{:key "model" :label "Data modeling" :icon :layers}
-   {:key "data" :label "Data console" :icon :database}
-   {:key "logs" :label "Log cockpit" :icon :microscope}])
-
 (defn root-url []
   (some-> (not-empty (str env/iam-root-url)) (str/replace #"/+$" "")))
 
+(def callback-path "/synthigy-callback.html")
+
 (def loopback-callbacks
-  ["http://localhost/console/tools/callback" "http://127.0.0.1/console/tools/callback"])
+  ["http://localhost/synthigy-callback.html" "http://127.0.0.1/synthigy-callback.html"])
 
 (def ^:dynamic *origins*
   "Candidate origins of the current console request, request origin first."
@@ -208,35 +202,16 @@
   []
   (when (io/resource "synthigy/console/js/tooling.js")
     (let [allowed (tools-redirections)]
-      (some #(when (oauth/redirect-allowed? (str % "/console/tools/callback") allowed) %)
+      (some #(when (oauth/redirect-allowed? (str % callback-path) allowed false) %)
             *origins*))))
 
-(defn tools-redirect-uri []
-  (some-> (tools-origin) (str "/console/tools/callback")))
-
-(defn tools-logout-uri []
-  (some-> (tools-origin) (str "/console/login?logged_out=1")))
-
 (defn tools-available?
-  "Tools show when the bundle is on the classpath and this console's callback is
-   one of the Synthigy Tools app's allowed redirect URLs."
+  "Tools show when the bundle is on the classpath and this origin's callback page is a Synthigy Tools redirect URI."
   []
   (some? (tools-origin)))
 
-(defn tools-callback-page
-  "Bare page at the registered Synthigy Tools redirect address."
-  []
-  (render
-   [:html {:lang "en"}
-    [:head
-     [:meta {:charset "utf-8"}]
-     [:title "Signing in · Synthigy"]]
-    [:body
-     [:script {:src (asset "js/tools.js")}]]]))
-
-(defn sidebar [uri user]
+(defn sidebar [uri]
   [:aside.console-sidebar
-   [:div.console-sidebar-brand (lockup)]
    [:nav.console-nav
     (for [{:keys [title items]} (nav)]
       (list
@@ -248,33 +223,23 @@
     (when (tools-available?)
       (list
        [:div.console-nav-group "Tools"]
-       (for [{:keys [key label icon]} tools]
-         [:button {:type "button" :data-syn-tool key}
-          (icon/icon icon {:size "16"})
-          [:span label]])))]
-   (when user
-     [:div.console-user
-      [:div.console-avatar (initials (:name user))]
-      [:div.console-user-meta
-       [:div.console-user-name (:name user)]
-       [:div.console-user-sub
-        (let [n (count (:roles user))]
-          (if (pos? n)
-            (str n " role" (when (not= 1 n) "s"))
-            "Signed in"))]]
-      [:form {:method "post" :action "/console/logout"}
-       [:ty-button {:type "submit" :size "sm" :appearance "ghost" :action true}
-        (icon/icon :log-out {:size "15"})
-        [:ty-tooltip {:placement "top"} "Sign out"]]]])])
+       [:button {:type "button" :data-syn-tools true}
+        (icon/icon :wrench {:size "16"})
+        [:span "Synthigy Tools"]]))]])
 
-(defn topbar
-  [crumb stream? search nav-filters]
-  [:header.console-topbar
-   [:div.console-crumb
-    [:span.root "Synthigy"]
-    [:span.sep (icon/icon :chevron-right {:size "13"})]
-    [:span.here crumb]]
-   [:div.console-topbar-spacer]
+(defn session-chip
+  [{:keys [name roles]}]
+  (let [n (count roles)]
+    [:span.console-session
+     {:title (str name " · " (if (pos? n) (str n " role" (when (not= 1 n) "s")) "signed in"))}
+     [:span.console-session-avatar (initials name)]
+     [:span.console-session-name name]]))
+
+(defn bar
+  [user stream? search nav-filters]
+  [:header.console-bar
+   (lockup)
+   [:span.console-bar-spacer]
    nav-filters
    (when stream?
      [:ty-tag.console-live
@@ -285,10 +250,18 @@
    (when-not (= :none search)
      [:div.console-search
       [:ty-input (merge {:id "console-search" :type "search" :placeholder "Filter…"
-                         :size "sm" :autocomplete "off"}
+                         :size "xs" :autocomplete "off"}
                         (or search {:oninput search-oninput}))
-       (icon/icon :search {:size "14" :slot "start"})
-       [:span.console-kbd {:slot "end"} "⌘K"]]])])
+       (icon/icon :search {:size "13" :slot "start"})
+       [:span.console-kbd {:slot "end"} "⌘K"]]])
+   (when user
+     (list
+      [:span.console-bar-sep]
+      (session-chip user)
+      [:form.console-bar-form {:method "post" :action "/console/logout"}
+       [:ty-button {:type "submit" :size "xs" :appearance "ghost" :action true}
+        (icon/icon :log-out {:size "14"})
+        [:ty-tooltip {:placement "bottom"} "Sign out"]]]))])
 
 (defn on-enter
   "Enter in a field runs `expr`."
@@ -300,7 +273,7 @@
   "The page's one confirm dialog; each opener sets its own `$confirmAction`, `action` is the fallback."
   [action stale?]
   [:ty-modal {(keyword "data-attr:open") "$confirmTarget !== ''"
-              :backdrop "true" :close-on-outside-click true :close-on-escape true
+              :no-zoom true
               (keyword "data-on:close") "$confirmTarget = ''; $confirmAction = ''"}
    [:div.console-confirm
     [:h2 {:data-text "$confirmVerb"} "Confirm"]
@@ -347,7 +320,7 @@
          [:ul (for [i issues] [:li (dataline-issue i audit)])])])))
 
 (defn admin-shell
-  [{:keys [title user uri body stream stream-expr confirm session paged search
+  [{:keys [title user uri body stream stream-expr confirm session paged total search
            nav-filters filter-keys]}]
   (let [stream-src (cond
                      stream-expr stream-expr
@@ -361,6 +334,7 @@
                    (when paged
                      (format (str ", browseOffset: %d, browseMore: true, browseQuery: '', "
                                   "browseSort: '', browseDir: ''") paged))
+                   (when total (str ", browseTotal: " total))
                    (apply str (for [k filter-keys] (str ", flt_" (name k) ": []")))
                    "}")}
        (head title)
@@ -370,19 +344,15 @@
                                   (str "@get(" stream-src ")")))
         [:div.sy-stars]
         [:div.console-shell
-         (sidebar uri user)
-         (topbar title (boolean stream-src) search nav-filters)
+         (bar user (boolean stream-src) search nav-filters)
+         (sidebar uri)
          [:main.console-content (dataline-banner) body]]
         (when confirm (confirm-dialog confirm (not (session/fresh? session))))
         [:script (raw search-hotkey)]
         (when stream-src [:script (raw live-indicator-script)])
         (when (tools-available?)
           (list
-           [:script (raw (str "window.SYNTHIGY_REDIRECT_URI="
-                              (json/write-str (tools-redirect-uri)) ";"
-                              "window.SYNTHIGY_POST_LOGOUT_REDIRECT_URI="
-                              (json/write-str (tools-logout-uri)) ";"
-                              "window.SYNTHIGY_TOOLING_BUNDLE="
+           [:script (raw (str "window.SYNTHIGY_TOOLING_BUNDLE="
                               (json/write-str (asset "js/tooling.js")) ";"))]
            [:script {:src (asset "js/tools.js") :defer true}]))]])))
 
@@ -403,7 +373,7 @@
                             (icon/icon g {:size "11" :slot "start"}) label]
                        n   [:ty-tag {:size "sm" :flavor "neutral-"} n]
                        :else "—")])
-      :agg    [:td.num [:ty-tag {:size "xs" :flavor "neutral-" :pill true}
+      :agg    [:td.num [:ty-tag {:size "xs" :flavor "neutral-"}
                         (when ic (icon/icon ic {:size "11" :slot "start"}))
                         (or v 0)]]
       :brand  (let [n   (some-> v name)
@@ -625,7 +595,7 @@
          [:div.console-fields (for [f fields] (config-field f cfg))])])))
 
 (defn option-row
-  [icon-k show {:keys [xid active] :as row} selected?]
+  [icon-k show {:keys [xid active] :as row}]
   (let [nm    (widgets/display-name row)
         nm    (if active nm (str nm " · inactive"))
         {:keys [tag sub]} show
@@ -634,7 +604,6 @@
     [:ty-option (cond-> {:value xid
                          :label nm
                          :flavor (if active "neutral" "warning")}
-                  selected? (assoc :selected true)
                   show (assoc :data-api (or tag-v "") :data-description (or sub-v "")))
      (icon/icon icon-k {:size "11" :slot "start"})
      (if show
@@ -664,39 +633,36 @@
 
 (defn nav-filter-trigger
   [k icon-k label]
-  ;; never drop stopPropagation on the clear icon — the click would also toggle the dropdown
-  [:ty-button {:slot "trigger" :type "button" :size "sm" :appearance "outlined"
-               :flavor "primary" :muted true}
-   (icon/icon icon-k {:size "12" :slot "start"})
-   [:span.console-nav-filter-label
-    {:data-text
-     (format "$flt_%s.length ? '%s (' + $flt_%s.length + ')' : '%s'"
-             (name k) label (name k) label)}
-    label]
-   [:span {:slot "end" :title "Clear" :style "opacity:.35;pointer-events:none"
-           (keyword "data-attr:style")
-           (format (str "$flt_%s.length ? 'opacity:1;pointer-events:auto' "
-                        ": 'opacity:.35;pointer-events:none'")
-                   (name k))
-           (keyword "data-on:click")
-           (format (str "evt.stopPropagation(); evt.preventDefault(); "
-                        "document.querySelectorAll('#%s-select ty-option[selected]')"
-                        ".forEach(function(o){o.click()})")
-                   (name k))}
-    (icon/icon :x {:size "11"})]])
+  (let [n (str "$flt_" (name k) ".length")]
+    [:ty-button {:slot "trigger" :type "button" :size "sm"}
+     (icon/icon icon-k {:size "13" :slot "start"})
+     label
+     [:ty-tag {:size "xs" :flavor "neutral+" :hidden true
+               (keyword "data-attr:hidden") (str "!" n)
+               :data-text n}]
+     (icon/icon :chevron-down {:size "13" :slot "end"
+                               (keyword "data-attr:hidden") (str n " > 0")})
+     ;; never drop stopPropagation here — the click would also toggle the dropdown
+     [:span.console-nav-filter-clear
+      {:slot "end" :title "Clear" :hidden true
+       (keyword "data-attr:hidden") (str "!" n)
+       (keyword "data-on:click")
+       (format "evt.stopPropagation(); evt.preventDefault(); document.getElementById('%s-select').clear()"
+               (name k))}
+      (icon/icon :x {:size "13"})]]))
 
 (defn link-option-list
   [icon-k label show held options & [more trigger]]
   (let [seen (into #{} (map :xid) held)]
     (concat
      [(or trigger (link-trigger icon-k label))]
-     (for [row held] (option-row icon-k show row true))
-     (for [row (remove (comp seen :xid) options)] (option-row icon-k show row false))
+     (for [row held] (option-row icon-k show row))
+     (for [row (remove (comp seen :xid) options)] (option-row icon-k show row))
      (when more [more]))))
 
 (defn link-page
   [icon-k show options & [more]]
-  (concat (for [row options] (option-row icon-k show row false))
+  (concat (for [row options] (option-row icon-k show row))
           (when more [more])))
 
 (defn singular
@@ -719,7 +685,7 @@
                 :value (str (or v ""))}]))
 
 (defn picker
-  [slug k label icon hint show held options]
+  [slug k label icon hint show held options & [chips-url]]
   (let [sel     (str/join "," (map :xid held))
         pick-id (str (name k) "-select")]
     [[:div.console-picker
@@ -729,12 +695,14 @@
        {:id pick-id
         :name (name k)
         :multiple true
-        :clearable true
         :external-search true
         :debounce "250"
         :size "sm"
         :value sel
         :placeholder (str "Search " (str/lower-case label) "…")
+        (keyword "data-on:change") (when chips-url
+                                     (format "@get('%s&sel=' + encodeURIComponent(evt.target.value || ''))"
+                                             chips-url))
         (keyword "data-on:open") "el._open = true"
         (keyword "data-on:close")
         (str "el._open = false; "
@@ -772,7 +740,7 @@
              [:div.console-selected-name
               [:span (or (:name r) "")]
               (when (and flag (truthy? (data/child-value r flag)))
-                [:ty-tag {:pill true :size "xs" :flavor "neutral-"} "confidential"])]
+                [:ty-tag {:size "xs" :flavor "neutral-"} "confidential"])]
              (when (not-empty desc) [:div.console-selected-desc desc])]
             (when-not persisted?
               (for [[fk] fields]
@@ -797,7 +765,7 @@
                             (keyword "data-on:click") close}
                 "Cancel"]]
     [:ty-modal {(keyword "data-attr:open") (str "$" sig)
-                :backdrop "true" :close-on-outside-click true :close-on-escape true
+                :no-zoom true
                 (keyword "data-on:close") close}
      [:div.console-confirm.console-panel-modal
       (if confirming
@@ -877,28 +845,45 @@
   [{:keys [editing confirming notice open]}]
   (boolean (or open confirming (some? editing) (= :warn (first notice)))))
 
-(defn selected-tags
-  [pick-id icon show]
-  [:ty-selected-tags {:for pick-id
-                      :class (if show "console-selected-list" "console-chips")}
-   [:template
-    (if show
-      [:div.console-selected-row
-       [:div.console-selected-icon (icon/icon icon {:size "14"})]
-       [:div.console-selected-body
-        [:div.console-selected-name
-         [:span "{label}"]
-         [:span.console-option-tag "{data-api}"]]
-        [:div.console-selected-desc "{data-description}"]]
-       [:ty-button
-        {:type "button" :size "xs" :action true :appearance "ghost"
-         :flavor "danger" :muted true :pill true
-         :onclick "this.dispatchEvent(new CustomEvent('dismiss',{bubbles:true}))"}
-        (icon/icon :x {:size "12"})]]
+(defn chips-id
+  [k]
+  (str (name k) "-chips"))
 
-      [:ty-tag {:pill true :size "sm" :flavor "{flavor}" :dismissible "true"}
+(defn chip-remove
+  "Deselect `xid` through the picker's own option, so removal takes the same path as an unpick."
+  [k xid]
+  (format "document.querySelector('#%s-select ty-option[value=\"%s\"][selected]')?.click()" (name k) xid))
+
+(defn chip
+  [k icon show {:keys [xid active] :as row}]
+  (let [nm  (widgets/display-name row)
+        nm  (if active nm (str nm " · inactive"))
+        rm  (chip-remove k xid)]
+    (if show
+      (let [tag-v (some-> (get row (:tag show)) :name)
+            sub-v (not-empty (get row (:sub show)))]
+        [:div.console-selected-row {:id (str (chips-id k) "-" xid)}
+         [:div.console-selected-icon (icon/icon icon {:size "14"})]
+         [:div.console-selected-body
+          [:div.console-selected-name
+           [:span nm]
+           (when tag-v [:span.console-option-tag tag-v])]
+          (when sub-v [:div.console-selected-desc sub-v])]
+         [:ty-button {:type "button" :size "xs" :action true :appearance "ghost"
+                      :flavor "danger" :muted true :pill true
+                      (keyword "data-on:click") rm}
+          (icon/icon :x {:size "12"})]])
+      [:ty-tag {:id (str (chips-id k) "-" xid)
+                :size "sm" :flavor (if active "neutral" "warning") :dismissible true
+                (keyword "data-on:dismiss") rm}
        (icon/icon icon {:size "11" :slot "start"})
-       "{label}"])]])
+       nm])))
+
+(defn link-chips
+  "A picker's selection as the server renders it — the only owner of these nodes."
+  [k icon show held]
+  [:div {:id (chips-id k) :class (if show "console-selected-list" "console-chips")}
+   (for [row held] (chip k icon show row))])
 
 (defn link-options-for
   "Picker options for a link; nil for an owned one, which never searches."
@@ -912,14 +897,20 @@
     (str "/console/iam/" slug "/" xid "/panel/" (name link-key))
     (str "/console/iam/" slug "/panel/" (name link-key))))
 
+(defn chips-url
+  [slug k]
+  (str "/console/iam/" slug "/chips?link=" (name k)))
+
 (defn link-control
-  [slug [k label _ icon hint show] row options & [status]]
+  "`chips?` refetches the chips on every pick — for a form with no per-unit save to answer with them."
+  [slug [k label _ icon hint show] row options & [status chips?]]
   (if (:create show)
     (link-panel (panel-base slug k) label k icon show (get row k) nil)
-    (let [[p pick-id] (picker slug k label icon hint show (get row k) options)]
+    (let [[p] (picker slug k label icon hint show (get row k) options
+                      (when chips? (chips-url slug k)))]
       [:div.console-links
        p
-       (selected-tags pick-id icon show)
+       (link-chips k icon show (get row k))
        status])))
 
 (defn owned-list
@@ -961,7 +952,7 @@
     (keyword "data-on:change__debounce.300ms")
     (str "if (evt.detail?.originalEvent?.type !== 'input' && !evt.target._open) { "
          (controls-post uri "el") " }")
-    (keyword "data-on:keydown")
+    (keyword "data-on:keydown__capture")
     (str "if (evt.key === 'Enter' && evt.target.tagName === 'TY-INPUT') "
          "{ evt.preventDefault(); evt.composedPath()[0].blur() }")}
    body])
@@ -1071,6 +1062,7 @@
                                 (set (map :xid (get after k)))))]
         {:patches (cond-> []
                     rerender?               (conj [(detail-unit spec after nm) :morph])
+                    (and k (not rerender?)) (conj [(link-chips k (nth u 3) (nth u 5 nil) (get after k)) :morph])
                     (seq (:sections detail)) (conj [(detail-sections spec after) :morph])
                     :always                 (into (cons [(detail-title after) :morph] status-p)))
          :signals (page-signals spec after)})
@@ -1170,7 +1162,7 @@
           [:div.console-chips
            (if-let [rs (seq (get row k))]
              (for [r rs]
-               [:ty-tag {:pill true :size "sm" :flavor "neutral"}
+               [:ty-tag {:size "sm" :flavor "neutral"}
                 (icon/icon icon {:size "11" :slot "start"})
                 (:name r)])
              [:p.console-field-hint "None."])]])]]]]])
@@ -1422,7 +1414,7 @@
                 :notice notice
                 :fields (for [f (:fields create)] (create-control f values))
                 :links (for [l (concat (:links create) (:owned create))]
-                         (link-control slug l row (link-options-for l)))
+                         (link-control slug l row (link-options-for l) nil true))
                 :actions
                 (list
                  [:ty-button {:type "button" :size "sm" :appearance "ghost"
@@ -1448,7 +1440,7 @@
   [{:keys [slug label]} stale? {:keys [notice mode payload]}]
   (let [mode (or mode :sync)]
     [:ty-modal {(keyword "data-attr:open") "$importOpen"
-                :backdrop "true" :close-on-outside-click true :close-on-escape true
+                :no-zoom true
                 (keyword "data-on:close") "$importOpen = false"}
      [:div.console-confirm.console-import-card
       [:h2 "Import " label]
@@ -1493,7 +1485,7 @@
   [{:keys [label]} tt]
   (let [t (name (:type tt))]
     [:ty-modal {(keyword "data-attr:open") "$exportOpen"
-                :backdrop "true" :close-on-outside-click true :close-on-escape true
+                :no-zoom true
                 (keyword "data-on:close") "$exportOpen = false"}
      [:div.console-confirm
       [:h2 "Export " label]
@@ -1526,16 +1518,15 @@
         "Download"]]]]))
 
 (defn nav-filter-picker
-  [{:keys [slug] :as spec} [k label entity icon] align]
+  [{:keys [slug] :as spec} [k label entity icon] placement]
   [:ty-select
    {:id (str (name k) "-select")
     :name (name k)
     :multiple true
-    :compact true
     :external-search true
     :debounce "250"
     :size "sm"
-    :align align
+    :placement placement
     (keyword "data-on:search")
     (format (str "@get('/console/iam/%s/filter-options?link=%s&offset=0&q=' "
                  "+ encodeURIComponent(evt.detail.query || '') "
@@ -1550,7 +1541,7 @@
   [{:keys [filters] :as spec}]
   (when (seq filters)
     [:div.console-nav-filters
-     (for [f filters] (nav-filter-picker spec f "end"))]))
+     (for [f filters] (nav-filter-picker spec f "bottom-end"))]))
 
 (defn slot-card
   [slug {:keys [by badge]} [value label] row]
@@ -1560,7 +1551,7 @@
                          :else         ["warning" "Configured, disabled"])]
     [:div.console-card
      [:div.console-card-mark (badge {by value})]
-     [:ty-tag {:pill true :size "sm" :flavor flavor} state]
+     [:ty-tag {:size "sm" :flavor flavor} state]
      [:ty-button {:type "button" :size "sm" :appearance "outlined"
                   :flavor "primary" :muted true
                   :onclick (str "location.href='"
@@ -1582,6 +1573,7 @@
 (defn browse
   [request {:keys [slug label subtitle] :as spec} & [import-state notice]]
   (let [rows  (data/browse-rows spec)
+        total (when rows (data/browse-total spec))
         more? (= (count rows) data/page-size)
         tt    (data/transfer-by-slug slug)
         exp?  (and tt (data/transfer-exportable? (:type tt)))
@@ -1597,6 +1589,7 @@
       ;; card-shaped push if that stops being true.
       :stream-expr (when (and (not cards?) (routes/sse-available?)) (live-rows-expr spec))
       :paged (when-not cards? (count rows))
+      :total total
       :search (if cards? :none (server-search spec))
       :nav-filters (when-not cards? (nav-filters spec))
       :filter-keys (when-not cards? (map first (:filters spec)))
@@ -1613,7 +1606,12 @@
        (widgets/notice notice true)
        [:div.console-page-head
         [:div.console-eyebrow "Administration"]
-        [:h1.console-title label]
+        [:div.console-heading
+         [:h1.console-title label]
+         (when total
+           [:ty-tag.console-count {:size "sm" :flavor "neutral"
+                                   :data-text "$browseTotal.toLocaleString('en-US')"}
+            (String/format java.util.Locale/US "%,d" (object-array [total]))])]
         [:p.console-subtitle subtitle]
         (when (or exp? imp? new?)
           [:div.console-toolbar

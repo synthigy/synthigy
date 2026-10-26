@@ -16,10 +16,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Device Confirmation</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Connect a device · Acme</title>
   <link rel="icon" type="image/png" href="/oauth/images/favicon.png">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="preload" href="/oauth/css/fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
   <link rel="stylesheet" href="/oauth/css/device.css">
+  <style>
+    /* Your brand. The built-in pages put the Synthigy lockup (.sy-lockup) here. */
+    .acme-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      height: 100%;
+      padding-left: 14px;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--sy-text-pp);
+    }
+
+    .acme-mark svg {
+      width: 17px;
+      height: 17px;
+    }
+  </style>
 </head>
 <body>
   <!--
@@ -34,56 +55,131 @@
       confirm → send `action=confirm|cancel` only — the device_confirm cookie
                 (SameSite=Lax, set by the server on the redirect) carries the rest.
                 No token in the page; the browser attaches the cookie for you.
+
+    The markup is the entry step. On the confirm step the script below fills the
+    boxes read-only, swaps the texts and keeps only the Confirm / Cancel buttons.
   -->
-  <div class="oauth-container">
-    <div class="device-card"><div class="inner">
-      <div class="header"><h1>Device Confirmation</h1></div>
-      <div class="description" id="desc"></div>
-      <form class="device-form" method="post" action="/oauth/device/activate">
-        <div class="code-boxes" id="boxes"></div>
-        <input type="hidden" name="user_code" id="user_code">
-        <div class="error"></div>
-        <div class="actions" id="actions"></div>
-      </form>
-    </div></div>
+  <div class="sy-shell">
+    <header class="sy-bar">
+      <span class="acme-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 21.5 20h-19z"/></svg>
+        <span>Acme</span>
+      </span>
+      <span class="sy-spacer"></span>
+    </header>
+
+    <main class="sy-stage">
+      <div class="sy-card">
+        <div class="sy-card-head">
+          <div class="sy-tile">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8"/><path d="M10 19v-3.96 3.15"/><path d="M7 19h5"/><rect width="6" height="10" x="16" y="12" rx="2"/></svg>
+          </div>
+          <h1 class="sy-card-title" id="title">Connect a device</h1>
+          <!-- The voice row: device.js writes "Enter all 8 characters" here through
+               SynthigyPage.message('voice', ...); it replaces the sub text in place. -->
+          <div class="sy-voice" id="voice" aria-live="polite">
+            <p class="sy-card-sub" id="desc">Enter the code shown on your device.</p>
+          </div>
+        </div>
+
+        <div class="sy-card-body">
+          <!-- data-sy-busy: shell.js shows the spinner on submit (entry step). -->
+          <form class="sy-form" id="device-form" method="post" action="/oauth/device/activate" data-sy-busy>
+            <input type="hidden" name="user_code" id="user_code">
+            <div class="sy-field">
+              <div class="sy-label-row">
+                <span class="sy-label" id="code-label">Device code</span>
+              </div>
+              <!-- device.js drives the editable boxes into #user_code as XXXX-XXXX
+                   (typing, paste, arrows, backspace); read-only boxes are skipped. -->
+              <div class="sy-otp" role="group" aria-labelledby="code-label">
+                <div class="sy-otp-group">
+                  <input class="code-box" type="text" maxlength="1" inputmode="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 1">
+                  <input class="code-box" type="text" maxlength="1" inputmode="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 2">
+                  <input class="code-box" type="text" maxlength="1" inputmode="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 3">
+                  <input class="code-box" type="text" maxlength="1" inputmode="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 4">
+                </div>
+                <span class="sy-otp-sep" aria-hidden="true"></span>
+                <div class="sy-otp-group">
+                  <input class="code-box" type="text" maxlength="1" inputmode="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 5">
+                  <input class="code-box" type="text" maxlength="1" inputmode="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 6">
+                  <input class="code-box" type="text" maxlength="1" inputmode="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 7">
+                  <input class="code-box" type="text" maxlength="1" inputmode="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 8">
+                </div>
+              </div>
+            </div>
+
+            <!-- entry step -->
+            <button class="sy-btn sy-btn--primary" type="submit" id="continue">
+              <span class="sy-btn-label">Continue</span>
+              <span class="sy-spin" aria-hidden="true"></span>
+            </button>
+
+            <!-- confirm step -->
+            <div class="sy-actions" id="confirm-actions">
+              <button class="sy-btn sy-btn--secondary" type="submit" name="action" value="cancel">
+                <span class="sy-btn-label">Cancel</span>
+                <span class="sy-spin" aria-hidden="true"></span>
+              </button>
+              <button class="sy-btn sy-btn--primary" type="submit" name="action" value="confirm">
+                <span class="sy-btn-label">Confirm</span>
+                <span class="sy-spin" aria-hidden="true"></span>
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div class="sy-card-foot" id="foot">Only enter codes from devices you're signing in yourself, never one someone sent you.</div>
+      </div>
+    </main>
+
+    <footer class="sy-status">
+      <span class="sy-status-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span data-sy-host></span>
+      </span>
+      <span class="sy-spacer"></span>
+      <span class="sy-status-item" id="hint-entry"><span class="sy-key">Enter</span><span>continue</span></span>
+      <span class="sy-status-item" id="hint-confirm">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8"/><path d="M10 19v-3.96 3.15"/><path d="M7 19h5"/><rect width="6" height="10" x="16" y="12" rx="2"/></svg>
+        <span>awaiting confirmation</span>
+      </span>
+    </footer>
   </div>
 
-  <script src="/oauth/js/starfield.js"></script>
+  <!-- Must run before device.js, which picks up the boxes and buttons left in the form. -->
   <script>
-    var code = new URLSearchParams(location.search).get('user_code');
-    var confirming = !!code;
-    var chars = confirming ? code.replace('-', '').split('') : [];
-    var boxes = document.getElementById('boxes');
+    (function () {
+      var code = new URLSearchParams(location.search).get('user_code');
+      var confirming = !!code;
 
-    for (var i = 0; i < 8; i++) {
-      if (i === 4) {
-        var sep = document.createElement('span');
-        sep.className = 'code-sep';
-        boxes.appendChild(sep);
+      function $(id) { return document.getElementById(id); }
+
+      if (confirming) {
+        var chars = code.replace('-', '').split('');
+        Array.prototype.forEach.call(document.querySelectorAll('.code-box'), function (b, i) {
+          b.value = chars[i] || '';
+          b.readOnly = true;
+          b.tabIndex = -1;
+        });
+        document.title = 'Confirm device code · Acme';
+        $('title').textContent = 'Confirm device code';
+        $('desc').textContent = 'Check that this code matches the one on your device.';
+        $('foot').textContent = "Didn't start this on your own device? Choose Cancel.";
+        // Confirm mode carries state in the cookie, not the form — drop the hidden field.
+        $('user_code').remove();
+        $('continue').remove();
+        $('hint-entry').remove();
+        // device.js puts the spinner on whichever of Confirm / Cancel was pressed.
+        $('device-form').removeAttribute('data-sy-busy');
+      } else {
+        $('confirm-actions').remove();
+        $('hint-confirm').remove();
       }
-      var b = document.createElement('input');
-      b.className = 'code-box';
-      b.maxLength = 1;
-      b.autocapitalize = 'characters';
-      b.spellcheck = false;
-      if (confirming) { b.value = chars[i] || ''; b.readOnly = true; b.tabIndex = -1; }
-      else { b.setAttribute('aria-label', 'Code character ' + (i + 1)); }
-      boxes.appendChild(b);
-    }
-
-    document.getElementById('desc').textContent = confirming
-      ? 'Confirm that the following code is used for device authorization'
-      : 'Type in the device code displayed on your device';
-
-    document.getElementById('actions').innerHTML = confirming
-      ? '<div><button class="confirm" name="action" value="confirm">Confirm</button>'
-        + '<button class="cancel" name="action" value="cancel">Cancel</button></div>'
-      : '<div><button class="continue">Continue</button></div>';
-
-    // Confirm mode carries state in the cookie, not the form — drop the hidden field.
-    if (confirming) document.getElementById('user_code').remove();
+    })();
   </script>
-  <!-- Drives the editable boxes (entry mode) into #user_code; skips read-only. -->
+  <script src="/oauth/js/starfield.js"></script>
+  <script src="/oauth/js/shell.js"></script>
   <script src="/oauth/js/device.js"></script>
 </body>
 </html>

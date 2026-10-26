@@ -236,6 +236,15 @@
   [request spec link q sel offset]
   (options-response request (:slug spec) (get-in spec [:detail :links]) link q sel offset))
 
+(defn link-chips-response
+  "A picker's chips for the selection `sel`, read under the caller — what an unsaved form shows."
+  [request spec link sel]
+  (when-let [[k _ link-entity icon _ show]
+             (first (filter #(= link (name (first %)))
+                            (concat (get-in spec [:create :links]) (get-in spec [:detail :links]))))]
+    (let [held (data/link-selected link-entity (remove str/blank? (str/split (str sel) #",")) show)]
+      (patch-response request [[(ui/link-chips k icon show held) :morph]] nil))))
+
 (defn filter-options-response
   [request spec link q sel offset]
   (options-response request (:slug spec) (:filters spec) link q sel offset ui/nav-filter-trigger))
@@ -250,17 +259,25 @@
                          data/transfer-exportable?)
         limit    (min (max limit data/page-size) range-cap)
         watched  (mapv name (into [(:entity spec)] (:watch spec)))
-        watch-q  ((:watch (:table spec))
-                  (data/table-params spec 0 limit q rels sort-k dir)
-                  :acting-as user-xid :entities watched)]
+        params   (data/table-params spec 0 limit q rels sort-k dir)
+        query    (:query (:table spec))
+        counted? (some? (get-in spec [:table :count]))
+        live     (embedded/live-value
+                  (fn []
+                    (cond-> {:rows (query params :acting-as user-xid)}
+                      counted? (assoc :total (data/browse-total spec :acting-as user-xid))))
+                  (first watched)
+                  {:acting-as user-xid :entities watched})]
     (stream request
-            watch-q
-            (fn [sse-gen rows]
+            live
+            (fn [sse-gen {:keys [rows total]}]
               (let [n (count rows)]
                 (d*/patch-elements! sse-gen
                                     (fragment (ui/browse-rows-fragment spec rows sel?))
                                     {d*/selector (str "#" (:slug spec) "-panel tbody")
                                      d*/patch-mode d*/pm-inner})
                 (d*/patch-signals! sse-gen
-                                   (json/write-str {:browseOffset n
-                                                    :browseMore (= n limit)})))))))
+                                   (json/write-str
+                                    (cond-> {:browseOffset n
+                                             :browseMore (= n limit)}
+                                      counted? (assoc :browseTotal total)))))))))

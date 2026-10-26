@@ -204,7 +204,7 @@
         ;;
         (nil? entry)
         (token-error
-         "invalid_request"
+         "invalid_grant"
          "Provided device code is illegal!"
          "Your request will be logged"
          "and processed")
@@ -328,14 +328,14 @@
 (def ^:private confirm-cookie-name "device_confirm")
 (def ^:private confirm-ttl-ms 300000) ; 5 minutes
 
-(defn confirm-cookie [device-code user-code]
+(defn confirm-cookie [device-code user-code request]
   {confirm-cookie-name
    {:value (encrypt {:device-code device-code
                      :user-code user-code
                      :exp (+ (System/currentTimeMillis) confirm-ttl-ms)})
     :path "/oauth/device"
     :http-only true
-    :secure true
+    :secure (not (core/loopback-http? request))
     :same-site :lax
     :max-age (quot confirm-ttl-ms 1000)}})
 
@@ -372,7 +372,7 @@
         :get
         (if (some? user_code)
           (if-let [device-code (find-device-code user_code)]
-            (let [cookie (confirm-cookie device-code user_code)]
+            (let [cookie (confirm-cookie device-code user_code request)]
               (if-let [redirect (login-page/custom-page-redirect
                                  "device.html" {:user_code user_code})]
                 (assoc redirect :cookies cookie)
@@ -384,7 +384,8 @@
                                                ::user-code user_code}))}))
             {:status 400
              :headers {"Content-Type" "text/html"}
-             :body (str (device/authorize {::error :device-code/not-available}))})
+             :body (str (device/authorize {::error :device-code/not-available
+                                           ::user-code user_code}))})
           (or (login-page/custom-page-redirect "device.html" {})
               {:status 200
                :headers {"Content-Type" "text/html"}

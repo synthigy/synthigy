@@ -12,7 +12,8 @@
 (ns synthigy.oauth.page.error
   "OAuth error page for cases where the server MUST NOT redirect (RFC 6749 §4.1.2.1)."
   (:require
-   [hiccup2.core :refer [html raw]]
+   [clojure.string :as str]
+   [synthigy.oauth.page.assets :as assets]
    [synthigy.oauth.page.custom :as login]))
 
 (def security-errors
@@ -20,92 +21,114 @@
     "client_not_registered"
     "no_redirections"})
 
+(defn register-hint
+  [client-name redirect-uri]
+  (when (and client-name (not-empty redirect-uri))
+    [:div.sy-dev
+     [:div.sy-dev-label "For developers"]
+     [:p "To fix this, add this exact address to the Redirect URIs of " [:b client-name] ":"]
+     [:code.sy-codeblock {:title "Redirect URI"} redirect-uri]]))
+
 (def error-messages
   {"no_redirections"
-   {:title "Authorization Blocked"
-    :message "This application has no configured redirect addresses. The authorization request cannot be completed safely."}
+   {:title "Authorization blocked"
+    :sub "This application has no registered return address."
+    :message "The authorization request cannot be completed safely, so sign-in was stopped."
+    :register-hint? true}
 
    "invalid_login_page"
-   {:title "Configuration Error"
+   {:title "Configuration error"
+    :sub "This application's login page setting is invalid."
+    :foot "Contact the developer of this application to fix it."
     :message-fn (fn [{:keys [client-name invalid-value]}]
-                  [:span
-                   "Client " [:b client-name] " has an invalid login page setting:"
-                   [:br] [:code invalid-value]
-                   [:br] [:br]
-                   "The 'login-page' setting must name a login page bundle (lowercase letters, digits and dashes). "
-                   "Please contact the application developer."])}
+                  (list
+                   [:p (if client-name
+                         (list "Client " [:b client-name] " has an invalid login page setting:")
+                         "This client has an invalid login page setting:")
+                    (when (not-empty (str invalid-value))
+                      [:code.sy-codeblock invalid-value])]
+                   [:p "The " [:code "login-page"] " setting must name a login page bundle (lowercase letters, digits and dashes)."]))}
 
    "missing_redirect"
-   {:title "Invalid Request"
-    :message "The authorization request is missing required information. Please contact the application developer."}
+   {:title "Invalid request"
+    :sub "The request does not say where to return after sign-in."
+    :foot "Contact the developer of this application to fix it."
+    :message "The authorization request is missing required information."}
 
    "redirect_missmatch"
-   {:title "Authorization Blocked"
-    :message "The return address provided by this application doesn't match its configuration. Do not enter any credentials."}
+   {:title "Authorization blocked"
+    :sub "This application asked to return to an unregistered address."
+    :message "The return address in this request doesn't match the application's configuration, so sign-in was stopped."
+    :register-hint? true}
 
    "missing_response_type"
-   {:title "Invalid Request"
-    :message "The authorization request is incomplete. Please contact the application developer."}
+   {:title "Invalid request"
+    :sub "The request does not say what it is asking for."
+    :foot "Contact the developer of this application to fix it."
+    :message "The authorization request is incomplete: it carries no response type."}
 
    "client_not_registered"
-   {:title "Unknown Application"
-    :message "This application is not recognized by the authorization server. Do not enter any credentials."}
+   {:title "Unknown application"
+    :sub "No application with this client ID is registered here."
+    :message "This application is not recognized by the authorization server."}
 
    "corrupt_session"
-   {:title "Session Error"
-    :message "Your authorization session could not be verified. Please try again or contact support."}
+   {:title "Session error"
+    :sub "Your sign-in session could not be verified."
+    :foot "If this keeps happening, contact your administrator."
+    :message "Your authorization session could not be verified. Start the sign-in again from the application."}
 
    "unsupported_grant_type"
-   {:title "Unsupported Request"
-    :message "The requested authorization method is not supported. Please contact the application developer."}})
+   {:title "Unsupported request"
+    :sub "This application asked for a sign-in method that is not supported."
+    :foot "Contact the developer of this application to fix it."
+    :message "The requested authorization method is not supported by this server."}})
 
 (def default-error
-  {:title "Authorization Error"
-   :message "An error occurred during authorization. Please contact support."})
-
-(defn shield-icon []
-  (raw "<svg xmlns=\"http://www.w3.org/2000/svg\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\">
-  <path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M12 9v3.75m0-10.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.75c0 5.592 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.25-8.25-3.286Zm0 13.036h.008v.008H12v-.008Z\" />
-</svg>"))
-
-(defn wrench-icon []
-  (raw "<svg xmlns=\"http://www.w3.org/2000/svg\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\">
-  <path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 0 0 4.486-6.336l-3.276 3.277a3.004 3.004 0 0 1-2.25-2.25l3.276-3.276a4.5 4.5 0 0 0-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437 1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008Z\" />
-</svg>"))
+  {:title "Authorization error"
+   :sub "Sign-in could not continue."
+   :foot "If this keeps happening, contact support."
+   :message "An error occurred during authorization."})
 
 (defn error-html
-  "Hiccup structure for an OAuth error page; optional context supplies dynamic
-   data (e.g. client-name for invalid_login_page)."
+  "Full error page for `error-type`; `context` carries :client-name, :redirect-uri, :invalid-value."
   ([error-type] (error-html error-type nil))
   ([error-type context]
    (let [security? (contains? security-errors error-type)
-         {:keys [title message message-fn]} (get error-messages error-type default-error)
-         message (if message-fn (message-fn context) message)]
-    (html
-     [:head
-      [:meta {:charset "UTF-8"}]
-      [:meta {:name "viewport" :content "width=device-width, initial-scale=1.0"}]
-      [:title "OAuth Error"]
-      [:link {:rel "icon" :type "image/png" :href "/oauth/images/favicon.png"}]
-      [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
-      [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
-      [:link {:rel "stylesheet" :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono&display=swap"}]
-      [:link {:rel "stylesheet" :href "/oauth/css/error.css"}]]
-     [:body
-      [:div.oauth-container
-       [:div.error-card
-        [:div.header
-         [:div {:class (str "icon " (if security? "security" "config"))}
-          (if security? (shield-icon) (wrench-icon))]
-         [:h2 title]]
-        [:div {:class (str "message " (when security? "security"))}
-         message]
-        [:div.error-code
-         (str "Error: " error-type)]
+         {:keys [title sub foot message message-fn register-hint?]} (get error-messages error-type default-error)
+         context (when (map? context) context)
+         client-name (not-empty (str (:client-name context)))
+         tone (if security? "tone-error" "tone-warn")
+         glyph (cond
+                 security? :shield-alert
+                 (= error-type "client_not_registered") :ban
+                 :else :wrench)
+         code (or (not-empty (str error-type)) "unknown_error")]
+     (assets/document
+      {:title (str title " · Synthigy")
+       :css "error.css"
+       :chip client-name
+       :status [:span.sy-status-item {:class tone} (assets/icon glyph) [:span code]]}
+      [:div.sy-card.sy-card--wide.sy-card--center
+       [:div.sy-card-head
+        (assets/hero {:tone tone :glyph glyph :title title :text sub}
+                     (assets/code-chip code))]
+       [:div.sy-card-body
         (when security?
-          [:div.help-text
-           "If you were redirected here unexpectedly, close this window."])]]
-      [:script {:src "/oauth/js/starfield.js"}]]))))
+          [:div.sy-msg.tone-error
+           [:span.sy-msg-icon (assets/icon :key-round)]
+           [:span.sy-msg-text "Do not enter your password or any other credentials."]])
+        [:div.sy-prose
+         (if message-fn
+           (message-fn context)
+           [:p message])]
+        (when register-hint?
+          (register-hint client-name (:redirect-uri context)))]
+       [:div.sy-card-foot
+        (cond
+          security? "If you were redirected here unexpectedly, close this window."
+          (not (str/blank? foot)) foot
+          :else "Contact the developer or administrator of this application.")]]))))
 
 (defn render-error-page
   "OAuth error page as a 400 HTTP response, used when redirect_uri is
@@ -113,7 +136,6 @@
   ([error-type] (render-error-page error-type nil))
   ([error-type context]
    (or
-    ;; Defer to a branded error.html in the custom login-page folder if present.
     (login/custom-page-redirect
      "error.html"
      (cond-> {:error error-type

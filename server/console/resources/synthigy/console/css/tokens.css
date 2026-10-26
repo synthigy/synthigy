@@ -57,7 +57,6 @@
     #0f0f10 55%,
     #0a0a0b 100%
   );
-  --sy-star-rgb: 255, 255, 255; /* read by starfield.js */
 
   /* ---- Text ladder: pp > p > base > m > mm ---------------------------- */
   --sy-text-pp: #ffffff;
@@ -78,6 +77,7 @@
    * the only chrome. Panels still get --sy-panel-bg below — atmosphere
    * belongs behind the data, not in it. */
   --sy-panel-bg: rgba(255, 255, 255, 0.035); /* cards / tables */
+  --sy-band: rgba(22, 22, 23, 0.84); /* the bar, same as the OAuth pages */
 
   --sy-border: rgba(255, 255, 255, 0.08);
   --sy-border-strong: rgba(255, 255, 255, 0.18);

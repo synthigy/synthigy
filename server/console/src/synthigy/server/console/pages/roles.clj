@@ -26,7 +26,7 @@
 (def spec
   {:slug "roles" :entity :user_role :key :iam/user-role :label "Roles" :icon :shield
    :table {:query cx/roles-table
-           :watch cx/watch-roles-table
+           :count cx/roles-count
            :sortable #{"name" "active" "users" "scopes"}}
    :subtitle (str "A role is a bundle of scopes. Users and groups hold roles; "
                   "roles are what the engine actually checks.")

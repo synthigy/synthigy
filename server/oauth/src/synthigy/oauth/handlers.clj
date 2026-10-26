@@ -27,6 +27,15 @@
    [synthigy.oauth.token :as token-ns]
    [synthigy.oidc :as oidc]))
 
+(defn wrap-frame-deny
+  "Forbid framing the response (clickjacking); never on /oauth/authorize, the hidden renew frame needs it."
+  [handler]
+  (fn [request]
+    (some-> (handler request)
+            (update :headers #(merge {"Content-Security-Policy" "frame-ancestors 'none'"}
+                                     %
+                                     {"X-Frame-Options" "DENY"})))))
+
 (def token
   "OAuth 2.0 token endpoint (all grant types), fully wrapped."
   (-> #'token-ns/token-handler
@@ -66,6 +75,7 @@
 (def login
   "OAuth login page handler (GET displays the form, POST authenticates and creates a session)."
   (-> #'login/login-handler
+      wrap-frame-deny
       wrap-keyword-params
       wrap-params
       wrap-cookies))
@@ -73,6 +83,7 @@
 (def logout
   "OAuth logout handler; terminates the session and optionally redirects to post_logout_redirect_uri."
   (-> #'login/logout-handler
+      wrap-frame-deny
       core/wrap-session-read
       core/wrap-basic-authorization
       wrap-keyword-params
@@ -82,6 +93,7 @@
 (def oauth-status
   "User-facing terminal status page (/oauth/status, /oauth/device/status) for flows with no client redirect."
   (-> #'page.status/status-handler
+      wrap-frame-deny
       wrap-keyword-params
       wrap-params
       wrap-cookies))
@@ -97,6 +109,7 @@
 (def device-activation
   "OAuth 2.0 Device Activation handler (GET displays the form, POST confirms/cancels)."
   (-> #'device/device-activation-handler
+      wrap-frame-deny
       wrap-keyword-params
       wrap-params
       wrap-cookies))
@@ -186,6 +199,7 @@
 (def claim
   "GET /oauth/claim?token=... — the onboarding claim page."
   (-> #'onboarding/claim-page-handler
+      wrap-frame-deny
       wrap-keyword-params
       wrap-params
       wrap-cookies))

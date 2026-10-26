@@ -43,6 +43,10 @@ predicate that uses it is dropped (`title (ilike ?q?:string)` filters only when 
 given). An optional parameter is not allowed under `or`, where dropping one branch would
 silently narrow the result.
 
+Optional and default exclude each other: `?q?:string="%"` is an error. A default
+means "filter with this value", optional means "don't filter at all". String defaults
+are always double-quoted: `?q:string="%"`, not `'%'` or a bare `%`.
+
 ```
 ?since:int=1980
 ?q:string="%"

@@ -58,7 +58,7 @@
 (defn connect-modal
   [linked password?]
   [:ty-modal {(keyword "data-attr:open") "$linkOpen !== ''"
-              :backdrop "true" :close-on-outside-click true :close-on-escape true
+              :no-zoom true
               (keyword "data-on:close") "$linkOpen = ''"}
    [:div.console-confirm
     [:h2 "Confirm it's you"]
@@ -98,7 +98,7 @@
 (defn password-modal
   [password?]
   [:ty-modal {(keyword "data-attr:open") "$pwOpen"
-              :backdrop "true" :close-on-outside-click true :close-on-escape true
+              :no-zoom true
               (keyword "data-on:close") "$pwOpen = false"}
    [:div.console-confirm
     [:h2 (if password? "Change password" "Set a password")]

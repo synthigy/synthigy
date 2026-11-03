@@ -42,8 +42,8 @@ engine and newer.
 ### Security
 - **`args` values no longer reach SQL as text.** A `_limit` or `_offset` that
   was not a number, or a `_distinct` or `_order_by` field name holding a quote,
-  went into the query as written: `{"_limit": "(select 2)"}` ran the subquery
-  on SQLite search, and `purge` on both engines. Any caller allowed to read an
+  went into the query as written, in `search` on SQLite and in `purge` on
+  both engines. Any caller allowed to read an
   entity could run SQL. `_limit` and `_offset` must now be non-negative
   integers and field names are quoted safely; a wrong shape fails with
   `BAD_ARGS_SHAPE`. Affects every release up to 0.4.0.

@@ -23,7 +23,6 @@
    [synthigy.env :as env]
    [synthigy.files.folders :as folders]
    [synthigy.files.guard :as guard]
-   [synthigy.files.links :as links]
    [synthigy.files.migrate :as migrate]
    [synthigy.files.model :as model]
    [synthigy.files.schema :as schema]
@@ -323,7 +322,7 @@
                                 :cache cache :open? open?})))
 
 (defn download
-  "GET/HEAD /files/<xid> and /files/<xid>/<v>/<name>: the current bytes, as the signed-in user."
+  "GET/HEAD /files/<xid>: the current bytes, as the signed-in user."
   [store request xid]
   (let [f (fields)
         row (file-row f xid)
@@ -627,7 +626,6 @@
 (defn route
   [store {:keys [uri request-method] :as request} principal]
   (let [[file? xid tail version restore] (re-matches #"/files(?:/([A-Za-z0-9]{22}))?(/versions|/info)?(?:/(\d+))?(/restore)?/?" uri)
-        [_ link-xid] (re-matches links/route uri)
         [_ raw-path] (re-matches path-link uri)
         [folders? folder-xid folder-tail] (re-matches #"/files/folders(?:/([A-Za-z0-9]{22}))?(/access|/share|/unshare)?/?" uri)
         path (some-> (get-in request [:query-params "path"]) not-empty)]
@@ -641,9 +639,6 @@
       folders? (folder-route request principal
                              (or folder-xid (some-> (get-in request [:query-params "path"]) not-empty folders/ref->xid))
                              folder-tail)
-      link-xid (if (#{:get :head} request-method)
-                 (download store request link-xid)
-                 (fail 405 "METHOD_NOT_ALLOWED" "A file link only downloads: GET or HEAD"))
       raw-path (if (#{:get :head} request-method)
                  (let [{target :xid problem :problem} (resolve-path (decode-path raw-path))]
                    (if target (download store request target) (apply fail problem)))
@@ -678,14 +673,13 @@
       :else (fail 404 "NOT_FOUND" "No such files endpoint"))))
 
 (defn open-route
-  "A request without a token: GET/HEAD of /files/<xid> or a file link, nothing else; nil when it is neither."
+  "A request without a token: GET/HEAD of /files/<xid> or a path link, nothing else; nil when it is neither."
   [store {:keys [uri request-method] :as request}]
   (when (#{:get :head} request-method)
     (let [[_ xid] (re-matches #"/files/([A-Za-z0-9]{22})/?" uri)
-          [_ link-xid] (re-matches links/route uri)
           [_ raw-path] (re-matches path-link uri)]
       (cond
-        (or xid link-xid) (open-download store request (or xid link-xid))
+        xid (open-download store request xid)
         raw-path (if-let [target (:xid (access/with-principal nil (resolve-path (decode-path raw-path))))]
                    (open-download store request target)
                    (unauthorized request))))))

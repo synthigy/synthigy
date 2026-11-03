@@ -99,11 +99,6 @@
 (defdata :files.folder/cache
   :euuid #uuid "b384adbf-be2f-4f7d-9a34-1713e824155a" :xid "PAj5nWDB1x5fNxkC4JkPZT")
 
-(def engine-attributes
-  "File attributes only the module writes."
-  [:files.file/storage-key :files.file/hash :files.file/size :files.file/status
-   :files.file/content-type :files.file/uploaded-by :files.file/uploaded-at])
-
 (defn entity
   ([entity-key] (entity (dataset/deployed-model) entity-key))
   ([model entity-key] (core/get-entity model (id/entity entity-key))))

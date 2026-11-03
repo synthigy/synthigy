@@ -3,6 +3,130 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.4.1] — 2026-11-03
+
+Files arrive: a free module in every bundle. The Synthigy SDKs' `files` API
+needs this engine. Synthigy Studio (tooling 0.3.0) signs in only to this
+engine and newer.
+
+### Added
+- **Files module** (`:synthigy/files`, alias `:server-files`, in every bundle):
+  bytes behind `/files`, each also a `File` record on `/data`. Put by path
+  (create or replace), download with ranges and ETags, folders by path with
+  read/write/delete access lists, sharing, the last ten versions and restore,
+  search across paths (`GET /files/search`), links without a token for public
+  folders (`/files/path/...`), folder `Public` and `Cache` settings inherited
+  from the nearest folder above. Storage on local disk or any S3-compatible
+  bucket (`SYNTHIGY_FILES_STORAGE` and the S3 keys); moving between stores
+  without downtime. Roles File Admin, File User and File Reader ship with the
+  module. Writes need an audit provider (`503 AUDIT_UNAVAILABLE` without one).
+  `/data` reads files and folders and lets other records link to them; only
+  `/files` creates, changes and deletes them (`ENGINE_OWNED`). Legacy file
+  rows migrate in place on first start (PostgreSQL). See docs/FILES.md.
+- `SYNTHIGY_SERVER_MAX_BODY`: the largest request body the HTTP server accepts
+  (default 25 MB).
+- CORS for browser apps allows `HEAD`, `PUT`, `PATCH`, `DELETE` and the
+  `If-Match`, `If-None-Match` and `Range` headers, and exposes `ETag`,
+  `Content-Disposition`, `Content-Range`, `Content-Length` and `Accept-Ranges`.
+- Hidden attributes: an attribute configured as hidden is read only by a
+  superuser.
+- Shipped system models mark their entities and relations as system in the
+  model (dataset patch 1.8.0).
+- Refused device-code requests are logged with the client, the error and the IP.
+
+### License
+- **The bundled web components (`tooling.js`) move from MIT to the Business
+  Source License**, starting with the first `@synthigy/tooling` release after
+  0.2.0. Bundles up to 0.2.0 stay MIT. See COMMERCIAL.md.
+
+### Security
+- **`args` values no longer reach SQL as text.** A `_limit` or `_offset` that
+  was not a number, or a `_distinct` or `_order_by` field name holding a quote,
+  went into the query as written: `{"_limit": "(select 2)"}` ran the subquery
+  on SQLite search, and `purge` on both engines. Any caller allowed to read an
+  entity could run SQL. `_limit` and `_offset` must now be non-negative
+  integers and field names are quoted safely; a wrong shape fails with
+  `BAD_ARGS_SHAPE`. Affects every release up to 0.4.0.
+- **Tree ops no longer splice `root` and `on` into SQL.** `get-tree` wrote the
+  `root` value straight into its query, and both `get-tree` and `search-tree` did
+  the same with the `on` relation name. Any caller allowed to read an entity could
+  run arbitrary SQL. `root` is now a bound parameter. `on` must name a tree
+  relation of the entity, otherwise the op fails with `UNKNOWN_TREE_RELATION`.
+- **Tree ops honour row-level security.** The recursive walk collected rows
+  without the read guard, so `get-tree` and `search-tree` returned rows the caller
+  could not read. A row you cannot read is now a wall: `get-tree` does not descend
+  past it, a `search-tree` match's ancestors stop below it, and an unfiltered
+  `search-tree` starts a tree at every visible row whose parent is hidden.
+
+### Changed
+- **`search-tree` root `_limit`/`_offset` page the matches**, like `search`: each
+  match comes back with its ancestors, which don't count toward the limit. They used
+  to cut the returned rows, ancestors included, mid-branch.
+- **A filtered `search-tree` keeps relation filters and limits** on the rows it
+  returns, as `get-tree` and an unfiltered `search-tree` already did. Ordering or a
+  `->` join on a relation no longer counts as a filter.
+- **The desktop app's OAuth client is now named Synthigy Studio** (was Synthigy
+  Desktop), after the app's rename. `/.well-known/synthigy` names it as
+  `auth.oidc.studio_client_id` (was `desktop_client_id`); the client id itself is
+  unchanged. Engines that
+  already have the client keep its old name until an operator renames it.
+  Breaking: Synthigy Studio signs in only to engines from this release on, and
+  the Synthigy Desktop app (tooling 0.2.0 and earlier) no longer signs in to them.
+
+### Fixed
+- **Legacy migration from 0.90.2 models no longer stops on removed attribute
+  types.** Attributes of type `currency`, `timeperiod` or `transit` move to
+  `json` before the deploy that drops those types (`currency` and `transit`
+  become inactive); system attributes take their shipped type. The migration
+  also takes the legacy master key (`legacy_master_key`) and re-wraps the stored
+  keys with the engine's own.
+- **`slice` no longer deletes records when it names a reference or a parent.**
+  Slicing a reference (such as `modified_by`) or the parent relation of a tree
+  deleted rows of the entity's own table instead of cutting a link: cutting a
+  folder from its parent deleted the folder's children. Such a slice is now
+  refused with `INVALID_SLICE`; set a reference or a parent to `null` with `sync`.
+- **`purge` runs the delete checks `delete` runs.** An extension could refuse
+  deleting a record while a purge of the same record went through.
+- **Deleting a dataset on PostgreSQL removes it.** It only recalled deployed
+  versions, so a dataset holding drafts (or nothing but drafts) stayed, with its
+  drafts, while the delete reported success. Drafts are now deleted too, and then
+  the dataset record.
+- **Recalling a version, or deleting a dataset, removes the model's records of the
+  entities and relations no deployed version uses any more**, and the role grants
+  on them go with them. PostgreSQL removed the relation records but kept the
+  entity records; SQLite kept both. Attribute records stay, so an attribute deny
+  list still applies when the entity is deployed again.
+- **A single-record delete picks one identity, as writes do**: the `xid` when it
+  is given, otherwise the first unique key given in full; other fields are
+  ignored. Every unique field present used to have to match as well, so deleting
+  with a whole record whose unique field had changed did nothing, without an
+  error, and part of a composite unique key could match several records.
+- Deploy logs name the version and dataset ("Deployed dataset version 0.3.6",
+  with `version-name` and `dataset-name` in `data`), and recall logs name the
+  version. They read the model's own fields instead, so the message ended without
+  a name and `data` carried only the model's internal `version` counter.
+- **Attributes named after SQL keywords** (`from`, `to`, `order`, `group`,
+  `select`, …) work in filters, ordering, `_distinct`, aggregates, relation pulls and
+  tree ops. They were quoted when the table was created but not in queries, so
+  reads failed with a syntax error, mostly on SQLite.
+- `sql-template` accepts placeholders for such fields: `SELECT {leave.from}` failed
+  with `Range … out of bounds`.
+- `search-tree` with a filter failed on an entity with an attribute named `path`
+  or `cycle`.
+- XSQL lint flags root filters, `_limit`, `_offset` and `_order_by` on `get-tree`:
+  its root is fixed by identity, so only `xid = …` and `on` belong there.
+- `get-tree` with a `root` that is not a UUID (UUID ids, Postgres) returns nothing
+  instead of a database error.
+- An unfiltered `search-tree` that finds nothing returns an empty list instead of
+  a database error.
+- XSQL lint flags `_on` naming a to-many self-relation; only a single-parent
+  relation can be walked.
+- XSQL lint and completion accept the documented bare `on` in tree ops. Lint read
+  only `_on`, so `on parent` was reported missing and the to-many, placement and
+  verb checks never ran; completion after `on ` offered no relations.
+- XSQL completion follows the tree lint: `on` offers only single-parent
+  self-relations, and the `get-tree` root offers only `xid`/`euuid` and `on`.
+
 ## [0.4.0] — 2026-10-26
 
 Synthigy Tools 0.2.0 needs this engine: against 0.3.1 its Sign Out fails and

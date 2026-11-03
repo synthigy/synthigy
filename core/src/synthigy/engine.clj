@@ -70,7 +70,22 @@
                  {:code "BAD_ARGS_SHAPE"
                   :rule "args_modifier"
                   :modifier (name k)
-                  :supported (mapv name (sort known-args-keys))})))))
+                  :supported (mapv name (sort known-args-keys))}))))
+    (doseq [[k ok? expected] [[:_where map? "a map"] [:_not map? "a map"] [:_maybe map? "a map"]
+                              [:_count map? "a map"] [:_agg map? "a map"]
+                              [:_or #(and (sequential? %) (every? map? %)) "a list of maps"]
+                              [:_and #(and (sequential? %) (every? map? %)) "a list of maps"]
+                              [:_limit nat-int? "a non-negative integer"]
+                              [:_offset nat-int? "a non-negative integer"]
+                              [:_distinct #(or (sequential? %) (map? %)) "a list of attributes"]
+                              [:_join #(or (string? %) (keyword? %)) "\"inner\", \"left\" or \"none\""]]
+            :let [v (get args k ::absent)]
+            :when (and (not= ::absent v) (some? v) (not (ok? v)))]
+      (throw (ex-info (str (name k) " must be " expected ". Got: " (pr-str v))
+                      {:code "BAD_ARGS_SHAPE"
+                       :rule "args_value"
+                       :argument (name k)
+                       :expected expected}))))
   (if-let [ob (:_order_by args)]
     (cond
       (map? ob)
@@ -501,7 +516,7 @@
 (def system-dataset-problem
   {:code "SYSTEM_DATASET_ENGINE_OWNED"
    :rule "system_dataset"
-   :message "Synthigy and OAuth datasets change only through engine upgrades."})
+   :message "System datasets change only through engine upgrades."})
 
 (defn system-change-problem
   [changes]
@@ -520,7 +535,7 @@
   "Refuse a non-superuser recall or destroy that touches a system dataset or changes a system entity."
   [dataset-ids version-ids]
   (when-not (access/superuser?)
-    (let [system-ids (dataset/system-ids (id/key))]
+    (let [system-ids (dataset/system-ids)]
       (when (some (:datasets system-ids) dataset-ids)
         (throw (problem-ex system-dataset-problem)))
       (let [changes (system/system-changes (dataset/deployed-model)
@@ -563,10 +578,6 @@
      :recall nil (:name stored)
      (fn []
        (assert-removal-allowed! [(id/extract (:dataset stored))] [(id/extract (:data ctx))])
-       (log/info {:id ::recalling-dataset-version
-                  :data {:action :recalling :subject :dataset
-                         :version (:data ctx)}}
-                 "Recalling dataset version")
        (reduced (assoc ctx :result (dataset/recall! (:data ctx))))))))
 
 ;; Purge Dataset — forbidden
@@ -735,7 +746,7 @@
 (defmethod execute-operation "synthigy-datasets"
   [ctx]
   (assert-scope! "dataset:load")
-  (assoc ctx :result (vec (sort (:datasets (dataset/system-ids (id/key)))))))
+  (assoc ctx :result (vec (sort (dataset/system-datasets)))))
 
 (defmethod execute-operation "schema"
   [{:keys [entities roles] :as ctx}]
@@ -812,7 +823,7 @@
   [version]
   (let [superuser (access/superuser?)
         stored (dataset/stored-version version)
-        system-ids (dataset/system-ids (id/key))
+        system-ids (dataset/system-ids)
         global (or (dataset/deployed-model)
                    (dataset.core/map->ERDModel {:entities {} :relations {}}))
         candidate (dataset/persisted-model (:model version))
@@ -820,8 +831,13 @@
         name-conflicts (system/new-name-conflicts global preview)
         conflicts (mapv system/conflict-details (system/new-field-conflicts global preview))
         changes (system/system-changes global preview system-ids)
-        rls-additions (when-not (contains? (:datasets system-ids) (id/extract (:dataset version)))
+        system-version? (system/system-model? candidate)
+        rls-additions (when-not system-version?
                         (system/system-rls-additions global candidate system-ids))
+        open-problems (when-not system-version?
+                        (system/open-rls-problems global candidate system-ids))
+        marked (system/system-marks global preview candidate
+                                    (contains? (:datasets system-ids) (id/extract (:dataset version))))
         broken-guards (guard-problem preview candidate)
         name-taken (dataset-version/name-problem version)]
     (cond-> {:errors [] :warnings []}
@@ -831,10 +847,24 @@
       broken-guards
       (update :errors conj broken-guards)
 
+      (and (seq marked) (not superuser))
+      (update :errors conj {:code "SYSTEM_MARK"
+                            :rule "system_mark"
+                            :message "Only a superuser marks a dataset, entity or relation as system."
+                            :details (vec marked)})
+
+      (seq open-problems)
+      (update :errors conj {:code "SYSTEM_ENTITY_RLS"
+                            :rule "system_entity_rls"
+                            :message (str "Guards on open system entities are added, never replaced or switched on: "
+                                          (str/join ", " (map system/open-rls-text open-problems)) ".")
+                            :hint "Give your guard a new id, and leave the entity's existing guards as they are."
+                            :details open-problems})
+
       (seq rls-additions)
       (update :errors conj {:code "SYSTEM_ENTITY_RLS"
                             :rule "system_entity_rls"
-                            :message (str "RLS on system entities comes only from the Synthigy and OAuth datasets: "
+                            :message (str "RLS on closed system entities comes only from the system datasets: "
                                           (str/join ", " (map system/rls-addition-text rls-additions)) ".")
                             :hint "Remove the RLS from these entities in this dataset; put guards on your own entities instead."
                             :details rls-additions})

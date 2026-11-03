@@ -273,9 +273,6 @@
     [this]
     [this module]
     "Reloads module. If module is not specified, than whole dataset is reloaded")
-  (unmount
-    [this module]
-    "Removes module from Synthigy by removing all data for that module")
   (get-last-deployed
     [this] [this offset]
     "MANUAL RECOVERY ONLY — reads model from __deploy_history; use reload for normal bootstrap.")
@@ -669,11 +666,11 @@
 
 (def entity-config-keys
   "The entity :configuration keys a model may carry; anything else is out of scope."
-  #{:rls :audit :constraints :rbac :audit/persist})
+  #{:rls :audit :constraints :rbac :audit/persist :system})
 
 (def relation-config-keys
   "The relation :configuration keys a model may carry."
-  #{:rbac})
+  #{:rbac :system})
 
 (defn clean-entity
   "Entity without out-of-scope :configuration keys or :claimed-by."
@@ -845,6 +842,11 @@
 
 (defn set-attribute-denied-roles [attribute op roles]
   (assoc-in attribute [:configuration :rbac :denied-roles op] roles))
+
+(defn hidden-attribute?
+  "True when `attribute` is engine-only: never read through the data API except by a superuser."
+  [attribute]
+  (true? (get-in attribute [:configuration :hidden])))
 
 (defn attribute-allows-op?
   "Pure check whether roles may perform op on attribute; applies only when the

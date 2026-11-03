@@ -151,15 +151,15 @@
     :type nil
     :settings nil}))
 
-(def first-party-clients
+(def synthigy-clients
   ["exports/app_synthigy_tools.json"
-   "exports/app_synthigy_desktop.json"])
+   "exports/app_synthigy_studio.json"])
 
-(defn ensure-first-party-clients
+(defn ensure-synthigy-clients!
   "Re-import any first-party OAuth client this engine is missing."
   []
   (with-principal nil
-    (doseq [export first-party-clients
+    (doseq [export synthigy-clients
             :when (not (get-client (:id (transfer/read-payload export))))]
       (transfer/import-app export)
       (log/info {:id ::imported-first-party-client
@@ -378,7 +378,7 @@
     (log/info {:id ::importing-default-data} "Importing default IAM data")
     (transfer/import-app "exports/app_synthigy_tools.json")
     (transfer/import-api "exports/api_synthigy.json")
-    (transfer/import-app "exports/app_synthigy_desktop.json")
+    (transfer/import-app "exports/app_synthigy_studio.json")
     (doseq [role ["exports/role_dataset_developer.json"
                   "exports/role_dataset_modeler.json"
                   "exports/role_dataset_explorer.json"
@@ -417,7 +417,7 @@
            (log/info {:id ::lifecycle-start :data {:action :starting}} "Starting IAM")
            (supervisor/progress-phase! "starting :synthigy/iam")
            (start)
-           (ensure-first-party-clients)
+           (ensure-synthigy-clients!)
            ;; Keep access/start out of `start` — :setup would run it before the roles are imported.
            (access/start)
            (log/info {:id ::lifecycle-started :data {:action :started}} "IAM started"))

@@ -296,6 +296,27 @@
   [entity-id]
   (schema/deployed-schema-entity entity-id))
 
+(defn tree-column
+  "The quoted self-FK column of tree relation `on`; throws UNKNOWN_TREE_RELATION for anything else."
+  [entity-id on]
+  (let [k (keyword on)
+        {:keys [recursions]} (deployed-schema-entity entity-id)]
+    (if (contains? recursions k)
+      (str \" (name k) \")
+      (throw (ex-info (str "`" (name on) "` is not a tree relation of this entity")
+                      {:code "UNKNOWN_TREE_RELATION"
+                       :relation (name on)
+                       :available (sort (map name recursions))})))))
+
+(declare read-scope-guard)
+
+(defn tree-source
+  "[from params]: `table`, or the rows of it the caller may read, for a recursive walk to stop at."
+  [entity-id table]
+  (if-let [{:keys [sql params]} (read-scope-guard entity-id table)]
+    [(format "(select * from \"%s\" where %s)" table sql) (vec params)]
+    [table []]))
+
 ;;; ============================================================================
 ;;; Temporary Key Generation
 ;;; ============================================================================
@@ -313,22 +334,23 @@
   "Max xids per multirow delete — above this, use purge."
   1000)
 
+(declare reference-constraint-keys)
+
 (defn delete-unique-args
-  "Builds a single-row delete's _eq predicate from unique keys; throws UNIQUE_KEY_REQUIRED."
+  "A single-row delete's _eq predicate: the id key when given, else the first unique group given in full; throws UNIQUE_KEY_REQUIRED."
   [entity-schema args]
-  (let [uniques (set (flatten ((comp :unique :constraints) entity-schema)))
-        unique-attribute-keys (as-> (:fields entity-schema) result
-                                (select-keys result uniques)
-                                (vals result)
-                                (conj (map :key result) (id/key)))
-        filtered-args (select-keys args unique-attribute-keys)]
-    (when (or (empty? filtered-args) (some nil? (vals filtered-args)))
+  (let [fields (:fields entity-schema)
+        groups (keep (fn [group] (not-empty (mapv #(get-in fields [% :key]) group)))
+                     ((comp :unique :constraints) entity-schema))
+        given (into #{} (keep (fn [[k v]] (when (some? v) k))) args)
+        filtered-args (some->> (reference-constraint-keys groups given) (select-keys args))]
+    (when (empty? filtered-args)
       (throw (ex-info
               (str "Delete on " (:name entity-schema) " needs a non-nil unique key")
               {:code "UNIQUE_KEY_REQUIRED"
                :rule "delete_identity"
                :entity-name (:name entity-schema)
-               :hint (str/join ", " (map name unique-attribute-keys))})))
+               :hint (str/join ", " (map #(str/join " + " (map name %)) (cons [(id/key)] groups)))})))
     {:filtered-args filtered-args
      :predicate-args (reduce-kv (fn [acc k v] (assoc acc k {:_eq v})) nil filtered-args)}))
 
@@ -377,8 +399,7 @@
   ([fields] (wrap-basic-fields fields nil))
   ([fields prefix]
    (if (not-empty prefix)
-     (map #(str (when prefix (str prefix \.))
-                (if (= (id/key) %) (id/field) (name %)))
+     (map #(str prefix \. \" (if (= (id/key) %) (id/field) (name %)) \")
           (conj fields "_eid"))
      (map #(str \" (if (= (id/key) %) (id/field) (name %)) \")
           (conj fields "_eid")))))
@@ -1411,6 +1432,34 @@
           data)
          (transform-object current entity data))))))
 
+(def join-modes {"left" :left "inner" :inner "none" :none})
+
+(defn join-mode
+  "The mode (:left, :inner or :none) of a `:_join` value; nil is :left, an unknown value nil."
+  [v]
+  (if (nil? v)
+    :left
+    (when (or (keyword? v) (string? v))
+      (join-modes (str/lower-case (name v))))))
+
+(defn normalize-join
+  "Args with `:_join` coerced to its mode; throws INVALID_JOIN on an unknown value or on `none` with `_maybe`."
+  [entity-id args]
+  (if-not (and (map? args) (contains? args :_join))
+    args
+    (let [v (:_join args)
+          mode (join-mode v)
+          entity-name (:name (deployed-schema-entity entity-id))]
+      (when (or (nil? mode) (and (= :none mode) (contains? args :_maybe)))
+        (throw (ex-info (str "Invalid _join " (pr-str v) " on entity " entity-name
+                             (if mode ": none cannot be combined with _maybe" ". Supported: left, inner, none"))
+                        {:code "INVALID_JOIN"
+                         :entity entity-name
+                         :value (if (keyword? v) (name v) v)
+                         :supported ["left" "inner" "none"]
+                         :path [:args :_join]})))
+      (assoc args :_join mode))))
+
 (defn selection->schema
   ([entity-id selection]
    (selection->schema entity-id selection nil))
@@ -1424,6 +1473,7 @@
           table :table
           rls :rls} (deployed-schema-entity entity-id)
          selection (flatten-selection selection)
+         args (normalize-join entity-id args)
          ;;
          {fields :field
           refs :reference} (distribute-fields (vals fields))
@@ -1804,6 +1854,11 @@
   [statements]
   (clojure.string/join " and " statements))
 
+(defn sql-quote
+  "Double-quote a SQL identifier."
+  [s]
+  (str \" (str/replace (name s) "\"" "") \"))
+
 (defn distinct-fields
   "Fields of a `_distinct`: a list (the wire form) or `{:attributes [...]}` (XSQL)."
   [d]
@@ -1820,7 +1875,7 @@
   [{{d :_distinct} :args}]
   (when-let [fields (distinct-fields d)]
     (str "distinct on ("
-         (clojure.string/join ", " (map #(str \" (name %) \") fields))
+         (clojure.string/join ", " (map sql-quote fields))
          ") ")))
 
 (defn modifiers-selection->sql
@@ -1862,7 +1917,7 @@
                    (fn [result [table field order]]
                      (conj result
                            (str (when table (str table \.))
-                                (name field)
+                                (sql-quote field)
                                 (case order
                                   :desc " desc nulls last"
                                   :asc " asc nulls first"))))
@@ -1891,7 +1946,7 @@
      (reduce
       (fn [[statements data] [field constraints]]
         (let [field-type (get field-types field)
-              field' (if (not-empty prefix) (str prefix \. (name field)) (name field))
+              field' (str (when (not-empty prefix) (str prefix \.)) \" (name field) \")
               field' (if (= "json" field-type)
                        (db/json-text *db* field')
                        field')
@@ -1902,7 +1957,7 @@
           (if (boolean? constraints)
             (if (= :_distinct field)
               [statements]
-              [(conj statements (str (name field) " = " constraints))])
+              [(conj statements (str \" (name field) \" " = " constraints))])
              ;;
             (if (is-relation? field)
               (if-not *deep* [statements data]
@@ -1968,8 +2023,8 @@
                       [[] data]
                       (map
                        (fn [constraint]
-                         (let [schema' (assoc schema :args constraint)]
-                           (query-selection->sql schema')))
+                         (let [[s d] (query-selection->sql (assoc schema :args constraint))]
+                           [(if (next s) [(str "(" (clojure.string/join " and " s) ")")] s) d]))
                        constraints))
                      0
                      (fn [statements']
@@ -2137,11 +2192,6 @@
 ;;; Inner-relation root scoping via EXISTS
 ;;; ============================================================================
 
-(defn sql-quote
-  "Double-quote a SQL identifier."
-  [s]
-  (str \" (str/replace (name s) "\"" "") \"))
-
 (defn sql-alias
   "A statement-unique SQL alias with prefix `p` (gensym-backed)."
   [p]
@@ -2157,11 +2207,20 @@
   "True when a relation does not scope its parent; absent `:_join` is LEFT, unconditionally."
   [args]
   (or (contains? args :_maybe)
-      (nil? (:_join args))
-      (boolean (#{:left :LEFT "left" "LEFT"} (:_join args)))))
+      (= :left (join-mode (:_join args)))))
+
+(defn read-guard
+  "`[sql params]` of `entity-id`'s :read RLS at `alias`, `1=0` when RLS applies but no guard does, nil when it does not apply."
+  [entity-id alias]
+  (when (rls-runtime/should-apply-guards? entity-id :read)
+    (when-let [{:keys [enabled guards]} (get-in (deployed-schema) [entity-id :rls])]
+      (when enabled
+        (if-let [r (and (seq guards) (rls-runtime/compile-guards-to-sql alias guards :read))]
+          [(:sql r) (vec (:params r))]
+          ["1=0" []])))))
 
 (defn inner-exists
-  "`[sql params]` (or nil) of EXISTS-scoped correlated subqueries for `schema`'s INNER relations at `alias`."
+  "`[sql params]` (or nil) of the correlated [NOT] EXISTS scoping `schema`'s INNER and NONE relations at `alias`."
   [schema alias]
   (let [preds
         (keep
@@ -2173,10 +2232,11 @@
                      [fsql fdata] (when (relation-has-filter? args)
                                     (relation-on-predicate rel))
                      [csql cdata] (inner-exists rel ex)
-                     needs-target? (or (seq fsql) (seq csql))]
-                 [(str "exists (select 1 from "
-                       (if (:recursion? rel)
-                         ;; tree-cardinality: self-FK column, no junction
+                     [gsql gdata] (read-guard (:to rel) ex)
+                     needs-target? (or (seq fsql) (seq csql) (seq gsql))]
+                 [(str (when (= :none (join-mode (:_join args))) "not ")
+                       "exists (select 1 from "
+                       (if (or (:recursion? rel) (:ref? rel))
                          (str (sql-quote (:entity/table rel)) " " ex
                               " where " ex "._eid = " alias "." (sql-quote (:from/field rel)))
                          (str (sql-quote (:relation/table rel)) " " jx
@@ -2185,11 +2245,40 @@
                                      " on " ex "._eid = " jx "." (sql-quote (:to/field rel))))
                               " where " jx "." (sql-quote (:from/field rel)) " = " alias "._eid"))
                        (when (seq fsql) (str " and (" fsql ")"))
-                       (when (seq csql) (str " and " csql)) ")")
-                  (vec (concat fdata cdata))]))))
+                       (when (seq csql) (str " and " csql))
+                       (when (seq gsql) (str " and (" gsql ")"))
+                       ")")
+                  (vec (concat fdata cdata gdata))]))))
          (:relations schema))]
     (when (seq preds)
       [(str/join " and " (map first preds)) (vec (mapcat second preds))])))
+
+(defn refuse-none-slice!
+  "Throws INVALID_JOIN when a sliced relation asks for `_join none`."
+  ([schema] (refuse-none-slice! schema [:args]))
+  ([schema path]
+   (doseq [[k {:keys [args] :as rel}] (:relations schema)
+           :let [path' (conj path (keyword (name k)))]]
+     (when (= :none (join-mode (:_join args)))
+       (throw (ex-info (str "_join none is not supported in slice (relation " (name k) ")")
+                       {:code "INVALID_JOIN"
+                        :rule "join_none_slice"
+                        :relation (name k)
+                        :value "none"
+                        :path (conj path' :_join)})))
+     (refuse-none-slice! rel path'))))
+
+(defn refuse-column-slice!
+  "Throws INVALID_SLICE when a slice names a reference or a parent: those are columns, not links."
+  [schema]
+  (doseq [[k {:keys [ref? recursion?]}] (:relations schema)
+          :when (or ref? recursion?)]
+    (throw (ex-info (str "Slice cuts relation links; " (name k) " is a "
+                         (if ref? "reference" "parent") " column, set it to null with sync")
+                    {:code "INVALID_SLICE"
+                     :rule "slice_column"
+                     :relation (name k)
+                     :path [:selections (keyword (name k))]}))))
 
 (defn search-stack-from
   "Builds the FROM clause by joining schema's tables; returns `[tables from-sql
@@ -2237,8 +2326,9 @@
                       [zipper])))
           ;; INNER default is deliberate — never default to LEFT here, tree ops break
           (->join [{:keys [args]}]
-            (if (:_maybe args) "left"
-                (str/lower-case (name (:_join args :INNER)))))]
+            (if (or (:_maybe args) (= :left (join-mode (:_join args :inner))))
+              "left"
+              "inner"))]
     (let [zipper (schema-zipper schema)
           {:keys [entity/as entity/table]
            rtable :relation/table
@@ -2277,11 +2367,11 @@
                                                 link-sql (if (= table link-table)
                                                            (format
                                                             "%s join \"%s\" %s on %s.%s=%s.%s%s"
-                                                            join child-table as-child as ff as-child "_eid" on-suffix)
+                                                            join child-table as-child as (sql-quote ff) as-child "_eid" on-suffix)
                                                            (format
                                                             "%s join \"%s\" %s on %s._eid=%s.%s\n%s join \"%s\" %s on %s.%s=%s.%s%s"
-                                                            join link-table as-link as as-link ff
-                                                            join child-table as-child as-link tf as-child "_eid" on-suffix))
+                                                            join link-table as-link as as-link (sql-quote ff)
+                                                            join child-table as-child as-link (sql-quote tf) as-child "_eid" on-suffix))
                                                 next-tables (conj tables as)
                                                 next-stack (conj stack link-sql)
                                                 next-join-data (cond-> join-data
@@ -2299,7 +2389,7 @@
          (str
           \" rtable \" " as " ras
           " " join " join " \" ttable \" \space as \space " on "
-          ras \. (if reference? falias talias) \= as "._eid"
+          ras \. (sql-quote (if reference? falias talias)) \= as "._eid"
           \newline (clojure.string/join "\n" stack))
          (str/join "\n" (conj
                           ; stack
@@ -2350,10 +2440,10 @@
         {:keys [_limit _offset]} (:args schema)
         windowed? (or _limit _offset)
         order-sql (modifiers-selection->sql (update level :args dissoc :_limit :_offset))
-        partition-col (if (= talias "_eid") (str ras "._eid") (str ras \. falias))
+        partition-col (if (= talias "_eid") (str ras "._eid") (str ras \. (sql-quote falias)))
         base (str "select " (if (= talias "_eid")
-                              (str ras "._eid as " falias)
-                              (str ras \. falias \, ras \. talias))
+                              (str ras "._eid as " (sql-quote falias))
+                              (str ras \. (sql-quote falias) \, ras \. (sql-quote talias)))
                   (when-not (empty? fields) (str "," (extend-fields (keys fields) as)))
                   (when windowed?
                     (str ", row_number() over (partition by " partition-col
@@ -2533,7 +2623,7 @@
                                       [(conj statements
                                              ;; never wrap the column in case/coalesce — SQLite drops its collation (min/max of text)
                                              (format
-                                              "%s(%s.%s)%s as %s$%s$%s"
+                                              "%s(%s.\"%s\")%s as %s$%s$%s"
                                               (case operation
                                                 :min "min"
                                                 :max "max"
@@ -3001,6 +3091,33 @@
                                  ") and (" sql ") is not true")]
                       (map (comp first vals) (sql/execute! tx (into (into [q] chunk) params) :raw)))))
           (partition-all budget ids))))
+
+(defn purge-deletes!
+  "Runs the delete enhancement of every row a purge is about to remove; `found` is {table {eid row}}."
+  [tx schema found]
+  (let [entities (into {} (keep (fn [{t :entity/table e :entity}] (when (and t e) [t e])))
+                       (tree-seq map? (comp vals :relations) schema))]
+    (doseq [[table rows] found
+            :let [entity-id (get entities table)]
+            :when (and entity-id (enhance/delete-hook? entity-id))
+            chunk (partition-all (chunk-rows-for 1) (keys rows))
+            x (map (comp first vals)
+                   (sql/execute! tx (into [(str "select \"" (id/field) "\" from \"" table "\" where _eid in ("
+                                                (clojure.string/join ", " (repeat (count chunk) \?)) ")")]
+                                          chunk)
+                                 :raw))]
+      (enhance/apply-delete entity-id {(id/key) x} tx))))
+
+(defn slice-hooks!
+  "Runs the slice enhancement at both ends of every relation a slice cuts."
+  [{:keys [entity relations]} tx]
+  (let [cut (reduce (fn [acc {:keys [relation] to :entity}]
+                      (cond-> (update acc entity (fnil conj #{}) relation)
+                        to (update to (fnil conj #{}) relation)))
+                    {}
+                    (vals relations))]
+    (doseq [[entity-id relation-ids] cut]
+      (enhance/apply-slice entity-id relation-ids tx))))
 
 (defn assert-from-side-writable!
   "Throws ROW_FORBIDDEN unless every from-side row passes the origin's :write

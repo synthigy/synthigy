@@ -12,6 +12,7 @@
 (ns synthigy.server
   "enso HTTP server adapter for Synthigy."
   (:require
+   synthigy.env
     [synthigy.client-address :as client-address]
     [synthigy.cors :as cors]
     [clojure.core.async :as async]
@@ -217,6 +218,7 @@
    (let [handler (make-handler {:routes routes :info info})
          s (enso/run-server handler {:host host
                                      :port port
+                                     :max-request-body-bytes synthigy.env/server-max-body
                                      :shutdown-timeout 100})]
      (routes/register-sse-transport! d*ring/->sse-response)
      (reset! server s)

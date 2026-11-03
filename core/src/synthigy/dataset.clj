@@ -309,13 +309,30 @@
   []
   (<-resource "dataset/synthigy.json"))
 
-(def system-ids
-  "Dataset, entity and relation ids of the shipped system models (Synthigy, OAuth) for an ID provider key."
-  (memoize
-   (fn [_id-key]
-     (let [versions [(current-synthigy-version) (<-resource "dataset/oauth_session.json")]]
-       (assoc (system/model-ids (map :model versions))
-              :datasets (into #{} (map (comp id/extract :dataset)) versions))))))
+(defn system-datasets
+  "Ids of the datasets whose latest deployed version carries a system model."
+  []
+  (binding [synthigy.dataset.access/*access-control* (synthigy.dataset.access/->AllowAllAccess)]
+    (try
+      (reduce (fn [acc {did (id/key) [v] :versions}]
+                (let [model (:model v)
+                      model (if (string? model) (<-transit model) model)]
+                  (cond-> acc (system/system-model? model) (conj did))))
+              #{}
+              (db/search-entity *db* :dataset/dataset nil
+                                {(id/key) nil
+                                 :versions [{:selections {(id/key) nil :model nil}
+                                             :args {:deployed {:_eq true}
+                                                    :_order_by {:deployed_on :desc}
+                                                    :_limit 1}}]}))
+      (catch clojure.lang.ExceptionInfo e
+        (if (= "UNKNOWN_ATTRIBUTE" (:code (ex-data e))) #{} (throw e))))))
+
+(defn system-ids
+  "System entities (id -> :closed or :open) and relations the deployed model marks, and the system datasets."
+  []
+  (system/model-system-ids (or (deployed-model) (core/map->ERDModel {:entities {} :relations {}}))
+                           (system-datasets)))
 
 (defn bootstrap-version
   "Synthigy model without RLS, for compiling the meta tables before the global model exists."
@@ -483,15 +500,13 @@
 ;;; ============================================================================
 
 (defn version-summary
-  "Identifying bits of a version (or a `{:model …}` envelope) for log payloads."
+  "Identifying bits of a version for log payloads."
   [v]
-  (let [m (or (:model v) v)]
-    (cond-> {}
-      (:xid m)        (assoc :version-xid (:xid m))
-      (:euuid m)      (assoc :version-euuid (str (:euuid m)))
-      (:name m)       (assoc :version-name (:name m))
-      (:version m)    (assoc :version (:version m))
-      (:dataset m)    (assoc :dataset-name (:name (:dataset m))))))
+  (cond-> {}
+    (:xid v)                   (assoc :version-xid (:xid v))
+    (:euuid v)                 (assoc :version-euuid (str (:euuid v)))
+    (:name v)                  (assoc :version-name (:name v))
+    (get-in v [:dataset :name]) (assoc :dataset-name (get-in v [:dataset :name]))))
 
 (defn persisted-model
   "The model as `deploy!` stores it, so stored and candidate models compare with `=`."
@@ -501,7 +516,7 @@
         core/normalize-legacy-types
         core/clean-model
         adapt-model-to-provider
-        (assoc :version 1)
+        (assoc :version 2)
         ->transit
         <-transit)))
 
@@ -604,12 +619,13 @@
   "Recall (delete) a dataset version, rolling back its schema and rebuilding the global model; true when done."
   [version]
   (let [actor   (log/current-principal-xid)
-        summary (version-summary version)
-        base    (cond-> (assoc summary :subject :dataset)
-                  actor (assoc :actor-xid actor))
         id      (id/extract version)
         stored  (when id
-                  (get-entity :dataset/version {(id/key) id} {(id/key) nil :name nil :deployed nil}))]
+                  (get-entity :dataset/version {(id/key) id} {(id/key) nil :name nil :deployed nil}))
+        summary (cond-> (version-summary version)
+                  (:name stored) (assoc :version-name (:name stored)))
+        base    (cond-> (assoc summary :subject :dataset)
+                  actor (assoc :actor-xid actor))]
     (if (and stored (not (:deployed stored)))
       (do (delete-entity :dataset/version {(id/key) id})
           (log/info {:id ::recalled

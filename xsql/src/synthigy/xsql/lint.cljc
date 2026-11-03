@@ -129,12 +129,18 @@
 
 (defn lint-statement [stmt-node entity-def ctx]
   (let [inner (first (:children stmt-node))]
-    (case (:node inner)
-      :scalar      (lint-scalar inner entity-def ctx)
-      :relation    (lint-relation inner entity-def ctx)
-      :count-block (lint-count-block inner entity-def ctx)
-      :agg-block   (lint-agg-block inner entity-def ctx)
-      nil)))
+    (if (and (:none-scope ctx) (#{:count-block :agg-block} (:node inner)))
+      (vswap! (:diags ctx) conj
+              (error-diag (or (first (:children inner)) inner)
+                          (str "`" (if (= :count-block (:node inner)) "_count" "_agg")
+                               "` under `!" (:none-scope ctx) "` aggregates nothing — `!"
+                               (:none-scope ctx) "` keeps parents with no matching row")))
+      (case (:node inner)
+        :scalar      (lint-scalar inner entity-def ctx)
+        :relation    (lint-relation inner entity-def ctx)
+        :count-block (lint-count-block inner entity-def ctx)
+        :agg-block   (lint-agg-block inner entity-def ctx)
+        nil))))
 
 ;; ── Scalar ──────────────────────────────────────────────────────────────
 
@@ -166,6 +172,15 @@
                               (str "Unexpected `:` after '" field-name "'. "
                                    "For relation aliases use `-" field-name ":<relation>`. "
                                    "Scalar aliases are not supported.")))
+
+          (and attr-def (:none-scope ctx)
+               (not (ast/find-child scalar-node :pred-op))
+               (not (ast/find-child scalar-node :scalar-filter)))
+          (vswap! (:diags ctx) conj
+                  (error-diag field-id
+                              (str "`!" (:none-scope ctx) "` selects nothing — it keeps parents with no "
+                                   "matching row, so '" field-name "' has no value; filter it "
+                                   "(`" field-name " = …`) or drop it")))
 
           attr-def
           (when-let [pred-op (ast/find-child scalar-node :pred-op)]
@@ -208,25 +223,38 @@
       (let [rel-id (first ids)
             rel-name (:text rel-id)
             rel-def (get-in entity-def [:relations rel-name])
-            attr-def (get-in entity-def [:attributes rel-name])]
+            attr-def (get-in entity-def [:attributes rel-name])
+            join (compile-impl/relation-join rel-node)
+            none-scope (or (:none-scope ctx) (when (= "none" join) rel-name))]
+        (when-not (#{"left" "inner" "none"} join)
+          (vswap! (:diags ctx) conj
+                  (error-diag rel-id (str "Unknown join '" join "' on '" rel-name "' — use left, inner or none"))))
         (cond
+          (and rel-def (:none-scope ctx) (= "left" join))
+          (vswap! (:diags ctx) conj
+                  (error-diag rel-id
+                              (str "`->" rel-name "` under `!" (:none-scope ctx) "` projects nothing — "
+                                   "use `-" rel-name "` or `!" rel-name "` to constrain")))
+
           rel-def
           (let [target-def (get-in (:schema ctx) [:entities (:target rel-def)])
                 parens (ast/find-child rel-node :parens)
-                block  (ast/find-child rel-node :block)]
+                block  (ast/find-child rel-node :block)
+                ctx'   (cond-> ctx none-scope (assoc :none-scope none-scope))]
             (when (and parens target-def)
               (lint-args-of-parens parens target-def ctx))
             (cond
-              (or (nil? block) (not (has-statement-child? block)))
+              (and (not none-scope)
+                   (or (nil? block) (not (has-statement-child? block))))
               (vswap! (:diags ctx) conj
                       (error-diag rel-id
                                   (str "Relation '" rel-name
                                        "' must have at least one child selection")))
 
-              target-def
+              (and block target-def)
               (doseq [c (:children block)
                       :when (= :statement (:node c))]
-                (lint-statement c target-def ctx))))
+                (lint-statement c target-def ctx'))))
 
           attr-def
           (vswap! (:diags ctx) conj
@@ -583,7 +611,7 @@
 (defn on-meta-node?
   [n]
   (and (= :meta-key (:node n))
-       (= "_on" (some-> (first (:children n)) :text))))
+       (= "_on" (parser/normalize-meta-kw (some-> (first (:children n)) :text)))))
 
 (defn root-on-nodes
   "All `_on` :meta-key nodes inside the root parens."
@@ -595,8 +623,7 @@
 (defn on-relation-id
   "The relation identifier of an `_on` meta-key node."
   [on-node]
-  (some #(when (and (= :identifier (:node %)) (not= "_on" (:text %))) %)
-        (:children on-node)))
+  (some #(when (= :identifier (:node %)) %) (rest (:children on-node))))
 
 (defn lint-on-placement
   "`_on` is only valid in the root parens of a tree op."
@@ -608,11 +635,11 @@
       (cond
         (not (contains? root-spans (:span n)))
         (vswap! (:diags ctx) conj
-                (error-diag n "`_on` belongs in the ROOT parens — it names the relation a tree op recurses over"))
+                (error-diag n "`on` belongs in the ROOT parens — it names the relation a tree op recurses over"))
 
         (and op (not (tree-ops op)))
         (vswap! (:diags ctx) conj
-                (error-diag n (str "`_on` is only valid on @search-tree / @get-tree — not @" op)))))))
+                (error-diag n (str "`on` is only valid on @search-tree / @get-tree — not @" op)))))))
 
 (defn lint-tree-on
   "Tree-op rule: exactly one root-parens `_on <rel>`, naming a self-relation of the root entity."
@@ -624,12 +651,12 @@
       (vswap! (:diags ctx) conj
               {:severity :error
                :from 0 :to (max 1 (count (:source ctx "")))
-               :message (str "`" op "` requires `_on <relation>` in the root parens — "
+               :message (str "`" op "` requires `on <relation>` in the root parens — "
                              "the self-relation to recurse over.")})
 
       (> (count ons) 1)
       (vswap! (:diags ctx) conj
-              (error-diag (second ons) "Only one `_on` per tree op"))
+              (error-diag (second ons) "Only one `on` per tree op"))
 
       :else
       (when entity-def
@@ -647,8 +674,14 @@
             (not= (:target rel-def) root-name)
             (vswap! (:diags ctx) conj
                     (error-diag (or rel-id n)
-                                (str "`_on " rel-name "` must be a SELF-relation of "
-                                     root-name " — it targets " (:target rel-def))))))))))
+                                (str "`on " rel-name "` must be a SELF-relation of "
+                                     root-name " — it targets " (:target rel-def))))
+
+            (= "many" (:cardinality rel-def))
+            (vswap! (:diags ctx) conj
+                    (error-diag (or rel-id n)
+                                (str "`on " rel-name "` must be a tree (single-parent) relation — "
+                                     "it is to-many")))))))))
 
 (defn root-parens-id-identity?
   "True if the root parens carry `xid = …` (or `euuid = …`)."
@@ -670,9 +703,41 @@
   [op tree ctx]
   (lint-tree-on op tree ctx))
 
+(defn identity-arg-stmt?
+  "True for a root arg-stmt that is exactly one `xid = …` / `euuid = …` predicate."
+  [stmt]
+  (let [preds (filter #(= :arg-predicate (:node %)) (tree-seq :children :children stmt))]
+    (and (= 1 (count preds))
+         (let [n     (first preds)
+               field (some #(when (= :identifier (:node %)) (:text %))
+                           (:children (ast/find-child n :path)))
+               pred  (ast/find-child n :pred-op)]
+           (and (#{"xid" "euuid"} field) pred (= "_eq" (second (classify-pred-op pred))))))))
+
+(defn on-arg-stmt? [stmt]
+  (let [m (first (:children stmt))]
+    (and (= :meta-key (:node m))
+         (= "_on" (parser/normalize-meta-kw (some-> m :children first :text))))))
+
+(defn lint-get-tree-root-args
+  "get-tree's root is fixed by its identity, so any other root filter or modifier means nothing."
+  [tree ctx]
+  (let [msg "`get-tree` fixes its root by identity — only `xid = …` and `on` belong in the root parens; filter relations instead"]
+    (doseq [stmt (some->> (:root-parens tree) (tree-seq :children :children) (filter #(= :arg-stmt (:node %))))
+            :when (not (or (identity-arg-stmt? stmt) (on-arg-stmt? stmt)))]
+      (vswap! (:diags ctx) conj (error-diag stmt msg)))
+    (doseq [c (:children tree)
+            :let [inner (first (:children c))]
+            :when (and (= :statement (:node c))
+                       (= :scalar (:node inner))
+                       (or (ast/find-child inner :pred-op) (ast/find-child inner :scalar-filter)))]
+      (vswap! (:diags ctx) conj
+              (error-diag inner "`get-tree` ignores filters on root fields — filter relations instead")))))
+
 (defmethod op-lint-rules "get-tree"
   [op tree ctx]
   (lint-tree-on op tree ctx)
+  (lint-get-tree-root-args tree ctx)
   (when-not (root-parens-id-identity? tree)
     (vswap! (:diags ctx) conj
             {:severity :error

@@ -66,7 +66,7 @@
   (let [tag (:type t)
         sp  [(:from t) (:to t)]]
     (case tag
-      (:identifier :string :number :arrow :dash
+      (:identifier :string :number :arrow :dash :bang
        :eq :neq :lt :le :gt :ge)
       (ast/leaf tag sp (:text t))
 
@@ -190,7 +190,7 @@
         (let [[bl st'] (consume-leaf st)]
           (recur st' (conj children bl)))
 
-        (or (#{:dash :arrow} (peek-type st))
+        (or (#{:dash :arrow :bang} (peek-type st))
             (= :identifier   (peek-type st)))
         (let [[n st'] (parse-statement st)]
           (recur st' (conj children n)))
@@ -247,7 +247,7 @@
         (cond
           (id-text=? st "_count")            (parse-count-block st)
           (id-text=? st "_agg")              (parse-agg-block st)
-          (#{:dash :arrow} (peek-type st))   (parse-relation st)
+          (#{:dash :arrow :bang} (peek-type st))   (parse-relation st)
           (= :identifier (peek-type st))     (parse-scalar st)
           :else                              [(error-node start "expected statement")
                                               (advance st)])]
@@ -367,6 +367,10 @@
                    [(error-node start
                                 "join markers are not allowed inside `_count` — counts are always inner; drop the `->`")
                     st'])
+          :bang  (let [[_ st'] (consume-leaf st)]
+                   [(error-node start
+                                "join markers are not allowed inside `_count` — counts are always inner; drop the `!`")
+                    st'])
           [nil st])
         children      (cond-> [] marker-err (conj marker-err))
         [alias-n st]  (if (looks-like-alias? st) (parse-alias st) [nil st])
@@ -420,6 +424,10 @@
           :arrow (let [[_ st'] (consume-leaf st)]
                    [(error-node start
                                 "join markers are not allowed inside `_agg` — aggregates are always inner; drop the `->`")
+                    st'])
+          :bang  (let [[_ st'] (consume-leaf st)]
+                   [(error-node start
+                                "join markers are not allowed inside `_agg` — aggregates are always inner; drop the `!`")
                     st'])
           [nil st])
         children      (cond-> [] marker-err (conj marker-err))
@@ -498,15 +506,15 @@
         st (skip-silent st :colon)]
     [(container :alias start [id]) st]))
 
-;; JoinMarker → Arrow | Dash
+;; JoinMarker → Arrow | Dash | Bang
 
 (defn parse-join-marker [st]
   (let [start (peek-tok st)]
     (case (peek-type st)
-      (:arrow :dash)
+      (:arrow :dash :bang)
       (let [[leaf st] (consume-leaf st)]
         [(container :join-marker start [leaf]) st])
-      [(error-node start "expected join marker (- or ->)") (advance st)])))
+      [(error-node start "expected join marker (-, -> or !)") (advance st)])))
 
 ;; Parens → "(" ArgList? ")"
 
@@ -793,7 +801,7 @@
 
       "_join"
       (let [[id st] (expect st :identifier
-                            "expected join type (left|inner|right|full) after _join")]
+                            "expected join type (left|inner|none) after _join")]
         [(container :meta-key start (conj children id)) st])
 
       "_on"

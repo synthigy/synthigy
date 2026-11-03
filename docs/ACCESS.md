@@ -118,6 +118,7 @@ Synthigy ships these roles; use them as they are or as a starting point.
 | Dataset Modeler | Modeling the datasets shared with it |
 | Dataset Explorer | Reading the whole dataset catalog |
 | XSQL Developer | The schema for code generation and editor tooling; no data access |
+| File Admin, File User, File Reader | Files and folders ([Files](FILES.md#access)) |
 
 ## Delegated administration
 

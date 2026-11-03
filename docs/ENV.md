@@ -35,6 +35,21 @@ Where the instance lives and which engine runs.
 | `SYNTHIGY_SERVER_ALLOWED_ORIGINS` |  | Extra browser origins allowed to call the API, comma separated ([CORS.md](CORS.md)). |
 | `SYNTHIGY_SERVER_TRUST_PROXY` |  | IPs or CIDRs of the reverse proxies in front of the engine, comma separated, e.g. `127.0.0.1/32,::1/128`. Only a request arriving from one of them has its `X-Forwarded-For`, `-Host` and `-Proto` believed ([PROXY.md](PROXY.md)). |
 | `SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` | `900000` | Longest life of one subscription stream, in milliseconds, before the server closes it; clients reconnect on their own. |
+| `SYNTHIGY_SERVER_MAX_BODY` | `26214400` | Largest request body the engine accepts, in bytes. Also the largest file one upload can carry ([FILES.md](FILES.md)). |
+
+## Files
+
+Where uploaded files keep their bytes ([FILES.md](FILES.md)). Every version of a file is its own object; the engine deletes the ones no longer kept.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SYNTHIGY_FILES_STORAGE` | `local` | `local` keeps files in `<home>/files/`. `s3` keeps them in an S3 bucket: AWS, SeaweedFS, MinIO or any S3-compatible store. |
+| `SYNTHIGY_FILES_S3_BUCKET` |  | Bucket name. Required for `s3`. |
+| `SYNTHIGY_FILES_S3_REGION` | `us-east-1` | Bucket region, e.g. `eu-central-1`. |
+| `SYNTHIGY_FILES_S3_ENDPOINT` |  | URL of an S3-compatible store, e.g. `http://seaweedfs:8333`. Unset: AWS. |
+| `SYNTHIGY_FILES_S3_PATH_STYLE` |  | `true`: address the bucket in the path (`host/bucket/key`) rather than the host name. Most self-hosted stores need it. |
+| `SYNTHIGY_FILES_S3_ACCESS_KEY_ID` |  | Access key. Unset: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, then the EC2 instance role. |
+| `SYNTHIGY_FILES_S3_SECRET_ACCESS_KEY` |  | Secret key, paired with the access key. |
 
 ## SQLite
 

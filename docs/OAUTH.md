@@ -24,7 +24,7 @@ consent screen, and it may run `/data` requests as its users
 A client lists the **redirect URIs** it may return to, matched exactly. Loopback
 URIs (`http://localhost`, `http://127.0.0.1`) have two exceptions:
 
-- a **native** app (application type `native`, such as the desktop app) may use
+- a **native** app (application type `native`, such as Synthigy Studio) may use
   any port on any of its loopback URIs (RFC 8252);
 - for a web client, a loopback URI registered **without** a port
   (`http://localhost/callback`) accepts any port, but only while the engine itself

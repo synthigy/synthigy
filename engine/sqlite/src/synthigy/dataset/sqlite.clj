@@ -1029,12 +1029,9 @@
     #{})))
 
 (defn version-rls-model
-  "The model of `version`, without RLS on system entities unless its dataset is a system dataset."
-  [{:keys [model dataset]}]
-  (let [system-ids (dataset/system-ids (id/key))]
-    (cond-> model
-      (not (contains? (:datasets system-ids) (id/extract dataset)))
-      (system/without-system-rls system-ids))))
+  "The model of `version` with only the RLS it may declare on the system entities `marks` names."
+  [{:keys [model]} marks]
+  (system/version-rls model marks))
 
 (defn latest-version-models
   "Models of the latest deployed version of every dataset, plus `include-version`
@@ -1047,10 +1044,11 @@
                    (->> (deployed-versions)
                         (filter (fn [v] (contains? latest (id/extract v))))
                         (remove (fn [v] (= superseded (some-> v :dataset id/extract))))
-                        (mapv (fn [v] (version-rls-model (update v :model dataset/adapt-model-to-provider))))))
-                [])]
-     (cond-> prior
-       include-version (conj (version-rls-model include-version))))))
+                        (mapv (fn [v] (update v :model dataset/adapt-model-to-provider)))))
+                [])
+         versions (cond-> prior include-version (conj include-version))
+         marks (system/entity-marks (map :model versions))]
+     (mapv #(version-rls-model % marks) versions))))
 
 (defn gen-activation-filter
   "Filter for activate-model; `include-version` replaces its dataset's latest deployed version."
@@ -1073,14 +1071,15 @@
   ([all-versions]
    (let [initial-model (core/map->ERDModel {:entities {}
                                             :relations {}})
+         marks (system/entity-marks (map :model all-versions))
          final-model
          (reduce
           (fn [global version]
-            (core/join-models global (core/add-claims (version-rls-model version) (id/extract version))))
+            (core/join-models global (core/add-claims (version-rls-model version marks) (id/extract version))))
           initial-model
           all-versions)]
      (-> final-model
-         (core/reconcile-rls-guards (latest-version-models))
+         (core/reconcile-rls-guards (mapv #(version-rls-model % marks) (system/latest-per-dataset all-versions)))
          (core/activate-model (gen-activation-filter))))))
 
 (defn last-deployed-model
@@ -1118,7 +1117,7 @@
                        (last-deployed-model)
                        (catch Throwable _ nil))
                      (core/map->ERDModel {:entities {} :relations {}}))]
-      (core/fold-version global (version-rls-model version) (id/extract version)
+      (core/fold-version global (version-rls-model version (system/entity-marks [global (:model version)])) (id/extract version)
                          (latest-version-models version)
                          (gen-activation-filter version))))
   (core/preview-recall [_ version-ids]
@@ -1147,13 +1146,13 @@
 
               version'' (encode-version-model
                          (assoc version
-                                :model (assoc model :version 1)
+                                :model (assoc model :version 2)
                                 :deployed_on (java.util.Date.)
                                 :deployed true))]
           (sync-entity this :dataset/version version'')
           (core/reload this (assoc version :model model))
 
-          (let [updated-model (assoc (rebuild-global-model) :version 1)]
+          (let [updated-model (assoc (rebuild-global-model) :version 2)]
             (dataset/save-model! updated-model)
             (add-to-deploy-history! this updated-model)
             (let [all-entities (vec (core/get-entities updated-model))]
@@ -1233,7 +1232,8 @@
               (execute-one! con [sql])
               (log/trace {:id ::relation-table-removed
                           :data {:from (:name from) :to (:name to) :table table-name}}
-                         "Removed relation table"))
+                         "Removed relation table")
+              (dataset/delete-entity :dataset/relation {(id/key) (id/extract relation)}))
             (doseq [entity exclusive-entities
                     :let [entity (core/get-entity global (id/extract entity))]
                     :when (some? entity)]
@@ -1242,7 +1242,8 @@
                 (log/trace {:id ::entity-removing
                             :data {:entity (:name entity) :table table-name}}
                            "Removing entity")
-                (execute-one! con [sql])))))
+                (execute-one! con [sql])
+                (dataset/delete-entity :dataset/entity {(id/key) (id/extract entity)})))))
 
         (let [updated-model (rebuild-global-model (remove #(= (id/extract %) version-id) (deployed-versions)))
               recalled-model (core/normalize-legacy-types (:model version))
@@ -1341,7 +1342,7 @@
      (let [model (rebuild-global-model)
            model' (-> (or model (core/map->ERDModel {:entities {}
                                                      :relations {}}))
-                      (assoc :version 1))
+                      (assoc :version 2))
            schema (query/model->schema model')]
        (dataset/save-model! model')
        (query/deploy-schema schema)
@@ -1372,43 +1373,6 @@
             projection (core/project global model)]
         (transform-database (:datasource *db*) projection nil)
         version)))
-  (core/unmount
-    [this version]
-    (let [{:keys [model]} (decode-version-model version)
-          global (core/get-model this)]
-      (with-open [con (jdbc/get-connection (:datasource *db*))]
-        (doseq [relation (core/get-relations model)
-                :let [{:keys [from to]
-                       :as relation} (core/get-relation global (id/extract relation))
-                      sql (format "drop table if exists \"%s\"" (relation->table-name relation))]]
-          (try
-            (execute-one! con [sql])
-            (log/trace {:id ::relation-removing
-                        :data {:from (:name from) :to (:name to) :sql sql}}
-                       "Removing relation")
-            (delete-entity this :dataset/relation {(id/key) (id/extract relation)})
-            (catch Throwable e
-              (log/error! {:id ::relation-table-remove-failed
-                           :data {:table (relation->table-name relation)}}
-                          e))))
-        (doseq [entity (core/get-entities model)
-                :let [{:keys [attributes]
-                       :as entity} (core/get-entity global (id/extract entity))]
-                :when (some? entity)]
-          (try
-            (let [sql (format "drop table if exists \"%s\"" (entity->table-name entity))]
-              (log/trace {:id ::entity-removing
-                          :data {:entity (:name entity) :sql sql}}
-                         "Removing entity")
-              (execute-one! con [sql])
-              (delete-entity this :dataset/entity {(id/key) (id/extract entity)})
-              (doseq [attribute attributes]
-                (delete-entity this :dataset/entity-attribute (id/extract attribute))))
-            (catch Throwable e
-              (log/error! {:id ::entity-table-remove-failed
-                           :data {:table (entity->table-name entity)}}
-                          e))))))
-    (core/reload this))
   (core/get-last-deployed
     ([this]
      ;; manual recovery only — never part of bootstrap (reload handles that)
@@ -1656,9 +1620,9 @@
 
   (limit-offset-clause [_db limit offset]
     (cond
-      (and limit offset) (str "LIMIT " limit " OFFSET " offset)
-      limit (str "LIMIT " limit)
-      offset (str "LIMIT -1 OFFSET " offset)
+      (and limit offset) (str "LIMIT " (long limit) " OFFSET " (long offset))
+      limit (str "LIMIT " (long limit))
+      offset (str "LIMIT -1 OFFSET " (long offset))
       :else ""))
 
   (placeholder-for-type [_db _field-type]

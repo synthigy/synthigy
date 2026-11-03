@@ -111,7 +111,12 @@ an `alias`:
 
 A relation never drops its parent: a movie with no matching actors is still
 returned. Add `"_join": "inner"` to a relation's `args` to return only the
-parents that have a match.
+parents that have a match, or `"_join": "none"` to return only the parents
+that have no match. The relation's filters (`_where`, `_and`, `_or` and flat
+field predicates) decide what counts as a match, and only related rows you can
+read count: a row hidden from you looks absent. A `none` relation itself
+always comes back empty. `none` cannot be combined with `_maybe` and is
+refused by `slice`; any other `_join` value fails with `INVALID_JOIN`.
 
 ### Filters and modifiers
 
@@ -124,7 +129,7 @@ parents that have a match.
 | `_order_by` | a list of `[field, "asc"\|"desc"]` pairs — always a list, so the order survives |
 | `_limit`, `_offset` | paging |
 | `_distinct` | a list of fields |
-| `_join` | `"inner"` on a relation, see above |
+| `_join` | `"left"` (default), `"inner"` or `"none"` on a relation, see above |
 
 Operators: `_eq`, `_neq`, `_lt`, `_le`, `_gt`, `_ge`, `_in`, `_not_in`,
 `_like`, `_ilike` (case-insensitive), `_is_null`.
@@ -149,8 +154,21 @@ the related rows. They are easiest to write in [XSQL](XSQL.md#counts-and-aggrega
 
 For an entity related to itself (`tree` cardinality), `get-tree` returns a root
 and everything below it, and `search-tree` returns the matches with every
-ancestor. `on` is the label of the relation to follow. Rows come back as a
-flat list; the SDKs nest them for you.
+ancestor. `on` is the label of the relation to follow; it must be a tree
+(single-parent) relation of the entity, anything else fails with
+`UNKNOWN_TREE_RELATION`. Rows come back as a flat list; the SDKs nest them for
+you.
+
+Access rules apply to every row of the walk, and a row you cannot read stops it:
+`get-tree` returns nothing below it, `search-tree` returns no ancestors above it,
+and a visible row under a hidden parent comes back as the top of its own tree,
+with its `on` relation empty.
+
+Filters work like `search`, by level. In `search-tree` the root filters, `_order_by`,
+`_limit` and `_offset` pick the matches, and every match comes back with its
+ancestors, which don't count toward the limit. `get-tree` is fixed by its root, so
+it takes no root filters. In both ops, filters and limits on a relation apply to
+that relation, per row.
 
 ```json
 {"op": "get-tree", "entity": "category", "on": "parent", "root": "<xid>",
@@ -240,6 +258,7 @@ Branch on `error.code`; messages may change.
 | `ENTITY_FORBIDDEN`, `ATTRIBUTE_FORBIDDEN` | Your roles may not touch this entity, or write this attribute ([ACCESS.md](ACCESS.md)). |
 | `UNKNOWN_ENTITY`, `UNKNOWN_ATTRIBUTE` | Not in the model, or not visible to you. Carries a `hint` when a close name exists. |
 | `UNKNOWN_OPERATOR`, `BAD_ARGS_SHAPE` | A typo in `args`. |
+| `INVALID_JOIN` | `_join` is not `left`, `inner` or `none`, or `none` is used with `_maybe` or in `slice`. |
 | `UNIQUE_VIOLATION`, `NOT_NULL_VIOLATION`, `FK_VIOLATION`, `CHECK_VIOLATION`, `TYPE_CAST_FAILURE` | The database refused the write. |
 | `DELETE_FORBIDDEN` | The record exists but your access rules hide it. |
 | `ROW_FORBIDDEN` | The write changes a record your access rules let you see but not write. |

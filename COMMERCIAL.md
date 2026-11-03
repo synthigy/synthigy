@@ -86,7 +86,11 @@ their own date.
 ## 5. What is separate
 
 - **Client SDKs** — Clojure, Go, JavaScript, Python and PHP — are **MIT**.
-- The bundled **web components** (`tooling.js`) are **MIT**.
+- The bundled **web components** (`tooling.js`, the `<synthigy-tools>` element
+  with all its tools) are under the same Business Source License and the same
+  free-use terms as Synthigy itself, from the first `@synthigy/tooling` release
+  after 0.2.0. Version 0.2.0 and earlier were released under the MIT License
+  and keep it.
 - **The Synthigy portal** — the CLI, supervisor daemon, operator console,
   provisioning, and release/upgrade machinery — is under the same Business
   Source License and the same free-use terms as Synthigy itself.

@@ -57,8 +57,7 @@
                         join-types)})))))
 
 (defn outside-parens?
-  "True when position idx in sql sits at paren depth 0 and outside quoted
-   regions."
+  "True when position idx in sql sits at paren depth 0, outside quoted regions and `{…}` placeholders."
   [^String sql idx]
   (loop [i 0 depth 0 quote nil]
     (if (>= i idx)
@@ -69,6 +68,7 @@
           (= c \()               (recur (inc i) (inc depth) nil)
           (= c \))               (recur (inc i) (dec depth) nil)
           (or (= c \') (= c \")) (recur (inc i) depth c)
+          (= c \{)               (recur (inc i) depth \})
           :else                  (recur (inc i) depth nil))))))
 
 (defn top-level-match
@@ -381,7 +381,7 @@
                         field (:field parsed)]
                     (-> state
                         (update :replacements conj
-                                {:raw raw :replacement (format "%s.%s" alias field)})
+                                {:raw raw :replacement (format "%s.\"%s\"" alias field)})
                         (record-column (select-item-label template select-end start end field)
                                        (field-type id field))))
 
@@ -402,7 +402,7 @@
                         field (:field parsed)]
                     (-> state
                         (update :replacements conj
-                                {:raw raw :replacement (format "%s.%s" target-alias field)})
+                                {:raw raw :replacement (format "%s.\"%s\"" target-alias field)})
                         (record-column (select-item-label template select-end start end field)
                                        (field-type target-id field))))))
               (catch Exception e

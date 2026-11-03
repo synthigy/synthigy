@@ -1,0 +1,53 @@
+{
+    "active": true,
+    "description": "Every file and folder regardless of folder access lists; no reach into IAM.",
+    "euuid": "d85812ff-ab54-4c8a-b795-7cd5fbb509ec",
+    "from_read_relations": [
+        {
+            "euuid": "18624b99-fc7c-42d6-8f2c-4644ca373270",
+            "xid": "41e8GqLS9nz6b9Vu9HzuFD"
+        },
+        {
+            "euuid": "21fcca7e-e67d-48da-9596-f252d2030fbb",
+            "xid": "5CRRt4afDgTn8Wi7DgBwf8"
+        },
+        {
+            "euuid": "2bcacf23-fbee-4f8c-bd7a-2879a1a1dfa4",
+            "xid": "6QeLVLKwj4athvZTz7i9tF"
+        },
+        {
+            "euuid": "5a177337-c027-42b3-be3e-89ad54b52ae8",
+            "xid": "C8F9Xd8CFNFGcHtPzukzUo"
+        },
+        {
+            "euuid": "66766a93-20e6-45b3-bbad-20d88e0ae882",
+            "xid": "Der4MByKSAX3ZoN2SYesQm"
+        },
+        {
+            "euuid": "e4ad2b4b-05bb-4314-9d62-fcf0615bda9b",
+            "xid": "VEoSL1SgcH4pnTqmJNMAwC"
+        }
+    ],
+    "name": "File Admin",
+    "owned_entities": [
+        {
+            "euuid": "63b2e70a-2162-423a-be36-4909d7831605",
+            "xid": "DK41BPRFuMKYtMzdomVQLU"
+        },
+        {
+            "euuid": "f03d4db6-da1a-46d2-b3cb-a4211d811729",
+            "xid": "WfcjKW6boVAH5LFGehEgKr"
+        }
+    ],
+    "read_entities": [
+        {
+            "euuid": "95afb558-3d28-45e5-9fbf-a2625afc5675",
+            "xid": "KV4seQm27gTAUHCxWERS12"
+        },
+        {
+            "euuid": "edcab1db-ee6f-4744-bfea-447828893223",
+            "xid": "WN5xU8Do5pcdhTkxXvEYwt"
+        }
+    ],
+    "xid": "TiUYYRNwPjouRGS4DvoJZ9"
+}

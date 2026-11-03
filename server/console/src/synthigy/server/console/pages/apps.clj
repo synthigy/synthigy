@@ -21,7 +21,7 @@
 (def grant-types
   [["authorization_code" "Authorization Code"]
    ["refresh_token" "Refresh Token"]
-   ["client_credentials" "Client Credentials"]
+   ["client_credentials" "Client Credentials" "$appType !== 'confidential'"]
    ["urn:ietf:params:oauth:grant-type:device_code" "Device Code"]])
 
 (def expiry-defaults
@@ -157,7 +157,7 @@
                     " client_credentials will fail until that is fixed.")]))))
 
 (defn prepare-save
-  "The app-row consequences of `changes`: a free service-user name, and no secret or trust left on a client switched to public."
+  "The app-row consequences of `changes`: a free service-user name, and no secret, trust or client_credentials left on a client switched to public."
   [changes current]
   (let [was-confidential? (service-user/confidential? current)
         confidential?     (service-user/confidential? (merge current (select-keys changes [:type])))]
@@ -167,12 +167,15 @@
          (service-user/service-user-name {:id (:id current) :name (get changes :name (:name current))})
          (get-in current [:service-user :xid]))))
     ;; never keep a secret on a public client — the token path branches on its existence
-    (cond-> changes
-      (and was-confidential? (not confidential?))
-      (assoc :secret nil)
-
-      (and was-confidential? (not confidential?) (get-in current [:settings "trusted"]))
-      (assoc :settings (assoc (merge (:settings current) (:settings changes)) "trusted" false)))))
+    (if-not (and was-confidential? (not confidential?))
+      changes
+      (let [settings (merge (:settings current) (:settings changes))
+            cleaned  (cond-> settings
+                       (get settings "trusted") (assoc "trusted" false)
+                       (some #{"client_credentials"} (get settings "allowed-grants"))
+                       (update "allowed-grants" #(vec (remove #{"client_credentials"} %))))]
+        (cond-> (assoc changes :secret nil)
+          (not= cleaned settings) (assoc :settings cleaned))))))
 
 (defn confirm-change
   [changes current]

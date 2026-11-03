@@ -179,6 +179,7 @@
                (let [db (pull-cursors connection schema roots)
                      response (construct-response schema db roots)
                      delete-statements (reduce-kv process-statement [] db)]
+                 (sql-query/purge-deletes! connection schema db)
                  (doseq [query delete-statements]
                    (log/debug {:id :synthigy.dataset.sql/purging-rows
                                :data {:entity-id entity-id :query query}}
@@ -228,37 +229,43 @@
   (let [{:keys [entity/table entity/as]
          :as schema} (binding [*operation-rules* #{:read}]
                        (selection->schema entity-id selection))
-        on' (name on)
+        on' (sql-query/tree-column entity-id on)
         id-field (id/field)
-        sql (if (some? root)
-              (format
-               "with recursive tree as (
-                select 
-                _eid, %s, %s
-                from %s where %s='%s'
-                union
-                select o._eid, o.%s, o.%s
-                from %s o
-                inner join tree t on t._eid=o.%s
-                ) select * from tree"
-               (id/field) on' table id-field root
-               id-field on' table on')
-              (format "select _eid, %s from %s" id-field table))]
-    (with-open [connection (jdbc/get-connection (:datasource *db*))]
-      (log/trace {:id :synthigy.dataset.sql/tree-roots-query
-                  :data {:entity-id entity-id :sql sql}}
-                 "Get entity tree roots")
-      (let [roots (map
-                   :_eid
-                   (sql/execute!
-                    connection
-                    [sql]
-                    core/*return-type*))]
-        (comment
-          (with-open [connection (jdbc/get-connection (:datasource *db*))]
-            (pull-roots connection schema {(keyword as) roots})))
-        (when (not-empty roots)
-          (pull-roots connection schema {(keyword as) roots}))))))
+        [src src-params] (sql-query/tree-source entity-id table)
+        root' (id/coerce-arg root)
+        query (if (some? root)
+                (-> [(format
+                      "with recursive tree as (
+                       select
+                       v._eid, v.%s, v.%s
+                       from %s v where v.%s=?
+                       union
+                       select o._eid, o.%s, o.%s
+                       from %s o
+                       inner join tree t on t._eid=o.%s
+                       ) select * from tree"
+                      id-field on' src id-field
+                      id-field on' src on')]
+                    (into src-params)
+                    (conj root')
+                    (into src-params))
+                (into [(format "select v._eid, v.%s from %s v" id-field src)] src-params))]
+    (when-not (and (= :euuid (id/key)) (string? root'))
+      (with-open [connection (jdbc/get-connection (:datasource *db*))]
+        (log/trace {:id :synthigy.dataset.sql/tree-roots-query
+                    :data {:entity-id entity-id :sql (first query)}}
+                   "Get entity tree roots")
+        (let [roots (map
+                     :_eid
+                     (sql/execute!
+                      connection
+                      query
+                      core/*return-type*))]
+          (comment
+            (with-open [connection (jdbc/get-connection (:datasource *db*))]
+              (pull-roots connection schema {(keyword as) roots})))
+          (when (not-empty roots)
+            (pull-roots connection schema {(keyword as) roots})))))))
 
 (defn search-entity-tree
   "Function searches entity tree and returns results by requested selection."
@@ -272,7 +279,8 @@
            entity-id
            selection
            args))
-        on' (name on)]
+        on' (sql-query/tree-column entity-id on)
+        [src src-params] (sql-query/tree-source entity-id table)]
     (with-open [connection (jdbc/get-connection (:datasource *db*))]
       (letfn [(targeting-args? [args]
                 (when (or
@@ -280,7 +288,8 @@
                        (and args (vector? args) (not-empty args)))
                   (if (vector? args)
                     (some targeting-args? args)
-                    (let [args' (dissoc args :_offset :_limit)
+                    (let [args' (cond-> (dissoc args :_offset :_limit :_order_by :_distinct)
+                                  (sql-query/relation-left? args) (dissoc :_join))
                           some-constraint? (not-empty (dissoc args' :_and :_or :_where))]
                       (if some-constraint?
                         true
@@ -292,12 +301,14 @@
                  (targeting-args? args)
                  (some targeting-args? (vals fields))
                  (some targeting-schema? (vals relations))))]
-        (let [targeting? (targeting-schema? schema)
+        (let [targeting? (or (targeting-schema? schema)
+                             (some? (:_limit args))
+                             (some? (:_offset args)))
               targets (when targeting?
                         (when-let [found-roots
                                    (search-entity-roots
                                     connection
-                                    (update schema :args dissoc :_distinct :_limit :_offset))]
+                                    (update schema :args dissoc :_distinct))]
                           (not-empty (get found-roots (keyword as)))))]
           (cond
             (not-empty targets)
@@ -307,13 +318,13 @@
                         g._eid, g.%s, array[g._eid], false
                         from %s g where g._eid in (%s)
                         union all
-                        select g._eid, g.%s, g._eid || path, g._eid=any(path)
+                        select g._eid, g.%s, g._eid || o.path, g._eid=any(o.path)
                         from %s g, tree o
-                        where g._eid=o.link and not cycle
+                        where g._eid=o.link and not o.cycle
                         ) select distinct on (_eid) * from tree"
                        on' table (clojure.string/join ", " targets)
-                       on' table)
-                  tree (sql/execute! connection [sql] core/*return-type*)
+                       on' src)
+                  tree (sql/execute! connection (into [sql] src-params) core/*return-type*)
                   maybe-roots (set (map :_eid tree))
                   roots (map :_eid (remove (comp maybe-roots :link) tree))
                   ranked-selection (fn [roots]
@@ -329,19 +340,19 @@
                                g._eid, g.%s, array[g._eid],array[g._rank], false
                                from %s g
                                union all
-                               select g._eid, g.%s, path || g._eid, prank || g._rank, g._eid=any(path)
+                               select g._eid, g.%s, o.path || g._eid, o.prank || g._rank, g._eid=any(o.path)
                                from %s g, tree o
-                               where g.%s =o._eid and not cycle
+                               where g.%s =o._eid and not o.cycle
                                ) select * from tree order by prank asc %s"
                               on' (ranked-selection roots)
                               on' (ranked-selection maybe-roots) on'
-                              (modifiers-selection->sql {:args (dissoc args :_order_by)}))]]
+                              "")]]
               (log/trace {:id :synthigy.dataset.sql/tree-roots-query
                           :data {:entity-id entity-id :sql (first sql-final)}}
                          "Get entity tree roots")
               (when (some? roots)
                 (pull-roots
-                 connection (shave-schema-arguments schema)
+                 connection (shave-schema-aggregates (shave-schema-arguments schema nil))
                  {(keyword as)
                   (distinct
                    (map
@@ -350,39 +361,43 @@
             (and targeting? (empty? targets))
             nil
             :else
-            (let [ranked-init-selection (if (not-empty order-by)
+            (let [top (if (not= src table)
+                        (format "(%s is null or %s not in (select _eid from %s s))" on' on' src)
+                        (format "%s is null" on'))
+                  ranked-init-selection (if (not-empty order-by)
                                           (format
-                                           "(select _eid, %s, row_number() over (%s) as _rank from %s where %s is null)"
-                                           on' (modifiers-selection->sql {:args {:_order_by order-by}}) table on')
-                                          (format "(select _eid, %s, _eid as _rank from %s where %s is null)" on' table on'))
+                                           "(select _eid, %s, row_number() over (%s) as _rank from %s v where %s)"
+                                           on' (modifiers-selection->sql {:args {:_order_by order-by}}) src top)
+                                          (format "(select _eid, %s, _eid as _rank from %s v where %s)" on' src top))
                   ranked-selection (if (not-empty order-by)
                                      (format
-                                      "(select _eid, %s, row_number() over (%s) as _rank from %s)"
-                                      on' (modifiers-selection->sql {:args {:_order_by order-by}}) table)
-                                     (format "(select _eid, %s, _eid as _rank from %s)" on' table))
+                                      "(select _eid, %s, row_number() over (%s) as _rank from %s v)"
+                                      on' (modifiers-selection->sql {:args {:_order_by order-by}}) src)
+                                     (format "(select _eid, %s, _eid as _rank from %s v)" on' src))
                   sql-final [(format
                               "with recursive tree(_eid,link,path,prank,cycle) as (
                                select 
                                g._eid, g.%s, array[g._eid],array[g._rank], false
                                from %s g
                                union all
-                               select g._eid, g.%s, path || g._eid, prank || g._rank, g._eid=any(path)
+                               select g._eid, g.%s, o.path || g._eid, o.prank || g._rank, g._eid=any(o.path)
                                from %s g, tree o
-                               where g.%s =o._eid and not cycle
+                               where g.%s =o._eid and not o.cycle
                                ) select * from tree order by prank asc %s"
                               on' ranked-init-selection
                               on' ranked-selection on'
-                              (modifiers-selection->sql {:args (dissoc args :_order_by)}))]]
+                              (modifiers-selection->sql {:args (dissoc args :_order_by)}))]
+                  sql-final (cond-> sql-final
+                              (seq src-params) (into (concat src-params src-params src-params)))]
               (log/trace {:id :synthigy.dataset.sql/tree-roots-query
                           :data {:entity-id entity-id :sql (first sql-final)}}
                          "Get entity tree roots")
-              (pull-roots
-               connection (shave-schema-aggregates schema)
-               {(keyword as)
-                (distinct
-                 (map
-                  :_eid
-                  (sql/execute! connection sql-final core/*return-type*)))}))))))))
+              (when-let [eids (not-empty
+                               (distinct
+                                (map :_eid (sql/execute! connection sql-final core/*return-type*))))]
+                (pull-roots
+                 connection (shave-schema-aggregates schema)
+                 {(keyword as) eids})))))))))
 
 (declare delete-entity-batch)
 
@@ -502,6 +517,8 @@
      (let [{:keys [relations entity/table entity/as]
             :as schema}
            (selection->schema entity-id selection args)
+           _ (sql-query/refuse-none-slice! schema)
+           _ (sql-query/refuse-column-slice! schema)
            enforced-schema (binding [*operation-rules* #{:delete}]
                              (selection->schema entity-id selection args))]
        (if (and
@@ -512,7 +529,8 @@
            "User doesn't have :delete rule for some of sliced relations or entities"
            {:type ::enforce-slice
             :roles (access/role-ids)}))
-         (let [queries (reduce-kv
+         (let [_ (sql-query/slice-hooks! schema tx)
+               queries (reduce-kv
                         (fn [r k {tt :to/table
                                   tf :to/field
                                   ff :from/field

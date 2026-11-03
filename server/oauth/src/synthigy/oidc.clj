@@ -148,7 +148,7 @@
 (letfn [(config []
           {:issuer (domain+)
            :authorization_endpoint (domain+ "/oauth/authorize")
-           :device_authorization_endpoint (domain+ "/oauth/device")
+           :device_authorization_endpoint (domain+ "/oauth/device/auth")
            :token_endpoint (domain+ "/oauth/token")
            :userinfo_endpoint (domain+ "/oauth/userinfo")
            :jwks_uri (domain+ "/oauth/jwks")
@@ -253,7 +253,7 @@
   []
   {:issuer (domain+)
    :authorization_endpoint (domain+ "/oauth/authorize")
-   :device_authorization_endpoint (domain+ "/oauth/device")
+   :device_authorization_endpoint (domain+ "/oauth/device/auth")
    :token_endpoint (domain+ "/oauth/token")
    :revocation_endpoint (domain+ "/oauth/revoke")
    :introspection_endpoint (domain+ "/oauth/introspect")

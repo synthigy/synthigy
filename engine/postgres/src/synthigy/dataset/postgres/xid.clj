@@ -13,8 +13,10 @@
   "PostgreSQL legacy euuid → xid import and boot-time ID-format detection."
   (:require
     [clojure.string :as str]
+    [patcho.lifecycle :as lifecycle]
     [synthigy.dataset :as dataset]
     [synthigy.dataset.core :as core]
+    [synthigy.dataset.encryption :as encryption]
     [synthigy.dataset.id :as id]
     [synthigy.dataset.patch.model :as model]
     [synthigy.dataset.postgres.patch :as postgres.patch]
@@ -24,6 +26,7 @@
     [synthigy.env :as env]
     [synthigy.log :as log]
     [synthigy.supervisor :as supervisor]
+    [synthigy.supervisor.probe :as probe]
     [synthigy.transit :refer [<-transit ->transit]]))
 
 
@@ -776,29 +779,62 @@ $$ LANGUAGE plpgsql;")
   []
   (= :euuid (id/key)))
 
+(defn adopt-legacy-master-key!
+  "Rewrap the legacy data keys from `legacy-key` under SYNTHIGY_ENCRYPTION_MASTER_KEY; no-op when that key already opens them."
+  [legacy-key]
+  (let [configured (encryption/env-master-key)
+        row        (when (encryption/dek-table-exists?)
+                     (encryption/ensure-deks-columns!)
+                     (some-> (first (encryption/db-deks)) (as-> r {:dek (:__deks/dek r)})))]
+    (when (and row (not (probe/master-key-verified? row configured)))
+      (cond
+        (str/blank? configured)
+        (throw (ex-info "SYNTHIGY_ENCRYPTION_MASTER_KEY is not set — set the new master key before migrating."
+                        {:code -32602}))
+
+        (not (probe/master-key-verified? row legacy-key))
+        (throw (ex-info (if (str/blank? legacy-key)
+                          "This database carries encrypted data keys — pass its legacy master key to the migration."
+                          "The legacy master key does not open this database's data keys.")
+                        {:code -32602}))
+
+        :else
+        (do (encryption/start legacy-key)
+            (try
+              (let [{:keys [migrated-count]} (encryption/migrate-local-key! configured)]
+                (log/info {:id ::legacy-master-key-adopted
+                           :data {:action :migrated :subject :encryption :row-count migrated-count}}
+                          "Legacy data keys rewrapped under the configured master key")
+                migrated-count)
+              (finally (encryption/stop))))))))
+
 (defn migrate->synthigy!
   "One-time, idempotent import of a legacy euuid Postgres database into the xid layout."
-  []
-  (if-not (legacy-euuid-layout?)
-    (do (log/info {:id ::migrate-skip :data {:action :migrating :subject :xid}}
-                  "Native Synthigy (xid) layout — no migration needed")
-        {:skipped :already-synthigy})
-    (do (log/warn {:id ::migrate-starting :data {:action :migrating :subject :xid}}
-                  "Legacy database detected — migrating to Synthigy xid layout")
-        ;; must run BEFORE migrating — transform-stored-models! reads deployed_on
-        (reconcile-legacy-meta-columns!)
-        (let [result (migrate-to-xid!)]
-          (verify-xid-migration)
-          (log/info {:id ::migrate-complete :data {:action :migrated :subject :xid}}
-                    "Legacy → Synthigy xid migration complete and verified")
-          (assoc result :migrated true)))))
+  ([] (migrate->synthigy! nil))
+  ([legacy-master-key]
+   (when-not (lifecycle/started? :synthigy/dataset)
+     (adopt-legacy-master-key! legacy-master-key)
+     (lifecycle/start! :synthigy/dataset))
+   (if-not (legacy-euuid-layout?)
+     (do (log/info {:id ::migrate-skip :data {:action :migrating :subject :xid}}
+                   "Native Synthigy (xid) layout — no migration needed")
+         {:skipped :already-synthigy})
+     (do (log/warn {:id ::migrate-starting :data {:action :migrating :subject :xid}}
+                   "Legacy database detected — migrating to Synthigy xid layout")
+         ;; must run BEFORE migrating — transform-stored-models! reads deployed_on
+         (reconcile-legacy-meta-columns!)
+         (let [result (migrate-to-xid!)]
+           (verify-xid-migration)
+           (log/info {:id ::migrate-complete :data {:action :migrated :subject :xid}}
+                     "Legacy → Synthigy xid migration complete and verified")
+           (assoc result :migrated true))))))
 
 (supervisor/register-method! "migrate.xid"
-  (fn [_]
+  (fn [{:keys [legacy_master_key]}]
     ;; never drop this guard — serve! runs each frame on its own thread; a second click would migrate concurrently
     (if-not (supervisor/progress-begin! :migration "starting")
       (throw (ex-info "A migration is already running on this engine."
                       {:code -32000 :running (supervisor/progress)}))
       (try
-        (migrate->synthigy!)
+        (migrate->synthigy! legacy_master_key)
         (finally (supervisor/progress-finish!))))))

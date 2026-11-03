@@ -1,0 +1,17 @@
+{
+    "active": true,
+    "description": "Downloads only what is shared with it; a folder write list never gives it write.",
+    "euuid": "758550d9-b9c3-458e-926e-154821b13e62",
+    "name": "File Reader",
+    "read_entities": [
+        {
+            "euuid": "63b2e70a-2162-423a-be36-4909d7831605",
+            "xid": "DK41BPRFuMKYtMzdomVQLU"
+        },
+        {
+            "euuid": "f03d4db6-da1a-46d2-b3cb-a4211d811729",
+            "xid": "WfcjKW6boVAH5LFGehEgKr"
+        }
+    ],
+    "xid": "FWhFXggrBxaWZTYWic36bT"
+}

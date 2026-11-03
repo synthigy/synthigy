@@ -519,9 +519,10 @@
        :grants
        (let [held (set v)]
          [:div.console-radio-row
-          (for [[gv glabel] (:choices opts)]
+          (for [[gv glabel disabled-when] (:choices opts)]
             [:label.console-check
-             [:ty-checkbox {:name nm :value gv :checked (when (held gv) true)}]
+             [:ty-checkbox (cond-> {:name nm :value gv :checked (when (held gv) true)}
+                             disabled-when (assoc (keyword "data-attr:disabled") disabled-when))]
              [:span glabel]])])
 
        :expiry

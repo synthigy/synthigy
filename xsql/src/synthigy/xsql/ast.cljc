@@ -58,7 +58,7 @@
 (defn sexpr-leaf-string [n]
   (let [name- (tag->camel (:node n))]
     (case (:node n)
-      (:identifier :arrow :dash) (str "(" name- " " (pr-str (:text n)) ")")
+      (:identifier :arrow :dash :bang) (str "(" name- " " (pr-str (:text n)) ")")
       (str "(" name- ")"))))
 
 (defn ast->sexpr
@@ -89,7 +89,7 @@
       (assoc base :children (mapv ast->json (:children n)))
 
       (and (leaf? n)
-           (#{:identifier :arrow :dash} (:node n)))
+           (#{:identifier :arrow :dash :bang} (:node n)))
       (assoc base :text (:text n))
 
       :else

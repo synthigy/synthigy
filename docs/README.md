@@ -10,6 +10,7 @@
 - [Modeling data](MODELING.md) — datasets, entities, attributes, relations, deploying
 - [The data API](DATA.md) — reading and writing over `/data`, live data
 - [XSQL](XSQL.md) — queries as documents, SQL templates
+- [Files](FILES.md) — uploads, downloads, versions, folders, S3 storage
 
 ## Access
 

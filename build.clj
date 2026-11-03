@@ -111,7 +111,7 @@
 (def lib-aliases (shipped "lib"))
 (def oauth-aliases [:server-oauth])
 (def server-aliases [:server-oauth :server-core])
-(def leaf-aliases (into [:server-console]
+(def leaf-aliases (into [:server-console :server-files]
                         (remove unshipped (map #(module-alias "server" %) (filter adapter? (impls "server"))))))
 (def core-aliases [])
 

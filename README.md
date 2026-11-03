@@ -51,6 +51,8 @@ first query.
 - Live queries over one SSE stream per client
 - History of every audited record, and `encrypted` attributes under a master key
   in your custody
+- Files: uploads, downloads, versions and shared folders, on local disk or any
+  S3-compatible store ([Files](docs/FILES.md))
 
 ## Bundles
 
@@ -66,7 +68,7 @@ first. Settings: [Environment variables](docs/ENV.md).
 ## Documentation
 
 [docs/README.md](docs/README.md) lists every page: modeling, the data API, XSQL,
-access control, OAuth, operations, the reverse proxy, encryption, SDKs, embedding,
+files, access control, OAuth, operations, the reverse proxy, encryption, SDKs, embedding,
 and the environment variable and CLI references.
 
 Client SDKs (MIT): JavaScript/TypeScript, Python, Go, Clojure and PHP —
@@ -75,14 +77,14 @@ Client SDKs (MIT): JavaScript/TypeScript, Python, Go, Clojure and PHP —
 ## Building from source
 
 ```bash
-SYNTHIGY_COMBO=engine-sqlite:audit-sqlite:log-sqlite:server-httpkit:server-console \
+SYNTHIGY_COMBO=engine-sqlite:audit-sqlite:log-sqlite:server-httpkit:server-console:server-files \
   SYNTHIGY_AOT=true clojure -T:build uber
 synthigy up --bundle sqlite \
-  --jar target/synthigy-engine-sqlite-audit-sqlite-log-sqlite-server-httpkit-server-console.jar
+  --jar target/synthigy-engine-sqlite-audit-sqlite-log-sqlite-server-httpkit-server-console-server-files.jar
 ```
 
 The combo names one `deps.edn` alias per source folder; the `postgres` bundle is
-`engine-postgres:audit-postgres:log-sqlite:server-httpkit:server-console`. A source
+`engine-postgres:audit-postgres:log-sqlite:server-httpkit:server-console:server-files`. A source
 build has no Tools in the console: the web components ship in released bundles only.
 
 ## Contributing
@@ -102,5 +104,7 @@ A **commercial license** covers organisations over EUR 3M, integrators deploying
 for them, hosting Synthigy as a service, OEM, warranty and support:
 [COMMERCIAL.md](COMMERCIAL.md), r.gersak@gmail.com.
 
-The client SDKs and the bundled web components (`tooling.js`) are MIT. Third-party
-dependencies keep their own licenses: [NOTICE.md](NOTICE.md).
+The client SDKs are MIT. The bundled web components (`tooling.js`) are under the
+same Business Source License from `@synthigy/tooling` releases after 0.2.0;
+0.2.0 and earlier are MIT. Third-party dependencies keep their own licenses:
+[NOTICE.md](NOTICE.md).

@@ -13,6 +13,7 @@
   "http-kit HTTP server adapter for Synthigy."
   (:require
    [synthigy.client-address :as client-address]
+   synthigy.env
    [synthigy.cors :as cors]
    [clojure.core.async :as async]
    [clojure.string :as str]
@@ -246,6 +247,7 @@
    (let [handler (make-handler {:routes routes :info info})
          stop-fn (httpkit/run-server handler {:ip host
                                               :port port
+                                              :max-body synthigy.env/server-max-body
                                               ;; never true — :remote-addr would become client-chosen
                                               :legacy-unsafe-remote-addr? false})]
      (routes/register-sse-transport! d*hk/->sse-response)

@@ -218,14 +218,15 @@
   (and attribute (= (id/data :iam.user/password) (id/extract attribute))))
 
 (defn attribute-allows?
-  "Whether the principal may perform `op` (:read / :write) on `attribute`; the login credential is superuser-only."
+  "Whether the principal may perform `op` (:read / :write) on `attribute`; the login credential and hidden attributes are superuser-only."
   ([entity attribute op] (attribute-allows? entity attribute op (role-xids)))
   ([entity attribute op roles]
    (boolean
-    (if (credential-attribute? attribute)
-      (superuser? roles)
-      (or (superuser? roles)
-          (core/attribute-allows-op? entity attribute op (or roles #{})))))))
+    (cond
+      (credential-attribute? attribute) (superuser? roles)
+      (and (= :read op) (core/hidden-attribute? attribute)) (superuser? roles)
+      :else (or (superuser? roles)
+                (core/attribute-allows-op? entity attribute op (or roles #{})))))))
 
 (defn relation-allows?
   ([relation direction rules] (relation-allows? relation direction rules (role-xids)))

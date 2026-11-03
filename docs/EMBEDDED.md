@@ -10,7 +10,7 @@ first superuser, Stop/Start/Restart, logs, versions and module health.
 
 ```clojure
 ;; deps.edn
-{:deps {com.synthigy/sqlite-bundle {:mvn/version "0.4.0"}}}
+{:deps {com.synthigy/sqlite-bundle {:mvn/version "0.4.1"}}}
 ```
 
 Register a patcho (`dev.gersak/patcho`) lifecycle module. Depend on
@@ -103,6 +103,11 @@ The database files are in the instance's `db/` folder, next to that `.env`.
 synthigy up      # portal at http://127.0.0.1:7888
 synthigy down
 ```
+
+With `SYNTHIGY_BUNDLE` set, `synthigy up` starts your jar straight away and
+the portal asks for the first superuser. Without it, the portal opens its
+setup page, which shows your jar: pick the bundle the jar was built with,
+since the jar decides which database drivers exist.
 
 - `SYNTHIGY_MODULES` **replaces** the default start list (`:synthigy/server`,
   `:synthigy/console`). Dependencies start on their own. List

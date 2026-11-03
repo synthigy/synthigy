@@ -32,18 +32,19 @@
    [synthigy.wire :as wire]))
 
 (defn preserve-body
-  "Stamp :raw-body on a JSON POST and hand back a fresh :body stream."
+  "Stamp :raw-body on a JSON POST and hand back a fresh :body stream of the same bytes."
   [request]
   (if (and (= :post (:request-method request))
            (:body request)
            (some-> (get-in request [:headers "content-type"])
                    (str/starts-with? "application/json")))
-    (let [raw (if (string? (:body request))
-                (:body request)
-                (slurp (:body request)))]
+    (let [body (:body request)
+          bytes (if (string? body)
+                  (.getBytes ^String body "UTF-8")
+                  (.readAllBytes ^java.io.InputStream body))]
       (assoc request
-             :raw-body raw
-             :body (java.io.ByteArrayInputStream. (.getBytes raw "UTF-8"))))
+             :raw-body (if (string? body) body (String. ^bytes bytes "UTF-8"))
+             :body (java.io.ByteArrayInputStream. bytes)))
     request))
 
 (defn wrap-preserve-body

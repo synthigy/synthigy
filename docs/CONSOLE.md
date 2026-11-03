@@ -16,7 +16,8 @@ Started by `synthigy up` and opened with `synthigy portal`. It binds to
 `ssh -L 7888:127.0.0.1:7888 server`.
 
 **First run** is a setup page: pick a bundle, connect the database, choose
-where audit and logs go, set the public URL, then **Launch**. Synthigy never
+where audit and logs go and where uploaded files are kept (local disk or an S3
+bucket), set the public URL, then **Launch**. Synthigy never
 creates the database itself — the page shows the SQL to create it. After the
 engine boots, the page asks for the first superuser.
 

@@ -29,8 +29,9 @@
 (defn headers
   [origin]
   {"Access-Control-Allow-Origin" origin
-   "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-   "Access-Control-Allow-Headers" "Content-Type, Authorization"})
+   "Access-Control-Allow-Methods" "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+   "Access-Control-Allow-Headers" "Content-Type, Authorization, If-Match, If-None-Match, Range"
+   "Access-Control-Expose-Headers" "ETag, Content-Disposition, Content-Range, Content-Length, Accept-Ranges"})
 
 (defn response-headers
   "CORS headers for a response to `origin`, merged over `base`."

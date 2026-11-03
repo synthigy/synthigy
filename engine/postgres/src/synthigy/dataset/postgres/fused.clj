@@ -58,40 +58,7 @@
 (defn has-filter?
   [args] (seq (apply dissoc args meta-keys)))
 
-;; never copy relation-left? here — absent-:_join semantics must live in one place
-(def ^:private left? q/relation-left?)
-
 (def ^:private relation-on-predicate @#'q/relation-on-predicate)
-
-(defn inner-exists
-  "[sql params] of one EXISTS per INNER relation scoping `node-alias`, or nil."
-  [node-schema node-alias]
-  (let [preds
-        (keep
-         (fn [[_ rel]]
-           (let [a (:args rel)]
-             (when-not (left? a)
-               (let [ex (or (:entity/as rel) (gen "ie"))
-                     jx (gen "ij")
-                     [fsql fdata] (when (has-filter? a)
-                                    (or (relation-on-predicate rel) ["" []]))
-                     [csql cdata] (inner-exists rel ex)
-                     needs-target? (or (seq fsql) (seq csql))]
-                 [(str "exists (select 1 from "
-                       (if (:recursion? rel)
-                         (str (qi (:entity/table rel)) " " ex
-                              " where " ex "._eid = " node-alias "." (qi (:from/field rel)))
-                         (str (qi (:relation/table rel)) " " jx
-                              (when needs-target?
-                                (str " join " (qi (:entity/table rel)) " " ex
-                                     " on " ex "._eid = " jx "." (qi (:to/field rel))))
-                              " where " jx "." (qi (:from/field rel)) " = " node-alias "._eid"))
-                       (when (seq fsql) (str " and (" fsql ")"))
-                       (when (seq csql) (str " and " csql)) ")")
-                  (vec (concat fdata cdata))]))))
-         (:relations node-schema))]
-    (when (seq preds)
-      [(str/join " and " (map first preds)) (vec (mapcat second preds))])))
 
 (defn rls-where
   "[sql params] of the :read RLS predicate on `alias`, `(1=0)` when no guard applies, nil when RLS is off."
@@ -137,7 +104,7 @@
         [filter-sql filter-data]
         (when (has-filter? rel-args)
           (or (relation-on-predicate ptr) ["" []]))
-        [ie-sql ie-data] (inner-exists rel ex)
+        [ie-sql ie-data] (q/inner-exists rel ex)
         child-source (str (qi junction) " " jx
                           " join " (qi child-tbl) " " ex
                           " on " ex "._eid = " jx "." (qi to-field))
@@ -254,7 +221,7 @@
           [filter-sql filter-data]
           (when (has-filter? (:args rel))
             (or (relation-on-predicate rel) ["" []]))
-          [ie-sql ie-data] (inner-exists rel ex)
+          [ie-sql ie-data] (q/inner-exists rel ex)
           [rls-sql rls-data] (rls-where (:to rel) ex)
           fk-on-parent? (or (:recursion? rel) (:ref? rel))
           child-source (if fk-on-parent?
@@ -306,7 +273,7 @@
         rt  (gen "rt")                        ; derived-table alias
         [laterals entries lat-params] (emit-node schema rt true)
         [where where-data] (q/search-stack-args (dissoc schema :relations))
-        [ie-sql ie-data] (inner-exists schema eas)
+        [ie-sql ie-data] (q/inner-exists schema eas)
         [rls-sql rls-data] (rls-where (:entity schema) eas)
         where-all (str/join " and " (remove str/blank? [where ie-sql rls-sql]))
         args (:args schema)

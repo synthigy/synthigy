@@ -34,3 +34,8 @@
 (def allowed-origins
   "Extra browser origins allowed on top of the registered clients' redirect origins."
   (into #{} (remove empty?) (clojure.string/split (env :synthigy-server-allowed-origins "") #"\s*,\s*")))
+
+(def server-max-body
+  "Largest request body the HTTP server accepts, in bytes (default 25 MB)."
+  (or (some-> (env :synthigy-server-max-body) clojure.string/trim not-empty parse-long)
+      (* 25 1024 1024)))

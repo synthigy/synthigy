@@ -14,7 +14,7 @@
    [clojure.string :as str]
    [environ.core :refer [env]]))
 
-(def known-entitlements #{:robotics :file-storage :process-modeling})
+(def known-entitlements #{:robotics :process-modeling})
 
 (defn entitlements
   "Set of entitlements the current license grants."

@@ -17,10 +17,8 @@
     [patcho.patch :as patch]
     [synthigy.data :refer [*SYNTHIGY*]]
     [synthigy.dataset :as dataset]
-    [synthigy.dataset.core :as core]
     [synthigy.dataset.id :as id]
-    [synthigy.dataset.sql.naming :refer [entity->table-name]]
-    [synthigy.db.sql :as sql]
+    [synthigy.dataset.patch :as dataset.patch]
     [synthigy.iam.access :as access :refer [with-principal]]
     [synthigy.iam.transfer :as transfer]))
 
@@ -153,39 +151,9 @@
                          "Deploying Synthigy model v0.90.1 (User copy aligned with OAuth: Name unique+mandatory, Password secret)")
                (dataset/deploy! (dataset/current-synthigy-version)))
 
-(def removed-attribute-types ["currency" "timeperiod" "transit"])
-
-(defn retype-removed-attributes!
-  "Rewrite attribute rows still typed currency/timeperiod/transit to their type in the deployed model, or json when it has none, so 0.90.2 can drop those types."
-  []
-  (let [model (dataset/deployed-model)
-        table (entity->table-name (core/get-entity model (id/entity :dataset/entity-attribute)))
-        id-column (name (id/key))
-        removed (set removed-attribute-types)
-        deployed (into {} (for [entity (core/get-entities model)
-                                attribute (:attributes entity)]
-                            [(str (id/extract attribute)) (some-> (:type attribute) name)]))
-        rows (sql/execute! (into [(format "select \"%s\" as id, name, type from \"%s\" where type in (?, ?, ?)" id-column table)]
-                                 removed-attribute-types))
-        target #(or (deployed (str (:id %))) "json")
-        {in-use true stale false} (group-by #(contains? removed (target %)) rows)]
-    (doseq [{:keys [id] :as row} stale]
-      (sql/execute-one! [(format "update \"%s\" set type = ? where \"%s\" = ?" table id-column) (target row) id]))
-    (when (seq stale)
-      (log/info {:id ::removed-attribute-types-retyped
-                 :data {:action :migrated :subject :dataset-model
-                        :attributes (mapv #(assoc (select-keys % [:id :name :type]) :to (target %)) stale)}}
-                "Rewrote leftover currency/timeperiod/transit attribute rows to their deployed type"))
-    (when (seq in-use)
-      (log/warn {:id ::removed-attribute-types-in-use
-                 :data {:action :verifying :subject :dataset-model
-                        :attributes (mapv #(select-keys % [:id :name :type]) in-use)}}
-                "Deployed attributes still use currency/timeperiod/transit; the 0.90.2 deploy refuses until they change type"))
-    (count stale)))
-
 (patch/upgrade :synthigy/model
                "0.90.2"
                (log/info {:id ::deploying-0-90-2 :data {:action :deploying :subject :synthigy-model :version "0.90.2"}}
                          "Deploying Synthigy model v0.90.2 (User AI_AGENT type; Group Type, User Owner and currency/timeperiod/transit attribute types dropped)")
-               (retype-removed-attributes!)
+               (dataset.patch/retire-removed-attribute-types!)
                (dataset/deploy! (dataset/current-synthigy-version)))

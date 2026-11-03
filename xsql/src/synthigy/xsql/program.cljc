@@ -645,8 +645,8 @@
   "Completion options for the `@`-token of a declaration line."
   [{:label "@search"       :type "keyword" :section "Operations" :detail "query — matching rows"}
    {:label "@get"          :type "keyword" :section "Operations" :detail "query — one row by identity"}
-   {:label "@search-tree"  :type "keyword" :section "Operations" :detail "query — matches + ancestors via _on"}
-   {:label "@get-tree"     :type "keyword" :section "Operations" :detail "query — root + descendants via _on"}
+   {:label "@search-tree"  :type "keyword" :section "Operations" :detail "query — matches + ancestors via on"}
+   {:label "@get-tree"     :type "keyword" :section "Operations" :detail "query — root + descendants via on"}
    {:label "@sql-template" :type "keyword" :section "Operations" :detail "raw SQL, {Entity.field} placeholders"}
    {:label "@slice"        :type "keyword" :section "Operations" :detail "destroy — slice matched rows"}
    {:label "@purge"        :type "keyword" :section "Operations" :detail "destroy — delete matched rows"}

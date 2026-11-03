@@ -18,6 +18,7 @@
    [synthigy.dataset.core :as core]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.sql.naming :refer [entity->table-name]]
+   [synthigy.dataset.system :as system]
    [synthigy.db :refer [*db*]]
    [synthigy.db.sql :as sql]
    [synthigy.log :as log]
@@ -115,6 +116,47 @@
       (log/info {:id ::deployed-on-backfilled :data {:action :patching :subject :deployed-on}}
                 "Backfilled deployed_on from modified_on"))))
 
+(def removed-attribute-types #{"currency" "timeperiod" "transit"})
+
+(defn retire-attribute
+  [attribute]
+  (cond-> (assoc attribute :type "json")
+    (#{"currency" "transit"} (some-> (:type attribute) name)) (assoc :active false)))
+
+(defn retire-removed-attribute-types!
+  "Move attribute rows off currency/timeperiod/transit before a deploy drops those types: system rows to their shipped type, others to json (currency and transit inactive); currency also in every stored version model."
+  []
+  (let [model (dataset/deployed-model)
+        table (entity->table-name (core/get-entity model (id/entity :dataset/entity-attribute)))
+        version-table (entity->table-name (core/get-entity model (id/entity :dataset/version)))
+        id-column (name (id/key))
+        shipped (into {} (for [entity (core/get-entities (:model (dataset/current-synthigy-version)))
+                               attribute (:attributes entity)]
+                           [(str (id/extract attribute)) (some-> (:type attribute) name)]))
+        rows (sql/execute! (into [(format "select \"%s\" as id, name, type from \"%s\" where type in (?, ?, ?)" id-column table)]
+                                 removed-attribute-types))
+        target (fn [{:keys [id type] :as row}]
+                 (if-let [t (shipped (str id))]
+                   {:type t :active true}
+                   (select-keys (retire-attribute row) [:type :active])))
+        versions (sql/execute! [(format "select _eid, model from \"%s\" where model like '%%\"~:type\":\"currency\"%%'" version-table)])]
+    (doseq [{:keys [id] :as row} rows
+            :let [{:keys [type active]} (target row)]]
+      (sql/execute-one! [(format "update \"%s\" set type = ?, active = coalesce(?, active) where \"%s\" = ?" table id-column)
+                         type active id]))
+    (doseq [{eid :_eid stored :model} versions]
+      (let [retire #(if (= "currency" (some-> (:type %) name)) (retire-attribute %) %)
+            model' (update (<-transit stored) :entities update-vals
+                           (fn [entity] (update entity :attributes #(mapv retire %))))]
+        (sql/execute-one! [(format "update \"%s\" set model = ? where _eid = ?" version-table) (->transit model') eid])))
+    (when (or (seq rows) (seq versions))
+      (log/info {:id ::removed-attribute-types-retired
+                 :data {:action :migrated :subject :dataset-model
+                        :versions (count versions)
+                        :attributes (mapv #(merge (select-keys % [:id :name :type]) (target %)) rows)}}
+                "Moved attributes off currency/timeperiod/transit"))
+    (count rows)))
+
 (patch/current-version :synthigy.dataset/model "1.0.6")
 
 ;; never "0" once Synthigy 0.90.0+ is deployed — the legacy step would rerun on every boot
@@ -130,10 +172,58 @@
                (log/info {:id ::legacy-meta-upgrading
                           :data {:action :upgrading :subject :dataset-model :version "1.0.6"}}
                          "Upgrading legacy meta-model tables to the Synthigy model")
+               (retire-removed-attribute-types!)
                (mount-synthigy-schema!)
                (fix-deployed-on!))
 
-(patch/current-version :synthigy/dataset "1.7.0")
+(patch/current-version :synthigy/dataset "1.8.0")
+
+(defn shipped-system-versions
+  "The system model versions core ships."
+  []
+  [(dataset/current-synthigy-version) (dataset/<-resource "dataset/oauth_session.json")])
+
+(defn mark-model
+  "`model` carrying the shipped system marks of `entity-marks` and `relation-marks`, a system model when `system?`."
+  [model system? entity-marks relation-marks]
+  (cond-> (-> model
+              (assoc :version 2)
+              (update :entities #(reduce-kv (fn [m eid e]
+                                              (cond-> m
+                                                (contains? entity-marks eid)
+                                                (assoc eid (assoc-in e [:configuration :system] (get entity-marks eid)))))
+                                            % %))
+              (update :relations #(reduce-kv (fn [m rid r]
+                                               (cond-> m
+                                                 (contains? relation-marks rid)
+                                                 (assoc rid (assoc-in r [:configuration :system] :closed))))
+                                             % %)))
+    system? (assoc-in [:configuration :system] true)))
+
+(defn mark-system-models!
+  "Model format 2: stored versions of the shipped system datasets carry the shipped system marks; every stored model is stamped :version 2."
+  []
+  (let [shipped (shipped-system-versions)
+        datasets (into #{} (map (comp id/extract :dataset)) shipped)
+        entity-marks (system/entity-marks (map :model shipped))
+        relation-marks (into #{} (mapcat (comp system/relation-marks :model)) shipped)
+        marked (for [{:keys [model dataset] :as version}
+                     (dataset/search-entity :dataset/version nil {(id/key) nil :model nil
+                                                                  :dataset [{:selections {(id/key) nil}}]})
+                     :let [stored (if (string? model) (<-transit model) model)]
+                     :when (instance? synthigy.dataset.core.ERDModel stored)
+                     :let [system? (contains? datasets (id/extract dataset))
+                           upgraded (if system?
+                                  (mark-model stored true entity-marks relation-marks)
+                                  (assoc stored :version 2))]
+                     :when (not= upgraded stored)]
+                 {(id/key) (id/extract version) :model (->transit upgraded)})]
+    (doseq [version marked]
+      (dataset/sync-entity :dataset/version version))
+    (log/info {:id ::v180-models-marked
+               :data {:action :upgraded :subject :dataset-model :version "1.8.0" :count (count marked)}}
+              (str "Model format 2: marked " (count marked) " stored dataset version models"))
+    (core/reload *db*)))
 
 (patch/upgrade :synthigy/dataset
                "1.6.0"
@@ -149,6 +239,10 @@
                             :data {:action :upgraded :subject :dataset-model :version "1.6.0" :count (count cleaned)}}
                            (str "Cleaned " (count cleaned) " stored dataset version models"))
                  (core/reload *db*)))
+
+(patch/upgrade :synthigy/dataset
+               "1.8.0"
+               (mark-system-models!))
 
 (defn can-migrate-to-xid?
   "Check if the system can migrate to XID format."

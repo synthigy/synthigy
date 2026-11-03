@@ -166,6 +166,30 @@
   ([db entity-id data tx]
    (delete db entity-id data tx)))
 
+(defn delete-hook?
+  "Whether a delete enhancement is registered for `entity-id`."
+  ([entity-id] (delete-hook? *db* entity-id))
+  ([db entity-id]
+   (not= (get-method delete [(class db) (id/xid-of entity-id)])
+         (get-method delete ::default))))
+
+(defmulti slice
+  "Checks whether the current user can cut links of `relations` (relation ids)
+   at entity `entity-id`; dispatches on [(class db) entity xid]."
+  (fn [db entity-id relations tx]
+    [(class db) (id/xid-of entity-id)])
+  :default ::default)
+
+(defmethod slice ::default
+  [_ _ relations _]
+  relations)
+
+(defn apply-slice
+  "Applies slice enhancement to the relations a slice cuts."
+  ([entity-id relations tx] (apply-slice *db* entity-id relations tx))
+  ([db entity-id relations tx]
+   (slice db entity-id relations tx)))
+
 (defn apply-schema
   "Entry point for schema enhancement — no-op when there is no current
    principal."

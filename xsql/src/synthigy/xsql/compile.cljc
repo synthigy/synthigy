@@ -289,9 +289,33 @@
 
 ;; ── Relation ────────────────────────────────────────────────────────────
 
+(defn marker-join
+  "Wire `:_join` implied by a relation's join-marker leaf tag."
+  [marker]
+  (case marker
+    :arrow "left"
+    :bang  "none"
+    "inner"))
+
+(defn explicit-join
+  "Lower-cased `(_join …)` value written in a relation's parens, or nil."
+  [rel-node]
+  (some (fn [n]
+          (when (and (= :meta-key (:node n))
+                     (= "_join" (parser/normalize-meta-kw (some-> n :children first :text))))
+            (let [v (second (:children n))]
+              (when (= :identifier (:node v)) (str/lower-case (:text v))))))
+        (some->> (ast/find-child rel-node :parens) (tree-seq :children :children))))
+
+(defn relation-join
+  "Effective join of a relation node — `left`, `inner` or `none`; an explicit `_join` wins over the marker."
+  [rel-node]
+  (or (explicit-join rel-node)
+      (marker-join (-> (ast/find-child rel-node :join-marker) :children first :node))))
+
 (defn compile-relation [rel-node parent]
   (let [join-marker (ast/find-child rel-node :join-marker)
-        is-left? (= :arrow (-> join-marker :children first :node))
+        marker (-> join-marker :children first :node)
         alias-node (ast/find-child rel-node :alias)
         field-id (some (fn [c]
                          (when (= :identifier (:node c)) c))
@@ -324,9 +348,8 @@
         preds (into {} (remove (fn [[k _]] (meta-keys k)) preds))
 
         args (cond-> (merge meta preds)
-               ;; Sigil implies the join; an explicit `(_join …)` arg wins.
                (not (contains? meta :_join))
-               (assoc :_join (if is-left? "left" "inner")))
+               (assoc :_join (marker-join marker)))
 
         entry (cond-> {}
                 alias (assoc :alias alias)
@@ -337,7 +360,8 @@
         existing (get parent (keyword field) [])]
     (if (and (empty? preds)
              (nil? selections)
-             (not is-left?)
+             (not= :arrow marker)
+             (not= "none" (some-> (:_join args) name str/lower-case))
              parens
              (some #(and (= :param-ref (:node %)) (:optional? %)
                          (absent? (lookup-param %)))

@@ -231,6 +231,7 @@
       (= "." c) {:type :dot    :from pos :to (inc pos) :text "."}
       (= "(" c) {:type :lparen :from pos :to (inc pos) :text "("}
       (= ")" c) {:type :rparen :from pos :to (inc pos) :text ")"}
+      (= "!" c) {:type :bang   :from pos :to (inc pos) :text "!"}
 
       (= "-" c)
       (cond

@@ -20,7 +20,7 @@
 (def modeler-public-client-id
   "ZMETOIKCJISOUMBAXRLOXOLKNSTVSMSGUZLMZOAFPIBJGCSF")
 
-(def desktop-public-client-id
+(def studio-public-client-id
   "IFGSBNADPUUWVSRWUOXHPEARTSTXMAHZIMSLHERFZJZEWYNF")
 
 (defn model-info
@@ -50,7 +50,7 @@
       (assoc-in [:auth :oidc]
                 {:discovery "/.well-known/openid-configuration"
                  :client_id modeler-public-client-id
-                 :desktop_client_id desktop-public-client-id
+                 :studio_client_id studio-public-client-id
                  :audience engine/platform-audience})
 
       datasets

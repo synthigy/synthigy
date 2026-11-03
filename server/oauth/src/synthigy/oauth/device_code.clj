@@ -316,6 +316,14 @@
                              "access_denied" "access_denied"
                              "server_error" "server_error"}
                   error-code (get error-map type "invalid_request")]
+              (log/warn {:id ::device-code-refused
+                         :data {:action :refused
+                                :subject :device-code
+                                :client (:client_id params)
+                                :error error-code
+                                :reason (ex-message ex)
+                                :ip remote-addr}}
+                        "Device code request refused")
               {:status 400
                :headers {"Content-Type" "application/json;charset=UTF-8"
                          "Cache-Control" "no-cache"}

@@ -29,11 +29,15 @@ movie (release_year > ?since:int=1980, limit ?limit:int=20, order by release_yea
 - `->genres` follows a **relation**; its fields are indented below it, as deep
   as the model goes.
 
-## Relations: left and inner
+## Relations: left, inner and none
 
 `->relation` keeps every parent — a movie with no genres is still returned and
 simply has no `genres` key. `-relation` keeps only the parents that have a
-match, so the relation scopes its parent.
+match, so the relation scopes its parent. `!relation` keeps only the parents
+with no match: `!genres (name = "Horror" or name = "Gore")` returns movies
+that have neither genre. A `!relation` selects nothing, so its block holds
+only filters (`name = "x"`) and nested `-`/`!` constraints. Only related rows
+you can read count as a match for `-` and `!`.
 
 ## Parameters
 
@@ -147,6 +151,11 @@ Text columns sort in human order (see [DATA.md](DATA.md#filters-and-modifiers)).
 On SQLite, an expression over a text column — `lower(x)`, `coalesce(x, '')`,
 `x || ''` — falls back to byte order; write `order by lower(x) collate human` to
 keep it. PostgreSQL keeps the column's order through expressions.
+
+A timestamp column selected as is — `{e.time}` or `{e.time} AS t` — comes back
+as a timestamp on every database. On SQLite, an expression over it —
+`max({e.time}) AS t` — comes back as UTC text, `2026-09-26 14:45:00.000`; parse
+it on the client. PostgreSQL returns a timestamp either way.
 
 ## Editor support
 

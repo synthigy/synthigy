@@ -13,6 +13,7 @@
   "Context-aware autocompletion engine for XSQL."
   (:require [clojure.string :as str]
             [synthigy.xsql.ast :as ast]
+            [synthigy.xsql.compile :as compile]
             [synthigy.xsql.parser :as parser]))
 
 ;; ── Constants ────────────────────────────────────────────────────────────
@@ -49,7 +50,7 @@
       :else (char-at source i))))
 
 (defn marker-before-current-word
-  "`:arrow` when `->` immediately precedes the current word, `:dash` for `-`, else nil."
+  "`:arrow` when `->` immediately precedes the current word, `:dash` for `-`, `:bang` for `!`, else nil."
   [^String source from]
   (let [from (if (= ":" (char-at source (dec from)))
                (loop [i (- from 2)]
@@ -66,6 +67,10 @@
       (and (>= from 1)
            (= "-" (char-at source (dec from))))
       :dash
+
+      (and (>= from 1)
+           (= "!" (char-at source (dec from))))
+      :bang
 
       :else nil)))
 
@@ -241,6 +246,28 @@
                  (nth targets i))
             (nth targets i)
             :else (recur (dec i))))))))
+
+(defn none-scope-by-indent
+  "Name of the innermost `!rel` (or `_join none`) relation enclosing the cursor by indent, or nil."
+  [root source offset]
+  (let [rels (collect-relations-before root source offset)]
+    (loop [i   (dec (count rels))
+           col (current-line-indent-text source offset)]
+      (when (>= i 0)
+        (let [r (nth rels i)]
+          (cond
+            (>= (:indent r) col) (recur (dec i) col)
+            (and (= :relation (:kind r))
+                 (= "none" (compile/relation-join (:node r)))) (:name r)
+            :else (recur (dec i) (:indent r))))))))
+
+(defn with-none-scope
+  "Tag a field-position ctx with `:none-scope` when it sits inside a `!rel` block."
+  [ctx tree source offset]
+  (if-let [rel (and (#{:block-start :line-start-root} (:kind ctx))
+                    (none-scope-by-indent tree source offset))]
+    (assoc ctx :none-scope rel)
+    ctx))
 
 (defn enclosing-relation-kind-by-indent
   "Kind of the innermost preceding relation at strictly smaller indent, or nil."
@@ -603,8 +630,8 @@
       (= prev-word "in")
       {:kind :after-in :entity-stack entity-stack}
 
-      ;; `_on |` — the tree-op recursion slot: self-relations only.
-      (= prev-word "_on")
+      ;; `on |` — the tree-op recursion slot: self-relations only.
+      (#{"on" "_on"} prev-word)
       {:kind :on-relation :entity-stack entity-stack}
 
       :else
@@ -847,6 +874,17 @@
                  {:label r :type "relation" :section "Relations"}))
              (sorted-relation-keys entity-def))))))
 
+(defn none-scope-options
+  "Inside a `!rel` block: attributes as filters, relations as constraints, nothing to select."
+  [entity-def siblings]
+  (when entity-def
+    (concat
+      (mapv (fn [a] {:label a :type "attribute" :section "Attributes" :detail "filter"
+                     :snippet (str a " = ${value}")})
+            (sorted-attr-keys entity-def))
+      (mapv (fn [r] {:label (str "-" r) :type "relation" :section "Relations" :detail "constraint"})
+            (remove (:rels siblings #{}) (sorted-relation-keys entity-def))))))
+
 (defn options-for-context [ctx schema root-entity]
   (let [entity-def (or (peek (:entity-stack ctx))
                        (when (and schema root-entity)
@@ -854,8 +892,14 @@
         marker (:marker-before ctx)]
     (case (:kind ctx)
       :line-start-root
-      (if marker
+      (cond
+        marker
         (bare-relation-options entity-def (:siblings ctx))
+
+        (:none-scope ctx)
+        (none-scope-options entity-def (:siblings ctx))
+
+        :else
         (concat
           (when entity-def
             (options-for-entity entity-def {:relation-prefix "->"
@@ -868,16 +912,23 @@
             (sort (keys (:entities schema))))
 
       :block-start
-      (if (:in-agg-body? ctx)
+      (cond
+        (:in-agg-body? ctx)
         (numeric-attr-options entity-def)
-        (if marker
-          (bare-relation-options entity-def (:siblings ctx))
-          (concat
-            (when entity-def
-              (options-for-entity entity-def {:relation-prefix "->"
-                                              :siblings (:siblings ctx)}))
-            [{:label "_count" :type "keyword" :section "Operators" :detail "aliased counters" :apply :block-opener}
-             {:label "_agg"   :type "keyword" :section "Operators" :detail "aggregates"       :apply :block-opener}])))
+
+        marker
+        (bare-relation-options entity-def (:siblings ctx))
+
+        (:none-scope ctx)
+        (none-scope-options entity-def (:siblings ctx))
+
+        :else
+        (concat
+          (when entity-def
+            (options-for-entity entity-def {:relation-prefix "->"
+                                            :siblings (:siblings ctx)}))
+          [{:label "_count" :type "keyword" :section "Operators" :detail "aliased counters" :apply :block-opener}
+           {:label "_agg"   :type "keyword" :section "Operators" :detail "aggregates"       :apply :block-opener}]))
 
       :arg-list-start
       (concat
@@ -954,14 +1005,15 @@
       [{:label "asc"  :type "constant" :detail "ascending"}
        {:label "desc" :type "constant" :detail "descending"}]
 
-      ;; Only self-relations of the root entity can be recursed.
+      ;; Only single-parent self-relations of the root entity can be recursed.
       :on-relation
       (when entity-def
         (let [root-name (or root-entity
                             (some (fn [[n d]] (when (= d entity-def) n))
                                   (:entities schema)))]
           (->> (:relations entity-def)
-               (filter (fn [[_ r]] (= root-name (:target r))))
+               (filter (fn [[_ r]] (and (= root-name (:target r))
+                                        (not= "many" (:cardinality r)))))
                (map first)
                sort
                (mapv (fn [r] {:label r :type "relation" :section "Relations"
@@ -1010,19 +1062,23 @@
     options))
 
 (defn tree-op-options
-  "Tree ops surface `_on <self-relation>` in the root arg-list only."
+  "Tree ops surface `on <self-relation>` in the root arg-list only."
   [_ {:keys [kind entity-stack]} options _]
   (if (and (= :arg-list-start kind) (<= (count entity-stack) 1))
     (conj (vec options)
-          {:label "_on" :type "keyword" :section "Operators"
+          {:label "on" :type "keyword" :section "Operators"
            :detail "self-relation to recurse over"})
     options))
 
 (defmethod op-complete-options "search-tree" [op ctx options entity-def]
   (tree-op-options op ctx options entity-def))
 
-(defmethod op-complete-options "get-tree" [op ctx options entity-def]
-  (tree-op-options op ctx options entity-def))
+(defmethod op-complete-options "get-tree" [op {:keys [kind entity-stack] :as ctx} options entity-def]
+  (let [root-args? (and (= :arg-list-start kind) (<= (count entity-stack) 1))
+        options (if root-args?
+                  (filterv #(and (= "attribute" (:type %)) (#{"xid" "euuid"} (:label %))) options)
+                  options)]
+    (tree-op-options op ctx options entity-def)))
 
 ;; ── Public entry ─────────────────────────────────────────────────────────
 
@@ -1033,7 +1089,8 @@
   (let [tree (parser/parse (or source ""))
         root-entity (or (some-> (:root-entity tree) :text) root-entity)
         [resolved ancestors] (innermost-with-ancestors tree offset (or source ""))
-        ctx (context-at tree resolved ancestors source offset schema root-entity)
+        ctx (-> (context-at tree resolved ancestors source offset schema root-entity)
+                (with-none-scope tree (or source "") offset))
         entity-def (or (peek (:entity-stack ctx))
                        (when (and schema root-entity)
                          (get-in schema [:entities root-entity])))
@@ -1073,7 +1130,8 @@
   (let [tree (parser/parse (or source ""))
         root-entity (or (some-> (:root-entity tree) :text) root-entity)
         [resolved ancestors] (innermost-with-ancestors tree offset (or source ""))
-        ctx (context-at tree resolved ancestors source offset schema root-entity)
+        ctx (-> (context-at tree resolved ancestors source offset schema root-entity)
+                (with-none-scope tree (or source "") offset))
         entity-stack (:entity-stack ctx)
         current-entity (peek entity-stack)
         indent (max 2 (current-line-indent-text source offset))
@@ -1119,6 +1177,9 @@
       (cond
         header-target
         {:mode :scope
+         :none-scope (or (:none-scope ctx)
+                         (when (= "none" (compile/relation-join header-rel))
+                           (relation-name-of header-rel)))
          :entity-def header-target
          :siblings (if-let [block (ast/find-child header-rel :block)]
                      (sibling-bare-names block source offset)
@@ -1158,4 +1219,5 @@
             {:mode :args :path path
              :options (vec (options-for-context ctx schema root-entity))}
             {:mode :scope :entity-def current-entity :siblings safe-siblings
+             :none-scope (:none-scope ctx)
              :path path :indent indent}))))))

@@ -151,6 +151,9 @@
   {:extra-paths ["server/oauth/src" "server/core/src"]
    :extra-deps {dev.synthigy/console {:local/root "server/console"}}}
 
+  :server-files
+  {:extra-paths ["server/files/src" "server/oauth/src" "server/core/src"]}
+
   ;; Adapters — exactly one per classpath, each ships `synthigy.server`.
   :server-httpkit
   {:extra-paths ["server/httpkit/src" "server/oauth/src" "server/core/src"]

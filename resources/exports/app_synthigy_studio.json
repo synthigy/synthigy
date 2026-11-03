@@ -1,6 +1,6 @@
 {
-  "description": "Public OAuth client for the Synthigy desktop app. Signs in through the system browser with a loopback redirect (RFC 8252): any port on 127.0.0.1, PKCE required. Refresh tokens are kept in the OS keychain.",
-  "name": "Synthigy Desktop",
+  "description": "Public OAuth client for Synthigy Studio, the desktop app. Signs in through the system browser with a loopback redirect (RFC 8252): any port on 127.0.0.1, PKCE required. Refresh tokens are kept in the OS keychain.",
+  "name": "Synthigy Studio",
   "settings": {
     "application-type": "native",
     "logo-url": null,

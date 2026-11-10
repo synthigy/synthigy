@@ -19,16 +19,10 @@
    [synthigy.db :refer [*db*]]))
 
 (defprotocol AuditEnhancement
-  "Pluggable infrastructure-layer audit tracking (not part of the domain model)."
+  "Engine DDL that makes the database keep stamp attributes."
 
   (transform-audit [db tx entities]
-    "Phase 1: adds audit columns via DDL, called after table creation.")
-
-  (augment-schema [db entity]
-    "Phase 2: returns {:fields ... :relations ...} to merge into the runtime schema.")
-
-  (audit [db entity-id data tx]
-    "Phase 3: populates audit values during the mutation pipeline."))
+    "Ensures the stamp columns, defaults and triggers of `entities`; called after their tables exist."))
 
 (defprotocol ModelEnhancement
   "Contributes attribute/relation additions to the runtime model."
@@ -142,12 +136,6 @@
   ([entity-id data tx] (apply-write *db* entity-id data tx))
   ([db entity-id data tx]
    (write db entity-id data tx)))
-
-(defn apply-audit
-  "Applies audit enhancement to mutation data."
-  ([entity-id data tx] (apply-audit *db* entity-id data tx))
-  ([db entity-id data tx]
-   (audit db entity-id data tx)))
 
 (defmulti delete
   "Checks whether the current user can perform the mutation; dispatches on

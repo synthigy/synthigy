@@ -23,8 +23,8 @@
    [synthigy.info :as info]
    [synthigy.json :as json]
    [synthigy.log :as log]
+   [synthigy.oauth.account :as account]
    [synthigy.oauth.core :as oauth]
-   [synthigy.oauth.federated :as federated]
    [synthigy.oauth.federated.registry :as registry]
    [synthigy.oauth.login :as oauth.login]
    [synthigy.oauth.page.custom :as custom]
@@ -155,7 +155,7 @@
     (do (some-> (session/current-session request) :id oauth/kill-session)
         {:status 303
          :headers {"Location" "/console/login?logged_out=1"}
-         :cookies {"idsrv.session" {:value "" :path "/" :max-age 0}}})))
+         :cookies {(oauth/session-cookie-name request) {:value "" :path "/" :max-age 0}}})))
 
 (defn kill-session!
   [request]
@@ -346,12 +346,8 @@
       (do
         (when-not (session/fresh? (:console/session request))
           (mark-authenticated! request))
-        (let [{:keys [status body]} (access/with-principal nil
-                                      (federated/unlink-handler
-                                       (assoc-in request [:params :xid] target)))
-              code   (when (string? body)
-                       (try (some-> (json/read-str body) :error)
-                            (catch Exception _ nil)))
+        (let [[status {code :error}] (access/with-principal nil
+                                       (account/unlink! (account/caller request) target))
               notice (cond
                        (= 200 status) [:ok "Sign-in method unlinked."]
                        code           (get unlink-messages code

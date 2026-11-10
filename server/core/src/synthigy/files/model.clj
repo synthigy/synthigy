@@ -99,6 +99,33 @@
 (defdata :files.folder/cache
   :euuid #uuid "b384adbf-be2f-4f7d-9a34-1713e824155a" :xid "PAj5nWDB1x5fNxkC4JkPZT")
 
+(defdata :files.folder/can-link
+  :euuid #uuid "80ff8d9f-0202-414a-ada7-22e456fa5170" :xid "Gvu1hAtKVkqeazSx5qx9qR")
+
+(defentity :files/link
+  :euuid #uuid "2f8bbcf4-4e59-4fce-9ced-14ba752d09ce" :xid "6sXbeaD2ZZMcbTjYVUVsim")
+
+(defrelation :files/link->file
+  :euuid #uuid "ddedb2af-dfa6-48b4-868e-612fd729a29f" :xid "UQULb5Yn13rqBGdseCAv7Q")
+
+(defdata :files.link/token-hash
+  :euuid #uuid "b5c17bf9-86b3-4baa-bedc-51944d6478d2" :xid "PSkYyvaLiicVDsa7YSMZAy")
+
+(defdata :files.link/created-by
+  :euuid #uuid "e0b93173-9c80-4408-8085-473df49d500c" :xid "UkVLvCPRKV9gEKch5N67vT")
+
+(defdata :files.link/expires-at
+  :euuid #uuid "4f428fbd-8c1d-4380-94cb-2fb4e6a4c9db" :xid "Anfh3zoExRGMpBCSdA44ve")
+
+(defdata :files.link/max-downloads
+  :euuid #uuid "3044ec25-658f-4e86-a0ee-f33b36c11182" :xid "6xi69JZip5ixq94pPQHHFf")
+
+(defdata :files.link/downloads
+  :euuid #uuid "d61f7cd4-e7e6-40ca-9f1d-ebbf97b04055" :xid "TSZvQqzqb3V3yy5GsPGe7E")
+
+(defdata :files.link/disposition
+  :euuid #uuid "264ab0dc-1153-4a77-a791-c6f7e08d53bd" :xid "5jFSRDmNxi5nTwsvsozcxL")
+
 (defn entity
   ([entity-key] (entity (dataset/deployed-model) entity-key))
   ([model entity-key] (core/get-entity model (id/entity entity-key))))

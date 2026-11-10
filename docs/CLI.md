@@ -286,14 +286,14 @@ Examples:
 
 ```
   synthigy pull --bundle postgres
-  synthigy pull --bundle sqlite --version v0.2.12
+  synthigy pull --bundle sqlite --version v0.4.1
 ```
 
 Flags:
 
 ```
       --bundle string    Bundle: sqlite | postgres | postgres-clickhouse (default "sqlite")
-      --version string   Release version (e.g. v0.2.12) (default "latest")
+      --version string   Release version (e.g. v0.4.1) (default "latest")
 ```
 
 ### `synthigy service`
@@ -341,7 +341,7 @@ Examples:
 ```
   synthigy up                                # opens the setup wizard on a fresh install
   synthigy up --bundle postgres              # needs POSTGRES_* env; persists the choice
-  synthigy up --version v0.2.12              # pin a release
+  synthigy up --version v0.4.1               # pin a release
   synthigy up --jar synthigy.jar             # local/airgap jar, no download
   synthigy up --join                         # stay attached (systemd / launchd / container PID 1)
   synthigy --env .synthigy/customer1.env up  # replaces <instance-home>/.env, for running several instances
@@ -354,7 +354,7 @@ Flags:
       --force            Re-download every module even if cached (suspected corruption)
       --jar string       Local jar, or a classpath of module jars, instead of a release download; airgap/custom builds
       --join             Stay attached to this terminal instead of detaching — for process supervisors (systemd Type=simple, launchd, a container's PID 1), which need the process they started to keep running
-      --version string   Release version to run (e.g. v0.2.12) (default "latest")
+      --version string   Release version to run (e.g. v0.4.1) (default "latest")
 ```
 
 ### `synthigy versions`
@@ -399,19 +399,41 @@ Scaffold ./.synthigy for a project-local instance
 synthigy env init
 ```
 
+### `synthigy guide`
+
+How a Synthigy project works, for you or your coding agent
+
+```
+synthigy guide
+```
+
+Examples:
+
+```
+  synthigy guide
+  synthigy guide > AGENTS.md
+```
+
 ### `synthigy status`
 
 Show this instance and its saved connection, offline
 
 ```
-synthigy status
+synthigy status [flags]
 ```
 
 Examples:
 
 ```
   synthigy status
+  synthigy status --json
   synthigy --env .synthigy/customer2.env status
+```
+
+Flags:
+
+```
+      --json   print one JSON object on stdout
 ```
 
 ### `synthigy upgrade`
@@ -426,13 +448,13 @@ Examples:
 
 ```
   synthigy upgrade
-  synthigy upgrade --version v0.1.9   # pin an older CLI
+  synthigy upgrade --version v0.2.0   # pin an older CLI
 ```
 
 Flags:
 
 ```
-      --version string   CLI release tag to install (e.g. v0.1.10) (default "latest")
+      --version string   CLI release tag to install (e.g. v0.2.0) (default "latest")
 ```
 
 ### `synthigy version`

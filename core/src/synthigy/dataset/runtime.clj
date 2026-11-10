@@ -10,7 +10,7 @@
 ;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.dataset.runtime
-  "Composes the runtime model — deployed model augmented with identity, audit, and
+  "Composes the runtime model — deployed model augmented with identity and
    reference-typed attrs as first-class entries."
   (:require
    [synthigy.dataset.core :as core]
@@ -61,25 +61,6 @@
      model
      #(append-attrs % (system-attrs-for provider %)))))
 
-(defn audit-attrs-for [entity]
-  (let [eid (id/extract entity)]
-    ;; who-columns come from core/audit-ref-attrs — never inline, RLS resolves against those ids
-    (into
-     (cond-> []
-       (core/audit-modified? entity)
-       (conj (merge (id/derive-id eid "modified_on")
-                    {:name "modified_on" :type "timestamp" :active true}))
-
-       (core/audit-created? entity)
-       (conj (merge (id/derive-id eid "created_on")
-                    {:name "created_on" :type "timestamp" :active true})))
-     (core/audit-ref-attrs entity))))
-
-(defrecord AuditEnhancer []
-  enhance/ModelEnhancement
-  (enhance-model [_ model]
-    (enhance-each-entity model #(append-attrs % (audit-attrs-for %)))))
-
 (defn attr->relation
   "Builds an ERDRelation from a ref-typed attr; the relation's identity is the
    attr's identity."
@@ -122,10 +103,9 @@
               new-rels))))
 
 (defn build
-  "Composes the runtime view: identity attrs + audit attrs + reference-typed-attrs-as-relations."
+  "Composes the runtime view: identity attrs + reference-typed-attrs-as-relations."
   [model]
   (when model
     (->> model
          (enhance/enhance-model (id/current-provider))
-         (enhance/enhance-model (->AuditEnhancer))
          (enhance/enhance-model (->ReferenceEnhancer)))))

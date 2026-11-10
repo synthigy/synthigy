@@ -56,6 +56,16 @@ or `write`. A denied attribute is silently left out of that role's reads — a
 query that selects it still succeeds — and a write that sets it is refused
 with `ATTRIBUTE_FORBIDDEN`.
 
+A role can't filter, sort or `_distinct` by an attribute it may not read:
+that is refused with `ATTRIBUTE_FORBIDDEN` too, and so is naming it in a
+`sql-template`. A template's `SELECT *` carries only the columns the role may
+read. Subscriptions leave denied attributes out of every change they send.
+
+A `user`, `group` or `role` reference reads as the target's label for anyone who
+can read the record holding it. The target's grants and row-level security do not
+apply to the label, and nothing past it can be read, filtered or sorted
+([DATA.md](DATA.md#references)).
+
 Passwords are an example: `User.password` is readable and writable by
 superusers only. Users change their own password in the console, under
 Profile.

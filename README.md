@@ -77,14 +77,14 @@ Client SDKs (MIT): JavaScript/TypeScript, Python, Go, Clojure and PHP —
 ## Building from source
 
 ```bash
-SYNTHIGY_COMBO=engine-sqlite:audit-sqlite:log-sqlite:server-httpkit:server-console:server-files \
+SYNTHIGY_COMBO=engine-sqlite:audit-sqlite:log-sqlite:server-enso:server-console \
   SYNTHIGY_AOT=true clojure -T:build uber
 synthigy up --bundle sqlite \
-  --jar target/synthigy-engine-sqlite-audit-sqlite-log-sqlite-server-httpkit-server-console-server-files.jar
+  --jar target/synthigy-engine-sqlite-audit-sqlite-log-sqlite-server-enso-server-console.jar
 ```
 
 The combo names one `deps.edn` alias per source folder; the `postgres` bundle is
-`engine-postgres:audit-postgres:log-sqlite:server-httpkit:server-console:server-files`. A source
+`engine-postgres:audit-postgres:log-sqlite:server-enso:server-console`. A source
 build has no Tools in the console: the web components ship in released bundles only.
 
 ## Contributing

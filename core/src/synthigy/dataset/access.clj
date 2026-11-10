@@ -178,7 +178,9 @@
        (and (= "enum" type)
             (some (complement :active) (:values configuration)))
        (assoc :retired (into [] (comp (remove :active) (map :name)) (:values configuration)))
-       (= "hashed" type) (assoc :write-only true))]))
+       (= "hashed" type) (assoc :write-only true)
+       (dataset/stamp attribute) (assoc :read-only true)
+       (dataset/reference-label type) (assoc :label (vec (sort (map clojure.core/name (dataset/reference-label type))))))]))
 
 (defn attribute->xid-pair [attribute]
   (when (and (:active attribute) (:xid attribute))

@@ -19,6 +19,7 @@
     [synthigy.log.pipeline :as pipeline]
     [synthigy.log.store.protocol :as store]
     [synthigy.log.store.ring :as ring]
+    [synthigy.log.store.signal :as signal]
     [synthigy.log.topics :as topics]
     [synthigy.node :as node]
     [taoensso.telemere :as t]))
@@ -96,13 +97,6 @@
                  :else (str k))]
          (str/replace s \- \_)))}))
 
-(defn keyword->wire-id
-  [id]
-  (cond
-    (qualified-keyword? id) (str (namespace id) "/" (name id))
-    (keyword? id)           (name id)
-    (some? id)              (str id)))
-
 (defn throwable->wire
   [x]
   (cond
@@ -129,7 +123,7 @@
             (.put "inst"        (when inst (str inst)))
             (.put "level"       (some-> level name))
             (.put "ns"          ns)
-            (.put "id"          (keyword->wire-id id))
+            (.put "id"          (signal/id->str id))
             (.put "msg"         (when msg_ (force msg_)))
             (.put "request_id"  (or (:request-id signal) (get ctx-map :request-id)))
             (.put "user_xid"    (or (:user-xid signal)   (get ctx-map :user-xid)))
@@ -140,10 +134,7 @@
                                     (string? h) h
                                     (map? h)    (or (:name h) @node/hostname)
                                     :else       @node/hostname)))
-            ;; (subs (str kw) 1), NOT `name` — :traffic/sse must stay "traffic/sse"
-            (.put "topics"      (->> (:topics signal)
-                                     (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t))))
-                                     sort vec))
+            (.put "topics"      (->> (:topics signal) (map signal/id->str) sort vec))
             (.put "data"        (or data {}))
             (.put "ctx"         residual-ctx)
             (.put "error_class" err-class)
@@ -433,10 +424,10 @@
   (cond-> {:ts     (some-> inst str)
            :level  (some-> level name)
            :ns     (some-> ns str)
-           :id     (keyword->wire-id id)
+           :id     (signal/id->str id)
            :msg    (some-> msg_ force str)
            :topics (->> (or (:topics signal) (topics/classify signal))
-                        (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t))))
+                        (map signal/id->str)
                         sort vec)}
     error (assoc :error {:class   (.getName (class error))
                          :message (ex-message error)

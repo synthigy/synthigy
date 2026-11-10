@@ -110,17 +110,18 @@
   [{error     :synthigy.oauth.login/error
     username  :synthigy.oauth.login/username
     raw-state :synthigy.oauth.login/raw-state
-    {:keys [authorization-code device-code]} :synthigy.oauth.login/state}]
+    {:keys [authorization-code device-code flow]} :synthigy.oauth.login/state}]
   (let [client (cond
                  authorization-code (ac/get-code-client authorization-code)
                  device-code (dc/get-code-client device-code))
         client-name (not-empty (str (:name client)))
+        account? (= "account" flow)
         logo (get-in client [:settings "logo-url"])
         invalid (when (= error :credentials) "true")]
     (assets/document
       {:title (str "Sign in · " (or client-name "Synthigy"))
        :css "login.css"
-       :chip client-name
+       :chip (or client-name (when account? "Your account"))
        :status [:span.sy-status-item [:span.sy-key "Enter"] [:span "sign in"]]
        :scripts ["/oauth/js/login.js"]}
       [:div.sy-card
@@ -128,9 +129,10 @@
         (when logo [:img.sy-card-logo {:src logo :alt ""}])
         [:h1.sy-card-title "Sign in"]
         (assets/voice {:id "voice"}
-                      (if client-name
-                        (list "to continue to " [:b client-name])
-                        "Enter your credentials to continue.")
+                      (cond
+                        client-name (list "to continue to " [:b client-name])
+                        account?    "to manage your account."
+                        :else       "Enter your credentials to continue.")
                       (error-text error))]
        [:div.sy-card-body
         [:form.sy-form {:method "post" :data-sy-busy ""}

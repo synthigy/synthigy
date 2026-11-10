@@ -35,6 +35,10 @@
   (list-blobs [this]
     "Every stored blob as {:key :modified Instant}, lazily."))
 
+(defprotocol FileBacked
+  (blob-file [this key]
+    "The blob as a java.io.File the HTTP server can send without copying, nil when the key is absent."))
+
 (def key-pattern #"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 (defn check-key
@@ -90,8 +94,8 @@
 (def spool-dir (str env/home "/files/.spool"))
 
 (defn spool!
-  "Copy `in` to a temp file while hashing; returns {:file :size :sha256}, throws :file-too-large past `max-size`."
-  [^InputStream in max-size]
+  "Copy `in` to a temp file while hashing; returns {:file :size :sha256}."
+  [^InputStream in]
   (private-dirs! spool-dir)
   (let [f (File/createTempFile "up-" ".part" (File. ^String spool-dir))
         md (MessageDigest/getInstance "SHA-256")
@@ -105,12 +109,9 @@
               {:file f
                :size total
                :sha256 (.formatHex (HexFormat/of) (.digest md))}
-              (let [total (+ total n)]
-                (when (and max-size (> total max-size))
-                  (throw (ex-info "File too large" {:code :file-too-large :max-size max-size})))
-                (.update md buf 0 n)
-                (.write out buf 0 n)
-                (recur total))))))
+              (do (.update md buf 0 n)
+                  (.write out buf 0 n)
+                  (recur (+ total n)))))))
       (catch Throwable t
         (.delete f)
         (throw t)))))

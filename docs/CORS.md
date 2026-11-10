@@ -12,7 +12,7 @@ browser. Synthigy answers those calls only for origins it knows:
   the engine itself runs on localhost: `http://localhost:3001` works too. With a
   port (`http://localhost:8000`) only that origin is allowed. `127.0.0.1` is a
   different host and needs its own registration;
-- Synthigy Studio's webview origins, `tauri://localhost` and
+- the webview origins `tauri://localhost` and
   `http://tauri.localhost`, always;
 - anything listed in `SYNTHIGY_SERVER_ALLOWED_ORIGINS` (comma-separated), for
   pages that read public data without an OAuth client of their own:

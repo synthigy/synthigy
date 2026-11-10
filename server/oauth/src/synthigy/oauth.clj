@@ -211,9 +211,9 @@
 
       force-login?
       (assoc (login-redirect {:prompt prompt})
-             :cookies {"idsrv.session" {:value ""
-                                        :max-age 0
-                                        :path "/"}})
+             :cookies {(core/session-cookie-name request) {:value ""
+                                                           :max-age 0
+                                                           :path "/"}})
 
       ;; TODO: full consent flow — for now treated like normal login
       prompt-consent?

@@ -15,16 +15,11 @@
             [synthigy.log :as log]
             [synthigy.dataset.id :as id]
             [synthigy.dataset.access :as access]
-            [synthigy.dataset.rls :as rls]
             [synthigy.dataset.sql.query :as q]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [clojure.string :as str]
             [jsonista.core :as json]))
-
-(defn unsupported! [reason]
-  (throw (ex-info (str "fused-query unsupported: " reason)
-                  {::unsupported true :reason reason})))
 
 (defn qi  "quote SQL identifier" [s] (str \" (str/replace (name s) "\"" "") \"))
 (defn lit "single-quoted SQL string literal" [s]
@@ -34,8 +29,7 @@
   [p]
   (name (gensym (str "__" p))))
 
-(def ^:private meta-keys #{:_join :_limit :_offset :_order_by :_distinct :_count :_agg})
-(def ^:private agg-fns  #{:avg :sum :min :max :count})
+(def ^:private meta-keys #{:_join :_limit :_offset :_order_by :_distinct})
 
 (defn order-by-pairs
   "Normalizes any `_order_by` spec shape into an ordered seq of [field direction]."
@@ -53,22 +47,12 @@
 
 (defn order-clause [order-by alias]
   (for [[f d] (order-by-pairs order-by)]
-    [(str alias "." (qi f)) (if (#{:desc "desc"} d) "desc nulls last" "asc nulls first")]))
+    [(str alias "." (qi f)) (if (= :desc d) "desc nulls last" "asc nulls first")]))
 
 (defn has-filter?
   [args] (seq (apply dissoc args meta-keys)))
 
 (def ^:private relation-on-predicate @#'q/relation-on-predicate)
-
-(defn rls-where
-  "[sql params] of the :read RLS predicate on `alias`, `(1=0)` when no guard applies, nil when RLS is off."
-  [entity-id alias]
-  (when (rls/should-apply-guards? entity-id :read)
-    (when-let [{:keys [enabled guards]} (get-in (q/deployed-schema) [entity-id :rls])]
-      (when enabled
-        (if-let [r (and (seq guards) (rls/compile-guards-to-sql alias guards :read))]
-          [(:sql r) (vec (:params r))]
-          ["(1=0)" []])))))
 
 (defn field-entries
   "json_build_object pieces for a node's scalar fields plus _eid; json columns go as ::text."
@@ -80,30 +64,25 @@
                  (when (= "json" (some-> (get ftypes f) name)) "::text"))))))
 
 (defn emit-relation
-  "Rows, _count and _agg of relation `k` as a single LATERAL sharing one predicate."
+  "Rows of relation `k` as a single LATERAL."
   [k schema row-alias]
   (let [rel (get-in schema [:relations k])
-        cnt (get-in schema [:_count k])
-        agg (get-in schema [:_agg k])
-        ptr (or rel cnt agg)
-        _ (when (and (:relation ptr)
-                     (not (access/relation-allows? (:relation ptr) #{:read})))
+        _ (when (and (:relation rel)
+                     (not (access/relation-allows? (:relation rel) #{:read})))
             (throw (ex-info (str "Relation access forbidden: " k)
-                            {:code "RELATION_FORBIDDEN" :relation (:relation ptr)})))
-        junction   (:relation/table ptr)
-        from-field (:from/field ptr)
-        to-field   (:to/field ptr)
-        child-tbl  (:entity/table ptr)
-        rtype      (:type ptr)
-        ;; never read args off `rel` — a count-only/agg-only relation has none and its filter is dropped
-        rel-args   (:args ptr)
-        ;; must be ptr's :entity/as — the predicate text bakes it in ("missing FROM-clause entry")
-        ex (or (:entity/as ptr) (gen "e"))
+                            {:code "RELATION_FORBIDDEN" :relation (:relation rel)})))
+        junction   (:relation/table rel)
+        from-field (:from/field rel)
+        to-field   (:to/field rel)
+        child-tbl  (:entity/table rel)
+        rel-args   (:args rel)
+        ;; must be rel's :entity/as — the predicate text bakes it in ("missing FROM-clause entry")
+        ex (or (:entity/as rel) (gen "e"))
         jx (gen "j") cx (gen "c")
-        [rls-sql rls-data] (rls-where (:to ptr) ex)
+        [rls-sql rls-data] (q/node-read-guard rel ex)
         [filter-sql filter-data]
         (when (has-filter? rel-args)
-          (or (relation-on-predicate ptr) ["" []]))
+          (or (relation-on-predicate rel) ["" []]))
         [ie-sql ie-data] (q/inner-exists rel ex)
         child-source (str (qi junction) " " jx
                           " join " (qi child-tbl) " " ex
@@ -113,105 +92,43 @@
                        (when (seq ie-sql)  (str " and " ie-sql))
                        (when (seq rls-sql) (str " and (" rls-sql ")")))
         child-obj  (str "json_build_object(" (str/join ", " (field-entries rel ex)) ")")
-        agg-spec   (when agg (select-keys agg agg-fns))
-        agg-fields (distinct (for [[_ fm] agg-spec [f _] fm] f))
         lat (gen "lat")
-        ords (order-clause (:_order_by rel-args) ex)
+        [ords ord-data] (reduce (fn [[os ps] [f d]]
+                                  (let [dir (if (= :desc d) "desc nulls last" "asc nulls first")]
+                                    (if-let [spec (get-in rel [:ops (keyword (name f))])]
+                                      (let [[sql sps] (q/op-order-sql spec ex)] [(conj os [sql dir]) (into ps sps)])
+                                      [(conj os [(str ex "." (qi f)) dir]) ps])))
+                                [[] []]
+                                (order-by-pairs (:_order_by rel-args)))
         limit (:_limit rel-args)
         offset (long (or (:_offset rel-args) 0))
         windowed? (or limit (pos? offset))
+        ords (cond-> ords windowed? (conj [(str ex "._eid") "asc"]))
         ord-cols (map-indexed (fn [i [e d]] [(str "__od" i) e d]) ords)
         rn-over (if (seq ords)
                   (str "order by " (str/join "," (map (fn [[e d]] (str e " " d)) ords)))
-                  "")]
-    (if (some? rel)
-      (let [inner (str "select " child-obj " as __v"
-                       (apply str (for [[a e _] ord-cols] (str ", " e " as " a)))
-                       (apply str (for [f agg-fields] (str ", " ex "." (qi f) " as __af_" (name f))))
-                       (when windowed? (str ", row_number() over (" rn-over ") as __rn"))
-                       " from " child-source " where " correlate)
-            agg-by (if (seq ord-cols)
-                     (str " order by " (str/join "," (map (fn [[a _ d]] (str cx "." a " " d)) ord-cols)))
-                     "")
-            filt (when windowed?
-                   (str " filter (where " cx ".__rn > " offset
-                        (when limit (str " and " cx ".__rn <= " (+ offset (long limit))))
-                        ")"))
-            outer (str "select coalesce(json_agg(" cx ".__v" agg-by ")" filt
-                       ", '[]'::json) as __rows"
-                       (when cnt ", count(*) as __cnt")
-                       (apply str (for [[fnk fm] agg-spec [f _] fm]
-                                    (str ", " (name fnk) "(" cx ".__af_" (name f) ") as __ag_"
-                                         (name fnk) "_" (name f))))
-                       " from (" inner ") " cx)]
-        {:lateral (str "left join lateral (" outer ") " lat " on true")
-         :json-pair  (str (lit k) ", " lat ".__rows")
-         :count-pair (when cnt (str (lit k) ", " lat ".__cnt"))
-         :agg-pair   (when agg
-                       (str (lit k) ", json_build_object("
-                            (str/join ", "
-                                      (for [f agg-fields]
-                                        (str (lit f) ", json_build_object("
-                                             (str/join ", " (for [[fnk fm] agg-spec
-                                                                  :when (contains? fm f)]
-                                                              (str (lit fnk) ", " lat ".__ag_"
-                                                                   (name fnk) "_" (name f))))
-                                             ")")))
-                            ")"))
-         :params (vec (concat filter-data ie-data rls-data))})
-      (let [outer (str "select"
-                       (when cnt " count(*) as __cnt")
-                       (when (and cnt agg) ",")
-                       (when agg
-                         (str " "
-                              (str/join ", "
-                                        (for [[fnk fm] agg-spec [f _] fm]
-                                          (str (name fnk) "(" ex "." (qi f) ") as __ag_"
-                                               (name fnk) "_" (name f))))))
-                       " from " child-source " where " correlate)]
-        {:lateral (str "left join lateral (" outer ") " lat " on true")
-         :count-pair (when cnt (str (lit k) ", " lat ".__cnt"))
-         :agg-pair   (when agg
-                       (str (lit k) ", json_build_object("
-                            (str/join ", "
-                                      (for [f agg-fields]
-                                        (str (lit f) ", json_build_object("
-                                             (str/join ", " (for [[fnk fm] agg-spec
-                                                                  :when (contains? fm f)]
-                                                              (str (lit fnk) ", " lat ".__ag_"
-                                                                   (name fnk) "_" (name f))))
-                                             ")")))
-                            ")"))
-         :params (vec (concat filter-data ie-data rls-data))}))))
-
-(defn emit-relation-views
-  "Relation slot for `k`, one LATERAL per distinct predicate across its rows pull, `_count` and `_agg`."
-  [k schema row-alias]
-  (let [views (keep (fn [p] (when-let [v (get-in schema [p k])] [p v]))
-                    [:relations :_count :_agg])
-        groups (vals (reduce (fn [acc [_ v :as view]]
-                               (update acc (not-empty (apply dissoc (:args v) meta-keys))
-                                       (fnil conj []) view))
-                             (array-map) views))]
-    (if (<= (count groups) 1)
-      (emit-relation k schema row-alias)
-      (let [bare (reduce (fn [s p] (update s p dissoc k)) schema [:relations :_count :_agg])
-            parts (map (fn [group]
-                         (emit-relation k (reduce (fn [s [p v]] (assoc-in s [p k] v)) bare group)
-                                        row-alias))
-                       groups)]
-        {:lateral    (str/join "\n" (map :lateral parts))
-         :json-pair  (some :json-pair parts)
-         :count-pair (some :count-pair parts)
-         :agg-pair   (some :agg-pair parts)
-         :params     (vec (mapcat :params parts))}))))
+                  "")
+        inner (str "select " child-obj " as __v"
+                   (apply str (for [[a e _] ord-cols] (str ", " e " as " a)))
+                   (when windowed? (str ", row_number() over (" rn-over ") as __rn"))
+                   " from " child-source " where " correlate)
+        agg-by (if (seq ord-cols)
+                 (str " order by " (str/join "," (map (fn [[a _ d]] (str cx "." a " " d)) ord-cols)))
+                 "")
+        filt (when windowed?
+               (str " filter (where " cx ".__rn > " offset
+                    (when limit (str " and " cx ".__rn <= " (+ offset (long limit))))
+                    ")"))
+        outer (str "select coalesce(json_agg(" cx ".__v" agg-by ")" filt
+                   ", '[]'::json) as __rows from (" inner ") " cx)]
+    {:lateral (str "left join lateral (" outer ") " lat " on true")
+     :json-pair (str (lit k) ", " lat ".__rows")
+     :params (vec (concat ord-data (when windowed? ord-data) filter-data ie-data rls-data))}))
 
 (defn emit-one-relation
   "A :one relation as a LIMIT 1 LATERAL."
   [k schema row-alias]
   (let [rel (get-in schema [:relations k])]
-    (when (or (get-in schema [:_count k]) (get-in schema [:_agg k]))
-      (unsupported! (str ":one with _count/_agg on " k)))
     (when (and (:relation rel)
                (not (access/relation-allows? (:relation rel) #{:read})))
       (throw (ex-info (str "Relation access forbidden: " k)
@@ -222,7 +139,7 @@
           (when (has-filter? (:args rel))
             (or (relation-on-predicate rel) ["" []]))
           [ie-sql ie-data] (q/inner-exists rel ex)
-          [rls-sql rls-data] (rls-where (:to rel) ex)
+          [rls-sql rls-data] (q/node-read-guard rel ex)
           fk-on-parent? (or (:recursion? rel) (:ref? rel))
           child-source (if fk-on-parent?
                          (str (qi (:entity/table rel)) " " ex)
@@ -245,26 +162,27 @@
 (defn emit-node
   "One node's level as [laterals-sql json-entries params]."
   [schema row-alias include-fields?]
-  (let [rel-keys (distinct (concat (keys (:relations schema))
-                                   (keys (:_count schema))
-                                   (keys (:_agg schema))))
-        rels (map (fn [k]
+  (let [rels (map (fn [k]
                     (if (= :one (get-in schema [:relations k :type]))
                       (emit-one-relation k schema row-alias)
-                      (emit-relation-views k schema row-alias)))
-                  rel-keys)
-        count-pairs (keep :count-pair rels)
-        agg-pairs   (keep :agg-pair rels)
+                      (emit-relation k schema row-alias)))
+                  (keys (:relations schema)))
         entries (concat
                  (when include-fields? (field-entries schema row-alias))
-                 (keep :json-pair rels)
-                 (when (seq count-pairs)
-                   [(str "'_count', json_build_object(" (str/join ", " count-pairs) ")")])
-                 (when (seq agg-pairs)
-                   [(str "'_agg', json_build_object(" (str/join ", " agg-pairs) ")")]))]
+                 (keep :json-pair rels))]
     [(str/join "\n" (map :lateral rels))
      entries
      (vec (mapcat :params rels))]))
+
+(defn order-terms
+  "Root sort terms `[sql dir params join join-params]`: an operation alias through one grouped join, the rest as `q/order-terms`."
+  [schema ob]
+  (mapcat (fn [[k d]]
+            (if-let [spec (get-in schema [:ops k])]
+              (let [[join value jps] (q/op-order-join spec (:entity/as schema))]
+                [[value d [] join jps]])
+              (map (fn [[sql d ps]] [sql d ps nil []]) (q/order-terms schema {k d}))))
+          ob))
 
 (defn compile-root-level
   "Root level as one statement yielding a json array of root objects."
@@ -274,12 +192,20 @@
         [laterals entries lat-params] (emit-node schema rt true)
         [where where-data] (q/search-stack-args (dissoc schema :relations))
         [ie-sql ie-data] (q/inner-exists schema eas)
-        [rls-sql rls-data] (rls-where (:entity schema) eas)
+        [rls-sql rls-data] (q/node-read-guard schema eas)
         where-all (str/join " and " (remove str/blank? [where ie-sql rls-sql]))
         args (:args schema)
         ob   (:_order_by args)
-        ords-inner (order-clause ob eas)
-        ords-rt    (order-clause ob rt)
+        related (when (q/term-order? schema)
+                  (map-indexed (fn [i [sql d ps join jps]]
+                                 [(str "__rk" i) sql (if (= :desc d) "desc nulls last" "asc nulls first") ps join jps])
+                               (order-terms schema ob)))
+        ords-inner (if related (map (fn [[a _ d]] [(qi a) d]) related) (order-clause ob eas))
+        ords-rt    (if related (map (fn [[a _ d]] [(str rt "." (qi a)) d]) related) (order-clause ob rt))
+        paged?     (or (:_limit args) (:_offset args))
+        ords-inner (cond-> (vec ords-inner)
+                     paged? (into (map (fn [c] [c "asc"]) (q/tiebreak-columns eas (:_distinct args)))))
+        ords-rt    (cond-> (vec ords-rt) paged? (conj [(str rt "._eid") "asc"]))
         fk-cols (keep (fn [[_ r]]
                         (when (or (:recursion? r) (:ref? r))
                           (:from/field r)))
@@ -287,12 +213,14 @@
         cols (distinct (remove #{:_eid}
                                (map #(if (keyword? %) % (keyword %))
                                     (concat (keys (:fields schema))
-                                            (map first (order-by-pairs ob))
+                                            (when-not related (map first (order-by-pairs ob)))
                                             fk-cols))))
         dist (q/distinct->sql schema)
         inner (str "select " (when dist (str dist " ")) eas "._eid"
                    (apply str (for [c cols] (str ", " eas "." (qi c) " as " (qi c))))
+                   (apply str (for [[a sql] related] (str ", " sql " as " (qi a))))
                    " from " (qi (:entity/table schema)) " " eas
+                   (apply str (keep #(nth % 4) related))
                    (when (seq where-all) (str " where " where-all))
                    (when (seq ords-inner)
                      (str " order by " (str/join "," (map (fn [[e d]] (str e " " d)) ords-inner))))
@@ -306,7 +234,7 @@
                   (str " order by " (str/join "," (map (fn [[a _ d]] (str a " " d)) ord-sel))))]
     [(str "select coalesce(json_agg(__o" agg-ord "), '[]'::json) as result from ("
           mid ") __top")
-     (vec (concat where-data ie-data rls-data lat-params))]))
+     (vec (concat (mapcat #(nth % 3) related) (mapcat #(nth % 5) related) where-data ie-data rls-data lat-params))]))
 
 (defn compile-sub-level
   "A non-root level scoped to `parent-eids`, yielding (__pe, __rels json) rows."
@@ -329,7 +257,7 @@
     :else       (json/read-value (.getValue ^org.postgresql.util.PGobject v) json-mapper)))
 
 (defn node-has-children? [schema]
-  (or (seq (:relations schema)) (seq (:_count schema)) (seq (:_agg schema))))
+  (seq (:relations schema)))
 
 (defn expand-tree
   "Pulls deeper levels, one statement per level, and stitches them back by _eid."
@@ -374,27 +302,6 @@
 
 (def ^:private float-types #{"float" "double" "decimal" "currency" "real"})
 
-(defn coerce-agg
-  "Brings `_agg` leaves to the engine's BigDecimal scale."
-  [agg]
-  (reduce-kv
-   (fn [m relk fieldmap]
-     (assoc m relk
-            (reduce-kv
-             (fn [m2 fld fnmap]
-               (assoc m2 fld
-                      (reduce-kv
-                       (fn [m3 fnk v]
-                         (assoc m3 fnk
-                                (cond
-                                  (not (number? v)) v
-                                  (= :count fnk)    v
-                                  (= :avg fnk)      (bigdec (double v))
-                                  :else             (bigdec v))))
-                       {} fnmap)))
-             {} fieldmap)))
-   {} agg))
-
 (defn coerce-node
   "Coerces a parsed node to exactly the engine's result shape, recursively."
   [schema obj]
@@ -409,7 +316,6 @@
                         (update m f dec o)
                         m))
                     o (:decoders schema))
-          o (if (:_agg o) (update o :_agg coerce-agg) o)
           o (reduce (fn [m [k rs]]
                       (if-not (contains? m k)
                         m
@@ -422,6 +328,27 @@
                             :else       m))))
                     o (:relations schema))]
       o)))
+
+(defn attach-ops
+  "Merges each level's :ops into `objs`, one grouped statement per relation per level."
+  [con schema objs]
+  (let [values (q/pull-ops con schema (keep :_eid objs))
+        objs (if values (mapv #(merge % (get values (some-> (:_eid %) long))) objs) objs)]
+    (reduce
+     (fn [objs [k rel-schema]]
+       (if-not (q/node-has-ops? rel-schema)
+         objs
+         (let [many? (not= :one (:type rel-schema))
+               children (if many? (mapcat #(get % k) objs) (keep #(get % k) objs))
+               by-eid (into {} (map (juxt :_eid identity)) (attach-ops con rel-schema (vec children)))]
+           (mapv (fn [o]
+                   (cond
+                     (not (contains? o k)) o
+                     many? (update o k #(mapv (fn [c] (by-eid (:_eid c) c)) %))
+                     :else (update o k #(some-> % :_eid (by-eid %)))))
+                 objs))))
+     objs
+     (:relations schema))))
 
 (defn run-search [schema]
   (with-open [con (jdbc/get-connection (:datasource db/*db*))]
@@ -441,7 +368,7 @@
                          :elapsed-ms elapsed}}
                  "Fused root query")
       (when (seq objs)
-        (mapv #(coerce-node schema %) (expand-tree con schema objs))))))
+        (attach-ops con schema (mapv #(coerce-node schema %) (expand-tree con schema objs)))))))
 
 (defn search
   "Fused `search-entity`."

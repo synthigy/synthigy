@@ -176,7 +176,7 @@
                (mount-synthigy-schema!)
                (fix-deployed-on!))
 
-(patch/current-version :synthigy/dataset "1.8.0")
+(patch/current-version :synthigy/dataset "1.9.0")
 
 (defn shipped-system-versions
   "The system model versions core ships."
@@ -243,6 +243,39 @@
 (patch/upgrade :synthigy/dataset
                "1.8.0"
                (mark-system-models!))
+
+(defn with-audit-actions
+  "`model` whose copies of the entities in `actions` (entity id -> audit actions) carry those actions too."
+  [model actions]
+  (reduce-kv (fn [m eid as]
+               (if-let [e (core/get-entity m eid)]
+                 (core/set-entity m (update-in e [:configuration :audit :actions] #(into (set %) as)))
+                 m))
+             model
+             actions))
+
+(defn upgrade-stored-models!
+  "Model format 3: every stored dataset version model has the merged audit flags as stamp attributes, on every copy of an entity."
+  []
+  (let [actions (into {} (keep (fn [e] (when-let [as (not-empty (get-in e [:configuration :audit :actions]))]
+                                         [(id/extract e) as])))
+                      (some-> (dataset/deployed-model) core/get-entities))
+        upgraded (for [{:keys [model] :as version} (dataset/search-entity :dataset/version nil {(id/key) nil :model nil})
+                       :let [stored (if (string? model) (<-transit model) model)]
+                       :when (instance? synthigy.dataset.core.ERDModel stored)
+                       :let [upgraded (core/upgrade-model (with-audit-actions stored actions))]
+                       :when (not= upgraded stored)]
+                   {(id/key) (id/extract version) :model (->transit upgraded)})]
+    (doseq [version upgraded]
+      (dataset/sync-entity :dataset/version version))
+    (log/info {:id ::v190-models-upgraded
+               :data {:action :upgraded :subject :dataset-model :version "1.9.0" :count (count upgraded)}}
+              (str "Model format 3: upgraded " (count upgraded) " stored dataset version models"))
+    (core/reload *db*)))
+
+(patch/upgrade :synthigy/dataset
+               "1.9.0"
+               (upgrade-stored-models!))
 
 (defn can-migrate-to-xid?
   "Check if the system can migrate to XID format."

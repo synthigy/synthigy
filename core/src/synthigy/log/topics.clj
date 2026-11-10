@@ -16,7 +16,7 @@
 
 (def parent-topics
   "The closed set of top-level topics. Lenses subscribe at this level."
-  #{:system :dataset :auth :traffic :audit :diagnostic})
+  #{:system :dataset :auth :traffic :audit :files :diagnostic})
 
 (def child-topics
   "The closed set of two-level topics (`parent/child`); a child never appears without its parent."
@@ -110,7 +110,8 @@
 
 (def ^:private ns-prefix->topics
   "Fallback base topic by `:ns` prefix, ORDERED — first (most specific) match wins."
-  [["synthigy.oauth"              #{:auth}]
+  [["synthigy.files"              #{:files}]
+   ["synthigy.oauth"              #{:auth}]
    ["synthigy.oidc"               #{:auth}]
    ["synthigy.iam.audit"          #{:audit}]
    ["synthigy.iam.encryption"     #{:system}]
@@ -178,7 +179,7 @@
             t (add-parents t)
             t (cond-> t
                 (and degraded? (not (contains? t :traffic))) (conj :system)
-                (not (some t [:dataset :auth :traffic])) (conj :system)
+                (not (some t [:dataset :auth :traffic :files])) (conj :system)
                 diag?                                   (conj :diagnostic))]
         t))))
 

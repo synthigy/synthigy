@@ -13,7 +13,6 @@
   "http-kit HTTP server adapter for Synthigy."
   (:require
    [synthigy.client-address :as client-address]
-   synthigy.env
    [synthigy.cors :as cors]
    [clojure.core.async :as async]
    [clojure.string :as str]
@@ -233,6 +232,11 @@
     (reset! server nil))
   nil)
 
+(def max-body
+  "Largest request body http-kit accepts, in bytes; it holds every body in memory (default 25 MB)."
+  (or (some-> (env :synthigy-httpkit-max-body) str/trim not-empty parse-long)
+      (* 25 1024 1024)))
+
 (defn start
   "Starts the http-kit HTTP server, replacing any running one."
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
@@ -247,7 +251,7 @@
    (let [handler (make-handler {:routes routes :info info})
          stop-fn (httpkit/run-server handler {:ip host
                                               :port port
-                                              :max-body synthigy.env/server-max-body
+                                              :max-body max-body
                                               ;; never true — :remote-addr would become client-chosen
                                               :legacy-unsafe-remote-addr? false})]
      (routes/register-sse-transport! d*hk/->sse-response)

@@ -203,6 +203,13 @@
     (reset! server nil))
   nil)
 
+(defn async-handler
+  "Ring's async arity over the sync handler; only async lets a streamed body keep writing after it returns (Datastar SSE)."
+  [handler]
+  (fn [request respond raise]
+    (try (respond (handler request))
+         (catch Throwable t (raise t)))))
+
 (defn start
   ([] (start {:info (patch/available-versions :synthigy/dataset :synthigy/iam)}))
   ([{:keys [host port info routes]
@@ -214,9 +221,10 @@
              "Starting HTTP server")
 
    (let [handler (make-handler {:routes routes :info info})
-         s (jetty/run-jetty handler {:host host
-                                     :port port
-                                     :join? false})]
+         s (jetty/run-jetty (async-handler handler) {:host host
+                                                     :port port
+                                                     :async? true
+                                                     :join? false})]
      (routes/register-sse-transport! d*ring/->sse-response)
      (reset! server s)
      (log/info {:id ::http-started :data {:action :started :subject :http-server :host host :port port}}

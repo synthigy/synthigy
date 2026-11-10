@@ -40,10 +40,18 @@
      nil
      access/entity-grants)))
 
+(def client-modules
+  "Optional modules that change what a client can call, by their discovery name."
+  {:synthigy/files "files"})
+
+(defn running-client-modules []
+  (not-empty (vec (for [[k n] client-modules :when (lifecycle/started? k)] n))))
+
 (defn discovery-body []
   (let [iam-active? (lifecycle/started? :synthigy/iam)
         datasets    (model-info)
-        grants      (entity-grant-fields)]
+        grants      (entity-grant-fields)
+        modules     (running-client-modules)]
     (cond-> {:service "synthigy"
              :auth {:required iam-active?}}
       iam-active?
@@ -57,4 +65,7 @@
       (assoc :datasets datasets)
 
       grants
-      (assoc :grants grants))))
+      (assoc :grants grants)
+
+      modules
+      (assoc :modules modules))))

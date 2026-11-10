@@ -1,0 +1,142 @@
+/*
+ *   Synthigy — model-driven IAM and data platform
+ *   Copyright (C) 2026 Robert Geršak
+ *   SPDX-License-Identifier: BUSL-1.1
+ *
+ *   Licensed under the Business Source License 1.1 — see LICENSE. Free in
+ *   production for individuals, non-profits, education and organisations
+ *   up to EUR 5M; larger organisations, integrators deploying for them and
+ *   hosted-service providers need a commercial license. Each version
+ *   becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+ *   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
+ */
+
+/* Synthigy OAuth: the signed-in user's own account */
+
+@import url('common.css');
+
+.sy-stage {
+  align-items: flex-start;
+}
+
+.sy-card--account {
+  max-width: 560px;
+}
+
+.sy-section {
+  padding: 22px 0;
+  border-top: 1px solid var(--sy-border-subtle);
+}
+
+.sy-section:first-child {
+  padding-top: 8px;
+  border-top: 0;
+}
+
+.sy-section:last-child {
+  padding-bottom: 0;
+}
+
+.sy-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--sy-text-p);
+}
+
+.sy-section-sub {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--sy-text-m);
+}
+
+.sy-section-body {
+  margin-top: 16px;
+}
+
+.sy-section-body > .sy-form > .sy-btn {
+  align-self: flex-end;
+  margin-top: 14px;
+}
+
+.sy-section-more {
+  margin-top: 14px;
+}
+
+.sy-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.sy-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--sy-border-subtle);
+}
+
+.sy-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.sy-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.sy-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--sy-text-p);
+  overflow-wrap: anywhere;
+}
+
+.sy-row-sub {
+  margin-top: 3px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--sy-text-m);
+  overflow-wrap: anywhere;
+}
+
+.sy-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sy-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--sy-success);
+  background: color-mix(in srgb, var(--sy-success) 14%, transparent);
+}
+
+.sy-inline {
+  display: inline-flex;
+}
+
+.sy-btn--sm {
+  width: auto;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.sy-btn--secondary img,
+.sy-btn--secondary svg {
+  width: 16px !important;
+  height: 16px !important;
+  object-fit: contain;
+}

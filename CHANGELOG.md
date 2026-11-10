@@ -3,10 +3,220 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.4.2] — 2026-11-10
+
+Operations in a selection replace `_count` and `_agg`, files gain zip
+downloads and download links, and every user gets an account page. Needs the
+SDKs js/go/clj 0.2.4, php 0.2.5, py 0.3.4 for the new operations.
+
+### Added
+
+- **Zip downloads:** `POST /files/zip {"files": [...], "folders": [...]}`
+  streams one zip of the named files and of everything inside the named
+  folders, read as the caller; what cannot be read is listed in
+  `_skipped.txt`. Capped by `SYNTHIGY_FILES_ZIP_MAX_BYTES` (2 GB) and
+  `SYNTHIGY_FILES_ZIP_MAX_ENTRIES` (10 000), `ZIP_TOO_LARGE` over either.
+- **Files events in the Logs tool:** uploads, replacements, renames, moves,
+  deletes, restores and sharing are logged under the new `files` topic
+  (downloads at debug).
+- **Files page for browsers:** a browser opening a private or missing file
+  link gets a "Sign-in required" page instead of the JSON error; the
+  `default` login-page bundle can replace it with its own `files.html`.
+- **Signed-in browsers open file links:** `/files/<xid>` and path links accept
+  the engine's sign-in cookie when the browser opens the link itself (typed,
+  bookmarked, same origin, or a link clicked elsewhere), under the same access
+  lists as a token. Other sites can't embed or fetch files with it.
+- **`/files` answers in the requested key case:** `?key_format=camel|kebab|pascal`,
+  as on `/data`; snake_case stays the default.
+- **Download links:** `POST /files/<xid>/links {"expires", "max_downloads",
+  "inline"}` makes `/files/link/<token>`, which downloads the file without
+  signing in until it expires (default 1 hour, at most 7 days), runs out of
+  downloads or is deleted (`DELETE /files/links/<link xid>`). Each link
+  is a `File Link` row (File System 0.3.14) holding only the token's SHA-256,
+  so every engine on the database honours it and a delete ends it at once.
+  Off until a File Admin sets the new folder setting `can_link`; File User
+  and File Admin make links to files they can read, File Reader cannot. Each
+  download re-checks that the link's creator can still read the file.
+
+- **Operations in a selection:** `votes: count(ratings)`, `count(ratings.value >= 4)`,
+  `count(distinct ratings.value)`, `sum`, `avg`, `min`, `max`, with an optional
+  filter as the second argument. The alias is the result key; on the wire an
+  operation is `{"alias", "op", "args"?}` on the relation key. Computed in the
+  database, at any level, inside the caller's read access.
+- **Sort by an operation or a related attribute:** `order by votes desc`,
+  `order by studio.name` (XSQL), `_order_by` with an alias or a nested map.
+- **XSQL `like`/`ilike` on enums** (stored as text, so patterns work).
+- **Account page and API:** every user manages their own display name,
+  password, sign-in methods and signed-in sessions at `/oauth/account`, with no
+  role needed: a page for browsers (a `default` bundle's `account.html` replaces
+  it), JSON for apps (`/oauth/account/profile`, `/password`, `/reauth`,
+  `/identities/unlink`, `/sessions/revoke`). The login page signs in to it
+  directly, with a password or a linked provider.
+- **Filters through relations:** `user (roles.name = "Admin")`, also inside
+  `and`/`or`/`_not`, through to-many relations, references (label fields only)
+  and self-references, whether the relation is selected or not. A reference
+  compared to an id (`owner = ?xid`, `_in`) matches its target.
+
+### Changed
+
+- **Audit stamps are ordinary attributes (model format 3).** The entity audit
+  switch that added hidden `modified_on`, `modified_by`, `created_on` and
+  `created_by` columns is gone. Instead a `timestamp` or `user` attribute is
+  stamped by the system: on create (set once) or on modify (set on every
+  write), under any name. Stamps show in the model, take attribute rules, and a
+  `user` stamp reads as a label.
+  - A value a client sends for a stamp is ignored; an attribute can instead
+    refuse it (`ATTRIBUTE_FORBIDDEN`).
+  - The upgrade turns each entity's audit switch into the attributes Modified On,
+    Modified By, Created On and Created By on the same columns, so no data
+    moves, and gives every copy of an entity in other datasets the same stamps.
+    Older exports are upgraded when they are deployed.
+- **Shipped models:** Synthigy 0.90.5, OAuth 0.2.17 and File System 0.3.15, all
+  in model format 3. Group and Role no longer carry Display Name; their label is
+  `name`.
+
+- **The files module is part of the server layer** (`server/core`), no
+  longer a separate `:server-files` alias: every build that has an HTTP
+  server carries it, and a full boot starts it. A command that still names
+  `:server-files` only gets the CLI's undeclared-alias warning. The bare
+  profile carries the code but does not start it (no IAM, no audit).
+- **Enso is the default HTTP server** (1.0.0-beta111), in every bundle: it
+  streams request and response bodies, where http-kit held them in memory
+  (a 500 MB download needed about 1 GB of heap). http-kit stays available as
+  `:server-httpkit`.
+- Enso and Jetty run Ring handlers in async mode, so Datastar streams (the
+  console's live pages) stay open after they start; in sync mode they
+  closed at once.
+- **Request size limit is http-kit's only:** `SYNTHIGY_SERVER_MAX_BODY` is
+  replaced by `SYNTHIGY_HTTPKIT_MAX_BODY` (default 25 MB), read by the
+  http-kit server alone, which holds every body in memory. Enso and Jetty
+  stream and set no limit, and the files module no longer caps uploads (its
+  `FILE_TOO_LARGE` answer is gone; on http-kit an oversized upload gets
+  http-kit's own 413).
+
+- **`_count` and `_agg` are removed** from the wire and XSQL; write one
+  operation per value. A leftover block is one parse error naming the
+  replacement.
+- **A relation needs a field:** `->roles` with nothing under it, or a wire
+  relation entry without `selections`, is `INVALID_SELECTION`, unless it is a
+  `_join: none` condition (`!roles`). Filter the parents with `roles.<field>`
+  instead.
+- **A root filter through a relation keeps parents, it doesn't cut the related
+  rows:** `user (roles.name = "Admin")` with `->roles` lists every role of the
+  matching users.
+- **XSQL with no params:** optional `?x?` predicates drop and a missing required
+  param is `PARAM_MISSING`; before, both ran as `null`.
+- **Console tables** (users, groups, roles, apps, APIs, providers, connectors)
+  read through search, with operations for the counts; a group chip no longer shrinks the Groups count to the matching
+  groups.
+- **Self-service endpoints moved under `/oauth/account`:** `POST /oauth/password`
+  is `POST /oauth/account/password`, `GET /oauth/federated/identities` is the
+  `identities` of `GET /oauth/account`, and `POST /oauth/federated/unlink` is
+  `POST /oauth/account/identities/unlink`. The old paths are gone. A bearer
+  token must carry the `https://synthigy.com` audience; an identity-only token
+  (`https://synthigy.com/id`) no longer changes a password.
+
+### Security
+
+- **Removing a sign-in method had no cross-site check.** The sign-in cookie is
+  `SameSite=None` on https, so another site could post an unlink with it within
+  five minutes of a sign-in. Every account POST made with the cookie must now
+  come from the engine's own pages. Every release up to 0.4.1 is affected.
+- **Attributes a role may not read stay out of filters, sorts and
+  templates.** A role could `_where`, `_order_by` or `_distinct` by a field it
+  is denied, and `sql-template` read any column. Any user who could see
+  another user in a shared group could read that user's password hash with a
+  template (`SELECT {user.password} FROM {user}`), or recover it character by
+  character with a `_like` filter. Now such a filter, sort or placeholder is
+  refused with `ATTRIBUTE_FORBIDDEN`, a template's `SELECT *` carries only
+  readable columns. `_count` and `_agg` over a relation now need read on
+  that relation, its entity and the fields they aggregate or filter on;
+  before, only the target's row rules applied. Every release up to 0.4.1
+  is affected.
+- **IAM Auditor no longer reads OAuth client secrets.** The hashed
+  `OAuth Client.secret` was readable by every role with read on OAuth
+  Client. OAuth model 0.2.16 denies it to IAM Auditor; App Developer and
+  superusers keep it, and client authentication is unchanged.
+- **Data subscriptions follow read access.** A `data` subscription accepted
+  any record xid and sent each change's values without checking that the
+  subscriber could read that record or entity, and with only role-level
+  attribute denies applied (password hashes were sent).
+  Now a change is sent only for a record inside the subscriber's read
+  guards, on an entity and relation it can read, without unreadable
+  attributes. Every release up to 0.4.1 is affected.
+- **History follows row-level security.** `/history` filtered entities and
+  attributes, but not rows: a role with read on an entity saw the audited
+  values of all its records. Now a record outside the caller's read guards
+  is left out, and so is a deleted record of a guarded entity. Every release
+  up to 0.4.1 is affected.
+- **Creates are checked against the row-level write scope.** A new row was
+  never tested against its entity's RLS write guard: a user could create a
+  row outside their scope (a comment authored as someone else, a worklog on
+  another employee or on none). And a row whose guard runs through a link
+  set in the same write (`employee → Login`, `project → members`) was
+  refused for everyone but superusers. The guard now runs once per table
+  after the links are written, inside the transaction, and a refused write
+  rolls back with `ROW_FORBIDDEN`. Every release up to 0.4.1 is affected.
+- **User, Group and Role references read as labels.** A `user`, `group` or
+  `role` attribute (`owner`, `modified_by`, `uploaded_by`, ...) on a record
+  the caller can read returns the referenced row's id and label: `display_name`
+  for a User, `name` for a Group or Role. No grant on User/Group/Role is needed,
+  and the target's row-level security does not apply.
+  - Inside a label only the id and the label fields can be selected, filtered,
+    sorted or used in `_distinct`. Another known field is left out of the
+    result; a filter, sort or distinct on it, in any form (`_where`, `_not`,
+    `_or`, flat, `_order_by`), is refused with `ATTRIBUTE_FORBIDDEN`. This holds
+    for every caller, superusers included; read the User entity itself for more.
+  - The same reference reads the same way under an alias, as an audit stamp and
+    with `_join inner`/`none`.
+  - Before, a reference failed with `ENTITY_FORBIDDEN` without a grant on User,
+    and returned the login (often an email) with one.
+  - The upgrade fills each user's display name once: the login when it is not
+    an email, else the profile name, else the login before `@`. Federated
+    sign-up sets it the same way. `/files` answers `uploaded_by.name` with the
+    label instead of the login.
+- **Purge never deletes through a reference.** A `purge` whose selection named
+  a `user`, `group` or `role` attribute also deleted the referenced User, Group
+  or Role rows. It now deletes only the purged records and their relations, and
+  returns each deleted row's label.
+- **`_not` could probe fields the caller may not read.** Filters under `_not`
+  skipped the attribute read check, so `_not {password {_like "..."}}` revealed
+  password hashes one prefix at a time. They are now checked like `_where`.
+  Every release up to 0.4.1 is affected.
+
+### Fixed
+
+- **Paging is stable:** a read with `_limit`/`_offset` ends its order with the
+  record id, so rows that tie (or a read without `_order_by`) no longer repeat
+  or skip between pages.
+- **`_agg` over two relations inflated `sum` on SQLite** (gone with `_agg`;
+  operations read each relation on its own).
+
+- **Sorting by a related field:** `_order_by {owner {display_name "asc"}}`
+  or `{folder {name "desc"}}` failed on SQLite (`SCHEMA_DRIFT`); on
+  PostgreSQL a sort through a relation failed, and one through a `user`,
+  `group` or `role` attribute sorted by the referenced row's internal id.
+- **`_like` and `_ilike` escape with `\` on SQLite too:** `\%` and `\_` match
+  a literal `%` and `_`, as they always did on PostgreSQL. On SQLite they
+  were wildcards, and a `\` in the pattern matched itself.
+- **Replacing a file records who replaced it:** `PUT /files/<xid>` and
+  `PUT /files?path=` set `uploaded_by` with `uploaded_at`; before, the
+  first uploader stayed.
+- **Files on S3 buckets with more than 1000 objects:** listing the second
+  page failed with `SignatureDoesNotMatch` (query parameters signed out of
+  order), so moving files between stores and the sweeper stopped at 1000.
+  In 0.4.1.
+- **Moving files out of a shared bucket** stopped at the first object the
+  files module did not write (for example a key with `/`). Only the
+  module's own blobs move now; the rest stay where they are and the move
+  reports how many. In 0.4.1.
+- **Malformed JSON on `/files` folder and file requests** answered 500; now
+  400 `INVALID_BODY`, as on `/data`.
+
 ## [0.4.1] — 2026-11-03
 
 Files arrive: a free module in every bundle. The Synthigy SDKs' `files` API
-needs this engine. Synthigy Studio (tooling 0.3.0) signs in only to this
+needs this engine. Synthigy Studio (tooling 0.2.1) signs in only to this
 engine and newer.
 
 ### Added

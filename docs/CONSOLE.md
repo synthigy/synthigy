@@ -57,5 +57,6 @@ Signed in with a Synthigy account. What you see depends on your roles:
   overview, topology of the running modules, data
   encryption keys and login page bundles.
 - **Tools** — **Data modeling** ([MODELING.md](MODELING.md)), the **Data
-  console** for running queries and XSQL against the live model, and the **Log
+  console** for running queries and XSQL against the live model, **Files**
+  for folders, uploads and versions ([FILES.md](FILES.md)), and the **Log
   cockpit**.

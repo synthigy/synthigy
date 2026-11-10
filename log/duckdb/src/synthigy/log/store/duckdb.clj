@@ -98,12 +98,6 @@
 
 (def promoted-ctx-keys [:request-id :user-xid :tenant :ip])
 
-(defn topics->delimited
-  "A topic set as a pipe-bounded sorted string (`|system|dataset|`), so membership is a bounded LIKE."
-  [topics]
-  (let [names (->> topics (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t)))) sort)]
-    (if (seq names) (str "|" (str/join "|" names) "|") "")))
-
 (defn delimited->topics [s]
   (if (str/blank? s) [] (->> (str/split s #"\|") (remove str/blank?) vec)))
 
@@ -118,12 +112,6 @@
     (some? x) [nil nil (str x)]
     :else     [nil nil nil]))
 
-(defn id->str [id]
-  (cond
-    (qualified-keyword? id) (str (namespace id) "/" (name id))
-    (keyword? id)           (name id)
-    (some? id)              (str id)))
-
 (defn signal->log-row
   "Project a Telemere signal map to the synthigy_logs column shape."
   [{:keys [inst level ns id msg_ data ctx error] :as signal}]
@@ -133,13 +121,13 @@
     {:inst        (duck/inst->utc inst)
      :level       (some-> level name)
      :ns          (when ns (str ns))
-     :id          (id->str id)
+     :id          (signal/id->str id)
      :msg         (when msg_ (try (force msg_) (catch Throwable _ nil)))
      :request_id  (or (:request-id signal) (get ctx-map :request-id))
      :user_xid    (or (:user-xid signal) (get ctx-map :user-xid))
      :tenant      (or (:tenant signal) (get ctx-map :tenant))
      :host        (cond (string? host-raw) host-raw (map? host-raw) (:name host-raw))
-     :topics      (topics->delimited (:topics signal))
+     :topics      (signal/topics->delimited (:topics signal))
      :data        (json/->json (or data {}))
      :ctx         (json/->json (apply dissoc ctx-map promoted-ctx-keys))
      :error_class err-class

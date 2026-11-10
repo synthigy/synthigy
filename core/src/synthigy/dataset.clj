@@ -15,6 +15,7 @@
   (:require
    [clojure.core.async :as async]
    [clojure.java.io :as io]
+   [clojure.string :as str]
    [synthigy.log :as log]
    [synthigy.supervisor :as supervisor]
    [patcho.patch :as patch]
@@ -299,7 +300,7 @@
     (as-> (-> (io/resource path)
               slurp
               <-transit
-              (update :model adapt-model-to-provider))
+              (update :model (comp core/upgrade-model adapt-model-to-provider)))
           version
       (adjust-id version)
       (update version :dataset adjust-id))))
@@ -367,18 +368,71 @@
 ;;; Selection Normalization
 ;;; ============================================================================
 
-(defn order-by-map
-  "A `_order_by` given as [field direction] pairs, the wire and XSQL form, as the array-map the query layer reads."
-  [order-by]
-  (if (and (sequential? order-by)
-           (every? #(and (sequential? %) (= 2 (count %))) order-by))
-    (apply array-map (mapcat (fn [[f d]] [(keyword (name f)) (keyword (name d))]) order-by))
-    order-by))
+(defn lower-keyword [v]
+  (when (or (keyword? v) (string? v))
+    (keyword (str/lower-case (name v)))))
 
-(defn normalize-config-args [args]
+(defn bad-order-by [message v]
+  (ex-info (str message " Got: " (pr-str v))
+           {:code "BAD_ORDER_BY_SHAPE"
+            :rule "order_by_entry"
+            :argument "_order_by"
+            :hint "Use {\"name\": \"asc\"} or [[\"name\", \"asc\"], …]."}))
+
+(defn order-direction [d]
+  (let [k (lower-keyword d)]
+    (if (#{:asc :desc} k)
+      k
+      (throw (bad-order-by "_order_by direction must be \"asc\" or \"desc\"." d)))))
+
+(defn order-by-map
+  "A wire or XSQL `_order_by` (map, [field direction] pairs or a vector of maps) as the array-map of keyword directions the query layer reads."
+  [order-by]
+  (cond
+    (map? order-by)
+    (apply array-map (mapcat (fn [[f d]] [f (if (map? d) (order-by-map d) (order-direction d))]) order-by))
+
+    (and (sequential? order-by)
+         (every? #(or (map? %) (and (sequential? %) (= 2 (count %)) (lower-keyword (first %)))) order-by))
+    (apply array-map (mapcat (fn [item]
+                               (if (map? item)
+                                 (mapcat identity (order-by-map item))
+                                 [(dk/normalize-key (keyword (name (first item)))) (order-direction (second item))]))
+                             order-by))
+
+    :else
+    (throw (bad-order-by "_order_by must be a map or a vector of [field direction] pairs." order-by))))
+
+(defn normalize-predicate [v]
+  (case (when (or (keyword? v) (string? v)) (name v))
+    "is_null" {:_is_null true}
+    "is_not_null" {:_is_not_null true}
+    v))
+
+(defn normalize-args*
+  [args]
+  (if-not (map? args)
+    args
+    (reduce-kv
+     (fn [m k v]
+       (assoc m k
+              (case k
+                (:_where :_not :_maybe) (normalize-args* v)
+                (:_or :_and) (if (sequential? v) (mapv normalize-args* v) v)
+                :_order_by (order-by-map v)
+                :_join (or (lower-keyword v) v)
+                (cond
+                  (str/starts-with? (name k) "_") v
+                  (map? v) (normalize-args* v)
+                  :else (normalize-predicate v)))))
+     {}
+     args)))
+
+(defn normalize-config-args
+  "Wire args as the canonical form the query layer reads: keyword `_join`/`_order_by` values, `is_null` as `{:_is_null true}`."
+  [args]
   (let [args (dk/normalize-keys-deep args)]
-    (cond-> args
-      (contains? args :_order_by) (update :_order_by order-by-map))))
+    (if (map? args) (normalize-args* args) (normalize-predicate args))))
 
 (defn normalize-selection
   "Normalize a user-friendly selection into the internal format selection->schema expects."
@@ -409,7 +463,7 @@
          (cond
            ;; Already internal format: vector of config maps
            (and (vector? v) (seq v) (map? (first v))
-                (some #(contains? (first v) %) [:selections :args :alias]))
+                (some #(contains? (first v) %) [:selections :args :alias :op]))
            (assoc m k (mapv (fn [cfg]
                               (cond-> cfg
                                 (:selections cfg) (update :selections normalize-selection)
@@ -463,7 +517,7 @@
 (defn slice-entity
   "Deletes the relations between entities that match args."
   [entity-id args selection]
-  (db/slice-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
+  (db/slice-entity *db* (id/entity entity-id) (normalize-config-args args) (normalize-selection selection)))
 
 (defn get-entity
   "Returns the one row `args` pinpoints, shaped by `selection`."
@@ -478,17 +532,17 @@
 (defn search-entity
   "Returns the rows matching `args`, shaped by `selection`."
   [entity-id args selection]
-  (db/search-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
+  (db/search-entity *db* (id/entity entity-id) (normalize-config-args args) (normalize-selection selection)))
 
 (defn search-entity-tree
   "Returns rows matching `args` with their ancestors along the `on` recursion."
   [entity-id on args selection]
-  (db/search-entity-tree *db* (id/entity entity-id) on (dk/normalize-keys-deep args) (normalize-selection selection)))
+  (db/search-entity-tree *db* (id/entity entity-id) on (normalize-config-args args) (normalize-selection selection)))
 
 (defn purge-entity
   "Deletes every row matching `args` and returns them shaped by `selection`."
   [entity-id args selection]
-  (db/purge-entity *db* (id/entity entity-id) (dk/normalize-keys-deep args) (normalize-selection selection)))
+  (db/purge-entity *db* (id/entity entity-id) (normalize-config-args args) (normalize-selection selection)))
 
 (defn delete-entity
   "Deletes by a unique-key map (one row) or a vector of xid strings (one transaction)."
@@ -514,9 +568,9 @@
   (let [model (if (string? model) (<-transit model) model)]
     (-> model
         core/normalize-legacy-types
+        core/upgrade-model
         core/clean-model
         adapt-model-to-provider
-        (assoc :version 2)
         ->transit
         <-transit)))
 

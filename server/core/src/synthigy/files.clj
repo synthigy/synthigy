@@ -27,6 +27,7 @@
    synthigy.files.probe
    [synthigy.files.schema :as schema]
    [synthigy.files.setup :as setup]
+   [synthigy.files.links :as links]
    [synthigy.files.sweeper :as sweeper]
    [synthigy.files.storage.local :as local]
    [synthigy.files.storage.s3 :as s3]
@@ -91,12 +92,14 @@
     (alter-var-root #'*storage* (constantly s))
     (routes/register-prefix! ::files "/files" #'handler)
     (sweeper/start! (fn [] *storage*))
+    (links/start!)
     (log/info {:id ::started :data {:action :started :subject :files :storage (.getSimpleName (class s))}}
               "Files module started")))
 
 (defn stop []
   (migrate/abort!)
   (sweeper/stop!)
+  (links/stop!)
   (routes/unregister-prefix! ::files)
   (dataset/remove-model-watch! ::schema)
   (alter-var-root #'*storage* (constantly nil))

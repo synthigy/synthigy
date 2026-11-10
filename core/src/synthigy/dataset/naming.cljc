@@ -84,20 +84,21 @@
                      :kind :attribute :ref a}))))
 
 (defn relation-label-sources
-  "Field sources the active relation labels put on `entity-id`: :to-label on :from, :from-label on :to."
+  "Field sources the active relation labels put on `entity-id` and its clones: :to-label on :from, :from-label on :to."
   [model entity-id]
-  (->> (core/get-relations model)
+  (let [ids (conj (core/clone-ids model entity-id) entity-id)]
+   (->> (core/get-relations model)
        (filter active?)
        (mapcat (fn [r]
                  (let [from-id (id/extract (:from r))
                        to-id   (id/extract (:to r))]
                    (cond-> []
-                     (and (= entity-id from-id) (not (str/blank? (:to-label r))))
+                     (and (ids from-id) (not (str/blank? (:to-label r))))
                      (conj {:name (normalize (:to-label r)) :display (:to-label r)
                             :kind :relation :field :to-label :ref r})
-                     (and (= entity-id to-id) (not (str/blank? (:from-label r))))
+                     (and (ids to-id) (not (str/blank? (:from-label r))))
                      (conj {:name (normalize (:from-label r)) :display (:from-label r)
-                            :kind :relation :field :from-label :ref r})))))))
+                            :kind :relation :field :from-label :ref r}))))))))
 
 (defn entity-field-sources
   [model entity]

@@ -27,8 +27,7 @@
   [entity condition]
   (let [attr-uuid (:attribute condition)
         ;; dangling attr must DROP the rule, never throw — never core/get-attribute here
-        attr (some #(when (= attr-uuid (id/extract %)) %)
-                   (concat (:attributes entity) (core/audit-ref-attrs entity)))]
+        attr (some #(when (= attr-uuid (id/extract %)) %) (:attributes entity))]
     (when (and attr (:active attr))
       (let [attr-type (:type attr)]
         (when (#{"user" "group" "role"} attr-type)
@@ -43,9 +42,25 @@
   [model step from-entity-id]
   (let [rel-id (:relation-id step)
         relation (core/get-relation model rel-id)]
-    (when (and relation (:active relation))
+    (cond
+      (not (and relation (:active relation)))
+      nil
+
+      (core/recursive-relation? relation)
+      (let [{:keys [to to-label]} relation]
+        (when (and (not-empty to-label)
+                   (= (core/entity-origin to)
+                      (core/entity-origin (core/get-entity model from-entity-id))))
+          {:table (entity->table-name to)
+           :from-field "_eid"
+           :to-field (normalize-name to-label)
+           :from-entity from-entity-id
+           :to-entity (core/entity-origin to)}))
+
+      :else
       (let [{:keys [from to]} relation
             forward? (cond
+                       (core/self-clone-relation? relation) (not (:inverted? step))
                        (= (id/extract from) from-entity-id) true
                        (= (id/extract to) from-entity-id) false
                        :else (= (core/entity-origin from)
@@ -105,9 +120,7 @@
         (let [final-entity (core/get-entity model final-entity-id)
               ;; dangling attr drops the rule, never throw — same safe lookup as compile-ref-condition
               final-attr (when final-entity
-                           (some #(when (= attr-uuid (id/extract %)) %)
-                                 (concat (:attributes final-entity)
-                                         (core/audit-ref-attrs final-entity))))]
+                           (some #(when (= attr-uuid (id/extract %)) %) (:attributes final-entity)))]
           (when (and final-attr (:active final-attr))
             (let [attr-type (:type final-attr)]
               (when (#{"user" "group" "role"} attr-type)

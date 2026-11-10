@@ -280,11 +280,20 @@
                  (catch Throwable e
                    (log/error! {:id ::profile-cleanup-failed} e)))))))))
 
+(defn register-reference-labels!
+  "Register what a reference to a user, group or role shows to anyone who can read the record holding it."
+  []
+  (doseq [[type-name entity-key label] [["user" :iam/user #{:display_name}]
+                                        ["group" :iam/user-group #{:name}]
+                                        ["role" :iam/user-role #{:name}]]]
+    (core/register-reference-type! type-name (id/entity entity-key) {:label label})))
+
 (defn start
   []
   (log/info {:id ::initializing} "Initializing IAM")
   (try
     (dataset/register-reference-types!)
+    (register-reference-labels!)
     ;; recompile now — the cached schema predates reference types; never read it before this
     (dataset/reload)
 

@@ -51,12 +51,11 @@
 
 (def ^:private known-args-keys
   "Operators and modifiers valid at the top of an `args` map."
-  #{:_where :_or :_and :_not :_maybe :_count :_agg
+  #{:_where :_or :_and :_not :_maybe
     :_limit :_offset :_order_by :_distinct :_join})
 
 (defn coerce-args
-  "Coerce JSON-boundary arg quirks before args reach the query layer — typo'd
-   _-keys and _order_by shape."
+  "Reject typo'd _-keys and badly shaped modifiers at the JSON boundary."
   [args]
   (when (map? args)
     (doseq [[k _] args]
@@ -72,7 +71,6 @@
                   :modifier (name k)
                   :supported (mapv name (sort known-args-keys))}))))
     (doseq [[k ok? expected] [[:_where map? "a map"] [:_not map? "a map"] [:_maybe map? "a map"]
-                              [:_count map? "a map"] [:_agg map? "a map"]
                               [:_or #(and (sequential? %) (every? map? %)) "a list of maps"]
                               [:_and #(and (sequential? %) (every? map? %)) "a list of maps"]
                               [:_limit nat-int? "a non-negative integer"]
@@ -86,49 +84,7 @@
                        :rule "args_value"
                        :argument (name k)
                        :expected expected}))))
-  (if-let [ob (:_order_by args)]
-    (cond
-      (map? ob)
-      args
-
-      (sequential? ob)
-      (let [bad (some (fn [item]
-                        (when-not (and (sequential? item)
-                                       (= 2 (count item))
-                                       (let [d (second item)
-                                             d-name (cond
-                                                      (keyword? d) (name d)
-                                                      (string? d)  d
-                                                      :else        nil)]
-                                         (contains? #{"asc" "desc"} d-name)))
-                          item))
-                      ob)]
-        (if bad
-          (throw (ex-info
-                  (str "_order_by entries must be [field direction] pairs "
-                       "where direction is \"asc\" or \"desc\". Got: "
-                       (pr-str bad))
-                  {:code "BAD_ORDER_BY_SHAPE"
-                   :rule "order_by_entry"
-                   :argument "_order_by"
-                   :hint (str "Use a vector of pairs, e.g. "
-                              "[[\"name\" \"asc\"]], not [\"name\" \"asc\"].")}))
-          (assoc args :_order_by
-                 (apply array-map
-                        (mapcat (fn [[field dir]]
-                                  [(if (keyword? field) field (keyword field))
-                                   (if (keyword? dir) dir (keyword dir))])
-                                ob)))))
-
-      :else
-      (throw (ex-info
-              (str "_order_by must be a vector of [field direction] pairs. "
-                   "Got: " (pr-str ob))
-              {:code "BAD_ORDER_BY_SHAPE"
-               :rule "order_by_shape"
-               :argument "_order_by"
-               :hint "Use [[\"name\" \"asc\"], …] (vector of pairs)."})))
-    args))
+  args)
 
 (def ^:private write-ops #{"sync" "stack" "delete" "purge" "slice"})
 
@@ -408,7 +364,8 @@
               (throw (ex-info (str "XSQL parse error: " message)
                               {:code "XSQL_PARSE_ERROR" :diagnostics (vec errors)
                                :from from :to to}))))
-        compiled (first (xsql-program/compile-parsed decls params))]
+        ;; never pass nil here — nil params is the shape-only compile: optionals turn into nulls instead of dropping
+        compiled (first (xsql-program/compile-parsed decls (or params {})))]
     (when (nil? compiled)
       (throw (ex-info "Empty XSQL operation document"
                       {:code "XSQL_PARSE_ERROR" :rule "operation_shape"})))
@@ -429,9 +386,32 @@
           (:on compiled)   (assoc :on (:on compiled))
           (:root compiled) (assoc :root (:root compiled))))))))
 
+(defn refuse-fieldless-relations!
+  "Throws INVALID_SELECTION when a read selects a relation without fields; a `_join none` relation is a condition and needs none."
+  ([entity-id selection] (refuse-fieldless-relations! entity-id (dataset/normalize-selection selection) nil []))
+  ([entity-id selection skip path]
+   (let [{:keys [relations recursions fields]} (sql-query/deployed-schema-entity entity-id)
+         refs (into {} (keep (fn [f] (when-let [t (:reference/entity f)] [(:key f) t]))) (vals fields))]
+     (doseq [[k v] selection
+             :let [k (keyword (name k))
+                   to (or (get-in relations [k :to])
+                          (get refs k)
+                          (when (contains? (set (map keyword recursions)) k) entity-id))]
+             :when (and to (not= k skip) (sequential? v))
+             {:keys [selections args op]} v
+             :when (not op)
+             :let [path' (conj path k)]]
+       (if (empty? selections)
+         (when-not (= :none (sql-query/join-mode (some-> (:_join args) name keyword)))
+           (throw (ex-info (str "Relation '" (name k) "' selects no fields — select one, or filter the parents with "
+                                (name k) ".<field> = …, or keep only parents without one with !" (name k))
+                           {:code "INVALID_SELECTION" :relation (name k) :path (into [:selections] path')})))
+         (refuse-fieldless-relations! to selections nil (conj path' :selections)))))))
+
 (defmethod execute-operation "search"
   [ctx]
   (let [{:keys [entity-id args] selection :selections :as ctx} (assert-map-selections ctx)]
+    (refuse-fieldless-relations! entity-id selection)
     (assoc ctx :result (or (dataset/search-entity entity-id args selection) []))))
 
 (defmethod execute-operation "get"
@@ -444,6 +424,7 @@
                       {:code "BAD_ARGS_SHAPE"
                        :rule "get_args"
                        :argument (name (key bad))})))
+    (refuse-fieldless-relations! entity-id selection)
     (assoc ctx :result (dataset/get-entity entity-id args selection))))
 
 (defmethod execute-operation "search-tree"
@@ -451,6 +432,7 @@
   (when-not on
     (throw (ex-info "search-tree requires :on (relation name)"
                     {:code "MISSING_ON"})))
+  (refuse-fieldless-relations! entity-id (dataset/normalize-selection selection) (keyword on) [])
   (assoc ctx :result
          (or (dataset/search-entity-tree entity-id (keyword on) args selection) [])))
 
@@ -462,6 +444,7 @@
   (when-not root
     (throw (ex-info "get-tree requires :root (starting entity id)"
                     {:code "MISSING_ROOT"})))
+  (refuse-fieldless-relations! entity-id (dataset/normalize-selection selection) (keyword on) [])
   (assoc ctx :result
          (dataset/get-entity-tree entity-id root (keyword on) selection)))
 

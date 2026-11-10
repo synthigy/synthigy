@@ -118,7 +118,9 @@
 (defn session-cookie
   [request]
   (some->> (get-in request [:headers "cookie"])
-           (re-find #"(?:^|;\s*)idsrv\.session=([^;]+)")
+           (re-find (re-pattern (str "(?:^|;\\s*)"
+                                     (java.util.regex.Pattern/quote (oauth/session-cookie-name request))
+                                     "=([^;]+)")))
            second
            not-empty))
 

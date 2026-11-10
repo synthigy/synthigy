@@ -10,21 +10,14 @@
 ;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.iam.audit
-  "Stub audit enhancement — no-op for compilation without a database backend.
+  "Stub stamp DDL — no-op for compilation without a database backend.
 
    Extends `Object`, not a concrete backend record: the `:stub` alias has
    no backend on the classpath, so `synthigy.db.SQLite` is both the wrong
-   type to name here and unreachable.
-
-   `augment-schema` must return `{}` and `audit` must return `data`
-   unchanged — both sit mid-pipeline (`runtime/model->schema`,
-   `enhance/apply-audit`) and a nil return silently drops the schema
-   fragment / the whole mutation payload."
+   type to name here and unreachable."
   (:require
    [synthigy.dataset.enhance :as enhance]))
 
 (extend-protocol enhance/AuditEnhancement
   Object
-  (transform-audit [_ _ _] nil)
-  (augment-schema  [_ _] {})
-  (audit           [_ _ data _] data))
+  (transform-audit [_ _ _] nil))

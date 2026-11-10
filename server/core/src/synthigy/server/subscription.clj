@@ -558,12 +558,29 @@
       (when (some #(nil? (async/offer! stream %)) events)
         (destroy-event-stream identity-key stream)))))
 
+(defn record-visible
+  "The envelope as the bound principal may see it: nil outside its read guards; a delete of a record never checked carries no values."
+  [envelope readable]
+  (let [{:keys [type data]} (:delta envelope)]
+    (if (not= "entity" (some-> type namespace))
+      envelope
+      (let [k [(:entity-xid data) (:record-xid data)]
+            delete? (= "delete" (name type))
+            known (get @readable k)]
+        (cond
+          (some? known) (when known envelope)
+          delete? (update-in envelope [:delta :data] dissoc :before :after)
+          :else (let [ok (sql-query/row-readable? (:entity-xid data) (:record-xid data))]
+                  (swap! readable assoc k ok)
+                  (when ok envelope)))))))
+
 (defn ensure-delta-loop!
   "Per-identity go-loop translating batched delta envelopes into SSE events under the principal's roles."
   [identity-key principal]
   (when (claim-loop! identity-key :data)
     (let [batch-chan (get-in @subscriptions-state [identity-key :data :batch-chan])
-          roles      (access/project-role-xids principal)]
+          roles      (access/project-role-xids principal)
+          readable   (atom {})]
       (async/go-loop []
         (if-let [first-env (async/<! batch-chan)]
           (let [batch (loop [batch [first-env]]
@@ -579,9 +596,11 @@
                                batch)
                 attr-key-idx (sql-query/attribute-key-index)
                 records      (get-in @subscriptions-state [identity-key :data :records])
-                events       (into []
-                                   (mapcat #(trans/translate-delta % attr-key-idx records roles))
-                                   all)
+                events       (access/with-principal principal
+                                   (into []
+                                         (comp (keep #(record-visible % readable))
+                                               (mapcat #(trans/translate-delta % attr-key-idx records roles)))
+                                         all))
                 last-atom    (get-in @subscriptions-state [identity-key :data :last-seq])
                 mx           (reduce max 0 (keep :seq all))]
             (when (and last-atom (pos? mx))

@@ -198,11 +198,15 @@
       (fail! "DELETE" (.statusCode r) (.body r)))
     nil))
 
+(defn list-query
+  "ListObjectsV2 query, parameters in the sorted order SigV4 signs."
+  [token]
+  (str (when token (str "continuation-token=" (uri-encode token false) "&")) "list-type=2&max-keys=1000"))
+
 (defn list-page
   "One ListObjectsV2 page: {:blobs [{:key :modified}] :next token-or-nil}."
   [cfg token]
-  (let [q (cond-> "list-type=2&max-keys=1000"
-            token (str "&continuation-token=" (uri-encode token false)))
+  (let [q (list-query token)
         uri (URI. (str (object-uri cfg nil) (if (str/ends-with? (str (object-uri cfg nil)) "/") "" "/") "?" q))
         signed (sign cfg ((:credentials cfg)) "GET" uri {} empty-sha256 (Instant/now))
         b (reduce-kv (fn [^java.net.http.HttpRequest$Builder b k v] (.header b k v))

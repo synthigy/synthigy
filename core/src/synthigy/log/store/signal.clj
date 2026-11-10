@@ -41,6 +41,12 @@
     (keyword? id)           (name id)
     (some? id)              (str id)))
 
+(defn topics->delimited
+  "A topic set as a pipe-bounded sorted string (`|system|dataset|`), so membership is a bounded LIKE."
+  [topics]
+  (let [names (->> topics (map id->str) sort)]
+    (if (seq names) (str "|" (str/join "|" names) "|") "")))
+
 (defn throwable-msg [^Throwable t]
   (some-> t .getMessage))
 
@@ -151,10 +157,8 @@
                       (boolean (re-find p s))))
     :exists?     #(some? (signal-field % field))
     :absent?     #(nil? (signal-field % field))
-    ;; (subs (str kw) 1), not `name` — :traffic/sse must stay "traffic/sse"
-    :has         (let [topic-str #(if (keyword? %) (subs (str %) 1) (str %))
-                       needle    (topic-str arg)]
-                   #(contains? (into #{} (map topic-str) (or (signal-field % field) #{}))
+    :has         (let [needle (id->str arg)]
+                   #(contains? (into #{} (map id->str) (or (signal-field % field) #{}))
                                needle))))
 
 (defn where-pred
@@ -239,10 +243,7 @@
      :tenant      (or (:tenant signal)     (get ctx-map :tenant))
      :ip          (or (:ip signal)         (get ctx-map :ip))
      :host        (host-of signal)
-     ;; (subs (str kw) 1), not `name` — :traffic/sse must stay "traffic/sse"
-     :topics      (->> (:topics signal)
-                       (map #(if (keyword? %) (subs (str %) 1) (str %)))
-                       sort vec)
+     :topics      (->> (:topics signal) (map id->str) sort vec)
      :data        (or (:data signal) {})
      :ctx         residual-ctx
      :error_class err-class

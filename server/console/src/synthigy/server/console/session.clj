@@ -18,7 +18,7 @@
 
 (defn session-id
   [request]
-  (not-empty (get-in request [:cookies "idsrv.session" :value])))
+  (not-empty (get-in request [:cookies (oauth/session-cookie-name request) :value])))
 
 (defn current-session
   [request]

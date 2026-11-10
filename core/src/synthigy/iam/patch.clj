@@ -23,6 +23,7 @@
     [synthigy.dataset.id :as id]
     [synthigy.dataset.sql.naming :as naming]
     [synthigy.iam.access :refer [with-principal]]
+    [synthigy.iam.context :as context]
     [synthigy.iam.keys]
     [synthigy.iam.transfer :as transfer]
     [synthigy.data :refer [*ROOT* *PUBLIC_ROLE*]]
@@ -32,7 +33,7 @@
 ;; Component Version Registration
 ;; ============================================================================
 
-(patch/current-version :synthigy/iam "1.0.2")
+(patch/current-version :synthigy/iam "1.0.3")
 ;; ============================================================================
 ;; Version Patches
 ;; ============================================================================
@@ -156,3 +157,6 @@
                                          (assoc iam-user
                                                 :active      false
                                                 :description "Deprecated, not created on new installs. Read-only IAM view, fully covered by IAM Auditor.")))))
+
+(patch/upgrade :synthigy/iam "1.0.3"
+               (context/fill-display-names!))

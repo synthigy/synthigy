@@ -10,8 +10,7 @@
 ;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.xsql.parser
-  "Recursive-descent parser for the XSQL DSL: tokens (synthigy.xsql.tokens)
-   to AST (synthigy.xsql.ast), mirroring sdk/query-dsl/grammar/query-dsl.grammar."
+  "Recursive-descent parser for the XSQL DSL: tokens (synthigy.xsql.tokens) to AST (synthigy.xsql.ast)."
   (:require [synthigy.xsql.ast :as ast]
             [synthigy.xsql.tokens :as tok]))
 
@@ -119,9 +118,8 @@
 
 ;; ── Forward declarations ─────────────────────────────────────────────────
 
-(declare parse-statement parse-scalar parse-relation parse-block
-         parse-count-block parse-count-child parse-agg-block parse-agg-relation
-         parse-agg-attr parse-agg-fn parse-parens parse-arg-list parse-arg-stmt
+(declare parse-statement parse-scalar parse-relation parse-block parse-aggregate parse-call
+         parse-parens parse-arg-list parse-arg-stmt
          parse-or-expr parse-and-expr parse-primary-expr parse-grouped-expr
          parse-arg-predicate parse-path parse-pred-op parse-binary-op
          parse-value parse-list-literal parse-meta-key parse-order-spec
@@ -239,15 +237,33 @@
                       root-parens (assoc :root-parens root-parens))]
     [query (skip-silent st :eof)]))
 
-;; Statement → Scalar | Relation | CountBlock | AggBlock
+;; `_count` / `_agg` (removed): the header line and its indented block become one error.
+
+(defn parse-removed-block [st]
+  (let [start (peek-tok st)
+        node (error-node start (str "`" (:text start) "` was removed — write each operation as its own line: "
+                                    "`votes: count(ratings)`, `rating: avg(ratings.value)`"))]
+    (loop [st (advance st) depth 0]
+      (case (peek-type st)
+        (:eof nil) [node st]
+        :indent (recur (advance st) (inc depth))
+        :dedent (if (<= depth 1)
+                  [node (advance st)]
+                  (recur (advance st) (dec depth)))
+        :newline (if (and (zero? depth) (not= :indent (peek-type (advance st))))
+                   [node (advance st)]
+                   (recur (advance st) depth))
+        (recur (advance st) depth)))))
+
+;; Statement → Scalar | Relation | Aggregate
 
 (defn parse-statement [st]
   (let [start (peek-tok st)
         [inner st']
         (cond
-          (id-text=? st "_count")            (parse-count-block st)
-          (id-text=? st "_agg")              (parse-agg-block st)
+          (or (id-text=? st "_count") (id-text=? st "_agg")) (parse-removed-block st)
           (#{:dash :arrow :bang} (peek-type st))   (parse-relation st)
+          (looks-like-alias? st)             (parse-aggregate st)
           (= :identifier (peek-type st))     (parse-scalar st)
           :else                              [(error-node start "expected statement")
                                               (advance st)])]
@@ -323,180 +339,80 @@
         (let [[stmt st'] (parse-statement st)]
           (recur st' (conj children stmt)))))))
 
-;; CountBlock → "_count" Newline Indent CountChild+ Dedent
+;; Aggregate → Alias Identifier Call Newline
 
-(defn parse-count-block [st]
+(defn parse-aggregate [st]
   (let [start (peek-tok st)
-        [kw st]  (consume-leaf st)
-        [nl st]  (expect st :newline "expected newline after _count")
-        [ind st] (expect st :indent  "expected indented children for _count")
-        children [kw nl ind]]
-    (loop [st       st
-           children children]
-      (cond
-        (= :dedent (peek-type st))
-        (let [[ded st] (consume-leaf st)]
-          [(container :count-block start (conj children ded)) st])
+        [alias-n st] (parse-alias st)
+        alias-text   (-> alias-n :children first :text)
+        fn-tok       (peek-tok st)
+        [fn-id st]   (cond
+                       (= :identifier (peek-type st))
+                       (consume-leaf st)
 
-        (= :eof (peek-type st))
-        [(container :count-block start children) st]
+                       (#{:dash :arrow :bang} (peek-type st))
+                       [(error-node (peek-tok st)
+                                    (str "A relation alias follows the join marker — write `"
+                                         (:text (peek-tok st)) alias-text ":<relation>`"))
+                        st]
 
-        (= :blank-line (peek-type st))
-        (let [[bl st] (consume-leaf st)]
-          (recur st (conj children bl)))
+                       :else
+                       [(error-node (peek-tok st) "expected an operation after the alias — count, sum, avg, min or max")
+                        st])
+        [call st]    (cond
+                       (= :error (:node fn-id)) [nil st]
+                       (= :lparen (peek-type st)) (parse-call st)
+                       :else [(error-node fn-tok
+                                          (str "expected `(` after `" (:text fn-id)
+                                               "` — operations are `alias: count(relation)`; scalar aliases are not supported"))
+                              st])
+        children     (filterv some? [alias-n fn-id call])]
+    (if (some #(= :error (:node %)) (into [fn-id call] (:children call)))
+      [(container :aggregate start children) (skip-to-newline st)]
+      (let [[nl st] (expect st :newline "expected newline after the operation")]
+        [(container :aggregate start (conj children nl)) st]))))
 
-        :else
-        ;; Progress watchdog: force-advance on no progress — editor hang otherwise.
-        (let [pos-before (:pos st)
-              [c st']    (parse-count-child st)]
-          (if (= pos-before (:pos st'))
-            [(container :count-block start (conj children c)) (advance st')]
-            (recur st' (conj children c))))))))
+(defn path-then-pred?
+  "True when the tokens at `st` are a dotted path followed by a predicate operator."
+  [st]
+  (loop [k 0]
+    (cond
+      (not= :identifier (peek-type st k)) false
+      (= :dot (peek-type st (inc k)))     (recur (+ k 2))
+      :else (pred-op-starter? (assoc st :pos (+ (:pos st) k 1))))))
 
-;; CountChild → Alias? Identifier Parens? Newline
+;; Call → "(" "distinct"? (Path ("," OrExpr)? | OrExpr)? ")"
 
-(defn parse-count-child [st]
+(defn parse-call [st]
   (let [start (peek-tok st)
-        [marker-err st]
-        (case (peek-type st)
-          :dash  (let [[_ st'] (consume-leaf st)]
-                   [(error-node start
-                                "join markers are not allowed inside `_count` — counts are always inner; drop the `-`")
-                    st'])
-          :arrow (let [[_ st'] (consume-leaf st)]
-                   [(error-node start
-                                "join markers are not allowed inside `_count` — counts are always inner; drop the `->`")
-                    st'])
-          :bang  (let [[_ st'] (consume-leaf st)]
-                   [(error-node start
-                                "join markers are not allowed inside `_count` — counts are always inner; drop the `!`")
-                    st'])
-          [nil st])
-        children      (cond-> [] marker-err (conj marker-err))
-        [alias-n st]  (if (looks-like-alias? st) (parse-alias st) [nil st])
-        children      (cond-> children alias-n (conj alias-n))
-        [field-id st] (expect st :identifier "expected relation name")
-        children      (conj children field-id)
-        [parens st]   (if (= :lparen (peek-type st)) (parse-parens st) [nil st])
-        children      (cond-> children parens (conj parens))
-        [nl st]       (expect st :newline "expected newline after count child")
-        children      (conj children nl)]
-    [(container :count-child start children) st]))
+        st    (skip-silent st :lparen)
+        [distinct-id st] (if (and (id-text=? st "distinct") (= :identifier (peek-type st 1)))
+                           (consume-leaf st)
+                           [nil st])
+        shortcut?   (or (= :lparen (peek-type st)) (path-then-pred? st))
+        [target st] (if (and (not shortcut?) (= :identifier (peek-type st)))
+                      (parse-path st)
+                      [nil st])
+        [filter st] (cond
+                      (and target (= :comma (peek-type st)))
+                      (let [st (advance st)
+                            ftok (peek-tok st)
+                            [expr st] (parse-or-expr st)]
+                        [(container :call-filter ftok [expr]) st])
 
-;; AggBlock → "_agg" Newline Indent AggRelation+ Dedent
+                      (and (nil? target) (not (#{:rparen :newline :dedent :eof} (peek-type st))))
+                      (let [ftok (peek-tok st)
+                            [expr st] (parse-or-expr st)]
+                        [(container :call-filter ftok [expr]) st])
 
-(defn parse-agg-block [st]
-  (let [start (peek-tok st)
-        [kw st]  (consume-leaf st)
-        [nl st]  (expect st :newline "expected newline after _agg")
-        [ind st] (expect st :indent  "expected indented children for _agg")
-        children [kw nl ind]]
-    (loop [st       st
-           children children]
-      (cond
-        (= :dedent (peek-type st))
-        (let [[ded st] (consume-leaf st)]
-          [(container :agg-block start (conj children ded)) st])
-
-        (= :eof (peek-type st))
-        [(container :agg-block start children) st]
-
-        (= :blank-line (peek-type st))
-        (let [[bl st] (consume-leaf st)]
-          (recur st (conj children bl)))
-
-        :else
-        ;; Progress watchdog: force-advance on no progress — editor hang otherwise.
-        (let [pos-before (:pos st)
-              [r st']    (parse-agg-relation st)]
-          (if (= pos-before (:pos st'))
-            [(container :agg-block start (conj children r)) (advance st')]
-            (recur st' (conj children r))))))))
-
-(defn parse-agg-relation [st]
-  (let [start (peek-tok st)
-        [marker-err st]
-        (case (peek-type st)
-          :dash  (let [[_ st'] (consume-leaf st)]
-                   [(error-node start
-                                "join markers are not allowed inside `_agg` — aggregates are always inner; drop the `-`")
-                    st'])
-          :arrow (let [[_ st'] (consume-leaf st)]
-                   [(error-node start
-                                "join markers are not allowed inside `_agg` — aggregates are always inner; drop the `->`")
-                    st'])
-          :bang  (let [[_ st'] (consume-leaf st)]
-                   [(error-node start
-                                "join markers are not allowed inside `_agg` — aggregates are always inner; drop the `!`")
-                    st'])
-          [nil st])
-        children      (cond-> [] marker-err (conj marker-err))
-        [alias-n st]  (if (looks-like-alias? st) (parse-alias st) [nil st])
-        children      (cond-> children alias-n (conj alias-n))
-        [field-id st] (expect st :identifier "expected agg-relation name")
-        children      (conj children field-id)
-        [parens st]   (if (= :lparen (peek-type st)) (parse-parens st) [nil st])
-        children      (cond-> children parens (conj parens))
-        [nl st]       (expect st :newline "expected newline after agg-relation header")
-        children      (conj children nl)
-        [ind st]      (expect st :indent  "expected indented agg attributes")
-        children      (conj children ind)]
-    (loop [st       st
-           children children]
-      (cond
-        (= :dedent (peek-type st))
-        (let [[ded st] (consume-leaf st)]
-          [(container :agg-relation start (conj children ded)) st])
-
-        (= :eof (peek-type st))
-        [(container :agg-relation start children) st]
-
-        :else
-        ;; Progress watchdog: force-advance on no progress — editor hang otherwise.
-        (let [pos-before (:pos st)
-              [a st']    (parse-agg-attr st)]
-          (if (= pos-before (:pos st'))
-            [(container :agg-relation start (conj children a)) (advance st')]
-            (recur st' (conj children a))))))))
-
-;; AggAttr → Identifier ":" AggFn ("," AggFn)* Newline
-
-(defn parse-agg-attr [st]
-  (let [start (peek-tok st)
-        [attr-id st] (expect st :identifier "expected aggregate attribute name")
-        st (skip-silent st :colon)
-        children [attr-id]
-        [first-fn st] (parse-agg-fn st)
-        children (conj children first-fn)]
-    (loop [st       st
-           children children]
-      (cond
-        (= :comma (peek-type st))
-        (let [st (advance st)
-              [fn-node st] (parse-agg-fn st)]
-          (recur st (conj children fn-node)))
-
-        (= :newline (peek-type st))
-        (let [[nl st] (consume-leaf st)]
-          [(container :agg-attr start (conj children nl)) st])
-
-        :else
-        [(container :agg-attr start
-                    (conj children (error-node (peek-tok st)
-                                               "expected , or newline after agg fn")))
-         (skip-to-newline st)]))))
-
-;; AggFn → "avg" | "sum" | "min" | "max"
-
-(defn parse-agg-fn [st]
-  (let [start (peek-tok st)
-        ok?   (and (= :identifier (peek-type st))
-                   (#{"avg" "sum" "min" "max"} (peek-text st)))]
-    (if ok?
-      (let [[id st] (consume-leaf st)]
-        [(container :agg-fn start [id]) st])
-      [(error-node start "expected aggregate function (avg/sum/min/max)")
-       (advance st)])))
+                      :else [nil st])
+        rparen-to (when (= :rparen (peek-type st)) (:to (peek-tok st)))
+        [err st]  (if rparen-to
+                    [nil (advance st)]
+                    [(error-node (peek-tok st) "Missing `)`") st])
+        children  (filterv some? [distinct-id target filter err])
+        from      (:from start)]
+    [(ast/node :call [from (or rparen-to (end-of-children children from))] children) st]))
 
 ;; Alias → Identifier ":"
 
@@ -839,11 +755,13 @@
 
 (defn parse-order-spec [st]
   (let [start (peek-tok st)
-        [id st] (expect st :identifier "expected identifier in order-by")
+        [path st] (if (= :identifier (peek-type st))
+                    (parse-path st)
+                    (expect st :identifier "expected identifier in order-by"))
         [children st]
         (if (or (id-text=? st "asc") (id-text=? st "desc"))
-          (let [[dir st] (consume-leaf st)] [[id dir] st])
-          [[id] st])]
+          (let [[dir st] (consume-leaf st)] [[path dir] st])
+          [[path] st])]
     [(container :order-spec start children) st]))
 
 ;; ── ScalarFilter family ─────────────────────────────────────────────────

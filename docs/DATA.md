@@ -61,7 +61,7 @@ the result are the model's names in snake case (`"Birth Date"` → `birth_date`)
 | `timestamp` | an ISO 8601 string in UTC to the second, `"2026-10-04T14:30:00Z"`. Send any RFC 3339 date-time; it is stored and returned in UTC. |
 | `json`, `encrypted` | any JSON value. An `encrypted` attribute arrives and leaves as plain JSON; only the database holds ciphertext. |
 | `hashed` | send the plain string; a hash is stored and the plain value is never returned |
-| `user`, `group`, `role` | a reference to one IAM record, written and selected like a relation: `"owner": {"xid": "…"}` |
+| `user`, `group`, `role` | a reference to one IAM record. Write it like a relation: `"owner": {"xid": "…"}` or `{"name": "…"}`. It reads as a label (see [References](#references)). |
 
 ## Reading
 
@@ -118,6 +118,27 @@ read count: a row hidden from you looks absent. A `none` relation itself
 always comes back empty. `none` cannot be combined with `_maybe` and is
 refused by `slice`; any other `_join` value fails with `INVALID_JOIN`.
 
+### References
+
+A `user`, `group` or `role` attribute (`owner`, `modified_by`, `uploaded_by`)
+reads as the referenced record's **label**: its `xid` plus `display_name` for a
+user, or `name` for a group or role.
+
+```json
+{"title": null, "owner": {"display_name": null}}
+```
+
+- **Access.** Anyone who can read the record can read its label, without a grant
+  on User, Group or Role. The attribute's own rules still apply.
+- **Other fields.** Another field of the target (`name`, the login; `password`;
+  `roles`) is left out, for every caller. An unknown field fails with
+  `UNKNOWN_ATTRIBUTE`.
+- **Filters and sorts.** You can filter and sort by the label fields. Doing it by
+  anything else, in any form, fails with `ATTRIBUTE_FORBIDDEN`. To read more
+  about a user, read the User entity, which needs its grant.
+- **Purge.** A `purge` never deletes the referenced record. It returns each
+  purged row's label.
+
 ### Filters and modifiers
 
 | Key | |
@@ -132,23 +153,39 @@ refused by `slice`; any other `_join` value fails with `INVALID_JOIN`.
 | `_join` | `"left"` (default), `"inner"` or `"none"` on a relation, see above |
 
 Operators: `_eq`, `_neq`, `_lt`, `_le`, `_gt`, `_ge`, `_in`, `_not_in`,
-`_like`, `_ilike` (case-insensitive), `_is_null`.
+`_like`, `_ilike` (case-insensitive), `_is_null`. In `_like` and `_ilike`, `%`
+and `_` are wildcards; `\%`, `\_` and `\\` match the character itself.
 
 Text and enum fields sort the way people read them, the same on PostgreSQL and
 SQLite: case-insensitive first (case breaks ties), digits as numbers, accents by
 Unicode — `apple`, `Apple`, `Auto2`, `Auto11`, `čevapi`, `Zebra`. `_lt`/`_gt`
 follow the same order. Equality is exact: `_eq` on `"apple"` does not match
-`"Apple"`. In `asc` order nulls come first, in `desc` order last.
+`"Apple"`. In `asc` order nulls come first, in `desc` order last. A read with `_limit`
+or `_offset` ends its order with the record id, so rows that tie (or a read with
+no `_order_by`) page the same way every time.
 
 ### Counts and aggregates
 
-`_count` and `_agg` compute over a relation in the database, without sending
-the related rows. They are easiest to write in [XSQL](XSQL.md#counts-and-aggregates):
+An operation computes over a relation in the database, without sending the
+related rows. It is an entry on the relation key with an `alias` (the result
+key) and an `op`; `args._where` filters the related rows. They are easiest to
+write in [XSQL](XSQL.md#counts-and-aggregates):
 
 ```json
-{"title": "Dune", "_count": {"actors": 7},
- "_agg": {"ratings": {"value": {"avg": 4.3}}}}
+{"title": null,
+ "actors":  [{"alias": "cast", "op": "count"}],
+ "ratings": [{"alias": "rating", "op": {"avg": "value"}},
+             {"alias": "fans", "op": "count", "args": {"_where": {"value": {"_ge": 4}}}}]}
 ```
+
+```json
+{"title": "Dune", "cast": 7, "rating": 4.3, "fans": 30}
+```
+
+`op` is `"count"` or `{fn: field}` with `fn` one of `sum`, `avg`, `min`, `max`,
+`count_distinct`. Operation entries sit in the same list as the relation's row
+selections. Counts are never null; `_order_by` sorts by an alias like a field
+(`[["cast", "desc"]]`).
 
 ### Trees
 

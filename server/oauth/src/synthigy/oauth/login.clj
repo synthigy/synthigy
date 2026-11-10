@@ -31,12 +31,12 @@
 (defn session-cookie
   ([session] (session-cookie session nil))
   ([session request]
-   {"idsrv.session" (merge {:value session
-                            :path "/"
-                            :http-only true}
-                           (if (core/loopback-http? request)
-                             {:secure false :same-site :lax}
-                             {:secure true :same-site :none}))}))
+   {(core/session-cookie-name request) (merge {:value session
+                                               :path "/"
+                                               :http-only true}
+                                              (if (core/loopback-http? request)
+                                                {:secure false :same-site :lax}
+                                                {:secure true :same-site :none}))}))
 
 (defn abort-authorization!
   "RFC 6749 §4.1.2.1: send the client its error the way a code would have been sent."
@@ -132,6 +132,48 @@
     {:redirect (str redirect-uri "#" (codec/form-encode params))}
 
     {:redirect (str redirect-uri "?" (codec/form-encode params))}))
+
+(def account-uri "/oauth/account")
+
+(defn account-path
+  "The account page, keeping `back`: the `client_id` and `return` of the app that sent the user there."
+  [back]
+  (cond-> account-uri (seq back) (str "?" (codec/form-encode back))))
+
+(defn account-state
+  "Login state that signs a user in to their own account page."
+  ([] (account-state nil))
+  ([back] (core/encrypt (cond-> {:flow "account"} (seq back) (assoc :back back)))))
+
+(defn account-login-url
+  "The login page signing in to the account page, with `params` (an error) riding along."
+  ([] (account-login-url nil nil))
+  ([back params]
+   (str (core/get-client-login-url nil) "?"
+        (codec/form-encode (merge {:state (account-state back)} params)))))
+
+(defn open-session!
+  "Mint a signed-in session for `user` that belongs to no client; returns its id."
+  [user flow amr client-info]
+  (let [sid (core/gen-session-id)]
+    (core/create-session! sid (merge {:user user :flow flow :authorized-at (java.util.Date.)
+                                      :amr amr :acr (core/derive-acr-from-amr amr)}
+                                     client-info))
+    sid))
+
+(defn account-sign-in
+  "Sign `user` in to the account page: a new session, its cookie, and the way there."
+  [request user amr json? back]
+  (let [sid     (open-session! user "account" amr (core/client-info request))
+        cookies (session-cookie sid request)]
+    (log/info {:id ::account-login
+               :user-xid (:xid user)
+               :data {:action :authenticated :subject :account
+                      :session (core/short-id sid) :method (str/join "+" amr)}}
+              "User signed in to the account page")
+    (if json?
+      (json-body 200 {:ok true :redirect (account-path back)} cookies)
+      {:status 303 :headers {"Location" (account-path back)} :cookies cookies})))
 
 (defn security-check
   "IP/user-agent/challenge check against the decrypted state, guarding session hijack; nil when all pass."
@@ -325,6 +367,23 @@
                       {:status 302
                        :headers {"Location" redirect}})))))
 
+            "account"
+            (if (:active resource-owner)
+              (account-sign-in request resource-owner ["pwd"] json? (:back flow-state))
+              (do
+                (log/warn {:id ::login-credentials-rejected
+                           :data {:action :credentials-rejected
+                                  :subject :resource-owner
+                                  :flow "account"
+                                  :username username}}
+                          "Authentication failed: invalid credentials")
+                (if json?
+                  (json-body 400 {:ok false :error "credentials"})
+                  {:status 400
+                   :headers {"Content-Type" "text/html"}
+                   :body (str (login-html {::state flow-state ::error :credentials
+                                           ::username username ::raw-state (:state data)}))})))
+
             (if json?
               (json-body 400 {:ok false :error "broken_flow"})
               {:status 302
@@ -406,7 +465,7 @@
                        :headers {"Content-Type" "text/html"}
                        :body (json/write-str message)})
         clear-cookie (when (and idsrv-session (= session idsrv-session))
-                       {"idsrv.session" {:value "" :max-age 0 :path "/"}})]
+                       {(core/session-cookie-name request) {:value "" :max-age 0 :path "/"}})]
     (cond
       (and (not-empty id_token_hint) (nil? claims))
       (bad-request "Provided 'id_token_hint' is not valid")

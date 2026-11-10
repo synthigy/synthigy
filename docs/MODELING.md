@@ -21,9 +21,8 @@ that dataset.
 ## Entities and attributes
 
 An **entity** becomes a table. Every record gets an `xid` — a short, URL-safe
-unique id. Per entity you can also record who created a record and when
-(`created_by`, `created_on`) and who changed it last and when (`modified_by`,
-`modified_on`).
+unique id. To record who created a record and when, and who changed it last,
+add stamp attributes (see **Stamps** below).
 
 An **attribute** becomes a column. Types:
 
@@ -53,6 +52,17 @@ one family (`int` → `float`, `enum` → `string`) are safe. Others, such as
 `string` → `int`, need every stored value to convert and fail the deploy if
 one does not. The modeler warns before you deploy. A reference attribute cannot
 change type: deactivate it and add a new one.
+
+**Stamps.** A `timestamp` or `user` attribute can be stamped by the system:
+- **on create:** set once, when the record is created;
+- **on modify:** set on every write.
+
+A timestamp stamp takes the time and a user stamp the writing user. A client value
+for a stamp is ignored by default; the attribute can instead refuse it with
+`ATTRIBUTE_FORBIDDEN`. The modeler's **Add stamps** declares the usual four:
+Created On, Created By, Modified On and Modified By. They replace the old entity
+audit switch, and an upgrade turns that switch into these attributes on the same
+columns.
 
 **Removing an attribute** from a deployed model deactivates it. The column and
 its data stay in the database; the attribute disappears from the API.

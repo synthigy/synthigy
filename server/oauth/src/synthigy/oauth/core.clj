@@ -130,7 +130,7 @@
 
 (def not-revoked
   "Match token rows where revoked is explicitly false OR NULL (default state)."
-  {:_or [{:revoked {:_eq false}} {:revoked :is_null}]})
+  {:_or [{:revoked {:_eq false}} {:revoked {:_is_null true}}]})
 
 (def ^:private no-audience
   "json object keys can't be nil — nil audience is keyed as empty string."
@@ -870,17 +870,51 @@
    (or forwarded-proto (name scheme))
    (or forwarded-host host original-uri)))
 
+(defn public-origin
+  "The engine's origin as the browser sees it: the root URL, else the request's original URI, else the bound domain."
+  [request]
+  (or (not-empty (str env/iam-root-url))
+      (when (or (:scheme request) (get-in request [:headers "x-forwarded-proto"]))
+        (original-uri request))
+      *domain*))
+
+(defn own-origins
+  "Origins a browser reaches the engine on: the root URL's and the request's own."
+  [request]
+  (into #{} (keep uri-origin)
+        [env/iam-root-url
+         (when (or (:scheme request) (get-in request [:headers "x-forwarded-proto"]))
+           (original-uri request))]))
+
+(defn same-origin?
+  "True when the browser vouches a request came from the engine's own pages: Sec-Fetch-Site, else Origin, else Referer; no evidence is false."
+  [request]
+  (let [{site "sec-fetch-site" origin "origin" referer "referer"} (:headers request)]
+    (cond
+      site    (= "same-origin" site)
+      origin  (contains? (own-origins request) origin)
+      referer (contains? (own-origins request) (uri-origin referer))
+      :else   false)))
+
 (defn loopback-http?
   "True when the engine is reached over plain http on loopback, where Safari drops Secure cookies."
   ([] (loopback-http? nil))
   ([request]
-   (let [origin (or (not-empty (str env/iam-root-url))
-                    (when (or (:scheme request) (get-in request [:headers "x-forwarded-proto"]))
-                      (original-uri request))
-                    *domain*)]
+   (let [origin (public-origin request)]
      (boolean (and origin
                    (str/starts-with? origin "http://")
                    (localhost-redirect? origin))))))
+
+(defn session-cookie-name
+  "idsrv.session, suffixed with the port when the engine's origin is off its scheme's default port."
+  ([] (session-cookie-name nil))
+  ([request]
+   (let [port (try (let [uri (java.net.URI. (public-origin request))
+                         port (.getPort uri)]
+                     (when-not (contains? #{-1 ({"http" 80 "https" 443} (.getScheme uri))} port)
+                       port))
+                   (catch Exception _ nil))]
+     (cond-> "idsrv.session" port (str "." port)))))
 
 (defn parse-body
   "Parse a request body by Content-Type (transit/edn/JSON); nil on any bad body."
@@ -915,10 +949,10 @@
                             (set (str/split scope #"\s+"))))))))
 
 (defn wrap-session-read
-  "Ring middleware mapping the idsrv.session cookie to the :idsrv/session param."
+  "Ring middleware mapping the session cookie to the :idsrv/session param."
   [handler]
   (fn [request]
-    (let [idsrv-session (get-in request [:cookies "idsrv.session" :value])]
+    (let [idsrv-session (get-in request [:cookies (session-cookie-name request) :value])]
       (if (empty? idsrv-session)
         (handler request)
         (handler (assoc-in request [:params :idsrv/session] idsrv-session))))))
@@ -942,7 +976,7 @@
          candidates (dataset/search-entity
                      (id/entity :oauth/session)
                      {:_where {:_and [{:active {:_eq true}}
-                                      {:_or [{:started :is_null}
+                                      {:_or [{:started {:_is_null true}}
                                              {:started {:_le cutoff}}]}]}}
                      {:id nil :authorized_at nil :last_seen nil})]
      (doseq [{session :id :keys [authorized_at last_seen]} candidates

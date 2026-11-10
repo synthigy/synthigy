@@ -92,12 +92,17 @@
   (when-let [v (get *reference-mapping* type-name)]
     (when (map? v) (:table-fn v))))
 
+(defn reference-label
+  "The fields a reference of `type-name` shows to anyone who can read the record holding it."
+  [type-name]
+  (:label (get *reference-mapping* type-name)))
+
 (defn register-reference-type!
-  "Registers a reference type with metadata."
+  "Registers a reference type, merging `opts` into what is already registered for it."
   [type-name entity-id opts]
   #?(:clj (alter-var-root
            #'*reference-mapping*
-           (fn [m] (assoc m type-name (merge {:entity-id entity-id} opts))))))
+           update type-name merge {:entity-id entity-id} opts)))
 
 ;;; End Reference Type API
 
@@ -518,11 +523,32 @@
   [entity relations]
   (map #(direct-relation-from entity %) relations))
 
+(defn self-clone-relation?
+  "True for a relation between an entity and its own clone."
+  [{:keys [from to]}]
+  (and (not= (id/extract from) (id/extract to))
+       (= (or (:original from) (id/extract from))
+          (or (:original to) (id/extract to)))))
+
+(defn clone-ids
+  "Ids of the clone nodes that stand for entity-id."
+  [model entity-id]
+  (into #{} (keep (fn [[cid {e :entity}]] (when (= e entity-id) cid))) (:clones model)))
+
 (defn focus-entity-relations
   "Returns entity relations with every relation inverted to be outgoing from
-   entity."
+   entity; an original also gets its clones' relations, seen from the clone."
   ([model entity]
-   (direct-relations-from entity (get-entity-relations model entity)))
+   (let [own (direct-relations-from entity (get-entity-relations model entity))
+         cids (when-not (cloned? entity) (clone-ids model (id/extract entity)))]
+     (if (empty? cids)
+       own
+       (let [taken (set (keep #(some-> (:to-label %) str/lower-case) own))]
+         (into (vec own)
+               (comp (mapcat #(let [c (get-entity model %)]
+                                (direct-relations-from c (get-entity-relations model c))))
+                     (remove #(contains? taken (some-> (:to-label %) str/lower-case))))
+               cids)))))
   ([model entity entity']
    (direct-relations-from entity (get-relations-between model entity entity'))))
 
@@ -855,30 +881,69 @@
   (or (not (rbac-enabled? entity))
       (empty? (clojure.set/intersection roles (attribute-denied-roles attribute op)))))
 
-(defn audit-actions [entity]
-  (get-in entity [:configuration :audit :actions]))
+(def model-format
+  "The stored model format; 3 made audit stamps ordinary attributes."
+  3)
 
-(defn audit-modified? [entity]
-  (contains? (audit-actions entity) :modified))
+(defn stamp
+  "When the system sets `attribute`: :create, :modify, or nil when it does not."
+  [attribute]
+  (when (#{"timestamp" "user"} (:type attribute))
+    (#{:create :modify} (get-in attribute [:configuration :stamp]))))
 
-(defn audit-created? [entity]
-  (contains? (audit-actions entity) :created))
+(defn stamp-write
+  "What a client value for a stamp attribute gets: :ignore (dropped) or :refuse."
+  [attribute]
+  (if (= :refuse (get-in attribute [:configuration :stamp/write])) :refuse :ignore))
 
-(defn audit-ref-attrs
-  "Synthetic user-typed attrs (modified_by/created_by) contributed by audit
-   config."
+(defn stamp-attributes
+  "Active attributes of `entity` the system sets."
   [entity]
-  (let [eid (id/extract entity)
-        existing (into #{} (map :name) (:attributes entity))]
-    (->> (cond-> []
-           (audit-modified? entity)
-           (conj (merge (id/derive-id eid "modified_by")
-                        {:name "modified_by" :type "user" :active true}))
-           (audit-created? entity)
-           (conj (merge (id/derive-id eid "created_by")
-                        {:name "created_by" :type "user" :active true})))
-         (remove #(contains? existing (:name %)))
-         vec)))
+  (filter #(and (not (false? (:active %))) (stamp %)) (:attributes entity)))
+
+(def audit-stamps
+  "The stamp attributes format 3 makes of `:audit :actions`, as [action column name type stamp]."
+  [[:modified "modified_on" "Modified On" "timestamp" :modify]
+   [:modified "modified_by" "Modified By" "user" :modify]
+   [:created "created_on" "Created On" "timestamp" :create]
+   [:created "created_by" "Created By" "user" :create]])
+
+(defn column-of [attribute-name]
+  (str/lower-case (str/replace attribute-name #"[\s\_\-\.\$\[\]\{\}\#]+" "_")))
+
+(defn upgrade-entity
+  "`entity` with its `:audit :actions` turned into stamp attributes; an attribute already on that column becomes the stamp."
+  [entity]
+  (let [actions (set (get-in entity [:configuration :audit :actions]))
+        eid (id/extract entity)]
+    (-> (reduce
+         (fn [entity [action column label type stamp]]
+           (if-not (contains? actions action)
+             entity
+             (let [attrs (vec (:attributes entity))
+                   idx (first (keep-indexed (fn [i a] (when (= column (some-> (:name a) column-of)) i)) attrs))]
+               (assoc entity :attributes
+                      (cond
+                        (nil? idx) (conj attrs (map->ERDEntityAttribute
+                                                (merge (id/derive-id eid column)
+                                                       {:name label :type type :active true :seq (count attrs)
+                                                        :constraint "optional" :configuration {:stamp stamp}})))
+                        (= type (:type (attrs idx))) (update attrs idx #(-> %
+                                                                             (assoc :active true)
+                                                                             (assoc-in [:configuration :stamp] stamp)))
+                        :else attrs)))))
+         entity
+         audit-stamps)
+        (update :configuration (fn [c]
+                                 (let [audit (not-empty (dissoc (:audit c) :actions))]
+                                   (not-empty (if audit (assoc c :audit audit) (dissoc c :audit)))))))))
+
+(defn upgrade-model
+  "`model` in the current format: entity `:audit :actions` become stamp attributes (format 3)."
+  [model]
+  (some-> model
+          (update :entities #(reduce-kv (fn [m k e] (assoc m k (upgrade-entity e))) (empty %) %))
+          (assoc :version model-format)))
 
 (defn audit-persist?
   "True iff this entity opts into audit-plug persistence."
@@ -1071,12 +1136,11 @@
      (paths->id-set paths)))
 
 (defn entity-active-attribute?
-  "Is attr-id an active attribute of entity? Includes synthetic audit
-   who-columns."
+  "Is attr-id an active attribute of entity?"
   [entity attr-id]
   (boolean
    (some #(and (:active %) (= attr-id (id/extract %)))
-         (concat (:attributes entity) (audit-ref-attrs entity)))))
+         (:attributes entity))))
 
 (defn validate-guard-paths
   "Validates guard conditions against current model state — a dangling one drops
@@ -1251,40 +1315,44 @@
 
 (defn discover-relation-paths*
   "BFS for :relation paths (ending at the first IAM entity) and :hybrid paths
-   (relations then a ref attr); no entity repeats on a path, a clone counts as
-   its original."
+   (relations then a ref attr); no entity repeats on a path except through one
+   tree or self-clone hop, a clone counts as its original."
   [model entity iam-uuids max-depth start-idx]
   (let [iam-entity-ids (set (vals iam-uuids))]
     (loop [queue [{:entity entity
                    :steps []
-                   :visited #{(entity-origin entity)}}]
+                   :visited #{(entity-origin entity)}
+                   :self-hop? false}]
            paths []
            path-idx start-idx]
       (if (or (empty? queue) (>= (count paths) max-guard-paths))
         (vec (take max-guard-paths paths))
-        (let [{:keys [entity steps visited]} (first queue)
+        (let [{:keys [entity steps visited self-hop?]} (first queue)
               remaining (rest queue)
               current-depth (count steps)]
           (if (>= current-depth max-depth)
             (recur remaining paths path-idx)
-            (let [relations (cond-> (vec (focus-entity-relations model entity))
-                              (:original entity)
-                              (into (focus-entity-relations model (get-entity model (:original entity)))))
+            (let [relations (focus-entity-relations model (get-entity model (entity-origin entity)))
                   new-items
                   (reduce
                    (fn [acc relation]
                      (let [target-entity (:to relation)
                            target-id (id/extract target-entity)
                            origin-id (entity-origin target-entity)
+                           self-clone? (self-clone-relation? relation)
+                           self? (or (recursive-relation? relation)
+                                     (and self-clone? (not-empty (:to-label relation))))
                            relation-label (or (:to-label relation) (:from-label relation) "")]
-                       (if (or (contains? visited origin-id)
+                       (if (or (and (contains? visited origin-id)
+                                    (not (and self? (not self-hop?))))
                                (false? (:active relation))
                                (false? (:active target-entity)))
                          acc
-                         (let [new-step {:relation-id (id/extract relation)
-                                         :label relation-label
-                                         :entity-id target-id
-                                         :entity-name (:name target-entity)}
+                         (let [new-step (cond-> {:relation-id (id/extract relation)
+                                                 :label relation-label
+                                                 :entity-id target-id
+                                                 :entity-name (:name target-entity)}
+                                          self-clone? (assoc :inverted? (inverted-relation? relation)))
                                new-steps (conj steps new-step)
                                new-visited (conj visited origin-id)
                                ref-types #{"user" "group" "role"}
@@ -1324,7 +1392,8 @@
                                new-queue (cond-> (:queue acc)
                                            (not is-iam?) (conj {:entity target-entity
                                                                 :steps new-steps
-                                                                :visited new-visited}))]
+                                                                :visited new-visited
+                                                                :self-hop? (or self-hop? self?)}))]
                            (assoc acc :paths new-paths :queue new-queue)))))
                    {:paths [] :queue []}
                    relations)]

@@ -173,7 +173,6 @@
                             (update :from (partial dataset/get-entity this))
                             (update :to (partial dataset/get-entity this)))]
             (cond-> r
-              (looking-for from) (conj relation')
-              (looking-for to) (conj relation'))))
+              (or (looking-for from) (looking-for to)) (conj relation'))))
         []
         (vals relations)))))

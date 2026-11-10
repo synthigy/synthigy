@@ -10,7 +10,7 @@
 ;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.files.guard
-  "The data API reads files and folders and links other records to them; only /files creates, changes or deletes them."
+  "The data API reads files, folders and their links and links other records to files and folders; only /files creates, changes or deletes them."
   (:require
    [clojure.string :as str]
    [next.jdbc :as jdbc]
@@ -59,7 +59,7 @@
 (def read-only-problem
   {:code "ENGINE_OWNED"
    :rule "files_read_only"
-   :message "Files and folders are created, changed and deleted through /files; the data API reads them and links records to them."})
+   :message "Files, folders and file links are created, changed and deleted through /files; the data API reads them and links records to files and folders."})
 
 (defn problem-ex [{:keys [message] :as problem}]
   (ex-info message (dissoc problem :message)))
@@ -78,15 +78,15 @@
                          {:builder-fn rs/as-unqualified-lower-maps}))))
 
 (defn owned-relations
-  "Relation ids only the module links and unlinks: a file's folder, a folder's parent and the access lists."
+  "Relation ids only the module links and unlinks: a file's folder, a folder's parent, the access lists and a link's file."
   []
-  (into #{} (map id/relation) (into [:files/file->folder :files/folder->parent] (map peek) model/acl-relations)))
+  (into #{} (map id/relation) (into [:files/file->folder :files/folder->parent :files/link->file] (map peek) model/acl-relations)))
 
 (defn attribute-columns [entity-key]
   (into #{} (map #(keyword (naming/normalize-name (:name %)))) (:attributes (model/entity entity-key))))
 
 (defn rows-changed?
-  "True when `analysis` creates a file or folder or writes one of their attributes."
+  "True when `analysis` creates a file, folder or link or writes one of their attributes."
   [analysis tx]
   (some (fn [entity-key]
           (let [table (naming/entity->table-name (model/entity entity-key))
@@ -96,7 +96,7 @@
             (or (some #(some columns (keys %)) rows)
                 (some (complement :xid) rows)
                 (not= (count (set xids)) (count (existing-xids tx table (distinct xids)))))))
-        [:files/file :files/folder]))
+        (filter model/entity [:files/file :files/folder :files/link])))
 
 (defn relations-written?
   "True when `analysis` links or clears a file's folder, a folder's parent or an access list."
@@ -108,7 +108,7 @@
               (concat (:relations/one analysis) (:relations/many analysis))))))
 
 (defn assert-write!
-  "Refuse a principal's write that creates or changes a file or folder or one of the module's relations; links to existing ones pass."
+  "Refuse a principal's write that creates or changes a file, folder or link or one of the module's relations; links to existing files and folders pass."
   [analysis tx]
   (when (and (not (module-write?))
              (or (rows-changed? analysis tx) (relations-written? analysis)))
@@ -116,7 +116,7 @@
   analysis)
 
 (defn assert-delete!
-  "Refuse a principal's delete or purge of a file or folder."
+  "Refuse a principal's delete or purge of a file, folder or link."
   [data]
   (when-not (module-write?)
     (throw (problem-ex read-only-problem)))
@@ -145,4 +145,13 @@
   (assert-slice! relations))
 
 (defmethod enhance/slice [Object (id/entity :files/file :xid)] [_ _ relations _]
+  (assert-slice! relations))
+
+(defmethod enhance/write [Object (id/entity :files/link :xid)] [_ _ analysis tx]
+  (assert-write! analysis tx))
+
+(defmethod enhance/delete [Object (id/entity :files/link :xid)] [_ _ data _]
+  (assert-delete! data))
+
+(defmethod enhance/slice [Object (id/entity :files/link :xid)] [_ _ relations _]
   (assert-slice! relations))

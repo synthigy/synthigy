@@ -885,7 +885,7 @@
          :options (mapv (fn [t] {:label t :type "type"}) types)}))))
 
 (defn xsql-order-restriction-completion
-  "Attribute-only options inside an XSQL `?name[:type](...)` restriction set."
+  "Attribute and operation-alias options inside an XSQL `?name[:type](...)` restriction set."
   [^String body offset schema op]
   (let [open (loop [i (dec offset) depth 0]
                (cond
@@ -897,9 +897,11 @@
                (re-find #"\?[a-z_][a-z0-9_]*\??(?::[a-zA-Z]+)?$" (subs body 0 open)))
       (let [r     (complete-impl/complete {:source body :offset offset :schema schema
                                            :root-entity nil :op op})
-            attrs (filterv #(= "attribute" (:type %)) (:options r))]
-        (when (seq attrs)
-          (assoc r :options attrs))))))
+            opts  (into (filterv #(= "attribute" (:type %)) (:options r))
+                        (map (fn [a] {:label a :type "property" :section "Operations" :detail "operation"}))
+                        (sort (complete-impl/aliases-at body offset)))]
+        (when (seq opts)
+          (assoc r :options opts))))))
 
 (defn complete
   "Context-aware completion across a program, mapped back to full-buffer offsets."

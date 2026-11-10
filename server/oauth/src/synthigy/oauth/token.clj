@@ -116,7 +116,7 @@
   (let [rel (token-relation token-key)
         audience-where (case audience
                          :any nil
-                         nil {:audience :is_null}
+                         nil {:audience {:_is_null true}}
                          {:audience {:_eq audience}})]
     (->> (core/session-row session
                            {rel [{:selections {:value nil}

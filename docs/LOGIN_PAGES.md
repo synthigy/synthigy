@@ -12,7 +12,7 @@ A bundle is a zip with `index.html` at its root, uploaded in the console under
 Bundle `<name>` is served at `/login/<name>/`.
 
 - `default` serves every client without its own bundle, and holds the `device.html`,
-  `status.html` and `error.html` pages.
+  `status.html`, `error.html`, `files.html` and `account.html` pages.
 - An app's **Login page** setting names its own bundle. Inactive or missing falls
   back to `default`, then to the built-in page.
 
@@ -68,6 +68,28 @@ everything in the query.
 - **status.html** — where a flow ends with no app to return to: a device login, a
   cancelled sign-in, an expired code. `?value=success|error|canceled`, plus `error`,
   `flow`, `user`, `client_name` and `provider` when they apply.
+
+## files.html
+
+Also in the `default` bundle. A browser that opens a private or missing file link
+(`/files/<id>`, `/files/path/...`) is redirected here with `?error=unauthorized`
+and `uri`, the link it opened. Static and read-only, like error.html. Without it,
+the built-in "Sign-in required" page answers with 401. Requests that aren't a
+browser opening a page (no `Accept: text/html`, or an `Authorization` header) get
+the JSON error as before.
+
+## account.html
+
+Also in the `default` bundle. A browser opening `/oauth/account` is redirected
+here, with `done` or `error` from the last action and the app's `client_id` and
+`return` (when an app sent the user) in the query; without it, the
+built-in account page answers. The page calls the account API
+([OAUTH.md](OAUTH.md#your-account)) with `fetch`: it is served from the engine's
+own origin, so the sign-in cookie goes along and the cross-site check passes.
+Signed out, `GET /oauth/account` answers `401` with `login_url`: send the browser
+there, and it comes back to `/oauth/account` once signed in. Pass `client_id` and
+`return` on to `GET /oauth/account`: when they check out, the answer has
+`back: {name, uri}` for a "Back to <app>" link.
 
 ## device.html
 

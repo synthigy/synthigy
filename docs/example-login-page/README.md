@@ -18,6 +18,8 @@ the built-in page. See [LOGIN_PAGES.md](../LOGIN_PAGES.md) for the full contract
 | `index.html` | `/login/<name>/` (login)           | posts `username`/`password` **+ the `state` blob** to `/oauth/login` (JSON mode, so errors stay on-page); renders federated "Continue with X" buttons from `/oauth/federated/providers`; a cancel link (`/oauth/login?state=…&cancel=1`) ends the flow |
 | `error.html` | `/login/default/error.html`       | renders the error from `?error=` / `?secure=` (+ `client-name`, `redirect-uri`, `invalid-value`) |
 | `status.html`| `/login/default/status.html` | final outcome when there's no app to return to — every `?error=` code mapped |
+| `files.html` | `/login/default/files.html`       | a browser opened a private or missing file link: `?error=unauthorized` + `uri` |
+| `account.html` | `/login/default/account.html`   | the signed-in user's own account: display name, password, sign-in methods, sessions — all through `fetch` to `/oauth/account`; signed out, it follows `login_url` |
 | `device.html`| `/login/default/device.html`       | entry (type the code → `user_code`) and confirm (cookie carries state, POST `action`) — same segmented code boxes as the built-in |
 
 ## The look

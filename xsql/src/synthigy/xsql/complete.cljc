@@ -19,14 +19,22 @@
 ;; ── Constants ────────────────────────────────────────────────────────────
 
 (def ^:private meta-keys ["limit" "offset" "order by" "distinct" "join"])
-(def ^:private agg-fns ["avg" "sum" "min" "max"])
+(def ^:private operation-fns ["count" "sum" "avg" "min" "max"])
+
+(def ^:private operation-field-types
+  {"sum" #{"number"}
+   "avg" #{"number"}
+   "min" #{"number" "timestamp" "string"}
+   "max" #{"number" "timestamp" "string"}})
+
+(def ^:private uncountable-types #{"json" "hashed" "encrypted"})
 
 (def ^:private ops-by-type
   {"string"    ["=" "!=" "<" "<=" ">" ">=" "like" "ilike" "in" "not in" "is" "is not null"]
    "number"    ["=" "!=" "<" "<=" ">" ">=" "in" "not in" "is"]
    "boolean"   ["=" "!=" "is"]
    "timestamp" ["=" "!=" "<" "<=" ">" ">=" "in" "not in" "is"]
-   "enum"      ["=" "!=" "in" "not in" "is"]})
+   "enum"      ["=" "!=" "like" "ilike" "in" "not in" "is"]})
 
 ;; ── Lexical helpers ──────────────────────────────────────────────────────
 
@@ -198,7 +206,7 @@
   "Relation nodes starting before `offset`, as `{:name :indent :from :kind}` entries."
   [root source offset]
   (let [acc (volatile! [])
-        rel-tags #{:relation :count-child :agg-relation}]
+        rel-tags #{:relation}]
     (letfn [(walk [n]
               (when (ast/container? n)
                 (when (and (rel-tags (:node n))
@@ -335,12 +343,6 @@
     (when-let [indent-tok (ast/find-child block-node :indent)]
       (current-line-indent-text source (first (:span indent-tok))))))
 
-(defn agg-body-indent
-  "Column of an :agg-relation body's first line (no :block wrapper)."
-  [agg-node source]
-  (when-let [indent-tok (ast/find-child agg-node :indent)]
-    (current-line-indent-text source (first (:span indent-tok)))))
-
 (defn entity-stack-from-ancestors
   "Push relation-target entities for ancestors whose block/parens contain offset, honoring the cursor-column hint."
   [ancestors offset source schema entity-stack]
@@ -350,7 +352,7 @@
     (reduce
       (fn [stack node]
         (cond
-          (#{:relation :count-child} (:node node))
+          (= :relation (:node node))
           (let [rel-name (relation-name-of node)
                 parent   (peek stack)
                 rel-def  (get-in parent [:relations rel-name])
@@ -363,18 +365,6 @@
             (if (and target
                      (or in-block? in-parens?)
                      (not (and in-block? (outdented? body-ind))))
-              (conj stack target)
-              stack))
-
-          (= :agg-relation (:node node))
-          (let [rel-name (relation-name-of node)
-                parent   (peek stack)
-                rel-def  (get-in parent [:relations rel-name])
-                target   (when rel-def (get-in schema [:entities (:target rel-def)]))
-                ind      (ast/find-child node :indent)
-                in-body? (and ind (> offset (first (:span ind))))
-                body-ind (agg-body-indent node source)]
-            (if (and target in-body? (not (outdented? body-ind)))
               (conj stack target)
               stack))
 
@@ -434,7 +424,7 @@
                                         (:children c))]
                       (vswap! attrs conj (:text id)))
 
-                    (#{:relation :count-child} (:node c))
+                    (= :relation (:node c))
                     (when-not (some #(= :alias (:node %)) (:children c))
                       (when-let [id (some #(when (= :identifier (:node %)) %)
                                           (:children c))]
@@ -443,41 +433,6 @@
             (filter #(= :statement (:node %))
                     (:children scope-parent))))
     {:attrs @attrs :rels @rels}))
-
-(defn unaliased-child-names
-  "Bare (unaliased) child names of a `_count`/`_agg` body."
-  [block-node child-tag offset]
-  (into #{}
-        (keep (fn [c]
-                (let [[from to] (:span c)]
-                  (when (and (= child-tag (:node c))
-                             (not (and (>= offset from) (< offset to)))
-                             (not (some #(= :alias (:node %)) (:children c))))
-                    (some #(when (= :identifier (:node %)) (:text %))
-                          (:children c))))))
-        (:children block-node)))
-
-(defn agg-attr-names-of
-  "Attr names already aggregated in an :agg-relation body, excluding the cursor's line."
-  [agg-rel-node offset]
-  (into #{}
-        (keep (fn [c]
-                (let [[from to] (:span c)]
-                  (when (and (= :agg-attr (:node c))
-                             (not (and (>= offset from) (< offset to))))
-                    (some #(when (= :identifier (:node %)) (:text %))
-                          (:children c))))))
-        (:children agg-rel-node)))
-
-(defn agg-fn-names-of
-  "Fn names already picked on an :agg-attr line (`value: avg, sum`)."
-  [agg-attr-node]
-  (into #{}
-        (keep (fn [c]
-                (when (= :agg-fn (:node c))
-                  (some #(when (= :identifier (:node %)) (:text %))
-                        (:children c)))))
-        (:children agg-attr-node)))
 
 (defn last-leaf-of
   [n]
@@ -507,19 +462,31 @@
           (subs source (inc i) offset)
           (recur (dec i)))))))
 
-(defn innermost-open-paren
-  "Position of the innermost unmatched `(` before `offset`, or nil."
+(defn open-paren-stack
+  "Positions of the unmatched `(` before `offset`, outermost first."
   [^String source offset]
   (loop [i 0 stack []]
     (if (>= i offset)
-      (peek stack)
+      stack
       (let [c (char-at source i)]
         (recur (inc i) (cond (= c "(") (conj stack i)
                              (= c ")") (if (seq stack) (pop stack) stack)
                              :else stack))))))
 
+(defn innermost-open-paren
+  "Position of the innermost unmatched `(` before `offset`, or nil."
+  [^String source offset]
+  (peek (open-paren-stack source offset)))
+
 (def ^:private order-kw-re #"^\s*(?:_order_by|order\s+by)(?=\s|$)")
-(def ^:private order-spec-re #"^\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:asc|desc))?\s*$")
+(def ^:private order-spec-re #"^\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\s+(?:asc|desc))?\s*$")
+
+(defn order-path-prefix
+  "Segments typed before the last `.` of the `order by` column at `offset` (`studio.na|` → [\"studio\"])."
+  [^String source offset]
+  (let [word (re-find #"[A-Za-z0-9_.]*$" (subs (or source "") 0 offset))
+        segs (str/split word #"\." -1)]
+    (vec (remove str/blank? (pop (vec segs))))))
 
 (defn order-by-slot
   "`:attr` or `:dir` slot of an `order by` spec list at `offset`, else nil."
@@ -557,15 +524,121 @@
              (#{"null" "true" "false"} (:text leaf))))))
 
 (defn value-slot
-  "Attribute name when `offset` sits where an `=`, `!=` or `in (…)` value goes, and whether inside an open quote."
+  "Attribute path when `offset` sits where an `=`, `!=` or `in (…)` value goes, and whether inside an open quote."
   [source offset]
   (let [t (subs source (line-start-offset source offset) offset)
-        eq (re-find #"([A-Za-z_][A-Za-z0-9_]*)\s*(?:!=|=)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)
-        in (re-find #"([A-Za-z_][A-Za-z0-9_]*)\s+(?:not\s+)?in\s*\(((?:\s*(?:\"[^\"]*\"|[^\s,()\"]+)\s*,)*)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)]
+        eq (re-find #"([A-Za-z_][A-Za-z0-9_.]*)\s*(?:!=|=)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)
+        in (re-find #"([A-Za-z_][A-Za-z0-9_.]*)\s+(?:not\s+)?in\s*\(((?:\s*(?:\"[^\"]*\"|[^\s,()\"]+)\s*,)*)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)]
     (cond
-      eq {:attr (nth eq 1) :in-string? (str/starts-with? (nth eq 2) "\"")}
-      in {:attr (nth in 1) :in-string? (str/starts-with? (nth in 3) "\"")
+      eq {:path (nth eq 1) :in-string? (str/starts-with? (nth eq 2) "\"")}
+      in {:path (nth in 1) :in-string? (str/starts-with? (nth in 3) "\"")
           :taken (into #{} (map second) (re-seq #"\"([^\"]*)\"" (nth in 2)))})))
+
+(defn path-prefix-target
+  "Entity reached from `entity` over every complete segment of a dotted `path-text` (the last, partial one is skipped)."
+  [path-text entity schema]
+  (reduce (fn [e seg]
+            (if-let [t (some->> (get-in e [:relations seg :target]) (conj [:entities]) (get-in schema))]
+              t
+              (reduced nil)))
+          entity
+          (butlast (str/split path-text #"\." -1))))
+
+(defn path-attr
+  "Attribute a dotted `path-text` ends on, walked from `entity`."
+  [path-text entity schema]
+  (get-in (path-prefix-target path-text entity schema)
+          [:attributes (last (str/split path-text #"\." -1))]))
+
+;; ── Aggregate calls (`alias: count(rel …)`) ─────────────────────────────
+
+(def ^:private call-head-re #"[ \t]*[a-z_][a-z0-9_]*[ \t]*:[ \t]*([a-z_]+)[ \t]*")
+
+(defn call-at
+  "`{:fn :open}` of the aggregate call whose parens enclose `offset`, or nil."
+  [^String source offset]
+  (some (fn [p]
+          (when-let [[_ f] (re-matches call-head-re (subs source (line-start-offset source p) p))]
+            (when (some #{f} operation-fns) {:fn f :open p})))
+        (rseq (open-paren-stack source offset))))
+
+(defn aggregate-fn-slot?
+  "True when the cursor sits where an operation name goes: `alias: |`."
+  [^String source offset]
+  (boolean (re-matches #"[ \t]*[a-z_][a-z0-9_]*[ \t]*:[ \t]*[a-z_]*"
+                       (subs source (line-start-offset source offset) offset))))
+
+(defn call-scope-entity
+  "Entity whose relations an aggregate call at `open` reads: its line's indent scope, else the AST stack."
+  [tree source open schema root-entity entity-stack]
+  (let [ind (line-start-indent source open)]
+    (or (when (pos? ind)
+          (enclosing-relation-target-by-indent tree source open ind schema root-entity))
+        (peek entity-stack)
+        (get-in schema [:entities root-entity]))))
+
+(defn call-context
+  "Completion ctx inside an aggregate call, or nil to leave the cursor to the generic branches."
+  [tree source offset schema root-entity entity-stack]
+  (when-let [{f :fn p :open} (call-at source offset)]
+    (let [scope (call-scope-entity tree source p schema root-entity entity-stack)
+          stack [scope]
+          inner (subs source (inc p) offset)
+          parts (str/split inner #",|\(|\)|\band\b|\bor\b" -1)
+          rel   (second (re-find #"([a-z_][a-z0-9_]*)" (str/replace inner #"^\s*distinct\s+" "")))
+          path  "[a-z_][a-z0-9_]*(?:\\.[a-z_][a-z0-9_]*)"]
+      (if (= 1 (count parts))
+        (let [distinct? (boolean (re-find #"^\s*distinct\s+" inner))
+              body      (str/replace inner #"^\s*(?:distinct\s+)?" "")
+              shortcut? (and (= "count" f) (not distinct?))]
+          (cond
+            (re-matches #"[a-z0-9_]*" body)
+            {:kind :call-relation :entity-stack stack :fn f :distinct? distinct?
+             :offer-distinct? shortcut?}
+
+            (re-matches #"[a-z_][a-z0-9_]*\.[a-z0-9_]*" body)
+            {:kind :call-field :entity-stack stack :fn f :distinct? distinct?
+             :target (path-prefix-target body scope schema)}
+
+            (re-matches (re-pattern (str path "+\\.[a-z0-9_]*")) body)
+            (if shortcut?
+              {:kind :path-continuation :entity-stack stack
+               :path-target-entity (path-prefix-target body scope schema)}
+              {:kind :call-none :entity-stack stack})
+
+            (re-matches (re-pattern (str path "+\\s+")) body)
+            (if shortcut?
+              {:kind :after-attr-in-pred :entity-stack stack :attr-def (path-attr (str/trim body) scope schema)}
+              {:kind :call-none :entity-stack stack})))
+        (let [tail (peek parts)]
+          (cond
+            (re-find #"\)\s*$" inner)
+            {:kind :after-predicate-value :entity-stack stack}
+
+            (re-matches #"\s*[a-z0-9_]*" tail)
+            {:kind :call-filter-head :entity-stack stack :relation rel}
+
+            (re-matches (re-pattern (str "\\s*" path "*\\.[a-z0-9_]*")) tail)
+            {:kind :path-continuation :entity-stack stack
+             :path-target-entity (path-prefix-target (str/trim tail) scope schema)}
+
+            (re-matches (re-pattern (str "\\s*" path "+\\s+")) tail)
+            {:kind :after-attr-in-pred :entity-stack stack :attr-def (path-attr (str/trim tail) scope schema)}))))))
+
+(defn order-scope-aliases
+  "Aggregate aliases of the level whose parens hold the cursor."
+  [tree resolved ancestors]
+  (compile/scope-aggregate-aliases
+   (if-let [rel (enclosing-of-tag resolved ancestors :relation)]
+     (ast/find-child rel :block)
+     tree)))
+
+(defn aliases-at
+  "Aggregate aliases of the level whose parens hold `offset` in `source`."
+  [source offset]
+  (let [tree (parser/parse (or source ""))
+        [resolved ancestors] (innermost-with-ancestors tree offset (or source ""))]
+    (order-scope-aliases tree resolved ancestors)))
 
 (defn context-at
   [tree resolved ancestors source offset schema root-entity]
@@ -590,11 +663,13 @@
                                          (= "\"" (subs t (dec (count t)))))))
         order-slot (order-by-slot source offset)
         slot (value-slot source offset)
-        slot-attr (when slot (get-in current-entity [:attributes (:attr slot)]))]
+        slot-attr (when slot (path-attr (:path slot) current-entity schema))]
     (cond
       ;; `order by` branches must stay first — the predicate branches would offer operators after the column
       (= :attr order-slot)
-      {:kind :order-attr :entity-stack entity-stack}
+      {:kind :order-attr :entity-stack entity-stack
+       :path-prefix (order-path-prefix source offset)
+       :aliases (order-scope-aliases tree resolved ancestors)}
 
       (= :dir order-slot)
       {:kind :order-dir :entity-stack entity-stack}
@@ -663,6 +738,7 @@
                               (if (and (>= j 0) (ident-char? (char-at source j)))
                                 (recur (dec j)) (inc j)))]
                   (get-in current-entity [:attributes (subs source start end)]))))
+            call-ctx (call-context tree source offset schema root-entity entity-stack)
             joiner-stmt (when (and in-args?
                                     (not= prev-char "(") (not= prev-char ","))
                           (when-let [al (or (enclosing-of-tag resolved ancestors :arg-list)
@@ -721,6 +797,9 @@
                      (complete-predicate-stmt? tail)))))
           {:kind :after-predicate-value :entity-stack entity-stack}
 
+          call-ctx
+          call-ctx
+
           (or (enclosing-of-tag resolved ancestors :scalar-filter)
               (when (pos? (open-paren-depth source offset))
                 (when-let [op-pos (innermost-open-paren source offset)]
@@ -738,39 +817,9 @@
               {:kind :value-suggestion :entity-stack entity-stack :attr-def attr-def}
               {:kind :after-attr-in-pred :entity-stack entity-stack :attr-def attr-def}))
 
-          (enclosing-of-tag resolved ancestors :agg-attr)
-          (let [agg-attr-node (enclosing-of-tag resolved ancestors :agg-attr)
-                attr-id       (ast/find-child agg-attr-node :identifier)
-                in-attr-name? (or (nil? attr-id)
-                                  (< offset (second (:span attr-id))))]
-            (if in-attr-name?
-              {:kind :agg-attr-name :entity-stack entity-stack
-               :used-attrs (if-let [ar (enclosing-of-tag resolved ancestors :agg-relation)]
-                             (agg-attr-names-of ar offset) #{})}
-              {:kind :agg-fn        :entity-stack entity-stack
-               :used-fns (agg-fn-names-of agg-attr-node)}))
+          (aggregate-fn-slot? source offset)
+          {:kind :aggregate-fn :entity-stack entity-stack}
 
-          (and (enclosing-of-tag resolved ancestors :count-block)
-               (not parens))
-          {:kind :count-block-body :entity-stack entity-stack
-           :used-rels (unaliased-child-names
-                        (enclosing-of-tag resolved ancestors :count-block)
-                        :count-child offset)}
-
-          (and (enclosing-of-tag resolved ancestors :agg-block)
-               (not (enclosing-of-tag resolved ancestors :agg-attr))
-               (not parens)
-               (not= :agg-relation
-                     (enclosing-relation-kind-by-indent
-                       tree source offset
-                       (current-line-indent-text source offset)
-                       schema root-entity)))
-          {:kind :agg-block-body :entity-stack entity-stack
-           :used-rels (unaliased-child-names
-                        (enclosing-of-tag resolved ancestors :agg-block)
-                        :agg-relation offset)}
-
-          ;; must stay below the agg/count branches — `value |` in an _agg body is the `value: avg` slot
           inline-attr-after-space
           {:kind :after-attr-in-pred
            :entity-stack entity-stack
@@ -782,12 +831,9 @@
               (and (pos? line-indent) schema root-entity)
               (if-let [target (enclosing-relation-target-by-indent
                                 tree source offset line-indent schema root-entity)]
-                (let [rel-kind (enclosing-relation-kind-by-indent
-                                 tree source offset line-indent schema root-entity)]
-                  {:kind :block-start :entity-stack [target]
-                   :marker-before marker-before
-                   :siblings siblings
-                   :in-agg-body? (= :agg-relation rel-kind)})
+                {:kind :block-start :entity-stack [target]
+                 :marker-before marker-before
+                 :siblings siblings}
                 (if (enclosing-of-tag resolved ancestors :block)
                   {:kind :block-start :entity-stack entity-stack
                    :marker-before marker-before
@@ -818,24 +864,24 @@
   (sort (keys (:relations entity-def))))
 
 (defn many-relation-keys
-  "Sorted to-many relation keys, the only kind `_count`/`_agg` can aggregate."
+  "Sorted to-many relation keys, the only kind an operation can read."
   [entity-def]
   (->> (:relations entity-def)
        (filter (fn [[_ r]] (= "many" (:cardinality r))))
        (map first)
        sort))
 
-(defn numeric-attr-options
-  "Number-typed attribute options minus `used`, for `_agg` relation bodies."
-  ([entity-def] (numeric-attr-options entity-def #{}))
-  ([entity-def used]
-   (when entity-def
-     (->> (:attributes entity-def)
-          (filter (fn [[_ a]] (= "number" (:type a))))
-          (map first)
-          (remove used)
-          sort
-          (mapv (fn [a] {:label a :type "attribute" :section "Attributes"}))))))
+(defn operation-attr-options
+  "Attributes of `target` that operation `f` can read."
+  [target f distinct?]
+  (let [allowed (operation-field-types f)]
+    (->> (:attributes target)
+         (filter (fn [[_ a]] (if distinct?
+                               (not (uncountable-types (:type a)))
+                               (and allowed (allowed (:type a))))))
+         (map first)
+         sort
+         (mapv (fn [a] {:label a :type "attribute" :section "Attributes"})))))
 
 (defn alias-template-option
   "Snippet option inserting `alias:rel` for a relation already projected bare at this scope."
@@ -900,12 +946,9 @@
         (none-scope-options entity-def (:siblings ctx))
 
         :else
-        (concat
-          (when entity-def
-            (options-for-entity entity-def {:relation-prefix "->"
-                                            :siblings (:siblings ctx)}))
-          [{:label "_count" :type "keyword" :section "Operators" :detail "aliased counters"  :apply :block-opener}
-           {:label "_agg"   :type "keyword" :section "Operators" :detail "aggregates"        :apply :block-opener}]))
+        (when entity-def
+          (options-for-entity entity-def {:relation-prefix "->"
+                                          :siblings (:siblings ctx)})))
 
       :root-entity-line
       (mapv (fn [e] {:label e :type "class" :section "Entities" :detail "root entity"})
@@ -913,9 +956,6 @@
 
       :block-start
       (cond
-        (:in-agg-body? ctx)
-        (numeric-attr-options entity-def)
-
         marker
         (bare-relation-options entity-def (:siblings ctx))
 
@@ -923,12 +963,9 @@
         (none-scope-options entity-def (:siblings ctx))
 
         :else
-        (concat
-          (when entity-def
-            (options-for-entity entity-def {:relation-prefix "->"
-                                            :siblings (:siblings ctx)}))
-          [{:label "_count" :type "keyword" :section "Operators" :detail "aliased counters" :apply :block-opener}
-           {:label "_agg"   :type "keyword" :section "Operators" :detail "aggregates"       :apply :block-opener}]))
+        (when entity-def
+          (options-for-entity entity-def {:relation-prefix "->"
+                                          :siblings (:siblings ctx)})))
 
       :arg-list-start
       (concat
@@ -969,37 +1006,53 @@
       (when-let [target (:path-target-entity ctx)]
         (options-for-entity target {:relation-detail "path hop"}))
 
-      ;; `_count`/`_agg` body: bare, to-many relation names only.
-      (:count-block-body :agg-block-body)
-      (when entity-def
-        (let [used (:used-rels ctx #{})
-              rels (many-relation-keys entity-def)
-              ;; _agg additionally needs a numeric attr on the target.
-              rels (if (= :agg-block-body (:kind ctx))
-                     (filterv
-                       (fn [r]
-                         (let [target-name (get-in entity-def [:relations r :target])
-                               target      (get-in schema [:entities target-name])]
-                           (boolean (some (fn [[_ a]] (= "number" (:type a)))
-                                          (:attributes target)))))
-                       rels)
-                     rels)]
-          (mapv (fn [r]
-                  (if (used r)
-                    (alias-template-option r "")
-                    {:label r :type "relation" :section "Relations"}))
-                rels)))
-
-      :agg-attr-name
-      (numeric-attr-options entity-def (:used-attrs ctx #{}))
-
-      :agg-fn
-      (mapv (fn [f] {:label f :type "function"})
-            (remove (:used-fns ctx #{}) agg-fns))
-
       :order-attr
-      (mapv (fn [a] {:label a :type "attribute" :section "Attributes"})
-            (sorted-attr-keys entity-def))
+      (let [prefix (:path-prefix ctx)
+            target (reduce (fn [ent seg]
+                             (when-let [rel (get-in ent [:relations seg])]
+                               (get-in schema [:entities (:target rel)])))
+                           entity-def prefix)]
+        (when target
+          (concat
+            (mapv (fn [a] {:label a :type "attribute" :section "Attributes"})
+                  (sorted-attr-keys target))
+            (mapv (fn [r] {:label r :type "relation" :section "Relations" :detail "sort by its attribute: ."})
+                  (sort (keys (:relations target))))
+            (when (empty? prefix)
+              (mapv (fn [a] {:label a :type "property" :section "Operations" :detail "operation"})
+                    (sort (:aliases ctx)))))))
+
+      :aggregate-fn
+      [{:label "count" :type "function" :section "Operations" :detail "related rows"}
+       {:label "sum"   :type "function" :section "Operations" :detail "sum of a number field"}
+       {:label "avg"   :type "function" :section "Operations" :detail "average of a number field"}
+       {:label "min"   :type "function" :section "Operations" :detail "smallest value"}
+       {:label "max"   :type "function" :section "Operations" :detail "largest value"}]
+
+      :call-relation
+      (when entity-def
+        (concat
+          (mapv (fn [r] {:label r :type "relation" :section "Relations"})
+                (filterv (fn [r]
+                           (let [target (get-in schema [:entities (get-in entity-def [:relations r :target])])]
+                             (or (and (= "count" (:fn ctx)) (not (:distinct? ctx)))
+                                 (seq (operation-attr-options target (:fn ctx) (:distinct? ctx))))))
+                         (many-relation-keys entity-def)))
+          (when (:offer-distinct? ctx)
+            [{:label "distinct" :type "keyword" :section "Operators" :detail "count distinct values"}])))
+
+      :call-field
+      (when-let [target (:target ctx)]
+        (if (and (= "count" (:fn ctx)) (not (:distinct? ctx)))
+          (options-for-entity target {:relation-detail "path hop"})
+          (operation-attr-options target (:fn ctx) (:distinct? ctx))))
+
+      :call-filter-head
+      (when-let [r (:relation ctx)]
+        [{:label r :type "relation" :section "Relations" :detail "the operation's relation"}])
+
+      :call-none
+      []
 
       :order-dir
       [{:label "asc"  :type "constant" :detail "ascending"}
@@ -1104,7 +1157,8 @@
 (def ^:private args-kinds
   #{:value-suggestion :after-is :after-is-not :after-not :after-like
     :after-in :arg-list-start :after-attr-in-pred :after-predicate-value
-    :path-continuation :agg-fn :order-attr :order-dir})
+    :path-continuation :order-attr :order-dir
+    :aggregate-fn :call-relation :call-field :call-filter-head :call-none})
 
 (defn scope-path-by-indent
   "Breadcrumb of relation names enclosing the cursor, via the same indent walk that decides scope."
@@ -1199,21 +1253,6 @@
         (case (:kind ctx)
           :root-entity-line
           {:mode :root :entities (vec (sort (keys (:entities schema))))}
-
-          :count-block-body
-          {:mode :scope :entity-def current-entity
-           :siblings {:attrs #{} :rels (:used-rels ctx #{})}
-           :relations-only? true :agg-kind :count :path path :indent indent}
-
-          :agg-block-body
-          {:mode :scope :entity-def current-entity
-           :siblings {:attrs #{} :rels (:used-rels ctx #{})}
-           :relations-only? true :agg-kind :agg :path path :indent indent}
-
-          :agg-attr-name
-          {:mode :scope :entity-def current-entity :numeric-only? true
-           :siblings {:attrs (:used-attrs ctx #{}) :rels #{}}
-           :agg-kind :agg-attr :path path :indent indent}
 
           (if (contains? args-kinds (:kind ctx))
             {:mode :args :path path

@@ -11,7 +11,7 @@
 
 (ns build
   "Uberjar for a chosen backend combo. Combo via SYNTHIGY_COMBO env,
-   e.g. SYNTHIGY_COMBO=engine-sqlite:audit-sqlite:log-sqlite:server-httpkit:server-console. Default build bundles
+   e.g. SYNTHIGY_COMBO=engine-sqlite:audit-sqlite:log-sqlite:server-enso:server-console. Default build bundles
    sources (no AOT). SYNTHIGY_AOT=true compiles every local namespace and
    strips local .clj/.cljc/.cljs from the jar — bytecode-only service
    artifact for GitHub releases; source publishing is Clojars, not this."
@@ -34,7 +34,7 @@
 ;; under synthigy/, not the jar root: b/uber append-merges every dependency's root/META-INF LICENSE and NOTICE into one file
 (def license-files ["LICENSE" "NOTICE.md" "COMMERCIAL.md"])
 
-(def combo (or (System/getenv "SYNTHIGY_COMBO") "engine-postgres:audit-postgres:log-sqlite:server-httpkit:server-console"))
+(def combo (or (System/getenv "SYNTHIGY_COMBO") "engine-postgres:audit-postgres:log-sqlite:server-enso:server-console"))
 (def aot? (= "true" (System/getenv "SYNTHIGY_AOT")))
 (def aliases (mapv keyword (str/split combo #":")))
 (def class-dir "target/classes")
@@ -72,7 +72,7 @@
 ;; core (base :paths — the engine, see deps.edn) has NOTHING baked in beyond
 ;; itself. Everything else composes on top, one strict layer at a time:
 ;;
-;;   core -> server-oauth -> server-core -> {server-httpkit, server-console}
+;;   core -> server-oauth -> server-core -> {server-enso, server-console}
 ;;
 ;; Each module is compiled with the PREVIOUS layer's class dir staged in, and
 ;; ships only what it added (`purge-foreign!`). server-oauth depends on core
@@ -99,7 +99,7 @@
 ;; folders that exist but ship no jar: the compile witness, deprecated CockroachDB,
 ;; the adapters no bundle uses, and DuckDB (source only — its native driver
 ;; would otherwise count as shared and land in core.jar)
-(def unshipped #{:engine-stub :engine-cockroach :server-ring-jetty :server-enso
+(def unshipped #{:engine-stub :engine-cockroach :server-ring-jetty
                  :audit-duckdb :log-duckdb :lib-duckdb})
 
 (defn shipped [dim] (vec (remove unshipped (aliases-of dim))))
@@ -111,7 +111,7 @@
 (def lib-aliases (shipped "lib"))
 (def oauth-aliases [:server-oauth])
 (def server-aliases [:server-oauth :server-core])
-(def leaf-aliases (into [:server-console :server-files]
+(def leaf-aliases (into [:server-console]
                         (remove unshipped (map #(module-alias "server" %) (filter adapter? (impls "server"))))))
 (def core-aliases [])
 

@@ -237,8 +237,9 @@
        (not (core/relation-rbac-enabled? (dataset/deployed-relation relation) direction)) true
        ;; Owning BOTH endpoint entities implies the link.
        (let [[from-e to-e] direction
-             owns? (fn [e] (boolean (not-empty (set/intersection
-                                                roles (get-in *rules* [:entity e :owners])))))]
+             owns? (fn [e] (let [origin (core/entity-origin (dataset/deployed-entity e))]
+                             (boolean (not-empty (set/intersection
+                                                  roles (get-in *rules* [:entity origin :owners]))))))]
          (and from-e to-e (owns? from-e) (owns? to-e)))
        true
        :else (letfn [(ok? [rule]

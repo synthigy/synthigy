@@ -151,9 +151,6 @@
   {:extra-paths ["server/oauth/src" "server/core/src"]
    :extra-deps {dev.synthigy/console {:local/root "server/console"}}}
 
-  :server-files
-  {:extra-paths ["server/files/src" "server/oauth/src" "server/core/src"]}
-
   ;; Adapters — exactly one per classpath, each ships `synthigy.server`.
   :server-httpkit
   {:extra-paths ["server/httpkit/src" "server/oauth/src" "server/core/src"]
@@ -165,7 +162,7 @@
 
   :server-enso
   {:extra-paths ["server/enso/src" "server/oauth/src" "server/core/src"]
-   :extra-deps {com.s-exp/enso {:mvn/version "1.0.0-beta94"}
+   :extra-deps {com.s-exp/enso {:mvn/version "1.0.0-beta111"}
                 ring/ring-core {:mvn/version "1.15.4"}
                 hiccup/hiccup {:mvn/version "2.0.0-RC3"}
                 dev.data-star.clojure/ring {:mvn/version "1.0.0-RC11"}}}
@@ -181,7 +178,7 @@
   ;; =========================================================================
   ;; Development & Testing
   ;; =========================================================================
-  ;; Usage: clj -M:engine-postgres:audit-postgres:log-sqlite:server-httpkit:server-console:dev
+  ;; Usage: clj -M:engine-postgres:audit-postgres:log-sqlite:server-enso:server-console:dev
 
   :dev
   {:extra-paths ["dev" "test" "test/resources"]

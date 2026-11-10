@@ -15,10 +15,10 @@
   (:require [synthigy.embedded :as embedded]))
 
 (def ^:no-doc users-table-op
-  {:op "sql-template", :source "select {user.xid} as xid,\n       {user.name},\n       {user.active},\n       {user.type},\n       count(distinct {user->groups.xid}) as groups,\n       count(distinct {user->roles.xid}) as roles,\n       count(distinct {user->sessions.xid})\n         filter (where {user->sessions.active}) as sessions\nwhere {user.name} ilike ?q?\n  and {user->groups.xid} in ?groups?[]\n  and {user->roles.xid} in ?roles?[]\ngroup by {user.xid}, {user.name}, {user.active}, {user.type}\norder by ?sort:order(name, active, sessions, groups, roles)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "search", :source "@search users-table\nuser (\n  name ilike ?q?\n  and groups.xid in ?groups?[]\n  and roles.xid in ?roles?[],\n  order by ?sort:order(name, active, sessions, groups, roles)=\"name asc\",\n  limit ?limit:int=100,\n  offset ?offset:int=0\n)\n  xid\n  name\n  active\n  type\n  groups: count(groups)\n  roles: count(roles)\n  sessions: count(sessions.active = true)", :entity "user"})
 
 (defn users-table
-  "sql-template console — params: q, groups, roles, sort, limit, offset"
+  "search console — params: q, groups, roles, sort, limit, offset"
   ([] (users-table {}))
   ([{:keys [q groups roles sort limit offset] :as params} & {:as opts}]
    (embedded/run-xsql users-table-op params opts)))
@@ -30,10 +30,10 @@
    (embedded/watch-xsql users-table-op params opts)))
 
 (def ^:no-doc groups-table-op
-  {:op "sql-template", :source "select {user_group.xid} as xid,\n       {user_group.name},\n       {user_group.active},\n       count(distinct {user_group->users.xid}) as users,\n       count(distinct {user_group->roles.xid}) as roles\nwhere {user_group.name} ilike ?q?\ngroup by {user_group.xid}, {user_group.name}, {user_group.active}\norder by ?sort:order(name, active, users, roles)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "search", :source "@search groups-table\nuser_group (\n  name ilike ?q?,\n  order by ?sort:order(name, active, users, roles)=\"name asc\",\n  limit ?limit:int=100,\n  offset ?offset:int=0\n)\n  xid\n  name\n  active\n  users: count(users)\n  roles: count(roles)", :entity "user_group"})
 
 (defn groups-table
-  "sql-template console — params: q, sort, limit, offset"
+  "search console — params: q, sort, limit, offset"
   ([] (groups-table {}))
   ([{:keys [q sort limit offset] :as params} & {:as opts}]
    (embedded/run-xsql groups-table-op params opts)))
@@ -45,10 +45,10 @@
    (embedded/watch-xsql groups-table-op params opts)))
 
 (def ^:no-doc roles-table-op
-  {:op "sql-template", :source "select {user_role.xid} as xid,\n       {user_role.name},\n       {user_role.active},\n       count(distinct {user_role->users.xid}) as users,\n       count(distinct {user_role->scopes.xid}) as scopes\nwhere {user_role.name} ilike ?q?\ngroup by {user_role.xid}, {user_role.name}, {user_role.active}\norder by ?sort:order(name, active, users, scopes)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "search", :source "@search roles-table\nuser_role (\n  name ilike ?q?,\n  order by ?sort:order(name, active, users, scopes)=\"name asc\",\n  limit ?limit:int=100,\n  offset ?offset:int=0\n)\n  xid\n  name\n  active\n  users: count(users)\n  scopes: count(scopes)", :entity "user_role"})
 
 (defn roles-table
-  "sql-template console — params: q, sort, limit, offset"
+  "search console — params: q, sort, limit, offset"
   ([] (roles-table {}))
   ([{:keys [q sort limit offset] :as params} & {:as opts}]
    (embedded/run-xsql roles-table-op params opts)))
@@ -60,10 +60,10 @@
    (embedded/watch-xsql roles-table-op params opts)))
 
 (def ^:no-doc apps-table-op
-  {:op "sql-template", :source "select {oauth_client.xid} as xid,\n       {oauth_client.name} as name,\n       {oauth_client.active} as active,\n       {oauth_client.type} as type,\n       count(distinct {oauth_client->apis.xid}) as apis\nwhere {oauth_client.name} ilike ?q?\ngroup by {oauth_client.xid}, {oauth_client.name}, {oauth_client.active}, {oauth_client.type}\norder by ?sort:order(name, active, apis)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "search", :source "@search apps-table\noauth_client (\n  name ilike ?q?,\n  order by ?sort:order(name, active, apis)=\"name asc\",\n  limit ?limit:int=100,\n  offset ?offset:int=0\n)\n  xid\n  name\n  active\n  type\n  apis: count(apis)", :entity "oauth_client"})
 
 (defn apps-table
-  "sql-template console — params: q, sort, limit, offset"
+  "search console — params: q, sort, limit, offset"
   ([] (apps-table {}))
   ([{:keys [q sort limit offset] :as params} & {:as opts}]
    (embedded/run-xsql apps-table-op params opts)))
@@ -75,10 +75,10 @@
    (embedded/watch-xsql apps-table-op params opts)))
 
 (def ^:no-doc apis-table-op
-  {:op "sql-template", :source "select {oauth_api.xid} as xid,\n       {oauth_api.name},\n       {oauth_api.audience},\n       count(distinct {oauth_api->clients.xid}) as apps,\n       count(distinct {oauth_api->scopes.xid}) as scopes\nwhere {oauth_api.name} ilike ?q?\ngroup by {oauth_api.xid}, {oauth_api.name}, {oauth_api.audience}\norder by ?sort:order(name, apps, scopes)=\"name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "search", :source "@search apis-table\noauth_api (\n  name ilike ?q?,\n  order by ?sort:order(name, apps, scopes)=\"name asc\",\n  limit ?limit:int=100,\n  offset ?offset:int=0\n)\n  xid\n  name\n  audience\n  apps: count(clients)\n  scopes: count(scopes)", :entity "oauth_api"})
 
 (defn apis-table
-  "sql-template console — params: q, sort, limit, offset"
+  "search console — params: q, sort, limit, offset"
   ([] (apis-table {}))
   ([{:keys [q sort limit offset] :as params} & {:as opts}]
    (embedded/run-xsql apis-table-op params opts)))
@@ -90,10 +90,10 @@
    (embedded/watch-xsql apis-table-op params opts)))
 
 (def ^:no-doc providers-table-op
-  {:op "sql-template", :source "select {federation_provider.xid} as xid,\n       {federation_provider.provider},\n       {federation_provider.active}\nwhere {federation_provider.provider}::text ilike ?q?\norder by ?sort:order(provider, active)=\"provider asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "search", :source "@search providers-table\nfederation_provider (\n  provider ilike ?q?,\n  order by ?sort:order(provider, active)=\"provider asc\",\n  limit ?limit:int=100,\n  offset ?offset:int=0\n)\n  xid\n  provider\n  active", :entity "federation_provider"})
 
 (defn providers-table
-  "sql-template console — params: q, sort, limit, offset"
+  "search console — params: q, sort, limit, offset"
   ([] (providers-table {}))
   ([{:keys [q sort limit offset] :as params} & {:as opts}]
    (embedded/run-xsql providers-table-op params opts)))
@@ -105,10 +105,10 @@
    (embedded/watch-xsql providers-table-op params opts)))
 
 (def ^:no-doc connectors-table-op
-  {:op "sql-template", :source "select {auth_connector.xid} as xid,\n       {auth_connector.name},\n       {auth_connector.type},\n       {auth_connector.priority},\n       {auth_connector.enabled}\nwhere {auth_connector.name} ilike ?q?\norder by ?sort:order(priority, name, type, enabled)=\"priority asc, name asc\"\nlimit ?limit:int=100\noffset ?offset:int=0"})
+  {:op "search", :source "@search connectors-table\nauth_connector (\n  name ilike ?q?,\n  order by ?sort:order(priority, name, type, enabled)=\"priority asc, name asc\",\n  limit ?limit:int=100,\n  offset ?offset:int=0\n)\n  xid\n  name\n  type\n  priority\n  enabled", :entity "auth_connector"})
 
 (defn connectors-table
-  "sql-template console — params: q, sort, limit, offset"
+  "search console — params: q, sort, limit, offset"
   ([] (connectors-table {}))
   ([{:keys [q sort limit offset] :as params} & {:as opts}]
    (embedded/run-xsql connectors-table-op params opts)))

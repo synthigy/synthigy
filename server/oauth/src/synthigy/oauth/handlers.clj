@@ -16,12 +16,12 @@
    [ring.middleware.keyword-params :refer [wrap-keyword-params]]
    [ring.middleware.params :refer [wrap-params]]
    [synthigy.oauth :as oauth]
+   [synthigy.oauth.account :as account]
    [synthigy.oauth.core :as core]
    [synthigy.oauth.device-code :as device]
    [synthigy.oauth.federated :as federated]
    [synthigy.oauth.introspect :as introspect]
    [synthigy.oauth.login :as login]
-   [synthigy.oauth.credentials :as credentials]
    [synthigy.oauth.onboarding :as onboarding]
    [synthigy.oauth.page.status :as page.status]
    [synthigy.oauth.token :as token-ns]
@@ -161,20 +161,6 @@
   "GET /oauth/federated/providers — public list of active federation providers."
   #'federated/providers-handler)
 
-(def federated-identities
-  "GET /oauth/federated/identities — the current user's linked sign-in methods."
-  (-> #'federated/identities-handler
-      wrap-keyword-params
-      wrap-params
-      wrap-cookies))
-
-(def federated-unlink
-  "POST /oauth/federated/unlink — remove one of the current user's linked identities."
-  (-> #'federated/unlink-handler
-      wrap-keyword-params
-      wrap-params
-      wrap-cookies))
-
 (def federated-client-identities
   "GET /oauth/federated/client/identities?user=<xid> — client-scoped identity listing for an administered user."
   (-> #'federated/client-identities-handler
@@ -211,12 +197,38 @@
       wrap-params
       wrap-cookies))
 
-(def change-password
-  "POST /oauth/password — the authenticated subject replaces its own password."
-  (-> #'credentials/change-password-handler
+(defn account-route
+  [handler]
+  (-> handler
       wrap-keyword-params
       wrap-params
       wrap-cookies))
+
+(def account
+  "GET /oauth/account — the caller's own account: JSON, or the account page for a browser."
+  (-> #'account/account-handler
+      wrap-frame-deny
+      account-route))
+
+(def account-profile
+  "POST /oauth/account/profile — the caller sets its own display name."
+  (account-route #'account/profile-handler))
+
+(def account-password
+  "POST /oauth/account/password — the caller replaces its own password."
+  (account-route #'account/password-handler))
+
+(def account-reauth
+  "POST /oauth/account/reauth — the caller proves presence again by password."
+  (account-route #'account/reauth-handler))
+
+(def account-unlink
+  "POST /oauth/account/identities/unlink — the caller removes one of its sign-in methods."
+  (account-route #'account/unlink-handler))
+
+(def account-revoke
+  "POST /oauth/account/sessions/revoke — the caller ends one of its sessions, or all but this one."
+  (account-route #'account/revoke-handler))
 
 (def onboard-complete
   "POST /oauth/onboard/complete — indirect (non-browser) onboarding completion."
@@ -239,8 +251,6 @@
    "/oauth/federated/start" {:get federated-start}
    "/oauth/federated/callback" {:get federated-callback}
    "/oauth/federated/providers" {:get federated-providers}
-   "/oauth/federated/identities" {:get federated-identities}
-   "/oauth/federated/unlink" {:post federated-unlink}
    "/oauth/federated/client/identities" {:get federated-client-identities}
    "/oauth/federated/client/unlink" {:post federated-client-unlink}
    ;; Account onboarding/claim — federation is one claim method among several
@@ -248,8 +258,13 @@
    "/oauth/onboard/complete" {:post onboard-complete}
    "/oauth/claim" {:get claim}
    "/oauth/claim/password" {:post claim-password}
-   ;; Subject-driven credential change — not onboarding, no ticket
-   "/oauth/password" {:post change-password}
+   ;; Self-service account — always the caller's own, never a user named in the request
+   "/oauth/account" {:get account}
+   "/oauth/account/profile" {:post account-profile}
+   "/oauth/account/password" {:post account-password}
+   "/oauth/account/reauth" {:post account-reauth}
+   "/oauth/account/identities/unlink" {:post account-unlink}
+   "/oauth/account/sessions/revoke" {:post account-revoke}
    ;; RFC 8414 - OAuth 2.0 Authorization Server Metadata
    "/.well-known/oauth-authorization-server" {:get oauth-authorization-server}})
 

@@ -1,0 +1,414 @@
+<!--
+      Synthigy — model-driven IAM and data platform
+      Copyright (C) 2026 Robert Geršak
+      SPDX-License-Identifier: BUSL-1.1
+
+      Licensed under the Business Source License 1.1 — see LICENSE. Free in
+      production for individuals, non-profits, education and organisations
+      up to EUR 5M; larger organisations, integrators deploying for them and
+      hosted-service providers need a commercial license. Each version
+      becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+      Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Your account · Acme</title>
+  <link rel="icon" type="image/png" href="/oauth/images/favicon.png">
+  <link rel="preload" href="/oauth/css/fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+  <link rel="stylesheet" href="/oauth/css/account.css">
+  <style>
+    /* Your brand. The built-in pages put the Synthigy lockup (.sy-lockup) here. */
+    .acme-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      height: 100%;
+      padding-left: 14px;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--sy-text-pp);
+    }
+
+    .acme-mark svg {
+      width: 17px;
+      height: 17px;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <!--
+    CONTRACT
+    ========
+    The server redirects here as:  /login/default/account.html?done=<what>  or  ?error=<code>
+    when a browser opens /oauth/account. Everything else comes from the account API, called
+    with fetch from this page: it is served from the engine's own origin, so the sign-in
+    cookie goes along and the cross-site check passes.
+
+      GET  /oauth/account                       profile, identities, sessions, fresh
+                                                ?client_id=&return= adds "back": {"name", "uri"}
+                                                signed out: 401 {"login_url"}: go there
+      POST /oauth/account/profile               {"display_name"}
+      POST /oauth/account/password              {"current_password", "new_password"}
+      POST /oauth/account/reauth                {"password"}
+      POST /oauth/account/identities/unlink     {"xid"}          needs fresh
+      POST /oauth/account/sessions/revoke       {"xid"} or {"all_others": true}   all_others needs fresh
+
+    Display names are typed by people: put them in the page with textContent, never innerHTML.
+  -->
+  <div class="sy-shell">
+    <header class="sy-bar">
+      <span class="acme-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 21.5 20h-19z"/></svg>
+        <span>Acme</span>
+      </span>
+      <span class="sy-spacer"></span>
+      <span class="sy-bar-chip"><span>Your account</span></span>
+    </header>
+
+    <main class="sy-stage">
+      <div class="sy-card sy-card--account" id="card" hidden>
+        <div class="sy-card-head">
+          <h1 class="sy-card-title" id="title"></h1>
+          <div class="sy-voice" id="voice" aria-live="polite">
+            <p class="sy-card-sub">Signed in as <b id="login"></b></p>
+          </div>
+        </div>
+
+        <div class="sy-card-body">
+          <section class="sy-section">
+            <h2 class="sy-section-title">Display name</h2>
+            <p class="sy-section-sub">What others see next to your work. Leave it empty to use your sign-in name.</p>
+            <div class="sy-section-body">
+              <form class="sy-form" id="profile-form">
+                <div class="sy-field">
+                  <div class="sy-label-row"><label class="sy-label" for="display_name">Display name</label></div>
+                  <div class="sy-control">
+                    <input class="sy-input" id="display_name" maxlength="64" autocomplete="nickname" spellcheck="false">
+                  </div>
+                </div>
+                <button class="sy-btn sy-btn--secondary sy-btn--sm" type="submit"><span class="sy-btn-label">Save</span><span class="sy-spin" aria-hidden="true"></span></button>
+              </form>
+            </div>
+          </section>
+
+          <section class="sy-section" id="password-section" hidden>
+            <h2 class="sy-section-title">Password</h2>
+            <p class="sy-section-sub">Changing it signs you out everywhere, this device too.</p>
+            <div class="sy-section-body">
+              <form class="sy-form" id="password-form">
+                <div class="sy-field">
+                  <div class="sy-label-row"><label class="sy-label" for="current_password">Current password</label><span class="sy-tag" data-sy-caps="current_password">Caps Lock</span></div>
+                  <div class="sy-control">
+                    <input class="sy-input" id="current_password" type="password" autocomplete="current-password">
+                    <button class="sy-input-btn" type="button" data-sy-reveal="current_password" aria-label="Show password" aria-pressed="false">
+                      <svg class="when-hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>
+                      <svg class="when-shown" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 2 20 20"/><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="sy-field">
+                  <div class="sy-label-row"><label class="sy-label" for="new_password">New password</label><span class="sy-tag" data-sy-caps="new_password">Caps Lock</span></div>
+                  <div class="sy-control">
+                    <input class="sy-input" id="new_password" type="password" minlength="8" autocomplete="new-password">
+                  </div>
+                </div>
+                <button class="sy-btn sy-btn--secondary sy-btn--sm" type="submit"><span class="sy-btn-label">Change password</span><span class="sy-spin" aria-hidden="true"></span></button>
+              </form>
+            </div>
+          </section>
+
+          <section class="sy-section" id="confirm-section" hidden>
+            <h2 class="sy-section-title">Confirm it's you</h2>
+            <p class="sy-section-sub">Changing sign-in methods or signing out everywhere needs a recent sign-in.</p>
+            <div class="sy-section-body">
+              <form class="sy-form" id="reauth-form">
+                <div class="sy-field">
+                  <div class="sy-label-row"><label class="sy-label" for="reauth_password">Password</label><span class="sy-tag" data-sy-caps="reauth_password">Caps Lock</span></div>
+                  <div class="sy-control">
+                    <input class="sy-input" id="reauth_password" type="password" autocomplete="current-password">
+                  </div>
+                </div>
+                <button class="sy-btn sy-btn--secondary sy-btn--sm" type="submit"><span class="sy-btn-label">Confirm</span><span class="sy-spin" aria-hidden="true"></span></button>
+              </form>
+              <div class="sy-stack sy-section-more" id="reauth-providers"></div>
+            </div>
+          </section>
+
+          <section class="sy-section">
+            <h2 class="sy-section-title">Sign-in methods</h2>
+            <p class="sy-section-sub" id="identities-hint"></p>
+            <div class="sy-section-body">
+              <div class="sy-rows" id="identities"></div>
+              <div class="sy-stack sy-section-more" id="link-providers"></div>
+            </div>
+          </section>
+
+          <section class="sy-section">
+            <h2 class="sy-section-title">Where you're signed in</h2>
+            <p class="sy-section-sub">Every browser, app and device signed in to this account.</p>
+            <div class="sy-section-body">
+              <div class="sy-rows" id="sessions"></div>
+              <div class="sy-section-more" id="sessions-more"></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="sy-card-foot" id="back-foot" hidden>
+          <a class="sy-link" id="back"><span id="back-label"></span></a>
+        </div>
+      </div>
+    </main>
+
+    <footer class="sy-status">
+      <span class="sy-status-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span data-sy-host></span>
+      </span>
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      var DONE = {
+        profile: 'Display name saved.',
+        reauth: 'Confirmed. For the next few minutes you can change sign-in methods and sign out everywhere.',
+        linked: 'Sign-in method linked.',
+        unlinked: 'Sign-in method removed.',
+        revoked: 'Session ended.',
+        signed_out_others: 'Signed out everywhere else.'
+      };
+      var ERRORS = {
+        reauth_required: "Confirm it's you first.",
+        link_reauth_required: "Confirm it's you first.",
+        invalid_credentials: 'Wrong password.',
+        invalid_request: 'Fill in every field.',
+        password_too_short: 'Use at least 8 characters.',
+        display_name_too_long: 'That display name is too long.',
+        no_local_credential: 'This account has no password to change.',
+        last_login_method: 'That is your only way to sign in. Link another method first.',
+        identity_not_found: 'That sign-in method is no longer linked.',
+        identity_already_linked: 'That account is already linked to someone else here.',
+        session_not_found: 'That session has already ended.'
+      };
+      var FLOWS = {
+        authorization_code: 'App sign-in',
+        device_code: 'Device sign-in',
+        account: 'This account page',
+        console: 'Console'
+      };
+      var BROWSERS = [[/Edg[e/]/, 'Edge'], [/OPR\/|Opera/, 'Opera'], [/Chrome\//, 'Chrome'],
+                      [/Firefox\//, 'Firefox'], [/Safari\//, 'Safari'], [/curl\//, 'curl']];
+      var SYSTEMS = [[/Windows/, 'Windows'], [/iPhone|iPad/, 'iOS'], [/Macintosh|Mac OS X/, 'macOS'],
+                     [/Android/, 'Android'], [/Linux/, 'Linux']];
+      var providers = [];
+      var q = new URLSearchParams(location.search);
+      // The app that sent the user here; the server keeps it only when `return` is one of that app's redirect URIs.
+      var carry = {};
+      ['client_id', 'return'].forEach(function (k) { if (q.get(k)) carry[k] = q.get(k); });
+
+      function withCarry(path, extra) {
+        var p = new URLSearchParams(Object.assign({}, carry, extra || {})).toString();
+        return p ? path + '?' + p : path;
+      }
+
+      function $(id) { return document.getElementById(id); }
+
+      function say(text, tone) { window.SynthigyPage.message('voice', text, tone); }
+
+      function sayError(code) {
+        say(ERRORS[code] || 'Something went wrong. Try again.',
+            code === 'reauth_required' || code === 'link_reauth_required' ? 'warn' : 'error');
+      }
+
+      function when(s) { return s ? new Date(s).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : ''; }
+
+      function pick(table, ua) {
+        for (var i = 0; i < table.length; i++) if (table[i][0].test(ua)) return table[i][1];
+      }
+
+      function device(ua) {
+        if (!ua) return 'Unknown device';
+        var b = pick(BROWSERS, ua), s = pick(SYSTEMS, ua);
+        return b && s ? b + ' on ' + s : b || s || ua.slice(0, 40);
+      }
+
+      function el(tag, cls, text) {
+        var e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+      }
+
+      function api(path, body) {
+        var init = {credentials: 'same-origin', headers: {Accept: 'application/json'}};
+        if (body) {
+          init.method = 'POST';
+          init.headers['Content-Type'] = 'application/json';
+          init.body = JSON.stringify(body);
+        }
+        return fetch(path, init).then(function (r) {
+          return r.json().catch(function () { return {}; }).then(function (b) {
+            return {ok: r.ok, status: r.status, body: b};
+          });
+        });
+      }
+
+      function signedOut(r) {
+        if (r.status === 401 && r.body.login_url) { location.href = r.body.login_url; return true; }
+      }
+
+      function button(label, onclick) {
+        var b = el('button', 'sy-btn sy-btn--secondary sy-btn--sm');
+        b.type = 'button';
+        b.appendChild(el('span', 'sy-btn-label', label));
+        b.addEventListener('click', onclick);
+        return b;
+      }
+
+      function row(title, sub, action, pill) {
+        var r = el('div', 'sy-row'), main = el('div', 'sy-row-main'), t = el('div', 'sy-row-title', title);
+        if (pill) t.appendChild(el('span', 'sy-pill', pill));
+        main.appendChild(t);
+        if (sub) main.appendChild(el('div', 'sy-row-sub', sub));
+        r.appendChild(main);
+        if (action) {
+          var a = el('div', 'sy-row-actions');
+          a.appendChild(action);
+          r.appendChild(a);
+        }
+        return r;
+      }
+
+      function startLink(p, mode, done) {
+        var a = el('a', 'sy-btn sy-btn--secondary');
+        a.href = '/oauth/federated/start?' + new URLSearchParams({
+          provider: p.name, mode: mode, return: withCarry('/oauth/account', {done: done})
+        });
+        a.appendChild(el('span', 'sy-btn-label', (mode === 'link' ? 'Link ' : 'Confirm with ') + p.label));
+        return a;
+      }
+
+      function kind(identity) { return String(identity.provider || '').toLowerCase(); }
+
+      function render(a) {
+        var p = a.profile, linked = a.identities.map(kind);
+
+        $('title').textContent = p.display_name || p.login;
+        $('login').textContent = p.login;
+        $('display_name').value = p.display_name || '';
+        $('password-section').hidden = !p.has_password;
+        $('confirm-section').hidden = a.fresh;
+        $('reauth-form').hidden = !(p.has_password || !linked.length);
+
+        var rp = $('reauth-providers');
+        rp.replaceChildren();
+        providers.forEach(function (x) { if (linked.indexOf(x.name) >= 0) rp.appendChild(startLink(x, 'reauth', 'reauth')); });
+
+        var ids = $('identities');
+        ids.replaceChildren();
+        if (!a.identities.length) ids.appendChild(el('p', 'sy-row-sub', 'You sign in with your password.'));
+        a.identities.forEach(function (i) {
+          var known = providers.filter(function (x) { return x.name === kind(i); })[0];
+          ids.appendChild(row(known ? known.label : kind(i),
+                              [i.email, i.linked_at && 'linked ' + when(i.linked_at)].filter(Boolean).join(' · '),
+                              a.fresh && button('Unlink', function () {
+                                act('/oauth/account/identities/unlink', {xid: i.xid}, 'unlinked');
+                              })));
+        });
+        $('identities-hint').textContent = a.fresh ? '' : "Confirm it's you to add or remove one.";
+
+        var lp = $('link-providers');
+        lp.replaceChildren();
+        if (a.fresh) providers.forEach(function (x) { if (linked.indexOf(x.name) < 0) lp.appendChild(startLink(x, 'link', 'linked')); });
+
+        var ss = $('sessions');
+        ss.replaceChildren();
+        a.sessions.forEach(function (s) {
+          var seen = s.last_seen || s.started;
+          ss.appendChild(row(device(s.agent),
+                             [s.client || FLOWS[s.flow], s.ip, seen && 'active ' + when(seen)].filter(Boolean).join(' · '),
+                             button('Sign out', function () {
+                               act('/oauth/account/sessions/revoke', {xid: s.xid}, 'revoked');
+                             }),
+                             s.current && 'This device'));
+        });
+
+        var more = $('sessions-more');
+        more.replaceChildren();
+        if (a.sessions.length > 1) {
+          more.appendChild(a.fresh
+            ? button('Sign out everywhere else', function () {
+                act('/oauth/account/sessions/revoke', {all_others: true}, 'signed_out_others');
+              })
+            : el('p', 'sy-row-sub', "Confirm it's you to sign out everywhere else at once."));
+        }
+        $('back-foot').hidden = !a.back;
+        if (a.back) {
+          $('back').href = a.back.uri;
+          $('back-label').textContent = 'Back to ' + a.back.name;
+        }
+        $('card').hidden = false;
+      }
+
+      function load() {
+        return api(withCarry('/oauth/account')).then(function (r) {
+          if (signedOut(r)) return;
+          if (r.ok) render(r.body);
+          else { $('card').hidden = false; sayError(r.body.error); }
+        });
+      }
+
+      // Every action ends the same way: show the account as it is now, then say what happened.
+      function act(path, body, done) {
+        return api(path, body).then(function (r) {
+          if (signedOut(r)) return;
+          return load().then(function () {
+            if (r.ok) say(DONE[done] || '', 'success');
+            else sayError(r.body.error);
+          });
+        });
+      }
+
+      function onSubmit(id, path, fields, done) {
+        $(id).addEventListener('submit', function (e) {
+          e.preventDefault();
+          var form = e.target, body = {};
+          fields.forEach(function (f) { body[f[0]] = $(f[1]).value; });
+          window.SynthigyPage.busy(form, true);
+          act(path, body, done).then(function () {
+            window.SynthigyPage.busy(form, false);
+            Array.prototype.forEach.call(form.querySelectorAll('input[type="password"]'), function (i) { i.value = ''; });
+          });
+        });
+      }
+
+      onSubmit('profile-form', '/oauth/account/profile', [['display_name', 'display_name']], 'profile');
+      onSubmit('password-form', '/oauth/account/password',
+               [['current_password', 'current_password'], ['new_password', 'new_password']], 'password');
+      onSubmit('reauth-form', '/oauth/account/reauth', [['password', 'reauth_password']], 'reauth');
+
+      fetch('/oauth/federated/providers')
+        .then(function (r) { return r.json(); })
+        .catch(function () { return []; })
+        .then(function (list) { providers = list || []; return load(); })
+        .then(function () {
+          if (q.get('error')) sayError(q.get('error'));
+          else if (DONE[q.get('done')]) say(DONE[q.get('done')], 'success');
+        });
+    })();
+  </script>
+  <script src="/oauth/js/starfield.js"></script>
+  <script src="/oauth/js/shell.js"></script>
+</body>
+</html>

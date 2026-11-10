@@ -1,0 +1,112 @@
+<!--
+      Synthigy — model-driven IAM and data platform
+      Copyright (C) 2026 Robert Geršak
+      SPDX-License-Identifier: BUSL-1.1
+
+      Licensed under the Business Source License 1.1 — see LICENSE. Free in
+      production for individuals, non-profits, education and organisations
+      up to EUR 5M; larger organisations, integrators deploying for them and
+      hosted-service providers need a commercial license. Each version
+      becomes GPL-2.0-or-later / Apache-2.0 four years after release.
+      Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Sign-in required · Acme</title>
+  <link rel="icon" type="image/png" href="/oauth/images/favicon.png">
+  <link rel="preload" href="/oauth/css/fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+  <link rel="stylesheet" href="/oauth/css/error.css">
+  <style>
+    /* Your brand. The built-in pages put the Synthigy lockup (.sy-lockup) here. */
+    .acme-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      height: 100%;
+      padding-left: 14px;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--sy-text-pp);
+    }
+
+    .acme-mark svg {
+      width: 17px;
+      height: 17px;
+    }
+  </style>
+</head>
+<body>
+  <!--
+    CONTRACT
+    ========
+    The server redirects here as:  /login/default/files.html?error=unauthorized&uri=<link opened>
+    when a browser opens a file link (/files/<id>, /files/path/...) for a file that is
+    private or doesn't exist. Both cases look the same on purpose. No POST, no token.
+    A browser signed in to this engine opens private links it may read without
+    landing here, so "sign in on this site, then open the link again" is a real way out.
+  -->
+  <div class="sy-shell">
+    <header class="sy-bar">
+      <span class="acme-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 21.5 20h-19z"/></svg>
+        <span>Acme</span>
+      </span>
+      <span class="sy-spacer"></span>
+    </header>
+
+    <main class="sy-stage">
+      <div class="sy-card sy-card--wide">
+        <div class="sy-card-head">
+          <div class="sy-tile tone-warn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          </div>
+          <div>
+            <h1 class="sy-card-title">Sign-in required</h1>
+            <p class="sy-card-sub">This file is private, or it doesn't exist.</p>
+          </div>
+        </div>
+
+        <div class="sy-card-body">
+          <div class="sy-prose">
+            <p>Sign in to Acme in this browser, then open the link again. Files in a public folder open without signing in.</p>
+          </div>
+          <div class="sy-kv" id="link">
+            <span class="sy-kv-key">Link</span>
+            <span class="sy-kv-val" id="uri"></span>
+          </div>
+        </div>
+
+        <div class="sy-card-foot">If you think you should see this file, ask the person who shared it.</div>
+      </div>
+    </main>
+
+    <footer class="sy-status">
+      <span class="sy-status-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span data-sy-host></span>
+      </span>
+      <span class="sy-spacer"></span>
+      <span class="sy-status-item tone-warn"><span id="status-code"></span></span>
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var uri = q.get('uri');
+      document.getElementById('status-code').textContent = q.get('error') || 'unauthorized';
+      if (uri) document.getElementById('uri').textContent = uri;
+      else document.getElementById('link').remove();
+    })();
+  </script>
+  <script src="/oauth/js/starfield.js"></script>
+  <script src="/oauth/js/shell.js"></script>
+</body>
+</html>

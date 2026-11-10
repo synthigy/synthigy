@@ -50,10 +50,12 @@ bytes, or bytes nobody can find.
 
 ## Size
 
-One request carries up to `SYNTHIGY_SERVER_MAX_BODY` bytes, 25 MB by default;
-more is refused with `FILE_TOO_LARGE`. A reverse proxy has a limit of its own
-(nginx `client_max_body_size`, see [Reverse proxy](PROXY.md)); keep it at
-least as large.
+The Enso and Jetty servers stream an upload to disk and set no limit. The
+http-kit server holds each request body in memory, so it caps one request at
+`SYNTHIGY_HTTPKIT_MAX_BODY` bytes, 25 MB by default, and refuses a bigger one
+with a plain-text 413 before the files module sees it. A reverse proxy has a
+limit of its own (nginx `client_max_body_size`, see [Reverse proxy](PROXY.md));
+set it to the largest file you accept.
 
 ## Access
 
@@ -111,9 +113,10 @@ unavailable, uploads, replacements, deletions and version calls answer
 
 ## HTTP
 
-Every call needs a bearer token and runs as its identity, except downloads of
+Every call needs a bearer token and runs as its identity, except [links](#links) and downloads of
 public files ([Serving files to browsers](#serving-files-to-browsers)).
-Errors are `{"error": {"code", "message"}}`.
+Errors are `{"error": {"code", "message"}}`. JSON answers are snake_case;
+`?key_format=camel`, `kebab` or `pascal` on any call cases their keys like `/data` does.
 
 A folder is named by its xid or by its path: `/` is `ROOT`, and
 `/projects/acme` and `/projects/acme/` name the same folder. A path works
@@ -140,14 +143,19 @@ you can see.
 | `PUT /files?path=/<folder path>/<name>` | The body becomes that file: created (201), or a new version when it is there (200, `If-Match` as above). The folder must exist: `FOLDER_NOT_FOUND` names the first one missing in `details.path` |
 | `PATCH /files/<xid>` | `{"name", "folder"}`: rename and/or move; `"folder": null` takes it out of every folder. A taken name is `FILE_NAME_TAKEN` |
 | `DELETE /files/<xid>` | Delete the file. 204 |
+| `POST /files/zip` | `{"files": [xid\|path...], "folders": [xid\|path...]}`: one zip of those files and everything inside those folders, streamed ([Zip](#zip)) |
 | `GET /files/<xid>/versions` | Kept versions, newest first: `id`, `at`, `by`, `hash`, `size`, `content_type`, `current` |
 | `GET /files/<xid>/versions/<id>` | The bytes of one version |
 | `POST /files/<xid>/versions/<id>/restore` | Make a version current again |
-| `GET /files/folders?parent=<xid\|path>` | Folders inside `parent` (default `ROOT`): `xid`, `name`, `path`, `parent`, `writable`, `public` and `cache` as they apply, and the folder's own values under `settings` |
+| `GET /files/folders?parent=<xid\|path>` | Folders inside `parent` (default `ROOT`): `xid`, `name`, `path`, `parent`, `writable`, `public`, `cache` and `can_link` as they apply, and the folder's own values under `settings` |
 | `POST /files/folders` | `{"name", "parent"}`; a new folder. 201 |
-| `PUT /files/folders?path=/a/b/` | `{"public", "cache"}`, both optional: the folder, with every missing folder above it, then its settings. When a setting is refused nothing is created |
+| `PUT /files/folders?path=/a/b/` | `{"public", "cache", "can_link"}`, all optional: the folder, with every missing folder above it, then its settings. When a setting is refused nothing is created |
 | `GET`, `PATCH`, `DELETE /files/folders/<xid>` | One folder; `PATCH {"name", "parent"}` renames or moves it (`"parent": null` or `"/"` to the top), paths below follow; only an empty folder is deleted |
-| `GET /files/folders/<xid>/access` | `{"read"\|"write"\|"delete": {"users": [...], "groups": [...]}}`; File Admin and File User, not File Reader |
+| `POST /files/<xid>/links` | `{"expires", "max_downloads", "inline"}`: a link that downloads the file without signing in ([Links](#links)). 201 with its `url`, shown only now |
+| `GET /files/<xid>/links` | The file's live links you can see: your own, or all of them for File Admin |
+| `DELETE /files/links/<link xid>` | End a link at once. 204 |
+| `GET`, `HEAD /files/link/<token>` | The bytes, for whoever holds the link |
+| `GET /files/folders/<xid>/access` | `{"read"\|"write"\|"delete": {"users": [...], "groups": [...]}}`, each `{xid, name}` (a user's display name, never the login); File Admin and File User, not File Reader |
 | `POST /files/folders/<xid>/share`, `/unshare` | `{"access": "read"\|"write"\|"delete", "users": [xid...], "groups": [xid...]}` |
 
 Send the bytes as the body with their own `Content-Type`, or none and the
@@ -182,7 +190,63 @@ images, audio, video, PDF and plain text in the browser instead. A plain
 `<img src>` cannot carry a token: give it a public file's link (below), or
 download into a `Blob` and use `URL.createObjectURL`.
 
-The [JavaScript SDK](SDKS.md) wraps all of this as `client.files`.
+### Listing a folder through `/data`
+
+For sorting, paging with a total, or filtering by name inside one folder, read
+File on `/data` like any record, under the same access lists. One request with
+the page and the totals:
+
+```json
+{"operations": [
+  {"op": "search", "entity": "file",
+   "args": {"_order_by": [["size", "desc"], ["xid", "asc"]], "_limit": 200, "_offset": 0},
+   "selections": {"name": null, "size": null, "content_type": null, "hash": null,
+                  "uploaded_at": null, "uploaded_by": {"display_name": null},
+                  "folder": [{"args": {"_join": "inner", "_where": {"xid": {"_eq": "<folder>"}}},
+                              "selections": {"xid": null}}]}},
+  {"op": "sql-template",
+   "template": "SELECT count(*) AS files, coalesce(sum({file.size}), 0) AS bytes FROM {file->folder.xid} WHERE {file->folder.xid} = ?folder:string",
+   "params": {"folder": "<folder>"}}]}
+```
+
+- End every sort with `["xid", "asc"]`, so pages never repeat or skip a file.
+- Inside the folder by name: `"_where": {"name": {"_ilike": "%annual%report%"}}`
+  on the search and `AND {file.name} ILIKE ?q:string` in the template, with the
+  same pattern. Put `\` before a `%`, `_` or `\` the user typed.
+- Files in no folder you can see: `"_join": "none"` on `folder`, and
+  `WHERE {file->folder.xid} IS NULL` in the template.
+- `uploaded_by {display_name}` needs no access to User.
+
+### Zip
+
+`POST /files/zip` streams one `application/zip` of the current versions of the
+files you name and of every file inside the folders you name, read as you:
+- A folder's files keep their paths below the folder's parent, so `/site/img/`
+  gives `img/logo.png` and `img/icons/a.svg`. A file you name directly is
+  stored under its name.
+- Two entries with the same name are numbered as uploads are (`a (2).txt`).
+- A file named twice, or both by itself and inside a named folder, is stored
+  once.
+- What you named but cannot read, does not exist, or is not READY is listed
+  in a `_skipped.txt` entry rather than failing the zip. A folder you cannot
+  see is skipped whole.
+- One folder alone names the zip after it (`img.zip`); anything else is
+  `files-<date>.zip`.
+
+The total size and the number of files are checked before a byte is sent:
+over `SYNTHIGY_FILES_ZIP_MAX_BYTES` (2 GB) or `SYNTHIGY_FILES_ZIP_MAX_ENTRIES`
+(10 000) the answer is `ZIP_TOO_LARGE` (413) with the counts in `details`.
+Images, video, audio, already-compressed formats and `application/octet-stream` go in uncompressed. On the
+http-kit server a zip is assembled in memory first; Enso and Jetty stream it.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"folders": ["/site/img/"]}' -o img.zip https://synthigy.example.com/files/zip
+```
+
+The [JavaScript SDK](SDKS.md) wraps all of this as `client.files`. In the
+console, **Tools → Files** does it by hand: folders, uploads, versions and
+restore, and each folder's Public, Cache and access lists.
 
 ## Serving files to browsers
 
@@ -209,7 +273,9 @@ percent-encoded) both download a file. The first survives a rename or a move;
 the second reads well and is the same in every environment. Both always serve
 the current bytes. Without a token, only downloads of files in a public
 folder answer, with `Access-Control-Allow-Origin: *`; everything else is 401,
-the same for a file that does not exist. `?disposition=inline` opens images,
+the same for a file that does not exist. A browser opening such a link gets a
+"Sign-in required" page instead of the JSON error, or the `default` login-page
+bundle's `files.html` when it has one ([LOGIN_PAGES.md](LOGIN_PAGES.md)). `?disposition=inline` opens images,
 video, audio, PDF and plain text in the browser instead of downloading them.
 
 `Cache-Control` follows the folder's `Cache`: `public, max-age=<Cache>`
@@ -220,6 +286,51 @@ With a CDN in front of the engine, public files come from its cache for
 
 A request that carries a token follows the access lists, also for a public
 file, and a token that fails is refused (401) even for a public file.
+
+A browser signed in to the engine (the console or a sign-in page on the same
+address) opens file links with its session cookie, under the same access
+lists, when it opens the link itself: typed, bookmarked, from a page on the
+engine's address, or a link clicked on another site. A page on another site
+cannot use the cookie to embed or fetch a file. The cookie works for the two
+download links only; every other `/files` request needs a token.
+
+## Links
+
+A link hands one file to someone without an account, or to another service,
+for a while: `https://<engine>/files/link/<token>`. It works from any engine
+on the same database, and ends everywhere at once when it expires, runs out
+of downloads or is deleted.
+
+- **Where.** Only in folders where `Can Link` is `true`, on the folder itself
+  or the nearest folder above with a value; off everywhere until a File Admin
+  switches it on. Files in no folder are never shared by link. `false` below
+  a `true` turns it off again, also for links already made.
+- **Who.** File User and File Admin, on files they can read (the create
+  grant on `File Link`). File Reader never.
+- **Every download** checks the link and the person who made it: if they can
+  no longer read the file (taken off the folder, deactivated), the link
+  stops. A bad, expired, used-up and deleted link all answer the same 404
+  (`LINK_NOT_FOUND`), or a "This link no longer works" page in a browser.
+- **Lifetime.** `expires` in seconds, 3600 by default, at most 7 days.
+- **Limited links.** With `max_downloads`, every GET is one whole download:
+  `Range` is ignored (`Accept-Ranges: none`) so the file cannot be fetched in
+  pieces past the limit; HEAD is free. Without a limit, ranges work and only
+  a request from the first byte counts in `downloads`.
+- **Caching.** `private`, never `public`: a CDN that ignores the token in the
+  path must not hand the file to others. A limited link sends `no-store`;
+  otherwise `max-age` is the folder's `Cache`, never past the link's expiry.
+  `Referrer-Policy: no-referrer` keeps the link out of other sites' logs.
+- Only the token's SHA-256 is stored, so the database cannot rebuild a link:
+  the `url` is shown once, when it is made. Links are read on `/data` as
+  `File Link` records and, like files, changed only through `/files`.
+- The engine deletes ended links every six hours, and a file's links with
+  the file.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"expires": 86400, "max_downloads": 3}' \
+     https://synthigy.example.com/files/rkpYAgQpiwaSnUhP7z5hU1/links
+```
 
 ## Errors
 
@@ -237,12 +348,15 @@ file, and a token that fails is refused (401) even for a public file.
 | `NAME_REQUIRED` | 400 | An upload without `?name=` |
 | `INVALID_NAME` | 400 | See [Names](#names) |
 | `INVALID_ACCESS` | 400 | `access` is not `read`, `write` or `delete` |
-| `FILE_TOO_LARGE` | 413 | Over `SYNTHIGY_SERVER_MAX_BODY` |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | A form-encoded body |
 | `RANGE_NOT_SATISFIABLE` | 416 | A range past the end of the file |
+| `ZIP_TOO_LARGE` | 413 | A zip over `SYNTHIGY_FILES_ZIP_MAX_BYTES` or `SYNTHIGY_FILES_ZIP_MAX_ENTRIES` |
 | `VERSION_EXPIRED` | 410 | A version, or bytes, no longer kept |
 | `AUDIT_UNAVAILABLE` | 503 | A write or version call while audit history is unavailable |
 | `FILES_MIGRATING` | 503 | An upload while files move to a new store; retry in a moment, downloads keep working |
 | `INVALID_PATH` | 400 | Not a file path (`/folder/name`) or not a folder path |
-| `INVALID_SETTINGS` | 400 | `public` is not true or false, or `cache` is not whole seconds |
+| `INVALID_SETTINGS` | 400 | `public` or `can_link` is not true or false, or `cache` is not whole seconds |
 | `ATTRIBUTE_FORBIDDEN` | 403 | Your roles may not set that folder setting |
+| `LINKS_DISABLED` | 403 | The file's folder does not allow links, or the file is in no folder |
+| `LINK_NOT_FOUND` | 404 | A link that expired, was used up or deleted, or never existed |
+| `INVALID_EXPIRES` | 400 | `expires` is not whole seconds from 1 to 604800 |

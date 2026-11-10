@@ -29,6 +29,45 @@ movie (release_year > ?since:int=1980, limit ?limit:int=20, order by release_yea
 - `->genres` follows a **relation**; its fields are indented below it, as deep
   as the model goes.
 
+### Layout
+
+Keep a short argument list on one line. Once it carries more than one
+condition, or paging and sorting besides a condition, give each part its own
+line: conditions first, each further condition starting with `and` / `or`, then
+`order by`, `limit` and `offset`, and the closing `)` on its own line.
+
+```
+user (
+  name ilike ?q?
+  and roles.xid in ?roles?[]
+  and active = true,
+  order by ?sort:order(name, roles)="name asc",
+  limit ?limit:int=100,
+  offset ?offset:int=0
+)
+  xid
+  name
+  roles: count(roles)
+```
+
+The same holds for a relation's arguments:
+
+```
+movie (xid = ?xid:string)
+  title
+  ->ratings (
+    value >= 4
+    and created_on > ?since:timestamp,
+    order by created_on desc,
+    limit 5
+  )
+    value
+    review
+```
+
+Line breaks inside `(...)` don't change the query; the field lines below it
+still follow indentation.
+
 ## Relations: left, inner and none
 
 `->relation` keeps every parent — a movie with no genres is still returned and
@@ -64,26 +103,43 @@ Parameters are passed as a plain object, `{"since": 1990, "q": "%star%"}`.
 
 ## Counts and aggregates
 
-`_count` and `_agg` compute in the database — no related rows are sent.
+Operations compute in the database — no related rows are sent. Each is a line
+`alias: op(argument)`; the alias is required and is the result key.
 
 ```
-movie (limit 20)
+movie (limit 20, order by votes desc)
   title
-  _count
-    ratings:movie_ratings
-    actors:actors
-  _agg
-    ratings:movie_ratings
-      value: avg
+  votes: count(movie_ratings)
+  cast: count(actors)
+  rating: avg(movie_ratings.value)
+  fans: count(movie_ratings.value >= 4)
+  scores: count(distinct movie_ratings.value)
 ```
 
 ```json
-{"title": "…", "_count": {"ratings": 42, "actors": 7},
- "_agg": {"ratings": {"value": {"avg": 4.3}}}}
+{"title": "…", "votes": 42, "cast": 7, "rating": 4.3, "fans": 30, "scores": 5}
 ```
 
-`ratings:movie_ratings` aliases the relation `movie_ratings` as `ratings`.
-Aggregate functions: `avg`, `sum`, `min`, `max`.
+- `count(rel)` counts related rows, `count(<predicate>)` the ones that match,
+  `count(distinct rel.field)` distinct values.
+- `sum`, `avg`, `min`, `max` take `rel.field`. A second argument filters the
+  related rows: `avg(movie_ratings.value, movie_ratings.value > 1)`. Every
+  path in a filter starts with the operation's relation.
+- Counts are never null (0 when there are no rows); the others are null when
+  no row has a value. `min` / `max` keep the field's type.
+- `order by` takes an alias (`order by votes desc`) or a related attribute
+  (`order by studio.name`).
+- Operations work under relations, at any level. A reference (a relation to
+  one record) takes none.
+
+A filter can reach through a relation: `user (roles.name = "Admin")` keeps the
+users that have such a role, whether `roles` is selected or not. Each path
+predicate asks on its own, so `roles.name = "A" and roles.active = false` can be
+met by two different roles. References filter the same way, on their label:
+`movie (modified_by.display_name = "Ana")`.
+
+A relation line needs at least one field. To keep parents by their related rows,
+filter instead (`roles.name = "Admin"`); to keep parents without any, use `!roles`.
 
 ## Operation files
 

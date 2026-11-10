@@ -93,7 +93,11 @@
           blob (fs/list-dir shard)
           :when (fs/regular-file? blob)]
       {:key (str (fs/file-name blob))
-       :modified (.toInstant (fs/last-modified-time blob))})))
+       :modified (.toInstant (fs/last-modified-time blob))}))
+  storage/FileBacked
+  (blob-file [_ key]
+    (let [p (blob-path root key)]
+      (when (fs/regular-file? p) (.toFile p)))))
 
 (defn create
   ([] (create root))

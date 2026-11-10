@@ -75,9 +75,8 @@ The full license text ships beside the font files as `OFL.txt`.
 - com.synthigy/sqlite-jdbc 3.47.1.0-icu78.3
 - com.zaxxer/HikariCP 6.2.1
 - commons-codec/commons-codec 1.17.1
-- commons-io/commons-io 2.16.1
-- http-kit/http-kit 2.9.0-beta3
-- org.apache.commons/commons-fileupload2-core 2.0.0-M1
+- commons-io/commons-io 2.21.0
+- org.apache.commons/commons-fileupload2-core 2.0.0-M5
 - org.msgpack/msgpack 0.6.12
 
 ## BSD 2-Clause
@@ -130,19 +129,20 @@ The full license text ships beside the font files as `OFL.txt`.
 ## MIT License
 
 - cheshire/cheshire 5.13.0
-- dev.data-star.clojure/http-kit 1.0.0-RC11
+- dev.data-star.clojure/ring 1.0.0-RC11
 - dev.data-star.clojure/sdk 1.0.0-RC11
 - nano-id/nano-id 1.1.0
 - org.checkerframework/checker-qual 3.42.0
-- org.ring-clojure/ring-core-protocols 1.12.2
-- org.ring-clojure/ring-websocket-protocols 1.12.2
+- org.ring-clojure/ring-core-protocols 1.15.4
+- org.ring-clojure/ring-websocket-protocols 1.15.4
 - org.slf4j/slf4j-api 2.0.16
-- ring/ring-codec 1.2.0
-- ring/ring-core 1.12.2
+- ring/ring-codec 1.3.0
+- ring/ring-core 1.15.4
 - version-clj/version-clj 2.0.3
 
 ## Mozilla Public License
 
+- com.s-exp/enso 1.0.0-beta111
 - org.javassist/javassist 3.18.1-GA
 
 <!-- 64 bundled third-party artifacts -->

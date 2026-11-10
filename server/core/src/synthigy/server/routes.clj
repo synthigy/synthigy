@@ -154,8 +154,6 @@
      ["/oauth/federated/start" :get (gated :synthigy/iam #'oauth/federated-start)]
      ["/oauth/federated/callback" :get (gated :synthigy/iam #'oauth/federated-callback)]
      ["/oauth/federated/providers" :get (gated :synthigy/iam #'oauth/federated-providers)]
-     ["/oauth/federated/identities" :get (gated :synthigy/iam #'oauth/federated-identities)]
-     ["/oauth/federated/unlink" :post (gated :synthigy/iam #'oauth/federated-unlink)]
      ["/oauth/federated/client/identities" :get (gated :synthigy/iam #'oauth/federated-client-identities)]
      ["/oauth/federated/client/unlink" :post (gated :synthigy/iam #'oauth/federated-client-unlink)]
 
@@ -163,7 +161,12 @@
      ["/oauth/onboard/complete" :post (gated :synthigy/iam #'oauth/onboard-complete)]
      ["/oauth/claim" :get (gated :synthigy/iam #'oauth/claim)]
      ["/oauth/claim/password" :post (gated :synthigy/iam #'oauth/claim-password)]
-     ["/oauth/password" :post (gated :synthigy/iam #'oauth/change-password)]
+     ["/oauth/account" :get (gated :synthigy/iam #'oauth/account)]
+     ["/oauth/account/profile" :post (gated :synthigy/iam #'oauth/account-profile)]
+     ["/oauth/account/password" :post (gated :synthigy/iam #'oauth/account-password)]
+     ["/oauth/account/reauth" :post (gated :synthigy/iam #'oauth/account-reauth)]
+     ["/oauth/account/identities/unlink" :post (gated :synthigy/iam #'oauth/account-unlink)]
+     ["/oauth/account/sessions/revoke" :post (gated :synthigy/iam #'oauth/account-revoke)]
 
      ["/oauth/userinfo" :get (gated :synthigy/iam #'oauth/userinfo)]
      ["/oauth/jwks" :get (gated :synthigy/iam #'oauth/jwks)]

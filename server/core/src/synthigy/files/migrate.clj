@@ -15,6 +15,7 @@
    [synthigy.files.probe :as probe]
    [synthigy.files.storage :as storage]
    [synthigy.files.storage.local :as local]
+   [synthigy.files.sweeper :as sweeper]
    [synthigy.log :as log]
    [synthigy.supervisor :as supervisor])
   (:import
@@ -52,7 +53,7 @@
       (= size (:size (storage/head-blob target key))) :skipped
       :else
       (if-let [^InputStream in (storage/open-blob source key)]
-        (let [spooled (with-open [in in] (storage/spool! in nil))]
+        (let [spooled (with-open [in in] (storage/spool! in))]
           (storage/put-file! target key (:file spooled) spooled)
           (when-not (= size (:size (storage/head-blob target key)))
             (throw (ex-info "The copy does not match its source" {:code :storage-error :key key})))
@@ -77,6 +78,11 @@
         (swap! state update outcome (fnil inc 0))
         (supervisor/progress-update! {:done (inc i) :total total :detail key})))))
 
+(defn module-key?
+  "True for the key shapes the module writes; anything else in a shared bucket stays behind."
+  [key]
+  (boolean (or (sweeper/owner key) (re-matches sweeper/bare-key key))))
+
 (defn listed [store]
   (mapv :key (storage/list-blobs store)))
 
@@ -94,7 +100,9 @@
   [source target]
   (try
     ;; ponytail: every key held in memory per pass; stream the listing if stores reach tens of millions of blobs
-    (let [first-keys (listed source)]
+    (let [all (listed source)
+          first-keys (filterv module-key? all)]
+      (swap! state assoc :left (- (count all) (count first-keys)))
       (phase! :copying "copying files")
       (copy-all! source target first-keys)
       (phase! :waiting "pausing uploads")
@@ -104,10 +112,11 @@
         (Thread/sleep 100))
       (phase! :catching-up "copying the last uploads")
       (let [seen (set first-keys)]
-        (copy-all! source target (into [] (remove seen) (listed source))))
+        (copy-all! source target (into [] (comp (filter module-key?) (remove seen)) (listed source))))
       (phase! :ready "ready to switch")
       (log/info {:id ::ready :data {:action :migrated :subject :files-storage
-                                    :copied (:copied @state 0) :skipped (:skipped @state 0)}}
+                                    :copied (:copied @state 0) :skipped (:skipped @state 0)
+                                    :left (:left @state 0)}}
                 "Files copied to the new store; uploads paused until the switch"))
     (catch Throwable t
       (let [aborted (= :aborted (:code (ex-data t)))]

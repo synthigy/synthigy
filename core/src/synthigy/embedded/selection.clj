@@ -55,7 +55,7 @@
        (let [k (->snake k)]
          (cond
            (and (vector? v) (seq v) (map? (first v))
-                (some #(contains? (first v) %) [:selections :args :alias]))
+                (some #(contains? (first v) %) [:selections :args :alias :op]))
            (assoc m k (mapv (fn [cfg]
                               (cond-> cfg
                                 (:selections cfg) (update :selections normalize)

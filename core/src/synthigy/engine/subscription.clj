@@ -143,6 +143,15 @@
                 (map (comp keyword str id/extract)))
           (:attributes entity))))
 
+(defn unreadable-attribute-xids
+  "Attribute-xid keywords the bound principal may not read on entity: denies, the credential, hidden and hashed attributes."
+  [entity]
+  (when entity
+    (into #{}
+          (comp (remove #(daccess/attribute-allows? (id/extract entity) (id/extract %) :read))
+                (map (comp keyword str id/extract)))
+          (:attributes entity))))
+
 (defn translate-attributes
   "Rewrite a before/after map from attribute-xid keys to user-facing
    attribute-key keys; denied keys are dropped instead of translated."
@@ -160,30 +169,31 @@
    SSE-shaped maps; roles optional, omitting denies nothing."
   ([envelope attr-key-index data-records]
    (translate-delta envelope attr-key-index data-records #{}))
-  ([{:keys [delta]} attr-key-index data-records roles]
+  ([{:keys [delta element]} attr-key-index data-records roles]
   (let [{:keys [type data]} delta
         track (some-> type namespace)
         op    (some-> type name)]
     (case track
       "entity"
-      (when op
-        (let [entity (some-> (:entity-xid data) dataset/deployed-entity)
-              denied (denied-attribute-xids entity roles)
-              base (-> (select-keys data [:ts :tenant :scope :actor :request :txid])
-                       (assoc :type       (str "record/" op)
-                              :record-xid (:record-xid data)))
-              with-before (cond-> base
-                            (contains? data :before)
-                            (assoc :before (translate-attributes
-                                            (:before data) attr-key-index denied)))
-              with-after  (cond-> with-before
-                            (contains? data :after)
-                            (assoc :after (translate-attributes
-                                           (:after data) attr-key-index denied)))]
-          [{:event "data" :data with-after}]))
+      (let [entity (some-> (:entity-xid data) dataset/deployed-entity)]
+        (when (and op (or (nil? entity) (daccess/entity-allows? (id/extract entity) #{:read})))
+          (let [denied (into (or (denied-attribute-xids entity roles) #{}) (unreadable-attribute-xids entity))
+                base (-> (select-keys data [:ts :tenant :scope :actor :request :txid])
+                         (assoc :type       (str "record/" op)
+                                :record-xid (:record-xid data)))
+                with-before (cond-> base
+                              (contains? data :before)
+                              (assoc :before (translate-attributes
+                                              (:before data) attr-key-index denied)))
+                with-after  (cond-> with-before
+                              (contains? data :after)
+                              (assoc :after (translate-attributes
+                                             (:after data) attr-key-index denied)))]
+            [{:event "data" :data with-after}])))
 
       "relation"
-      (when (#{"link" "unlink"} op)
+      (when (and (#{"link" "unlink"} op)
+                 (or (nil? element) (daccess/relation-allows? element #{:read})))
         (let [from-xid (:from-xid data)
               to-xid   (:to-xid data)
               from?    (contains? data-records from-xid)

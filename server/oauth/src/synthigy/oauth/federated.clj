@@ -71,7 +71,8 @@
 
       :else
       (if-let [u (try (dataset/sync-entity :iam/user
-                                           {:name username :active true :type :PERSON})
+                                           {:name username :active true :type :PERSON
+                                            :display_name (iam.context/default-display-name (:name claims) username)})
                        (catch Throwable e
                          (log/error! {:id ::provision-failed
                                       :data {:action :created :subject :federated-user
@@ -280,10 +281,20 @@
          :headers {"Location" (or (console-return return) "/console")}
          :cookies (login/session-cookie sid)}))))
 
+(defn handle-account-login
+  "Account mode: sign an already-linked identity in to its own account page; never provisions."
+  [request id provider back]
+  (let [resolved (*resolve-identity* (:iss id) (:sub id) (:claims id))
+        err      #(error-redirect % (core/get-client-login-url nil) {:state (login/account-state back)})]
+    (cond
+      (nil? resolved)          (err "not_linked")
+      (not (:active resolved)) (err "access_denied")
+      :else                    (login/account-sign-in request resolved [(name provider)] false back))))
+
 (defn handle-reauth
   "Step-up via an already-linked identity: re-stamp the current session, never mint one."
   [request id provider reauth-session return]
-  (let [current (get-in request [:cookies "idsrv.session" :value])
+  (let [current (get-in request [:cookies (core/session-cookie-name request) :value])
         owner   (some-> current core/live-session-owner)
         err     #(error-redirect % (return-target return))]
     (cond
@@ -335,7 +346,7 @@
 (defn handle-link
   "Link mode: attach (iss,sub) to the currently authenticated account."
   [request id provider link-session return]
-  (let [current (get-in request [:cookies "idsrv.session" :value])
+  (let [current (get-in request [:cookies (core/session-cookie-name request) :value])
         owner   (some-> current core/live-session-owner)
         err     #(error-redirect % (return-target return))]
     (cond
@@ -423,7 +434,7 @@
                (err "provider_unsupported")))
 
         (= mode "reauth")
-        (let [session (get-in request [:cookies "idsrv.session" :value])]
+        (let [session (get-in request [:cookies (core/session-cookie-name request) :value])]
           (if-not (some-> session core/live-session-owner)
             (err "link_requires_login")
             (try (begin-upstream cfg provider (cond-> {:reauth session}
@@ -436,7 +447,7 @@
                    (err "provider_unsupported")))))
 
         (= mode "link")
-        (let [session (get-in request [:cookies "idsrv.session" :value])]
+        (let [session (get-in request [:cookies (core/session-cookie-name request) :value])]
           (cond
             (not (some-> session core/live-session-owner))
             (err "link_requires_login")
@@ -468,10 +479,12 @@
           (error-redirect "claim_invalid"))
 
         :else
-        (let [ac-code (:authorization-code (when state (core/decrypt state)))]
-          (if (nil? ac-code)
+        (let [{ac-code :authorization-code flow :flow back :back} (when state (core/decrypt state))
+              extra (cond ac-code {:ac ac-code}
+                          (= "account" flow) (cond-> {:account true} back (assoc :b back)))]
+          (if (nil? extra)
             (error-redirect "no_flow")
-            (try (begin-upstream cfg provider {:ac ac-code})
+            (try (begin-upstream cfg provider extra)
                  (catch Throwable e
                    (log/warn {:id ::start-failed :data {:provider provider :err (.getMessage e)}}
                              "Federated start failed")
@@ -483,13 +496,15 @@
   (binding [core/*domain* (core/original-uri request)]
     (let [{:keys [code state iss error]} (:params request)
           {provider :p nonce :n verifier :v ac-code :ac link-session :link
-           claim :claim console? :console reauth-session :reauth return :r}
+           claim :claim console? :console account? :account back :b reauth-session :reauth return :r}
           (when state (core/decrypt state))
           cfg (registry/resolve-provider provider)
           client-info (core/client-info request)
           err (fn [code]
                 (cond
                   console?     (error-redirect code "/console/login")
+                  account?     (error-redirect code (core/get-client-login-url nil)
+                                               {:state (login/account-state back)})
                   (or link-session reauth-session) (error-redirect code (return-target return))
                   ac-code      (login-retry code ac-code)
                   :else        (error-redirect code (return-target return))))]
@@ -510,6 +525,7 @@
               reauth-session (handle-reauth request id (:provider cfg) reauth-session return)
               link-session (handle-link request id (:provider cfg) link-session return)
               console?     (handle-console-login id (:provider cfg) return client-info)
+              account?     (handle-account-login request id (:provider cfg) back)
               :else        (handle-login id (:provider cfg) ac-code client-info)))
           (catch Throwable e
             (log/error {:id ::callback-failed :data {:provider provider :err (.getMessage e)}}
@@ -523,65 +539,32 @@
    :headers {"Content-Type" "application/json"}
    :body (json/write-str (registry/list-providers))})
 
-(defn session-user
-  "Current user with password and linked identities from the idsrv.session cookie, or nil."
-  [request]
-  (when-let [owner (some-> (get-in request [:cookies "idsrv.session" :value])
-                           core/live-session-owner)]
-    (dataset/get-entity :iam/user {:name (:name owner)}
-                        {:name nil :password nil
-                         :external_identities
-                         [{:args {:_join :left}
-                           :selections {:xid nil :provider nil :email nil :linked_at nil}}]})))
-
-(defn identities-handler
-  "GET /oauth/federated/identities — the current user's linked sign-in methods."
-  [request]
-  (if-let [user (session-user request)]
-    (json-response 200 {:identities (mapv #(select-keys % [:xid :provider :email :linked_at])
-                                          (:external_identities user))})
-    (json-response 401 {:error "link_requires_login"})))
-
 (defn unlink-identity!
-  "Unlink `xid` from the user; refuses the last login method."
+  "Unlink `xid` from `user` (with :password and :external_identities), refusing the last login method; returns [status body]."
   [user xid]
-  (cond
-    (nil? xid)
-    (json-response 400 {:error "missing_xid"})
-
-    :else
-    (let [ids    (:external_identities user)
-          target (some #(when (= xid (:xid %)) %) ids)]
-      (cond
-        ;; not among THIS user's identities — don't confirm existence
-        (nil? target)
-        (json-response 404 {:error "identity_not_found"})
-
-        ;; last login method — refuse (federated-only user with one identity)
-        (and (nil? (:password user)) (<= (count ids) 1))
-        (json-response 409 {:error "last_login_method"})
-
-        :else
-        (do (dataset/delete-entity :id-federation/external-identity {:xid xid})
-            (log/info {:id ::identity-unlinked
-                       :data {:action :deleted :subject :external-identity
-                              :provider (:provider target) :user (:name user)}}
-                      "Unlinked external identity from account")
-            (json-response 200 {:ok true}))))))
-
-(defn unlink-handler
-  "POST /oauth/federated/unlink {xid} — remove a linked identity; requires fresh auth."
-  [request]
-  (let [session (get-in request [:cookies "idsrv.session" :value])
-        xid     (get-in request [:params :xid])
-        user    (session-user request)]
+  (let [ids    (:external_identities user)
+        target (some #(when (= xid (:xid %)) %) ids)]
     (cond
-      (nil? user)                    (json-response 401 {:error "link_requires_login"})
-      (not (session-fresh? session)) (json-response 403 {:error "link_reauth_required"})
-      :else                          (unlink-identity! user xid))))
+      (str/blank? xid)
+      [400 {:error "missing_xid"}]
+
+      ;; not among THIS user's identities — don't confirm existence
+      (nil? target)
+      [404 {:error "identity_not_found"}]
+
+      (and (str/blank? (:password user)) (<= (count ids) 1))
+      [409 {:error "last_login_method"}]
+
+      :else
+      (do (dataset/delete-entity :id-federation/external-identity {:xid xid})
+          (log/info {:id ::identity-unlinked
+                     :data {:action :deleted :subject :external-identity
+                            :provider (:provider target) :user (:name user)}}
+                    "Unlinked external identity from account")
+          [200 {:ok true}]))))
 
 (defn target-user
-  "Resolve an explicit target user by xid — same shape `session-user` returns."
+  "Resolve an explicit target user by xid, with its password and linked identities."
   [user-xid]
   (when user-xid
     (dataset/get-entity :iam/user {:xid user-xid}
@@ -609,7 +592,7 @@
     (let [{:keys [user xid]} (:params request)]
       (if-let [target (target-user user)]
         (if (onboarding/administers? principal target)
-          (unlink-identity! target xid)
+          (apply json-response (unlink-identity! target xid))
           (json-response 403 {:error "provision_forbidden"}))
         (json-response 404 {:error "user_not_found"})))
     (json-response 403 {:error "provision_forbidden"})))

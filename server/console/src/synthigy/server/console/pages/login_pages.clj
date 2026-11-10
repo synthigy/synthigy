@@ -330,7 +330,38 @@ if (secure) {
               [code (if (error-page/security-errors code) "true" "false")
                (str title " — " (or message "This app's Login page setting is not a bundle name."))])}
      {:heading "Minimal script"
-      :code error-snippet}]}])
+      :code error-snippet}]}
+
+   {:file "files.html"
+    :title "Files page"
+    :url "/login/default/files.html?error=unauthorized&uri=…"
+    :summary (str "Default bundle only. A browser opened a file link it may not see: a private file, or one that "
+                  "doesn't exist. Read-only: display the message, POST nothing.")
+    :sections
+    [{:heading "Receives (query string)"
+      :cols ["Parameter" "Meaning"]
+      :rows [["error" "unauthorized"]
+             ["uri" "The file link that was opened, e.g. /files/<id>."]]}]}
+
+   {:file "account.html"
+    :title "Account page"
+    :url "/login/default/account.html?done=…"
+    :summary (str "Default bundle only. A browser opened /oauth/account: the signed-in user's display name, "
+                  "password, sign-in methods and sessions. The page calls the account API with fetch, from "
+                  "the engine's own origin, so the sign-in cookie goes along.")
+    :sections
+    [{:heading "Receives (query string)"
+      :cols ["Parameter" "Meaning"]
+      :rows [["done" "The last action that worked: profile, reauth, linked, unlinked, revoked, signed_out_others."]
+             ["error" "Why the last action was refused, e.g. reauth_required, or a provider link error."]]}
+     {:heading "Calls"
+      :cols ["Endpoint" "Body"]
+      :rows [["GET /oauth/account" "Signed out: 401 with login_url. Send the browser there."]
+             ["POST /oauth/account/profile" "display_name"]
+             ["POST /oauth/account/password" "current_password, new_password"]
+             ["POST /oauth/account/reauth" "password"]
+             ["POST /oauth/account/identities/unlink" "xid"]
+             ["POST /oauth/account/sessions/revoke" "xid, or all_others: true"]]}]}])
 
 (defn guide-signal [file] (str "$pageGuide === '" file "'"))
 
@@ -366,7 +397,9 @@ if (secure) {
    ["device.html" "Device code entry and confirm (TVs, CLIs). Default bundle only."]
    ["claim.html"  "Account set-up from a sign-in link — first password or provider. Default bundle only."]
    ["status.html" "Outcome after a login or device flow — success, cancel, error. Default bundle only."]
-   ["error.html"  "Authorization request rejected before sign-in, e.g. a bad redirect URI. Default bundle only."]])
+   ["error.html"  "Authorization request rejected before sign-in, e.g. a bad redirect URI. Default bundle only."]
+   ["files.html"  "A browser opened a private or missing file link. Default bundle only."]
+   ["account.html" "The signed-in user's own account. Default bundle only."]])
 
 (defn upload-panel []
   [:div.console-panel.console-upload

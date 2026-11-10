@@ -157,3 +157,15 @@
                          "Deploying Synthigy model v0.90.2 (User AI_AGENT type; Group Type, User Owner and currency/timeperiod/transit attribute types dropped)")
                (dataset.patch/retire-removed-attribute-types!)
                (dataset/deploy! (dataset/current-synthigy-version)))
+
+(patch/upgrade :synthigy/model
+               "0.90.3"
+               (log/info {:id ::deploying-0-90-3 :data {:action :deploying :subject :synthigy-model :version "0.90.3"}}
+                         "Deploying Synthigy model v0.90.3 (User Display Name)")
+               (dataset/deploy! (dataset/current-synthigy-version)))
+
+(patch/upgrade :synthigy/model
+               "0.90.5"
+               (log/info {:id ::deploying-0-90-5 :data {:action :deploying :subject :synthigy-model :version "0.90.5"}}
+                         "Deploying Synthigy model v0.90.5 (model format 3 stamps; Display Name off Group and Role)")
+               (dataset/deploy! (dataset/current-synthigy-version)))

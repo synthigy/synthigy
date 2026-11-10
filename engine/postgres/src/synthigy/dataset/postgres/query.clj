@@ -15,7 +15,6 @@
    [clojure.string :as str]
    [next.jdbc :as jdbc]
    [next.jdbc.prepare :as p]
-   [synthigy.dataset.access :as access]
    [synthigy.dataset.core :as core]
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
@@ -111,14 +110,16 @@
          where-all (clojure.string/join
                     " and " (remove clojure.string/blank? [where exists-sql]))
          distinct-on (distinct->sql schema)
-         modifiers (modifiers-selection->sql schema)
+         [modifiers order-data] (if (sql-query/term-order? schema)
+                                  (sql-query/related-modifiers focused-schema)
+                                  [(modifiers-selection->sql schema {:tiebreak? true}) []])
          query (as-> (format "select %s%s._eid as %s from \"%s\" %s"
                              (if distinct-on (str distinct-on " ") "")
                              root-as root-as root-tbl root-as)
                      query
                  (if (not-empty where-all) (str query \newline "where " where-all) query)
                  (if modifiers (str query " " modifiers) query))
-         data (vec (concat where-data exists-data))
+         data (vec (concat where-data exists-data order-data))
          [r :as ids] (if (and (empty? where-all)
                               (nil? distinct-on)
                               (not (some #{:_limit :_offset :_order_by}
@@ -178,8 +179,9 @@
                        (conj r (construct-statement k (keys v))))]
                (let [db (pull-cursors connection schema roots)
                      response (construct-response schema db roots)
-                     delete-statements (reduce-kv process-statement [] db)]
-                 (sql-query/purge-deletes! connection schema db)
+                     doomed (sql-query/purge-found connection schema roots db)
+                     delete-statements (reduce-kv process-statement [] (dissoc doomed :ops))]
+                 (sql-query/purge-deletes! connection schema doomed)
                  (doseq [query delete-statements]
                    (log/debug {:id :synthigy.dataset.sql/purging-rows
                                :data {:entity-id entity-id :query query}}
@@ -332,7 +334,7 @@
                                        (if (not-empty order-by)
                                          (format
                                           "(select _eid, %s, row_number() over (%s) as _rank from %s where _eid in (%s))"
-                                          on' (modifiers-selection->sql {:args {:_order_by order-by}}) table roots')
+                                          on' (sql-query/with-tiebreak (modifiers-selection->sql {:args {:_order_by order-by}}) nil nil) table roots')
                                          (format "(select _eid, %s, _eid as _rank from %s where _eid in (%s))" on' table roots'))))
                   sql-final [(format
                               "with recursive tree(_eid,link,path,prank,cycle) as (
@@ -367,12 +369,12 @@
                   ranked-init-selection (if (not-empty order-by)
                                           (format
                                            "(select _eid, %s, row_number() over (%s) as _rank from %s v where %s)"
-                                           on' (modifiers-selection->sql {:args {:_order_by order-by}}) src top)
+                                           on' (sql-query/with-tiebreak (modifiers-selection->sql {:args {:_order_by order-by}}) nil nil) src top)
                                           (format "(select _eid, %s, _eid as _rank from %s v where %s)" on' src top))
                   ranked-selection (if (not-empty order-by)
                                      (format
                                       "(select _eid, %s, row_number() over (%s) as _rank from %s v)"
-                                      on' (modifiers-selection->sql {:args {:_order_by order-by}}) src)
+                                      on' (sql-query/with-tiebreak (modifiers-selection->sql {:args {:_order_by order-by}}) nil nil) src)
                                      (format "(select _eid, %s, _eid as _rank from %s v)" on' src))
                   sql-final [(format
                               "with recursive tree(_eid,link,path,prank,cycle) as (
@@ -519,71 +521,60 @@
            (selection->schema entity-id selection args)
            _ (sql-query/refuse-none-slice! schema)
            _ (sql-query/refuse-column-slice! schema)
-           enforced-schema (binding [*operation-rules* #{:delete}]
-                             (selection->schema entity-id selection args))]
-       (if (and
-            (not= enforced-schema schema)
-            (not (access/superuser?)))
-         (throw
-          (ex-info
-           "User doesn't have :delete rule for some of sliced relations or entities"
-           {:type ::enforce-slice
-            :roles (access/role-ids)}))
-         (let [_ (sql-query/slice-hooks! schema tx)
-               queries (reduce-kv
-                        (fn [r k {tt :to/table
-                                  tf :to/field
-                                  ff :from/field
-                                  rt :relation/table
-                                  tas :entity/as
-                                  args' :args
-                                  :as schema'}]
-                          (let [query (str "delete from " \" rt \")
-                                [where-from from-data] (search-stack-args (dissoc schema :relations))
-                                select-from
-                                (when (targeting-args? args)
-                                  (format
-                                   "(select _eid from \"%s\" as %s where %s)"
-                                   table as where-from))
-                                [where-to to-data] (search-stack-args schema')
-                                select-to
-                                (when (targeting-args? args')
-                                  (format
-                                   "(select _eid from \"%s\" as %s where %s)"
-                                   tt tas where-to))
-                                where (when (or select-to select-from)
-                                        (j-and
-                                         (cond-> []
-                                           select-from (conj (str ff " in " select-from))
-                                           select-to (conj (str tf " in " select-to)))))]
-                            (assoc r k (into
-                                        [(str query (when (not-empty where) "\nwhere ") where)]
-                                        (into from-data to-data)))))
-                        {}
-                        relations)
-               result (reduce-kv
-                       (fn [r k query]
-                         (assoc r k
-                                (try
-                                  (log/debug {:id :synthigy.dataset.sql/slicing-entity
-                                              :data {:entity-id entity-id :query query}}
-                                             "Slicing query")
-                                  (sql/execute! tx query core/*return-type*)
-                                   ;; TODO - Enable this
-                                   ; (async/put!
-                                   ;   core/client
-                                   ;   {:type :entity/slice
-                                   ;    :entity entity-id
-                                   ;    :args args
-                                   ;    :selection selection})
-                                  true
-                                  (catch Throwable e
-                                    (log/error! {:id :synthigy.dataset.sql/slice-failed
-                                                 :data {:entity-id entity-id}} e)
-                                    false))))
-                       {}
-                       queries)]
-           result))))))
+           _ (doseq [{:keys [relation] direction :rbac/direction} (vals relations)]
+               (sql-query/relation-accessible? relation direction #{:delete}))
+           _ (sql-query/slice-hooks! schema tx)
+           [where-from from-data] (binding [*operation-rules* #{:update}]
+                                    (search-stack-args (dissoc schema :relations)))
+           ;; never drop a non-empty root WHERE — no subquery means every link of the relation is cut
+           select-from (when (or (targeting-args? args) where-from)
+                         (format "(select _eid from \"%s\" as %s where %s)" table as where-from))
+           queries (reduce-kv
+                    (fn [r k {tt :to/table
+                              tf :to/field
+                              ff :from/field
+                              rt :relation/table
+                              tas :entity/as
+                              args' :args
+                              :as schema'}]
+                      (let [query (str "delete from " \" rt \")
+                            [where-to to-data] (search-stack-args schema')
+                            select-to (when (or (targeting-args? args') where-to)
+                                        (format "(select _eid from \"%s\" as %s where %s)" tt tas where-to))
+                            where (when (or select-to select-from)
+                                    (j-and
+                                     (cond-> []
+                                       select-from (conj (str ff " in " select-from))
+                                       select-to (conj (str tf " in " select-to)))))]
+                        (assoc r k (into
+                                    [(str query (when (not-empty where) "\nwhere ") where)]
+                                    (cond-> []
+                                      select-from (into from-data)
+                                      select-to (into to-data))))))
+                    {}
+                    relations)]
+       (reduce-kv
+        (fn [r k query]
+          (assoc r k
+                 (try
+                   (log/debug {:id :synthigy.dataset.sql/slicing-entity
+                               :data {:entity-id entity-id :query query}}
+                              "Slicing query")
+                   (sql/execute! tx query core/*return-type*)
+                   ;; TODO - Enable this
+                   ; (async/put!
+                   ;   core/client
+                   ;   {:type :entity/slice
+                   ;    :entity entity-id
+                   ;    :args args
+                   ;    :selection selection})
+                   true
+                   (catch Throwable e
+                     (log/error! {:id :synthigy.dataset.sql/slice-failed
+                                  :data {:entity-id entity-id}} e)
+                     false))))
+        {}
+        queries)))))
 
 (extend-type synthigy.db.Postgres
   db/ModelQueryProtocol

@@ -36,7 +36,7 @@
   "type -> {:entity, :prefix, :scalars, :refs}; :refs maps a relation key to :ref (id-only stub) or a nested {:scalars #{…}} when this export IS the target's definition."
   {:role  {:entity  :iam/user-role
            :prefix  "role_"
-           :scalars #{:name :description :active :avatar}
+           :scalars #{:name :display_name :description :active :avatar}
            :refs    (zipmap [:scopes
                              ;; CRUDOB — dropping :browse_entities strips B on import
                              :create_entities :read_entities :update_entities
@@ -50,14 +50,14 @@
 
    :group {:entity  :iam/user-group
            :prefix  "group_"
-           :scalars #{:name :description :active :type :avatar}
+           :scalars #{:name :display_name :description :active :type :avatar}
            ;; dropping :datasets strips the RLS dataset scope on import
            :refs    {:datasets :ref}}
 
    :user  {:entity  :iam/user
            :prefix  "user_"
            ;; NO :password (hashed), NO :person_info/:public_profile
-           :scalars #{:name :active :type :avatar :priority :settings}
+           :scalars #{:name :display_name :active :type :avatar :priority :settings}
            :refs    {:roles :ref :groups :ref}}
 
    :app   {:entity  :iam/app

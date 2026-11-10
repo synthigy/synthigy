@@ -13,41 +13,57 @@
   "The /files endpoints: bytes in and out, every check made as the signed-in user."
   (:require
    [clojure.string :as str]
+   [clojure.walk :as walk]
    [synthigy.audit.protocol :as audit]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.access :as daccess]
    [synthigy.dataset.id :as id]
+   [synthigy.dataset.key :as dk]
    [synthigy.dataset.sql.naming :as naming]
    [synthigy.dataset.sql.query :as query]
    [synthigy.engine :as engine]
    [synthigy.env :as env]
    [synthigy.files.folders :as folders]
    [synthigy.files.guard :as guard]
+   [synthigy.files.links :as links]
    [synthigy.files.migrate :as migrate]
    [synthigy.files.model :as model]
+   [synthigy.files.page :as page]
    [synthigy.files.schema :as schema]
    [synthigy.files.search :as search]
    [synthigy.files.storage :as storage]
    [synthigy.files.versions :as versions]
+   [synthigy.files.zip :as zip]
    [synthigy.iam.access :as access]
+   [synthigy.iam.context :as iam.context]
    [synthigy.json :as json]
    [synthigy.log :as log]
-   [synthigy.oauth.authentication :as auth])
+   [synthigy.oauth.authentication :as auth]
+   [synthigy.oauth.core :as oauth])
   (:import
    [java.net URLConnection URLDecoder URLEncoder]
    [java.nio.charset StandardCharsets]))
 
+(def ^:dynamic *key-fn* nil)
+
+(defn cased [body]
+  (if-let [kf *key-fn*]
+    (walk/postwalk #(if (map? %) (update-keys % (fn [k] (if (keyword? k) (dk/preserve-prefix kf k) k))) %) body)
+    body))
+
 (defn respond [status body]
   {:status status
    :headers {"Content-Type" "application/json"}
-   :body (json/write-str body)})
+   :body (json/write-str (cased body))})
 
 (defn fail [status code message & [details]]
   (respond status {:error (cond-> {:code code :message message} details (assoc :details details))}))
 
 (defn unauthorized [request]
-  (-> (fail 401 "UNAUTHORIZED" "Sign in to use files")
-      (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request))))
+  (if (page/browser? request)
+    (page/unauthorized request)
+    (-> (fail 401 "UNAUTHORIZED" "Sign in to use files")
+        (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))))
 
 (defn fields
   "Wire keys of the File attributes and the folder relation, from the deployed model."
@@ -72,20 +88,22 @@
    (:folder f) [{:selections {(id/key) nil :name nil :path nil}}]})
 
 (defn engine-facts
-  "Storage key, uploader {xid name} and folder serving of the files `xids`, read as the engine: the key is hidden from the data API, and the caller may hold no grant on User."
+  "Storage key, uploader {xid name} (the label, never the login) and folder serving of the files `xids`, read as the engine: the key is hidden from the data API, and the caller may hold no grant on User."
   [f xids]
   (if (empty? xids)
     {}
     (access/with-principal nil
-      (let [tree (folders/facts)]
+      (let [rows (dataset/search-entity :files/file {:_where {(id/key) {:_in (vec xids)}}}
+                                        {(id/key) nil (:storage-key f) nil
+                                         (:uploaded-by f) [{:selections {(id/key) nil :display_name nil}}]
+                                         (:folder f) [{:selections {(id/key) nil}}]})
+            folder-of #(some-> (get % (:folder f)) id/extract)
+            tree (folders/facts (map folder-of rows))]
         (into {}
               (map (fn [row] [(id/extract row) {:key (get row (:storage-key f))
-                                                :uploader (some-> (get row (:uploaded-by f)) (select-keys [(id/key) :name]))
-                                                :served (folders/served tree (some-> (get row (:folder f)) id/extract))}]))
-              (dataset/search-entity :files/file {:_where {(id/key) {:_in (vec xids)}}}
-                                     {(id/key) nil (:storage-key f) nil
-                                      (:uploaded-by f) [{:selections {(id/key) nil :name nil}}]
-                                      (:folder f) [{:selections {(id/key) nil}}]}))))))
+                                                :uploader (some-> (get row (:uploaded-by f)) (as-> u {(id/key) (get u (id/key)) :name (:display_name u)}))
+                                                :served (folders/served tree (folder-of row))}]))
+              rows)))))
 
 (defn wire
   "The File row as the endpoints answer it; the storage key never leaves the server."
@@ -109,8 +127,6 @@
 (defn storage-key [f xid]
   (get-in (engine-facts f [xid]) [xid :key]))
 
-(defn max-size [] env/server-max-body)
-
 (defn content-type
   "The type the client declared, else one guessed from the name, else octet-stream."
   [request file-name]
@@ -124,12 +140,7 @@
 
 (defn spool-body-stream!
   [request]
-  (try
-    {:spooled (storage/spool! (or (:body request) (java.io.ByteArrayInputStream. (byte-array 0))) (max-size))}
-    (catch clojure.lang.ExceptionInfo e
-      (if (= :file-too-large (:code (ex-data e)))
-        {:refusal (fail 413 "FILE_TOO_LARGE" (str "Files are limited to " (max-size) " bytes"))}
-        (throw e)))))
+  {:spooled (storage/spool! (or (:body request) (java.io.ByteArrayInputStream. (byte-array 0))))})
 
 (defn form-encoded? [request]
   (some-> (get-in request [:headers "content-type"]) str/lower-case (str/starts-with? "application/x-www-form-urlencoded")))
@@ -221,7 +232,7 @@
 
 (defn replace!
   "PUT /files/<xid>: a new version of the file; `If-Match: \"<hash>\"` refuses a lost update."
-  [store request xid]
+  [store request principal xid]
   (let [f (fields)
         row (file-row f xid)
         expected (strip-etag (get-in request [:headers "if-match"]))]
@@ -241,7 +252,8 @@
                         (:size f) (:size spooled)
                         (:content-type f) ctype
                         (:status f) :READY
-                        (:uploaded-at f) (java.util.Date.)}
+                        (:uploaded-at f) (java.util.Date.)
+                        (:uploaded-by f) {(id/key) (id/extract principal)}}
                   [refused] (refused-write store k data)]
               (or refused (respond 200 (wire f (file-row f xid))))))))))
 
@@ -303,10 +315,12 @@
              :body (when-not head? (storage/open-blob store key a b))})
 
           :else
-          (if-let [in (if head? ::head (storage/open-blob store key))]
+          (if-let [body (cond head? ::head
+                              (satisfies? storage/FileBacked store) (storage/blob-file store key)
+                              :else (storage/open-blob store key))]
             {:status 200
              :headers (assoc base "Content-Length" (str size))
-             :body (when-not head? in)}
+             :body (when-not head? body)}
             (fail 410 "VERSION_EXPIRED" "These bytes are no longer stored")))))))
 
 (defn serve-row
@@ -348,6 +362,7 @@
       (fail 404 "FILE_NOT_FOUND" "No such file")
       (try
         (guard/as-endpoint #(dataset/delete-entity :files/file {(id/key) xid}))
+        (links/delete-of-file! xid)
         {:status 204}
         (catch clojure.lang.ExceptionInfo e
           (or (write-refusal e) (throw e)))))))
@@ -406,8 +421,8 @@
 (defn param-long [request k default]
   (or (some-> (get-in request [:query-params k]) str/trim not-empty parse-long) default))
 
-(defn list-files
-  "GET /files?folder=&folderless=&name=&q=&order=&limit=&offset=: the files the caller can see, newest first; q's words in order, a space for anything between."
+(defn file-list
+  "The wired files the caller can see for /files query params, newest first; q's words in order, a space for anything between."
   [request]
   (let [f (fields)
         {:strs [folder folderless name q order]} (:query-params request)
@@ -416,9 +431,9 @@
         limit (-> (param-long request "limit" 100) (max 1) (min 1000))
         offset (max 0 (param-long request "offset" 0))
         order-by (case order
-                   "name" {(:name f) :asc}
-                   "oldest" {(:uploaded-at f) :asc}
-                   {(:uploaded-at f) :desc})
+                   "name" (array-map (:name f) :asc (id/key) :asc)
+                   "oldest" (array-map (:uploaded-at f) :asc (id/key) :asc)
+                   (array-map (:uploaded-at f) :desc (id/key) :asc))
         sel (cond-> (selection f)
               folderless (assoc (:folder f) [{:args {:_join :none}}])
               (not-empty folder) (assoc (:folder f) [{:selections {(id/key) nil :name nil :path nil}
@@ -436,7 +451,12 @@
                                         (not-empty name) (assoc :_where {(:name f) {:_eq name}}))
                                       sel))
         facts (engine-facts f (map id/extract rows))]
-    (respond 200 {:files (mapv #(wire f % facts) rows)})))
+    (mapv #(wire f % facts) rows)))
+
+(defn list-files
+  "GET /files?folder=&folderless=&name=&q=&order=&limit=&offset=."
+  [request]
+  (respond 200 {:files (file-list request)}))
 
 (defn search-files
   "GET /files/search?q=&folder=&limit=&offset=: folders and files whose paths hold the words of q in order, shortest path first."
@@ -462,7 +482,7 @@
                            (into {} (map (juxt id/extract #(get % (folders/name-field))))
                                  (dataset/search-entity :files/folder {:_where {(id/key) {:_in (vec xids)}}}
                                                         {(id/key) nil (folders/name-field) nil})))
-            tree (when (seq folder-names) (folders/facts))]
+            tree (when (seq folder-names) (folders/facts (keys folder-names)))]
         (respond 200 {:results (vec (keep (fn [{:keys [type xid path]}]
                                             (case type
                                               :folder (when (contains? folder-names xid)
@@ -478,9 +498,16 @@
       (respond 200 (wire f row))
       (fail 404 "FILE_NOT_FOUND" "No such file"))))
 
-(defn json-body [request]
-  (let [raw (or (:raw-body request) (some-> (:body request) slurp))]
-    (if (str/blank? raw) {} (json/read-str raw))))
+(defn json-body
+  "The request's JSON object, {} when blank; throws a 400 problem for anything else."
+  [request]
+  (let [raw (or (:raw-body request) (some-> (:body request) slurp))
+        body (if (str/blank? raw)
+               {}
+               (try (json/read-str raw) (catch Exception _ ::malformed)))]
+    (if (map? body)
+      body
+      (throw (ex-info "Invalid JSON body" {::problem [400 "INVALID_BODY" "The body must be a JSON object"]})))))
 
 (defn split-path
   "[folder path, name] of a file path such as /site/img/logo.png, or nil."
@@ -521,7 +548,7 @@
       (fail 404 "FOLDER_NOT_FOUND" (str "No such folder: " missing) {:path missing})
       (let [folder (folders/ref->xid dir)]
         (if-let [xid (file-in folder file-name)]
-          (replace! store request xid)
+          (replace! store request principal xid)
           (if (strip-etag (get-in request [:headers "if-match"]))
             (fail 412 "FILE_CHANGED" "The file changed since you read it" {:hash nil})
             (create-file! store request principal file-name folder)))))
@@ -546,11 +573,117 @@
         (guard/as-endpoint #(dataset/sync-entity :files/file (cond-> {(id/key) xid}
                                                                new-name (assoc (:name f) new-name)
                                                                move? (assoc (:folder f) (when target {(id/key) target})))))
-        (respond 200 (wire f (file-row f xid)))
+        (assoc (respond 200 (wire f (file-row f xid))) ::action (if move? :moved :renamed))
         (catch Exception e
           (or (write-refusal e) (throw e)))))))
 
+(defn base-url [request]
+  (str/replace (or (not-empty (str env/iam-root-url)) (oauth/original-uri request)) #"/+$" ""))
+
+(defn link-url [request token] (str (base-url request) "/files/link/" token))
+
+(defn create-link!
+  "POST /files/<xid>/links {expires, max_downloads, inline}: a link anyone holding it downloads the file with."
+  [request principal xid]
+  (let [f (fields)
+        row (file-row f xid)
+        served (when row (get-in (engine-facts f [xid]) [xid :served]))]
+    (cond
+      (not (links/deployed?)) (fail 404 "NOT_FOUND" "This File System model has no File Link")
+      (nil? row) (fail 404 "FILE_NOT_FOUND" "No such file")
+      (nil? (get row (:folder f))) (fail 403 "LINKS_DISABLED" "Files in no folder cannot be shared by link")
+      (not (:can-link served)) (fail 403 "LINKS_DISABLED" "Links are not allowed in this folder")
+      :else
+      (let [{:keys [problem token link]} (links/create! principal xid (json-body request))]
+        (if-let [[st code message] problem]
+          (fail st code message)
+          (respond 201 (assoc link :url (link-url request token))))))))
+
+(defn list-links
+  "GET /files/<xid>/links: the file's live links the caller can see."
+  [xid]
+  (cond
+    (not (links/deployed?)) (fail 404 "NOT_FOUND" "This File System model has no File Link")
+    (nil? (file-row (fields) xid)) (fail 404 "FILE_NOT_FOUND" "No such file")
+    :else (try
+            (respond 200 {:file xid :links (links/of-file xid)})
+            (catch clojure.lang.ExceptionInfo e
+              (or (write-refusal e) (throw e))))))
+
+(defn delete-link!
+  "DELETE /files/links/<link xid>: the link stops working everywhere at once."
+  [link-xid]
+  (if-not (links/deployed?)
+    (fail 404 "NOT_FOUND" "This File System model has no File Link")
+    (try
+      (let [{:keys [problem file]} (links/delete! link-xid)]
+        (if-let [[st code message] problem]
+          (fail st code message)
+          {:status 204 ::file file}))
+      (catch clojure.lang.ExceptionInfo e
+        (or (write-refusal e) (throw e))))))
+
+(defn link-gone [request]
+  (if (page/browser? request)
+    (page/link-gone request)
+    (assoc-in (fail 404 "LINK_NOT_FOUND" "This link expired, was used up or withdrawn, or never existed")
+              [:headers "Cache-Control"] "no-store")))
+
+(defn creator-reads?
+  "Whether user `creator`, read fresh from the database, is active and can read file `xid`."
+  [creator xid]
+  (let [p (when creator (access/with-principal nil (iam.context/get-user-details {(id/key) creator})))]
+    (and p (not (false? (:active p)))
+         (some? (access/with-principal p (dataset/get-entity :files/file {(id/key) xid} {(id/key) nil}))))))
+
+(defn link-download
+  "GET/HEAD /files/link/<token>: the file behind a live link, checked as the link's creator on every request."
+  [store request token]
+  (let [f (fields)
+        lf (when (links/deployed?) (links/fields))
+        link (when lf
+               (links/by-token token (assoc (links/selection lf) (:file lf)
+                                            [{:selections {(id/key) nil (:name f) nil (:hash f) nil (:size f) nil (:status f) nil
+                                                           (:content-type f) nil (:storage-key f) nil
+                                                           (:folder f) [{:selections {(id/key) nil (folders/path-field) nil}}]}}])))
+        file (get link (:file lf))
+        folder (get file (:folder f))
+        served (delay (folders/served (folders/chain (get folder (folders/path-field))) (id/extract folder)))
+        limited (links/limited? lf link)
+        request (cond-> request
+                  limited (update :headers dissoc "range" "if-none-match")
+                  (links/inline? lf link) (assoc-in [:query-params "disposition"] "inline"))
+        counts? (and (= :get (:request-method request))
+                     (or limited
+                         (nil? (get-in request [:headers "range"]))
+                         (str/starts-with? (str (get-in request [:headers "range"])) "bytes=0-"))
+                     (not= (get file (:hash f)) (strip-etag (get-in request [:headers "if-none-match"]))))]
+    (if (or (not (links/live? lf link))
+            (nil? folder)
+            (links/used-up? lf link)
+            (not (:can-link @served))
+            (not (creator-reads? (some-> (get link (:created-by lf)) id/extract) (id/extract file)))
+            (and counts? (not (links/count-download! lf link))))
+      (link-gone request)
+      (let [cache (:cache @served)
+            response (serve-row store request f file {:key (get file (:storage-key f))}
+                                (cond limited "private, no-store"
+                                      (nil? cache) "private, no-cache"
+                                      :else (cache-control "private" (min cache (links/seconds-left lf link))))
+                                true)]
+        (cond-> (assoc-in response [:headers "Referrer-Policy"] "no-referrer")
+          limited (assoc-in [:headers "Accept-Ranges"] "none")
+          true (assoc ::link (id/extract link)))))))
+
+(def link-uri #"/files/link/([^/]+)/?")
+
+(def links-uri #"/files/(?:([A-Za-z0-9]{22})/links|links/([A-Za-z0-9]{22}))/?")
+
 (def path-link #"/files/path(/.*)")
+
+(def file-uri #"/files(?:/([A-Za-z0-9]{22}))?(/versions|/info)?(?:/(\d+))?(/restore)?/?")
+
+(def folder-uri #"/files/folders(?:/([A-Za-z0-9]{22}))?(/access|/share|/unshare)?/?")
 
 (defn decode-path
   "The file path a /files/path/... link names, or nil when a decoded part would hold a /."
@@ -588,15 +721,24 @@
         (folder-result (folders/create! principal (some-> name str) (some-> parent not-empty folders/ref->xid)) 201))
 
       (and xid (= :get m))
-      (if-let [f (folders/folder xid)] (respond 200 f) (fail 404 "FOLDER_NOT_FOUND" "No such folder"))
+      (if-let [f (folders/folder xid)]
+        (if (#{"true" "1"} (get-in request [:query-params "view"]))
+          (respond 200 (merge {:folder f
+                               :folders (folders/children xid)}
+                              (if (folders/lists-readable?)
+                                {:access (folders/access-lists xid)}
+                                {:access nil :access_error {:code "FORBIDDEN" :message "You may not see who has access to this folder"}})))
+          (respond 200 f))
+        (fail 404 "FOLDER_NOT_FOUND" "No such folder"))
 
       (and xid (= :patch m))
       (let [{:keys [name parent] :as body} (json-body request)]
-        (folder-result (folders/update! xid {:name (some-> name str)
-                                             :parent (if (and (contains? body :parent) (str/blank? parent))
-                                                       (folders/root)
-                                                       (some-> parent not-empty folders/ref->xid))})
-                       200))
+        (assoc (folder-result (folders/update! xid {:name (some-> name str)
+                                                    :parent (if (and (contains? body :parent) (str/blank? parent))
+                                                              (folders/root)
+                                                              (some-> parent not-empty folders/ref->xid))})
+                              200)
+               ::action (if (contains? body :parent) :moved :renamed)))
 
       (and xid (= :delete m))
       (try
@@ -609,25 +751,102 @@
       :else (fail 405 "METHOD_NOT_ALLOWED" "Folders: GET/POST /files/folders, GET/PATCH/DELETE /files/folders/<xid> (or /files/folders?path=/a/b/), PUT /files/folders?path=, GET <xid>/access, POST <xid>/share|unshare"))))
 
 (defn folder-put!
-  "PUT /files/folders?path=/a/b/ {public, cache}: the folder and any missing above it, then its settings."
+  "PUT /files/folders?path=/a/b/ {public, cache, can_link}: the folder and any missing above it, then its settings."
   [request principal]
   (let [path (some-> (get-in request [:query-params "path"]) str/trim not-empty)]
     (if (and path (str/starts-with? path "/"))
       (try
-        (folder-result (folders/ensure! principal path (select-keys (json-body request) [:public :cache])) 200)
+        (folder-result (folders/ensure! principal path (select-keys (json-body request) [:public :cache :can_link])) 200)
         (catch Exception e
           (or (write-refusal e) (throw e))))
       (fail 400 "INVALID_PATH" "Name the folder by its path: PUT /files/folders?path=/site/img/"))))
 
-(defn needs-audit? [{:keys [uri request-method]}]
-  (or (#{:post :put :delete} request-method)
-      (re-find #"^/files/[A-Za-z0-9]{22}/versions" uri)))
+(defn zip-request? [{:keys [uri request-method]}]
+  (and (= :post request-method) (= "/files/zip" (str/replace uri #"/$" ""))))
 
-(defn route
+(defn ready-rows
+  "READY files the caller can read, by xid or by folder, each with its folder path."
+  [f {:keys [xids folders]}]
+  (dataset/search-entity :files/file
+                         {:_where (cond-> {(:status f) {:_eq :READY}}
+                                    xids (assoc (id/key) {:_in (vec xids)}))}
+                         {(id/key) nil (:name f) nil (:size f) nil (:content-type f) nil
+                          (:folder f) [(cond-> {:selections {(id/key) nil :path nil}}
+                                         folders (assoc :args {:_where {(id/key) {:_in (vec folders)}} :_join :inner}))]}))
+
+(defn zip-plan
+  "The entries and skips POST /files/zip names, every file read as the caller."
+  [f {:keys [files folders]}]
+  (let [file-refs (map str files)
+        resolved (for [r file-refs]
+                   (if (str/starts-with? r "/")
+                     (let [{:keys [xid]} (resolve-path r)] [r xid])
+                     [r r]))
+        rows (when-let [xids (seq (keep second resolved))]
+               (into {} (map (juxt id/extract identity)) (ready-rows f {:xids (distinct xids)})))
+        loose (for [[r xid] resolved]
+                (if-let [row (get rows xid)]
+                  {:row row :entry (get row (:name f)) :ref r}
+                  {:skip {:ref r :reason "not found, not readable or not ready"}}))
+        in-folders (for [r (map str folders)
+                         :let [xid (folders/ref->xid r)
+                               top (when (and (not (str/starts-with? xid "/")) (folders/visible? xid))
+                                     (folders/engine-folder xid))]]
+                     (if-not top
+                       [{:skip {:ref r :reason "folder not found"}}]
+                       (let [tree (folders/subtree (:path top))
+                             parent (if (= "/" (:path top)) "/" (subs (:path top) 0 (inc (str/last-index-of (:path top) "/" (- (count (:path top)) 2)))))]
+                         (for [row (ready-rows f {:folders (map :xid tree)})]
+                           {:row row :ref r
+                            :entry (str (subs (get-in row [(:folder f) :path]) (count parent)) (get row (:name f)))}))))
+        all (concat (apply concat in-folders) loose)
+        picked (vals (into {} (comp (filter :row) (map (juxt #(id/extract (:row %)) identity))) (reverse all)))]
+    {:items (zip/unique-names (sort-by :entry picked))
+     :skipped (vec (keep :skip all))
+     :name (if (and (empty? files) (= 1 (count folders)))
+             (let [top (some-> (first folders) str folders/ref->xid folders/engine-folder)
+                   leaf (some-> (:path top) (str/split #"/") last not-empty)]
+               (str (or leaf "files") ".zip"))
+             (str "files-" (java.time.LocalDate/now java.time.ZoneOffset/UTC) ".zip"))}))
+
+(defn zip-files
+  "POST /files/zip {files, folders}: one zip of the READY files named and inside the folders, streamed."
+  [store request]
+  (let [f (fields)
+        {:keys [files folders] :as body} (json-body request)
+        refs? #(or (nil? %) (and (sequential? %) (every? string? %)))]
+    (cond
+      (not (and (refs? files) (refs? folders))) (fail 400 "INVALID_BODY" "files and folders are arrays of xids or paths")
+      (and (empty? files) (empty? folders)) (fail 400 "INVALID_BODY" "Name at least one file or folder")
+      :else
+      (let [{:keys [items skipped name]} (zip-plan f body)
+            bytes (reduce + 0 (keep #(get (:row %) (:size f)) items))]
+        (if (or (> (count items) (zip/max-entries)) (> bytes (zip/max-bytes)))
+          (fail 413 "ZIP_TOO_LARGE" (str "A zip holds at most " (zip/max-entries) " files and " (zip/max-bytes) " bytes")
+                {:files (count items) :bytes bytes :max_files (zip/max-entries) :max_bytes (zip/max-bytes)})
+          (let [facts (engine-facts f (map #(id/extract (:row %)) items))
+                items (mapv (fn [{:keys [row] :as item}]
+                              (assoc item :key (get-in facts [(id/extract row) :key])
+                                     :content-type (get row (:content-type f))))
+                            items)]
+            {:status 200
+             :headers {"Content-Type" "application/zip"
+                       "Content-Disposition" (disposition request name "application/zip")
+                       "Cache-Control" "private, no-store"}
+             :body (zip/stream store items skipped)
+             ::entries (count items)}))))))
+
+(defn needs-audit? [{:keys [uri request-method] :as request}]
+  (and (not (zip-request? request))
+       (not (re-matches links-uri uri))
+       (or (#{:post :put :delete} request-method)
+           (re-find #"^/files/[A-Za-z0-9]{22}/versions" uri))))
+
+(defn dispatch
   [store {:keys [uri request-method] :as request} principal]
-  (let [[file? xid tail version restore] (re-matches #"/files(?:/([A-Za-z0-9]{22}))?(/versions|/info)?(?:/(\d+))?(/restore)?/?" uri)
+  (let [[file? xid tail version restore] (re-matches file-uri uri)
         [_ raw-path] (re-matches path-link uri)
-        [folders? folder-xid folder-tail] (re-matches #"/files/folders(?:/([A-Za-z0-9]{22}))?(/access|/share|/unshare)?/?" uri)
+        [folders? folder-xid folder-tail] (re-matches folder-uri uri)
         path (some-> (get-in request [:query-params "path"]) not-empty)]
     (cond
       (and (nil? audit/*audit-provider*)
@@ -635,6 +854,18 @@
       (fail 503 "AUDIT_UNAVAILABLE" "File versions and deletions live in audit history, which is not available right now; downloads still work")
 
       (and (= "/files/search" (str/replace uri #"/$" "")) (= :get request-method)) (search-files request)
+      (zip-request? request) (zip-files store request)
+      (re-matches link-uri uri)
+      (if (#{:get :head} request-method)
+        (link-download store request (second (re-matches link-uri uri)))
+        (fail 405 "METHOD_NOT_ALLOWED" "A file link only downloads: GET or HEAD"))
+      (re-matches links-uri uri)
+      (let [[_ file-xid link-xid] (re-matches links-uri uri)]
+        (cond
+          (and file-xid (= :post request-method)) (create-link! request principal file-xid)
+          (and file-xid (= :get request-method)) (list-links file-xid)
+          (and link-xid (= :delete request-method)) (delete-link! link-xid)
+          :else (fail 405 "METHOD_NOT_ALLOWED" "Links: GET/POST /files/<xid>/links, DELETE /files/links/<link xid>")))
       (and folders? (= :put request-method) (nil? folder-xid) (nil? folder-tail)) (folder-put! request principal)
       folders? (folder-route request principal
                              (or folder-xid (some-> (get-in request [:query-params "path"]) not-empty folders/ref->xid))
@@ -663,7 +894,7 @@
         (list-files request))
       (and xid (= "/info" tail) (= :get request-method)) (info xid)
       (and xid (nil? tail) (nil? version) (#{:get :head} request-method)) (download store request xid)
-      (and xid (nil? tail) (= :put request-method)) (replace! store request xid)
+      (and xid (nil? tail) (= :put request-method)) (replace! store request principal xid)
       (and xid (nil? tail) (= :patch request-method)) (patch-file! request xid)
       (and xid (nil? tail) (= :delete request-method)) (remove! xid)
       (and xid (= "/versions" tail) version restore (= :post request-method)) (restore! store xid version principal)
@@ -672,33 +903,137 @@
       (and (nil? xid) (= uri "/files")) (fail 405 "METHOD_NOT_ALLOWED" "List with GET /files, upload with POST /files?name=...")
       :else (fail 404 "NOT_FOUND" "No such files endpoint"))))
 
+(defn route
+  "Answer one /files request; a ::problem thrown on the way becomes its error response."
+  [store request principal]
+  (try
+    (binding [*key-fn* (let [f (get-in request [:query-params "key_format"])]
+                         (when (and f (not= "snake" f)) (dk/format->key-fn f)))]
+      (dispatch store request principal))
+    (catch clojure.lang.ExceptionInfo e
+      (if-let [problem (::problem (ex-data e))]
+        (apply fail problem)
+        (throw e)))))
+
 (defn open-route
   "A request without a token: GET/HEAD of /files/<xid> or a path link, nothing else; nil when it is neither."
   [store {:keys [uri request-method] :as request}]
   (when (#{:get :head} request-method)
     (let [[_ xid] (re-matches #"/files/([A-Za-z0-9]{22})/?" uri)
-          [_ raw-path] (re-matches path-link uri)]
+          [_ raw-path] (re-matches path-link uri)
+          [_ token] (re-matches link-uri uri)]
       (cond
+        token (link-download store request token)
         xid (open-download store request xid)
         raw-path (if-let [target (:xid (access/with-principal nil (resolve-path (decode-path raw-path))))]
                    (open-download store request target)
                    (unauthorized request))))))
 
-(defn blob-write? [{:keys [uri request-method]}]
-  (and (#{:post :put} request-method) (not (str/starts-with? uri "/files/folders"))))
+(defn browser-opened?
+  "Whether the browser itself opened this request: same origin, typed or bookmarked, or a top-level navigation."
+  [{:keys [headers]}]
+  (let [site (get headers "sec-fetch-site")]
+    (or (nil? site)
+        (contains? #{"same-origin" "none"} site)
+        (= "navigate" (get headers "sec-fetch-mode")))))
+
+(defn cookie-principal
+  "The principal behind the sign-in cookie, for a file link the browser opens without a token."
+  [{:keys [uri request-method headers] :as request}]
+  (when (and (#{:get :head} request-method)
+             (nil? (get headers "authorization"))
+             (or (re-matches #"/files/[A-Za-z0-9]{22}/?" uri) (re-matches path-link uri))
+             (browser-opened? request))
+    (when-let [sid (auth/session-cookie request)]
+      (access/with-principal nil
+        (let [{:keys [active authorized-at resource-owner]} (oauth/get-session sid)
+              principal (when (and active authorized-at resource-owner)
+                          (iam.context/get-user-context resource-owner))]
+          (when (and principal (not (false? (:active principal))))
+            principal))))))
+
+(defn blob-write? [{:keys [uri request-method] :as request}]
+  (and (#{:post :put} request-method) (not (str/starts-with? uri "/files/folders")) (not (zip-request? request))
+       (not (re-matches links-uri uri))))
+
+(defn event-of
+  "The change a successful /files answer made, as the Logs tool's Files lens reads it; nil for reads and failures."
+  [{:keys [uri request-method query-params]} {:keys [status body] ::keys [action] :as response}]
+  (when (and status (<= 200 status 299) (not= :head request-method))
+    (let [answer (delay (when (string? body) (try (json/read-str body) (catch Exception _ nil))))
+          [file? xid tail version restore] (re-matches file-uri uri)
+          [folders? folder-xid folder-tail] (re-matches folder-uri uri)
+          link? (re-matches path-link uri)
+          path (some-> (get query-params "path") not-empty)
+          m request-method
+          file-event (fn [action subject]
+                       (cond-> {:action action :subject subject
+                                :file (or xid (:xid @answer))
+                                :folder (or (get-in @answer [:folder :path]) (when (and path (not xid)) (first (split-path path))))}
+                         version (assoc :version (parse-long version))
+                         (and path (not xid)) (assoc :path path)))]
+      (cond
+        (= "/files/zip" (str/replace uri #"/$" ""))
+        (when (= :post m) {:action :downloaded :subject :zip :files (::entries response)})
+
+        (re-matches link-uri uri)
+        (when (= :get m) {:action :downloaded :subject :link :link (::link response)})
+
+        (re-matches links-uri uri)
+        (let [[_ file-xid link-xid] (re-matches links-uri uri)]
+          (case m
+            :post {:action :created :subject :link :file file-xid :link (:xid @answer)}
+            :delete {:action :deleted :subject :link :file (::file response) :link link-xid}
+            nil))
+
+        folders?
+        (when-let [[action subject] (cond
+                                      (= "/share" folder-tail) [:shared :access]
+                                      (= "/unshare" folder-tail) [:unshared :access]
+                                      folder-tail nil
+                                      (= :post m) [:created :folder]
+                                      (= :put m) [:updated :folder]
+                                      (= :patch m) [action :folder]
+                                      (= :delete m) [:deleted :folder])]
+          {:action action :subject subject :folder (or folder-xid path (:path @answer))})
+
+        (and (= :get m) (or link? (and xid (nil? tail)) (and xid version (nil? restore)) (and (nil? xid) path (nil? tail))))
+        (file-event :downloaded (if version :version :file))
+
+        (or link? (not file?) (= "/info" tail) (= :get m)) nil
+        restore (file-event :restored :version)
+        (= :post m) (file-event :uploaded :file)
+        (= :put m) (file-event (if (and (nil? xid) (= 201 status)) :uploaded :replaced) :file)
+        (= :patch m) (file-event action :file)
+        (= :delete m) (file-event :deleted :file)))))
+
+(defn record!
+  "Log the change `response` made; downloads only at debug, since every page view of a public file is one."
+  [request response]
+  (try
+    (when-let [{:keys [action subject] :as event} (event-of request response)]
+      (let [user (log/current-principal-xid)
+            msg (str "File " (name subject) " " (name action) ": " (or (:file event) (:link event) (:path event) (:folder event) (some-> (:files event) (str " files"))))]
+        (if (= :downloaded action)
+          (log/debug {:id ::changed :user-xid user :data event} msg)
+          (log/info {:id ::changed :user-xid user :data event} msg))))
+    (catch Throwable _ nil))
+  response)
 
 (defn handler
   "Ring handler for the /files prefix; without an Authorization header only public files download."
   [store-fn request]
   (try
-    (if-let [{:keys [principal]} (auth/authenticate-request request engine/platform-audience)]
+    (if-let [principal (or (:principal (auth/authenticate-request request engine/platform-audience))
+                           (cookie-principal request))]
       (access/with-principal principal
-        (if (blob-write? request)
-          (migrate/writing (fail 503 "FILES_MIGRATING" "Files are moving to new storage; uploads resume in a moment, downloads still work")
-                           #(route (store-fn) request principal))
-          (route (store-fn) request principal)))
+        (record! request
+                 (if (blob-write? request)
+                   (migrate/writing (fail 503 "FILES_MIGRATING" "Files are moving to new storage; uploads resume in a moment, downloads still work")
+                                    #(route (store-fn) request principal))
+                   (route (store-fn) request principal))))
       (or (when (nil? (get-in request [:headers "authorization"]))
-            (open-route (store-fn) request))
+            (some->> (open-route (store-fn) request) (record! request)))
           (unauthorized request)))
     (catch Throwable t
       (log/error! {:id ::request-failed :msg "Files request failed"

@@ -154,13 +154,18 @@
 
 (defn attribute->ddl
   [_entity {n :name
-            t :type}]
-  (clojure.string/join
-   " "
-   (remove
-    empty?
-    [(column-name n)
-     (type->ddl t)])))
+            t :type
+            :as attribute}]
+  ;; never inline a user stamp — it can precede the user table; the stamp DDL adds it
+  (when-not (and (= "user" t) (core/stamp attribute))
+   (clojure.string/join
+    " "
+    (remove
+     empty?
+     [(column-name n)
+      (type->ddl t)
+      (when (and (= "timestamp" t) (core/stamp attribute))
+        "default localtimestamp")]))))
 
 (defn normalized-enum-value [value]
   (clojure.string/replace value #"-|\s" "_"))
@@ -195,12 +200,7 @@
                          column-name))
                       ids)))))
                (:unique cs))
-          audit-cols (cond-> []
-                       (core/audit-modified? entity)
-                       (conj "modified_on timestamp not null default localtimestamp")
-                       (core/audit-created? entity)
-                       (conj "created_on timestamp not null default localtimestamp"))
-          rows (concat pk as' audit-cols cs')]
+          rows (concat pk as' cs')]
       (format
        "create table \"%s\" (\n  %s\n)"
        table
@@ -1199,13 +1199,13 @@
 
               version'' (encode-version-model
                          (assoc version
-                                :model (assoc model :version 2)
+                                :model (assoc model :version core/model-format)
                                 :deployed_on (java.util.Date.)
                                 :deployed true))]
           (sync-entity this :dataset/version version'')
           (core/reload this version'')
 
-          (let [updated-model (assoc (rebuild-global-model) :version 2)]
+          (let [updated-model (assoc (rebuild-global-model) :version core/model-format)]
             (dataset/save-model! updated-model)
             (add-to-deploy-history! updated-model)
             (let [all-entities (vec (core/get-entities updated-model))]
@@ -1420,7 +1420,7 @@
      (let [model (rebuild-global-model)
            model' (-> (or model (core/map->ERDModel {:entities {}
                                                      :relations {}}))
-                      (assoc :version 2))
+                      (assoc :version core/model-format))
            model'' (core/activate-model model' (gen-activation-filter))
            schema (query/model->schema model'')]
        (dataset/save-model! model'')

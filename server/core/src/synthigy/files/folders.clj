@@ -35,6 +35,8 @@
 
 (defn cache-field [] (some-> (model/column :files/folder :files.folder/cache) keyword))
 
+(defn can-link-field [] (some-> (model/column :files/folder :files.folder/can-link) keyword))
+
 (defn ensure-root!
   "The ROOT folder, path /, created when missing."
   []
@@ -42,27 +44,51 @@
     (when-not (dataset/get-entity :files/folder {(id/key) (root)} {(id/key) nil})
       (dataset/sync-entity :files/folder {(id/key) (root) (name-field) "ROOT" (path-field) "/"}))))
 
-(defn engine-folders
-  "Every folder's xid, path, parent xid, Public and Cache, read as the engine."
-  []
-  (let [pf (public-field)
-        cf (cache-field)]
-    (access/with-principal nil
-      (mapv (fn [r] {:xid (id/extract r) :path (get r (path-field)) :parent (some-> (get r (parent-field)) id/extract)
-                     :public (when pf (get r pf)) :cache (when cf (get r cf))})
-            (dataset/search-entity :files/folder nil (cond-> {(id/key) nil (path-field) nil (parent-field) [{:selections {(id/key) nil}}]}
-                                                       pf (assoc pf nil)
-                                                       cf (assoc cf nil)))))))
+(defn fact-selection []
+  (let [pf (public-field) cf (cache-field) lf (can-link-field)]
+    (cond-> {(id/key) nil (path-field) nil (parent-field) [{:selections {(id/key) nil}}]}
+      pf (assoc pf nil)
+      cf (assoc cf nil)
+      lf (assoc lf nil))))
+
+(defn fact [r]
+  (let [pf (public-field) cf (cache-field) lf (can-link-field)]
+    {:xid (id/extract r) :path (get r (path-field)) :parent (some-> (get r (parent-field)) id/extract)
+     :public (when pf (get r pf)) :cache (when cf (get r cf)) :can-link (when lf (get r lf))}))
+
+(defn engine-where
+  "Xid, path, parent xid, Public and Cache of the folders `args` match, read as the engine."
+  ([args] (engine-where args (fact-selection)))
+  ([args selection]
+   (access/with-principal nil
+     (mapv fact (dataset/search-entity :files/folder args selection)))))
 
 (defn engine-folder [xid]
-  (first (filter #(= xid (:xid %)) (engine-folders))))
+  (when xid (first (engine-where {:_where {(id/key) {:_eq xid}}}))))
+
+(defn at-path [path]
+  (first (engine-where {:_where {(path-field) {:_eq path}}})))
+
+(defn at-paths
+  "Path -> xid of the folders among `paths`."
+  [paths]
+  (if (empty? paths)
+    {}
+    (into {} (map (juxt :path :xid)) (engine-where {:_where {(path-field) {:_in (vec (distinct paths))}}}))))
+
+(defn engine-children
+  "The folders directly inside `xid`, at most `limit` when given."
+  [xid & [limit]]
+  (engine-where (cond-> {} limit (assoc :_limit limit))
+                (assoc (fact-selection) (parent-field)
+                       [{:selections {(id/key) nil} :args {:_where {(id/key) {:_eq xid}} :_join :inner}}])))
 
 (defn ref->xid
   "Folder xid for `ref`: a path when it starts with /, otherwise the xid itself."
   [ref]
   (if (and (string? ref) (str/starts-with? ref "/"))
     (let [path (cond-> ref (not (str/ends-with? ref "/")) (str "/"))]
-      (or (some #(when (= path (:path %)) (:xid %)) (engine-folders)) ref))
+      (or (:xid (at-path path)) ref))
     ref))
 
 (defn visible? [xid]
@@ -80,19 +106,20 @@
   (every? (fn [[_ _ k]] (daccess/relation-allows? (id/relation k) #{:read})) model/acl-relations))
 
 (defn served
-  "How files in folder `xid` are served: Public and Cache each from the folder's own value, else the nearest folder above that has one."
+  "How files in folder `xid` are served: Public, Cache and Can Link each from the folder's own value, else the nearest folder above that has one."
   [facts xid]
-  (loop [x xid seen #{} public nil cache nil]
+  (loop [x xid seen #{} public nil cache nil can-link nil]
     (if-let [f (when-not (seen x) (get facts x))]
       (recur (:parent f) (conj seen x)
              (if (some? public) public (:public f))
-             (if (some? cache) cache (:cache f)))
-      {:public (true? public) :cache cache})))
+             (if (some? cache) cache (:cache f))
+             (if (some? can-link) can-link (:can-link f)))
+      {:public (true? public) :cache cache :can-link (true? can-link)})))
 
 (defn wire
   "A folder as the endpoints answer it: Public and Cache as they apply, its own values under :settings."
   [{:keys [xid] :as row} facts]
-  (let [{:keys [path parent public cache]} (get facts xid)
+  (let [{:keys [path parent public cache can-link]} (get facts xid)
         applied (served facts xid)]
     {:xid xid
      :name (:name row)
@@ -101,24 +128,43 @@
      :writable (writable? xid)
      :public (:public applied)
      :cache (:cache applied)
-     :settings {:public public :cache cache}}))
+     :can_link (:can-link applied)
+     :settings {:public public :cache cache :can_link can-link}}))
 
-(defn facts [] (into {} (map (juxt :xid identity)) (engine-folders)))
+(defn prefixes
+  "The folder paths from the top down to `path`: /a/b/ → (/a/ /a/b/)."
+  [path]
+  (let [parts (remove str/blank? (str/split (str path) #"/"))]
+    (map #(str "/" (str/join "/" (take % parts)) "/") (range 1 (inc (count parts))))))
+
+(defn facts
+  "The folders `xids` and every folder above them, by xid: what `served` and `wire` walk."
+  [xids]
+  (let [own (when-let [xs (seq (distinct (remove nil? xids)))]
+              (engine-where {:_where {(id/key) {:_in (vec xs)}}}))
+        above (when (seq own)
+                (engine-where {:_where {(path-field) {:_in (vec (into #{"/"} (mapcat (comp prefixes :path)) own))}}}))]
+    (into {} (map (juxt :xid identity)) (concat own above))))
+
+(defn chain
+  "The folder at `path` and every folder above it, by xid, in one read: what `served` walks."
+  [path]
+  (into {} (map (juxt :xid identity)) (engine-where {:_where {(path-field) {:_in (vec (prefixes path))}}})))
 
 (defn folder [xid]
   (when-let [row (dataset/get-entity :files/folder {(id/key) xid} {(id/key) nil (name-field) nil})]
-    (wire {:xid xid :name (get row (name-field))} (facts))))
+    (wire {:xid xid :name (get row (name-field))} (facts [xid]))))
 
 (defn children
   "The visible folders directly inside `parent-xid`."
   [parent-xid]
-  (let [all (facts)
-        kids (into #{} (comp (filter #(= parent-xid (:parent %))) (map :xid)) (vals all))]
+  (let [kids (mapv :xid (engine-children parent-xid))]
     (if (empty? kids)
       []
-      (->> (dataset/search-entity :files/folder {:_where {(id/key) {:_in (vec kids)}}} {(id/key) nil (name-field) nil})
-           (map #(wire {:xid (id/extract %) :name (get % (name-field))} all))
-           (sort-by :name)
+      (->> (dataset/search-entity :files/folder
+                                  {:_where {(id/key) {:_in kids}} :_order_by (array-map (name-field) :asc (id/key) :asc)}
+                                  {(id/key) nil (name-field) nil})
+           (map (let [all (facts kids)] #(wire {:xid (id/extract %) :name (get % (name-field))} all)))
            vec))))
 
 (defn inherited-acl
@@ -149,7 +195,7 @@
       (not (writable? parent-xid)) (problem 403 "FORBIDDEN" "You may not create folders here")
       :else
       (let [path (str (:path parent) folder-name "/")]
-        (if (some #(= path (:path %)) (engine-folders))
+        (if (at-path path)
           (problem 409 "FOLDER_NAME_TAKEN" "A folder with this name already exists here")
           (let [row (guard/as-module
                      #(dataset/sync-entity :files/folder
@@ -159,54 +205,53 @@
                                                   (inherited-acl parent-xid (id/extract principal)))))]
             {:folder (folder (id/extract row))}))))))
 
-(defn prefixes
-  "The folder paths from the top down to `path`: /a/b/ → (/a/ /a/b/)."
-  [path]
-  (let [parts (remove str/blank? (str/split (str path) #"/"))]
-    (map #(str "/" (str/join "/" (take % parts)) "/") (range 1 (inc (count parts))))))
-
 (defn first-missing
   "The first folder on `path` that is absent or hidden from the principal, or nil when all are there."
   [path]
-  (let [by-path (into {} (map (juxt :path :xid)) (engine-folders))]
+  (let [by-path (at-paths (prefixes path))]
     (some (fn [p] (let [x (get by-path p)] (when (or (nil? x) (not (visible? x))) p)))
           (prefixes path))))
 
 (defn settings-problem
-  "Why `settings` ({:public :cache}) cannot be written by the principal, or nil."
+  "Why `settings` ({:public :cache :can_link}) cannot be written by the principal, or nil."
   [settings]
-  (let [{:keys [public cache]} settings]
+  (let [{:keys [public cache can_link]} settings]
     (cond
       (and (contains? settings :public) (some? public) (not (boolean? public)))
       (problem 400 "INVALID_SETTINGS" "public is true, false or null")
       (and (contains? settings :cache) (some? cache) (not (and (int? cache) (>= cache 0))))
       (problem 400 "INVALID_SETTINGS" "cache is whole seconds, 0 or more, or null")
+      (and (contains? settings :can_link) (some? can_link) (not (boolean? can_link)))
+      (problem 400 "INVALID_SETTINGS" "can_link is true, false or null")
       (and (contains? settings :public) (nil? (public-field)))
       (problem 400 "INVALID_SETTINGS" "This File System model has no Public attribute")
       (and (contains? settings :cache) (nil? (cache-field)))
       (problem 400 "INVALID_SETTINGS" "This File System model has no Cache attribute")
+      (and (contains? settings :can_link) (nil? (can-link-field)))
+      (problem 400 "INVALID_SETTINGS" "This File System model has no Can Link attribute")
       (some (fn [[k attr]] (and (contains? settings k)
                                 (not (daccess/attribute-allows? (id/entity :files/folder) (id/data attr) :write))))
-            [[:public :files.folder/public] [:cache :files.folder/cache]])
+            [[:public :files.folder/public] [:cache :files.folder/cache] [:can_link :files.folder/can-link]])
       (problem 403 "ATTRIBUTE_FORBIDDEN" "Your roles may not change this folder setting"))))
 
 (defn write-settings!
-  "Write Public and Cache of folder `xid` with the caller's grants, so attribute permissions apply."
+  "Write Public, Cache and Can Link of folder `xid` with the caller's grants, so attribute permissions apply."
   [xid settings]
   (let [cols (cond-> {}
                (contains? settings :public) (assoc (public-field) (:public settings))
-               (contains? settings :cache) (assoc (cache-field) (:cache settings)))]
+               (contains? settings :cache) (assoc (cache-field) (:cache settings))
+               (contains? settings :can_link) (assoc (can-link-field) (:can_link settings)))]
     (when (seq cols)
       (guard/as-endpoint #(dataset/sync-entity :files/folder (assoc cols (id/key) xid))))))
 
 (defn ensure!
-  "Folder `path` and every missing folder above it, created as the principal; then its `settings` (Public, Cache)."
+  "Folder `path` and every missing folder above it, created as the principal; then its `settings` (Public, Cache, Can Link)."
   [principal path settings]
   (let [path (cond-> (str path) (not (str/ends-with? (str path) "/")) (str "/"))]
     (or (settings-problem settings)
         (when (and (= "/" path) (seq settings))
           (problem 403 "FORBIDDEN" "ROOT has no settings"))
-        (let [by-path (into {} (map (juxt :path :xid)) (engine-folders))]
+        (let [by-path (at-paths (prefixes path))]
           (loop [[p & more] (prefixes path) parent (root)]
             (cond
               (nil? p)
@@ -226,7 +271,9 @@
 (defn subtree
   "Folders at or under `path`, deepest last."
   [path]
-  (sort-by (comp count :path) (filter #(str/starts-with? (:path %) path) (engine-folders))))
+  (->> (engine-where {:_where {(path-field) {:_like (str (str/replace path #"[\\%_]" "\\\\$0") "%")}}})
+       (filter #(str/starts-with? (:path %) path))
+       (sort-by (comp count :path))))
 
 (defn update!
   "Rename and/or move folder `xid`; paths below it follow."
@@ -247,7 +294,7 @@
           (problem 404 "FOLDER_NOT_FOUND" "No such parent folder")
           (and new-parent (not (writable? parent-xid))) (problem 403 "FORBIDDEN" "You may not move folders there")
           (str/starts-with? (:path parent) (:path current)) (problem 409 "FOLDER_CYCLE" "A folder cannot move inside itself")
-          (and (not= path (:path current)) (some #(= path (:path %)) (engine-folders)))
+          (and (not= path (:path current)) (at-path path))
           (problem 409 "FOLDER_NAME_TAKEN" "A folder with this name already exists there")
           :else
           (let [old (:path current)
@@ -263,7 +310,7 @@
 (defn empty-folder?
   [xid]
   (access/with-principal nil
-    (and (not-any? #(= xid (:parent %)) (engine-folders))
+    (and (empty? (engine-children xid 1))
          (empty? (dataset/search-entity :files/file {:_limit 1}
                                         {(id/key) nil
                                          (keyword (naming/normalize-name (:to-label (model/relation :files/file->folder))))
@@ -282,16 +329,21 @@
 (def accesses {"read" :read "write" :write "delete" :delete})
 
 (defn access-lists
-  "Who holds read, write and delete on folder `xid`: {access {:users [{xid name}] :groups [...]}}, read as the engine."
+  "Who holds read, write and delete on folder `xid`: {access {:users [{xid name}] :groups [...]}}, read as the engine; a user's name is the display name."
   [xid]
   (let [fields (model/acl-fields)
         row (access/with-principal nil
               (dataset/get-entity :files/folder {(id/key) xid}
                                   (into {(id/key) nil}
-                                        (map (fn [k] [k [{:selections {(id/key) nil :name nil}}]]))
-                                        (vals fields))))]
+                                        (map (fn [[[_ kind] k]]
+                                               [k [{:selections (if (= :users kind)
+                                                                  {(id/key) nil :display_name nil}
+                                                                  {(id/key) nil :name nil})}]]))
+                                        fields)))]
     (reduce-kv (fn [acc [a kind] k]
-                 (assoc-in acc [a kind] (mapv #(select-keys % [(id/key) :name]) (get row k))))
+                 (assoc-in acc [a kind] (mapv #(hash-map (id/key) (get % (id/key))
+                                                         :name (if (= :users kind) (:display_name %) (:name %)))
+                                              (get row k))))
                {:read {:users [] :groups []} :write {:users [] :groups []} :delete {:users [] :groups []}}
                fields)))
 

@@ -26,7 +26,7 @@
   [store]
   (let [key (str "synthigy-probe-" (str/replace (str (random-uuid)) "-" ""))
         body (.getBytes (str "Synthigy storage probe " key) StandardCharsets/UTF_8)
-        spooled (storage/spool! (ByteArrayInputStream. body) nil)]
+        spooled (storage/spool! (ByteArrayInputStream. body))]
     (storage/put-file! store key (:file spooled) (assoc spooled :content-type "text/plain"))
     (try
       (let [^InputStream in (or (storage/open-blob store key)

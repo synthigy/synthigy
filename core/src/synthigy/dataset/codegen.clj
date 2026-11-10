@@ -37,6 +37,17 @@
                             (not nul) (assoc :nullable false))
                           {:key col :type "unknown"}))))})
 
+(defn op-field
+  "Typed `op` field of a selection operation: counts int, avg float, sum/min/max the field's type."
+  [schema rel alias op]
+  (let [[f field] (if (map? op) (first op) ["count" nil])
+        f (str/replace (name f) "-" "_")]
+    (merge {:key (name alias) :kind "op"}
+           (case f
+             ("count" "count_distinct") {:type "int" :nullable false}
+             "avg" {:type "float"}
+             {:type (or (get-in schema [:entities (:to rel) :attributes (name field) :type]) "unknown")}))))
+
 (defn derive-result
   "Derives the typed result tree for a selection against the snake schema."
   [schema entity-name selection]
@@ -49,31 +60,40 @@
      :fields
      (->> (reduce-kv
            (fn [acc k v]
-             (let [kname (name k)]
+             (let [kname (name k)
+                   label (get-in ent [:attributes kname :label])]
                (cond
-                 ;; _count/_agg must be tested BEFORE the relation branch —
-                 ;; their
-                 ;; wire shape mimics a relation and would be mistyped
-                 ;; otherwise.
-                 (= kname "_count")
-                 (conj acc {:key "_count" :kind "map" :value "int" :optional true})
-                 (= kname "_agg")
-                 (conj acc {:key "_agg" :kind "map" :value "unknown" :optional true})
+                 (and label (map? (if (vector? v) (first v) v)) (get-in ent [:relations kname]))
+                 (let [rel (get-in ent [:relations kname])
+                       shown (conj (set label) "xid")]
+                   (into acc
+                         (map (fn [{:keys [selections alias]}]
+                                {:key         (or alias kname)
+                                 :kind        "relation"
+                                 :cardinality (:cardinality rel)
+                                 :optional    true
+                                 :fields      (:fields (derive-result schema (:to rel)
+                                                                      (into {} (filter #(shown (name (key %)))) selections)))}))
+                         (if (vector? v) v [{:selections v}])))
 
-                 (and (vector? v) (map? (first v)))
-                 (let [{:keys [selections alias]} (first v)
-                       rel (get-in ent [:relations kname])]
+                 (and (vector? v) (map? (first v)) (not (get-in ent [:attributes kname])))
+                 (let [rel (get-in ent [:relations kname])]
                    (when (nil? rel)
                      (throw (ex-info (str "describe: '" kname "' is not a relation on '" entity-name "'")
                                      {:code "SCHEMA_UNKNOWN_RELATION" :entity entity-name :relation kname})))
                    (when (nil? (:cardinality rel))
                      (throw (ex-info (str "describe: relation '" entity-name "." kname "' has no cardinality")
                                      {:code "SCHEMA_MISSING_CARDINALITY" :entity entity-name :relation kname})))
-                   (conj acc {:key         (or alias kname)
-                              :kind        "relation"
-                              :cardinality (:cardinality rel)
-                              :optional    true
-                              :fields      (:fields (derive-result schema (:to rel) selections))}))
+                   (into acc
+                         (map (fn [{:keys [selections alias op]}]
+                                (if op
+                                  (op-field schema rel alias op)
+                                  {:key         (or alias kname)
+                                   :kind        "relation"
+                                   :cardinality (:cardinality rel)
+                                   :optional    true
+                                   :fields      (:fields (derive-result schema (:to rel) selections))})))
+                         v))
                  :else
                  (if (= kname "xid") acc
                      (let [attr (get-in ent [:attributes kname])]

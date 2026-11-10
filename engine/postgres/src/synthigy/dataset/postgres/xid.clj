@@ -455,7 +455,7 @@ $$ LANGUAGE plpgsql;")
                           (:entities m))]
           (when (pos? @changed)
             (sql/execute! ["UPDATE dataset_version SET model = ? WHERE euuid = ?"
-                           (->transit (assoc m :entities entities')) euuid])
+                           (->transit (core/upgrade-model (assoc m :entities entities'))) euuid])
             (swap! stats #(-> % (update :versions inc) (update :entities + @changed)))
             (log/info {:id ::audit-config-normalized
                        :data {:action :patching :subject :model

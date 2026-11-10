@@ -25,8 +25,10 @@ synthigy up
 The first `up` downloads a Java runtime and the engine into `~/.synthigy` and
 starts the **portal**; open `http://127.0.0.1:7888`. Pick a bundle —
 `sqlite` needs nothing else; `postgres` needs a database you created — and
-press **Launch**. When the engine is up, the portal asks for the first
-superuser.
+check it: **Check file** for SQLite, **Test connection** for PostgreSQL.
+Choose where uploaded files are kept, local disk or an S3 bucket (**Test
+bucket**). **Launch** unlocks once the checks pass. When the engine is up,
+the portal asks for the first superuser.
 
 `synthigy up --bundle sqlite` skips the choice.
 

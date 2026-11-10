@@ -18,8 +18,8 @@
             [synthigy.xsql.sql-params :as sql-params]))
 
 (declare compile-ast
-         compile-statement-into compile-scalar compile-relation
-         compile-count-block compile-agg-block compile-args-of-parens
+         compile-statement-into compile-scalar compile-relation compile-aggregate
+         compile-args-of-parens
          compile-arg-list compile-arg-stmt compile-or-expr compile-and-expr
          compile-primary-expr compile-arg-predicate compile-pred-op
          compile-value compile-list-literal compile-meta-key
@@ -196,11 +196,8 @@
       :relation
       {:out' (compile-relation inner parent) :filters filter-acc}
 
-      :count-block
-      {:out' (assoc parent :_count (compile-count-block inner)) :filters filter-acc}
-
-      :agg-block
-      {:out' (assoc parent :_agg (compile-agg-block inner)) :filters filter-acc}
+      :aggregate
+      {:out' (compile-aggregate inner parent) :filters filter-acc}
 
       {:out' parent :filters filter-acc})))
 
@@ -216,17 +213,11 @@
      :pred   pred
      :filter filter}))
 
-(defn scalar-colon-error?
-  "True when the scalar carries a `:` error node (attempted scalar alias)."
-  [scalar-node]
-  (boolean (some #(and (= :error (:node %)) (= ":" (:text %)))
-                 (:children scalar-node))))
-
 (defn compile-scalar
   "Returns `{:out' :filters}` — updated selections plus the filter accumulator."
   [scalar-node parent filter-acc]
   (let [{:keys [field pred filter]} (scalar-parts scalar-node)]
-    (if (or (nil? field) (scalar-colon-error? scalar-node))
+    (if (nil? field)
       {:out' parent :filters filter-acc}
       (let [key (keyword field)]
         (cond
@@ -370,75 +361,79 @@
       parent
       (assoc parent (keyword field) (conj (vec existing) wrapped)))))
 
-;; ── _count ──────────────────────────────────────────────────────────────
+;; ── Aggregate (`alias: count(rel)`) ────────────────────────────────────
 
-(defn compile-count-block
-  "Wire shape for `_count` — children grouped by relation name."
-  [count-node]
-  (let [grouped
-        (reduce
-          (fn [acc child]
-            (let [alias-node (ast/find-child child :alias)
-                  field-id   (some (fn [c]
-                                     (when (= :identifier (:node c)) c))
-                                   (:children child))
-                  field      (text-of field-id)
-                  alias      (when alias-node (-> alias-node :children first :text))
-                  parens     (ast/find-child child :parens)
-                  args-raw   (when parens (compile-args-of-parens parens))
-                  args       (when (seq args-raw) args-raw)
-                  entry      (cond-> nil
-                               alias (assoc :alias alias)
-                               args  (assoc :args args))
-                  rel-key    (keyword field)]
-              (update acc rel-key (fnil conj []) entry)))
-          {}
-          (ast/find-children count-node :count-child))]
-    [{:selections grouped}]))
+(def aggregate-fns #{"count" "sum" "avg" "min" "max"})
 
-;; ── _agg ────────────────────────────────────────────────────────────────
-
-(defn compile-agg-block
-  "Wire shape for `_agg`: envelope-per-child, each aggregate fn its own entry."
+(defn aggregate-parts
+  "Alias, function, distinct flag, target path segments and filter of an :aggregate node."
   [agg-node]
-  (let [children (ast/find-children agg-node :agg-relation)
-        grouped
-        (reduce
-          (fn [acc rel]
-            (let [alias-node (ast/find-child rel :alias)
-                  alias      (when alias-node (-> alias-node :children first :text))
-                  field-id   (some (fn [c]
-                                     (when (= :identifier (:node c)) c))
-                                   (:children rel))
-                  rel-name   (text-of field-id)
-                  parens     (ast/find-child rel :parens)
-                  args-raw   (when parens (compile-args-of-parens parens))
-                  args       (when (seq args-raw) args-raw)
-                  attrs      (ast/find-children rel :agg-attr)
-                  sel        (reduce
-                               (fn [sel-acc attr]
-                                 (let [attr-id (first (filter #(= :identifier (:node %))
-                                                              (:children attr)))
-                                       attr-name (text-of attr-id)
-                                       fns (ast/find-children attr :agg-fn)
-                                       fn-entries (mapv
-                                                    (fn [f]
-                                                      (let [fn-text (-> f :children first :text)]
-                                                        {:selections {(keyword fn-text) nil}}))
-                                                    fns)]
-                                   (assoc sel-acc (keyword attr-name) fn-entries)))
-                               {}
-                               attrs)
-                  entry      (cond-> {:selections sel}
-                               alias (assoc :alias alias)
-                               args  (assoc :args args))
-                  rel-key    (keyword rel-name)]
-              (update acc rel-key (fnil conj []) entry)))
-          {}
-          children)]
-    [{:selections grouped}]))
+  (let [call (ast/find-child agg-node :call)]
+    {:alias     (some-> (ast/find-child agg-node :alias) :children first :text)
+     :fn        (some #(when (= :identifier (:node %)) (:text %)) (:children agg-node))
+     :distinct? (boolean (some #(= :identifier (:node %)) (:children call)))
+     :target    (some->> (ast/find-child call :path) :children (filterv #(= :identifier (:node %))) (mapv :text))
+     :filter    (some-> (ast/find-child call :call-filter) :children first)}))
+
+(defn filter-paths
+  "Every :path node of an aggregate filter, in source order."
+  [filter-node]
+  (filterv #(= :path (:node %)) (tree-seq :children :children filter-node)))
+
+(defn aggregate-relation
+  "Relation an aggregate reads: its target's head, else the first filter path's head."
+  [{:keys [target filter]}]
+  (or (first target)
+      (some-> (first (filter-paths filter)) :children first :text)))
+
+(defn drop-path-heads
+  "The filter AST with each path's leading relation segment removed."
+  [n]
+  (cond
+    (= :path (:node n))  (update n :children #(vec (rest %)))
+    (ast/container? n)   (update n :children #(mapv drop-path-heads %))
+    :else                n))
+
+(defn aggregate-op
+  "Wire `:op` of an aggregate: `\"count\"`, or `{fn field}`."
+  [{f :fn distinct? :distinct? target :target}]
+  (cond
+    distinct?     {:count_distinct (second target)}
+    (= "count" f) "count"
+    :else         {(keyword f) (second target)}))
+
+(defn compile-aggregate
+  "Conj the aggregate's `{:alias :op :args?}` entry onto its relation key."
+  [agg-node parent]
+  (let [{:keys [alias filter] :as parts} (aggregate-parts agg-node)
+        rel  (aggregate-relation parts)
+        args (when filter (compile-or-expr (drop-path-heads filter)))]
+    (if (and alias rel (aggregate-fns (:fn parts)))
+      (update parent (keyword rel) (fnil conj [])
+              (cond-> {:alias alias :op (aggregate-op parts)}
+                (and (map? args) (seq args)) (assoc :args args)))
+      parent)))
+
+(defn scope-aggregate-aliases
+  "Aliases of the aggregates directly under a :query or :block node."
+  [parent-node]
+  (into #{}
+        (keep (fn [stmt]
+                (let [inner (first (:children stmt))]
+                  (when (= :aggregate (:node inner))
+                    (:alias (aggregate-parts inner))))))
+        (ast/find-children parent-node :statement)))
 
 ;; ── Args inside Parens ──────────────────────────────────────────────────
+
+(defn order-spec-path
+  "Segment texts of an :order-spec's column (`studio.name` → [\"studio\" \"name\"])."
+  [spec]
+  (let [head (first (:children spec))]
+    (case (:node head)
+      :path (mapv :text (filter #(= :identifier (:node %)) (:children head)))
+      :identifier [(:text head)]
+      [])))
 
 (defn compile-args-of-parens [parens-node]
   (when parens-node
@@ -684,12 +679,13 @@
         (let [specs (ast/find-children meta-node :order-spec)]
           {:_order_by
            (mapv (fn [spec]
-                   (let [id (some #(when (= :identifier (:node %)) %)
-                                  (:children spec))
-                         dir (last (filter #(and (= :identifier (:node %))
-                                                 (#{"asc" "desc"} (:text %)))
-                                           (:children spec)))]
-                     [(:text id) (or (:text dir) "asc")]))
+                   (let [segs (order-spec-path spec)
+                         dir (or (some #(when (and (= :identifier (:node %)) (#{"asc" "desc"} (:text %))) (:text %))
+                                       (:children spec))
+                                 "asc")]
+                     (if (next segs)
+                       (reduce (fn [m seg] {(keyword seg) m}) {(keyword (peek segs)) dir} (rseq (pop segs)))
+                       [(first segs) dir])))
                  specs)}))
 
       "_distinct"
@@ -708,8 +704,12 @@
 
 ;; ── Selection-scoped order params (post-pass) ───────────────────────────
 
-(defn selection-scalars [selections]
-  (set (keep (fn [[k v]] (when (nil? v) (name k))) selections)))
+(defn selection-scalars
+  "Names an order param may reference at this level: selected scalars and aggregate aliases."
+  [selections]
+  (into (set (keep (fn [[k v]] (when (nil? v) (name k))) selections))
+        (comp (filter vector?) cat (filter :op) (map :alias))
+        (vals selections)))
 
 (defn check-order-scope [{:keys [args] :as node} selections]
   (when-let [info (some-> (:_order_by args) meta :xsql/scope-to-selection)]

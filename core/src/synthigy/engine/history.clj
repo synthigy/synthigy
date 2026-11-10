@@ -20,6 +20,7 @@
     [synthigy.dataset.access :as daccess]
     [synthigy.dataset.core :as core]
     [synthigy.dataset.id :as id]
+    [synthigy.dataset.sql.query :as sql-query]
     [synthigy.iam.access :as access]
     [synthigy.log :as log]))
 
@@ -203,22 +204,68 @@
     (let [kept (apply dissoc m attributes)]
       (when (or (seq kept) (empty? m)) kept))))
 
+(defn attribute-entity
+  "Entity xid owning attribute key `k`."
+  [k]
+  (some (fn [e] (when (some #(= (name k) (str (id/extract %))) (:attributes e)) (str (id/extract e))))
+        (core/get-entities (dataset/deployed-model))))
+
+(defn result-subject
+  [record-xid m]
+  (when (seq m)
+    {:entity-xid (attribute-entity (first (keys m))) :record-xid record-xid}))
+
+(defn subjects
+  "The rows `filter-result` will ask visibility about for an op's result."
+  [op result record-xid]
+  (case op
+    "get-at"           (keep #(result-subject record-xid %) [result])
+    "diff"             (keep #(result-subject record-xid %) [(merge (:before result) (:after result))])
+    "timeline"         (mapcat val result)
+    ("events" "since") result
+    nil))
+
+(defn record-refs
+  [{:keys [entity-xid record-xid relation-xid from-xid to-xid]}]
+  (if relation-xid
+    (when-let [rel (dataset/deployed-relation relation-xid)]
+      [[(str (id/extract (:from rel))) from-xid] [(str (id/extract (:to rel))) to-xid]])
+    [[(some-> entity-xid str) record-xid]]))
+
+(defn record-visibility
+  "Whether the bound principal may see each of `subjects`' records or links now, one guard query per entity; a deleted record of a guarded entity is hidden."
+  [subjects]
+  (let [readable (into #{}
+                       (mapcat (fn [[e refs]] (map #(vector e %) (sql-query/readable-rows e (map second refs)))))
+                       (group-by first (filter #(every? some? %) (mapcat record-refs subjects))))]
+    (fn [{:keys [relation-xid] :as row}]
+      (let [refs (record-refs row)]
+        (boolean (and (seq refs)
+                      (or (nil? relation-xid) (daccess/relation-allows? relation-xid #{:read}))
+                      (every? readable refs)))))))
+
+(defn record-result-visible?
+  [visible? record-xid m]
+  (or (empty? m) (visible? (result-subject record-xid m))))
+
 (defn filter-result
-  "Drop what `denied` hides from an op's result."
-  [op result {:keys [attributes] :as denied}]
+  "Drop what `denied` hides from an op's result, and with `visible?` every record the principal's read guards exclude."
+  ([op result denied] (filter-result op result denied nil nil))
+  ([op result {:keys [attributes] :as denied} visible? record-xid]
   (if (nil? denied)
     result
-    (let [rows (fn [rs] (filterv #(readable-row? denied %) rs))]
+    (let [rows (fn [rs] (filterv #(and (readable-row? denied %) (or (nil? visible?) (visible? %))) rs))
+          shown? #(or (nil? visible?) (record-result-visible? visible? record-xid %))]
       (case op
-        "get-at"   (strip-attributes result attributes)
-        "diff"     (when result
+        "get-at"   (when (shown? result) (strip-attributes result attributes))
+        "diff"     (when (and result (shown? (merge (:before result) (:after result))))
                      (-> result
                          (update :before strip-attributes attributes)
                          (update :after strip-attributes attributes)
                          (update :changed #(filterv (complement attributes) %))))
         "timeline" (into {} (keep (fn [[k rs]] (when-let [kept (not-empty (rows rs))] [k kept]))) result)
         ("events" "since") (rows result)
-        result))))
+        result)))))
 
 (defn execute
   "Run a /history request body and return {:op op :result …} — the
@@ -232,5 +279,10 @@
     (when (str/blank? op)
       (throw (ex-info "op is required" {:code "OP_REQUIRED" :status 400})))
     (access/with-principal principal
-      {:op op :result (filter-result op (execute-op audit/*audit-provider* op opts) (denied))})))
+      (let [denied     (denied)
+            result     (execute-op audit/*audit-provider* op opts)
+            record-xid (some-> (wire-get opts "record-xid") str)]
+        {:op op :result (filter-result op result denied
+                                       (when denied (record-visibility (subjects op result record-xid)))
+                                       record-xid)}))))
 

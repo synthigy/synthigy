@@ -15,6 +15,7 @@
   (:require
    [clojure.string :as str]
    [synthigy.log :as log]
+   [synthigy.dataset.access :as access]
    [synthigy.dataset.rls :as rls]
    [synthigy.dataset.sql.protocol :as proto]
    [synthigy.dataset.sql.query :as sql-query]
@@ -220,7 +221,7 @@
             join-key [current-id label]
             state (cond-> (update state :entities conj target-id)
                     (:relation rel)
-                    (update :relations conj (select-keys rel [:relation :from :to])))]
+                    (update :relations conj (select-keys rel [:relation :rbac/direction])))]
         (if (contains? (:join-keys-seen state) join-key)
           [target-id target-alias state]
           (case (:kind rel)
@@ -317,12 +318,43 @@
                 (filter #(contains? tables (str/lower-case %))))
           (re-seq #"(?i)\b(?:FROM|JOIN)\s+\"?(\w+)\"?" stripped))))
 
+(defn readable-field?
+  "Whether the caller may read `field` of `entity-id` in a template, by the same attribute rule as search."
+  [entity-id field]
+  (let [attr-id (get (:field->attribute (sql-query/deployed-schema-entity entity-id)) (keyword field))]
+    (or (nil? attr-id) (access/attribute-allows? entity-id attr-id :read))))
+
+(defn table-id-columns
+  "The id columns `table` carries; legacy tables have euuid, new ones may not."
+  [table]
+  (let [k [::id-columns table]]
+    (or (sql-query/cached-template k)
+        (let [present (set (map :name (proto/get-columns *db* table)))]
+          (sql-query/cache-template k (filterv present ["_eid" "xid" "euuid"]))))))
+
+(defn readable-columns
+  "Columns of `entity-id` a template may read for the caller: ids, tree parents and readable attributes."
+  [entity-id]
+  (let [{:keys [table fields recursions]} (sql-query/deployed-schema-entity entity-id)]
+    (-> (table-id-columns table)
+        (into (map name) recursions)
+        (into (comp (map (comp name :key))
+                    (filter #(readable-field? entity-id %)))
+              (vals fields))
+        distinct)))
+
 (defn enforce-rbac!
   "Apply search's entity/relation RBAC checks; must run per execution, never inside the memoized resolve."
-  [{:keys [entities relations]}]
+  [{:keys [entities relations fields-read]}]
   (run! #(sql-query/entity-accessible? % #{:read :owns}) entities)
-  (run! (fn [{:keys [relation from to]}]
-          (sql-query/relation-accessible? relation [from to] #{:read}))
+  (when (rls/should-apply-guards?)
+    (doseq [[entity-id field] fields-read
+            :when (not (readable-field? entity-id field))]
+      (throw (ex-info (format "You may not read '%s' on entity '%s'"
+                              field (:name (sql-query/deployed-schema-entity entity-id)))
+                      {:code "ATTRIBUTE_FORBIDDEN" :entity entity-id :attribute field}))))
+  (run! (fn [{:keys [relation] direction :rbac/direction}]
+          (sql-query/relation-accessible? relation direction #{:read}))
         relations))
 
 (defn resolve-template
@@ -340,6 +372,7 @@
                     :columns {}
                     :join-keys-seen #{}
                     :refs []
+                    :fields-read #{}
                     :root-entities {}
                     :replacements []
                     :errors (mapv (fn [t]
@@ -380,6 +413,7 @@
                   (let [[id alias state] (resolve-root state (:entity parsed))
                         field (:field parsed)]
                     (-> state
+                        (update :fields-read conj [id field])
                         (update :replacements conj
                                 {:raw raw :replacement (format "%s.\"%s\"" alias field)})
                         (record-column (select-item-label template select-end start end field)
@@ -401,6 +435,7 @@
                         [target-id target-alias state] (walk-relation-chain id alias joins-spec state)
                         field (:field parsed)]
                     (-> state
+                        (update :fields-read conj [target-id field])
                         (update :replacements conj
                                 {:raw raw :replacement (format "%s.\"%s\"" target-alias field)})
                         (record-column (select-item-label template select-end start end field)
@@ -448,7 +483,8 @@
          :relations (:relations final-state)
          :aliases (:aliases final-state)
          :refs (:refs final-state)
-         :rls-shape 2
+         :fields-read (:fields-read final-state)
+         :rls-shape 3
          :columns (into {} (remove (comp #{::ambiguous} val)) (:columns final-state))}))))
 
 ;;; ============================================================================
@@ -719,9 +755,11 @@
         [(format "(SELECT %s.* FROM \"%s\" %s WHERE %s) %s"
                  alias link alias (str/join " AND " (map first ends)) alias)
          (vec (mapcat second ends))]))
-    (when-let [[g gp] (read-guard entity alias)]
-      (let [{:keys [table]} (sql-query/deployed-schema-entity entity)]
-        [(format "(SELECT %s.* FROM \"%s\" %s WHERE %s) %s" alias table alias g alias) gp]))))
+    (let [{:keys [table]} (sql-query/deployed-schema-entity entity)
+          [g gp] (read-guard entity alias)
+          cols (str/join ", " (map #(format "%s.\"%s\"" alias %) (readable-columns entity)))]
+      [(format "(SELECT %s FROM \"%s\" %s%s) %s" cols table alias (if g (str " WHERE " g) "") alias)
+       (or gp [])])))
 
 (defn guard-ref
   "Swap every live occurrence of ref's tag for its guarded view; a guard with nowhere to go fails closed."
@@ -745,7 +783,7 @@
   [sql params {:keys [refs rls-shape]}]
   (cond
     (not (rls/should-apply-guards?)) [sql (vec params)]
-    (not= 2 rls-shape) (throw (ex-info "Stale template resolution" {:code "TEMPLATE_RLS_STALE"}))
+    (not= 3 rls-shape) (throw (ex-info "Stale template resolution" {:code "TEMPLATE_RLS_STALE"}))
     :else (reduce guard-ref [sql (vec params)] refs)))
 
 ;;; ============================================================================
@@ -757,7 +795,7 @@
    per call — never behind the memo, which is keyed by text alone."
   [body cached?]
   (let [resolved (if cached?
-                   (or (let [c (sql-query/cached-template body)] (when (= 2 (:rls-shape c)) c))
+                   (or (let [c (sql-query/cached-template body)] (when (= 3 (:rls-shape c)) c))
                        (let [resolved (resolve-template body)]
                          (when-not (:errors resolved)
                            (sql-query/cache-template body resolved))

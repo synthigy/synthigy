@@ -24,7 +24,7 @@ consent screen, and it may run `/data` requests as its users
 A client lists the **redirect URIs** it may return to, matched exactly. Loopback
 URIs (`http://localhost`, `http://127.0.0.1`) have two exceptions:
 
-- a **native** app (application type `native`, such as Synthigy Studio) may use
+- a **native** app (application type `native`) may use
   any port on any of its loopback URIs (RFC 8252);
 - for a web client, a loopback URI registered **without** a port
   (`http://localhost/callback`) accepts any port, but only while the engine itself
@@ -81,7 +81,46 @@ with `USER_NOT_FOUND` or `USER_INACTIVE`.
 Add Google, Microsoft, LinkedIn, GitHub, Facebook, Discord or up to three custom
 OpenID Connect providers in the console under Administration → Identity Providers;
 it shows the redirect URI to register with the provider. A user can link several
-sign-in methods to one account (Your account → Sign-in methods).
+sign-in methods to one account ([Your account](#your-account)).
+
+## Your account
+
+Every user manages their own account at `/oauth/account`, with no role needed:
+display name, password, sign-in methods, and the browsers, apps and devices
+signed in. A browser gets the account page; signed out, it goes through the
+login page first, with a password or a linked provider. Anything else gets
+JSON. Link to it from your app as "Manage account":
+`/oauth/account?client_id=<your client id>&return=<a redirect URI of that client>`
+adds "Back to <app>" (and `back` in the JSON). A `return` that is not one of the
+client's registered redirect URIs is ignored.
+
+| Endpoint | |
+|---|---|
+| `GET /oauth/account` | `profile` (`xid`, `login`, `display_name`, `has_password`), `identities`, `sessions`, `fresh` |
+| `POST /oauth/account/profile` | `{"display_name"}`; empty goes back to the default |
+| `POST /oauth/account/password` | `{"current_password", "new_password"}`; every session ends, this one too |
+| `POST /oauth/account/reauth` | `{"password"}`: confirm it's you |
+| `POST /oauth/account/identities/unlink` | `{"xid"}` of a sign-in method |
+| `POST /oauth/account/sessions/revoke` | `{"xid"}` of a session, or `{"all_others": true}` |
+
+- Every call acts on the caller; a user named in the body is ignored. The caller
+  is a bearer token for the `https://synthigy.com` audience, else the browser's
+  sign-in cookie.
+- With the cookie, a POST must come from the engine's own pages
+  (`Sec-Fetch-Site`, else `Origin`, else `Referer`); anything else gets
+  `403 cross_origin`.
+- Unlinking and `all_others` need a sign-in within the last 5 minutes (`fresh`),
+  else `403 reauth_required`. Confirm with `/oauth/account/reauth`, or with a
+  linked provider at
+  `/oauth/federated/start?provider=<name>&mode=reauth&return=/oauth/account`.
+- A session's handle is its `xid`; the session id itself is never shown.
+- A display name is free text, not unique: at most 64 characters, with control
+  and format characters (bidi overrides included) removed. The `xid` is what
+  identifies a user.
+- Errors: `login_required` (with `login_url`), `invalid_token`, `cross_origin`,
+  `reauth_required`, `invalid_request`, `invalid_credentials`,
+  `password_too_short`, `no_local_credential`, `display_name_too_long`,
+  `last_login_method`, `identity_not_found`, `session_not_found`, `missing_xid`.
 
 ## See also
 

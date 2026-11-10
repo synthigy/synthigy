@@ -16,7 +16,7 @@ Where the instance lives and which engine runs.
 | `SYNTHIGY_HOME` |  | Instance directory: `.env`, pid files, logs, and the local database files in `db/` (`synthigy.db`, `audit.db`, `logs.db`). Unset, the CLI uses the nearest `.synthigy/` above the current directory, else `~/.synthigy`. |
 | `SYNTHIGY_ENV_FILE` |  | Profile file to use instead of `<home>/.env` (same as `--env`). |
 | `SYNTHIGY_BUNDLE` |  | Which engine bundle runs: `sqlite`, `postgres` or `postgres-clickhouse`. Unset, `synthigy up` opens the setup page. |
-| `SYNTHIGY_VERSION` | `latest` | Engine release to run, e.g. `v0.2.12`, or `latest`. |
+| `SYNTHIGY_VERSION` | `latest` | Engine release to run, e.g. `v0.4.1`, or `latest`. |
 | `SYNTHIGY_RELEASES_REPO` | `synthigy/synthigy` | GitHub repository releases are downloaded from (`owner/repo`). |
 | `SYNTHIGY_PROFILE` | `full` | `full` runs identity, OAuth and the console. `bare` runs the data API alone with NO authentication — trusted networks only. |
 | `SYNTHIGY_JAR` |  | A local jar, or a classpath of jars, to run instead of a downloaded release — custom builds, air-gapped machines and app jars ([EMBEDDED.md](EMBEDDED.md)). |
@@ -35,7 +35,7 @@ Where the instance lives and which engine runs.
 | `SYNTHIGY_SERVER_ALLOWED_ORIGINS` |  | Extra browser origins allowed to call the API, comma separated ([CORS.md](CORS.md)). |
 | `SYNTHIGY_SERVER_TRUST_PROXY` |  | IPs or CIDRs of the reverse proxies in front of the engine, comma separated, e.g. `127.0.0.1/32,::1/128`. Only a request arriving from one of them has its `X-Forwarded-For`, `-Host` and `-Proto` believed ([PROXY.md](PROXY.md)). |
 | `SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` | `900000` | Longest life of one subscription stream, in milliseconds, before the server closes it; clients reconnect on their own. |
-| `SYNTHIGY_SERVER_MAX_BODY` | `26214400` | Largest request body the engine accepts, in bytes. Also the largest file one upload can carry ([FILES.md](FILES.md)). |
+| `SYNTHIGY_HTTPKIT_MAX_BODY` | `26214400` | Largest request body the http-kit server accepts, in bytes, and so the largest file one upload can carry ([FILES.md](FILES.md)). http-kit holds every body in memory; the Enso and Jetty servers stream and have no limit. |
 
 ## Files
 
@@ -50,6 +50,8 @@ Where uploaded files keep their bytes ([FILES.md](FILES.md)). Every version of a
 | `SYNTHIGY_FILES_S3_PATH_STYLE` |  | `true`: address the bucket in the path (`host/bucket/key`) rather than the host name. Most self-hosted stores need it. |
 | `SYNTHIGY_FILES_S3_ACCESS_KEY_ID` |  | Access key. Unset: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, then the EC2 instance role. |
 | `SYNTHIGY_FILES_S3_SECRET_ACCESS_KEY` |  | Secret key, paired with the access key. |
+| `SYNTHIGY_FILES_ZIP_MAX_BYTES` | `2147483648` | Largest total of the files one zip download (`POST /files/zip`) may hold, in bytes; more is refused with `ZIP_TOO_LARGE` before anything is sent. |
+| `SYNTHIGY_FILES_ZIP_MAX_ENTRIES` | `10000` | Most files one zip download may hold. |
 
 ## SQLite
 

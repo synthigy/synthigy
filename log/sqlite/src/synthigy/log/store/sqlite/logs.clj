@@ -66,10 +66,6 @@
 
 (def promoted-ctx-keys [:request-id :user-xid :tenant :ip])
 
-(defn topics->delimited [topics]
-  (let [names (->> topics (map (fn [t] (if (keyword? t) (subs (str t) 1) (str t)))) sort)]
-    (if (seq names) (str "|" (str/join "|" names) "|") "")))
-
 (defn delimited->topics [s]
   (if (str/blank? s)
     []
@@ -87,12 +83,6 @@
     (some? x) [nil nil (str x)]
     :else     [nil nil nil]))
 
-(defn id->str [id]
-  (cond
-    (qualified-keyword? id) (str (namespace id) "/" (name id))
-    (keyword? id)           (name id)
-    (some? id)              (str id)))
-
 (defn signal->row
   "Project a Telemere signal onto the synthigy_logs columns, in column order."
   [{:keys [inst level ns id msg_ data ctx error] :as signal}]
@@ -102,13 +92,13 @@
     [(conn/->micros inst)
      (some-> level name)
      (when ns (str ns))
-     (id->str id)
+     (signal/id->str id)
      (when msg_ (try (force msg_) (catch Throwable _ nil)))
      (or (:request-id signal) (get ctx-map :request-id))
      (or (:user-xid signal) (get ctx-map :user-xid))
      (or (:tenant signal) (get ctx-map :tenant))
      (cond (string? host-raw) host-raw (map? host-raw) (:name host-raw))
-     (topics->delimited (:topics signal))
+     (signal/topics->delimited (:topics signal))
      (json/->json (or data {}))
      (json/->json (apply dissoc ctx-map promoted-ctx-keys))
      err-class

@@ -12,10 +12,14 @@
 (ns synthigy.iam.context
   "Pluggable user-context provider with a cached default implementation."
   (:require
+   [clojure.string :as str]
+   [next.jdbc :as jdbc]
+   [next.jdbc.result-set :as rs]
    [synthigy.log :as log]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.core :as core]
    [synthigy.dataset.delta :as delta]
+   [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
    [synthigy.iam.keys]
    [synthigy.iam.context.protocols :as protocols
@@ -68,6 +72,74 @@
   (boolean
    (:active
     (core/get-relation (dataset/deployed-model) (id/relation :oauth/user->public-profile)))))
+
+(defn default-display-name
+  "The login unless it is an email, else the profile name, else the login before `@`."
+  [profile-name login]
+  (if (and login (not (re-find #"@.*\." login)))
+    (not-empty login)
+    (or (not-empty profile-name)
+        (some-> login (str/split #"@" 2) first not-empty))))
+
+(defn fill-display-names!
+  "Sets Display Name on users that have none; idempotent."
+  []
+  (let [pp? (public-profile-live?)
+          rows (dataset/search-entity :iam/user {:_where {:display_name :is_null}}
+                                      (cond-> {(id/key) nil :name nil}
+                                        pp? (assoc :public_profile [{:args {:_join :left}
+                                                                     :selections {:name nil}}])))
+          writes (vec (keep (fn [{login :name pp :public_profile :as u}]
+                              (when-let [d (default-display-name (:name (cond-> pp (sequential? pp) first)) login)]
+                                {(id/key) (get u (id/key)) :display_name d}))
+                            rows))]
+      (when (seq writes)
+        (dataset/stack-entity :iam/user writes)
+        (log/info {:id ::display-names-filled
+                   :data {:action :modified :subject :display-name :written (count writes)}}
+                  "Filled missing user display names"))
+      (count writes)))
+
+(defn stored-users
+  "{[:id v] row, [:name v] row} of the stored users among `rows`, row = {:name :display_name}."
+  [tx table rows]
+  (let [k (id/key)
+        ids (vec (keep k rows))
+        names (vec (keep #(when-not (get % k) (:name %)) rows))
+        in #(str/join "," (repeat (count %) "?"))
+        where (str/join " or " (cond-> []
+                                 (seq ids) (conj (str "\"" (name k) "\" in (" (in ids) ")"))
+                                 (seq names) (conj (str "name in (" (in names) ")"))))]
+    (into {}
+          (mapcat (fn [r] [[[:id (get r k)] r] [[:name (:name r)] r]]))
+          (jdbc/execute! tx (into [(str "select \"" (name k) "\", name, display_name from \"" table "\" where " where)]
+                                  (concat ids names))
+                         {:builder-fn rs/as-unqualified-lower-maps}))))
+
+(defn with-default-display-names
+  "Gives User rows that would end up without a Display Name the default: new, stored without one, or written blank; never a nested pointer."
+  [analysis tx]
+  (let [k (id/key)
+        table (some (fn [[t e]] (when (= e (id/entity :iam/user)) t)) (:entity/mapping analysis))
+        pointer? (set (remove (get-in analysis [:subject table] #{}) (get-in analysis [:link-only table])))
+        todo (into {} (filter (fn [[tmp r]] (and (not (pointer? tmp))
+                                                 (or (:name r) (contains? r :display_name))
+                                                 (str/blank? (:display_name r)))))
+                   (get-in analysis [:entity table]))]
+    (if (empty? todo)
+      analysis
+      (let [stored (stored-users tx table (vals todo))]
+        (reduce-kv (fn [a tmp r]
+                     (let [st (get stored (if-let [x (get r k)] [:id x] [:name (:name r)]))
+                           login (or (:name r) (:name st))]
+                       (if (or (nil? login)
+                               (and (not (contains? r :display_name)) (not (str/blank? (:display_name st)))))
+                         a
+                         (assoc-in a [:entity table tmp :display_name] (default-display-name nil login)))))
+                   analysis
+                   todo)))))
+
+(defmethod enhance/write [Object (id/entity :iam/user :xid)] [_ _ analysis tx] (with-default-display-names analysis tx))
 
 (def ^:private public-profile-selection
   {:name nil

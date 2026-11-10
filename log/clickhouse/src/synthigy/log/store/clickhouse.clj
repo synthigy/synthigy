@@ -125,8 +125,7 @@
      :user_xid    (ch/str-or-empty (or (:user-xid sig) (get ctx-map :user-xid)))
      :tenant      (ch/str-or-empty (or (:tenant sig) (get ctx-map :tenant)))
      :host        (or (signal/host-of sig) "")
-     ;; (subs (str kw) 1), not `name` — :traffic/sse must stay "traffic/sse"
-     :topics      (->> (:topics sig) (map #(if (keyword? %) (subs (str %) 1) (str %))) sort vec)
+     :topics      (->> (:topics sig) (map signal/id->str) sort vec)
      :data        (json/->json (or data {}))
      :ctx         (json/->json (apply dissoc ctx-map signal/promoted-ctx-keys))
      :error_class (ch/str-or-empty err-class)

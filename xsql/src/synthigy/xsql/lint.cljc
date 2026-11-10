@@ -17,8 +17,8 @@
             [synthigy.xsql.parser :as parser]
             [synthigy.xsql.sql-params :as sql-params]))
 
-(declare lint-statement lint-scalar lint-relation lint-count-block
-         lint-agg-block lint-args-of-parens lint-or-expr lint-arg-predicate
+(declare lint-statement lint-scalar lint-relation lint-aggregate
+         lint-args-of-parens lint-or-expr lint-arg-predicate
          lint-pred-op-against-type)
 
 (def ^:private ops-by-type
@@ -30,11 +30,10 @@
    "boolean"   #{"_eq" "_neq" "is_null" "is_not_null"}
    "timestamp" #{"_eq" "_neq" "_lt" "_le" "_gt" "_ge"
                  "_in" "_not_in" "is_null" "is_not_null"}
-   "enum"      #{"_eq" "_neq" "_in" "_not_in" "is_null" "is_not_null"}})
+   "enum"      #{"_eq" "_neq" "_like" "_ilike" "_in" "_not_in" "is_null" "is_not_null"}})
 
 (def ^:private structural-recovery
-  #{:newline :statement :block :relation :scalar
-    :count-block :count-child :agg-block :agg-relation})
+  #{:newline :statement :block :relation :scalar :aggregate})
 
 (defn error-diag [node msg]
   {:severity :error
@@ -129,20 +128,17 @@
 
 (defn lint-statement [stmt-node entity-def ctx]
   (let [inner (first (:children stmt-node))]
-    (if (and (:none-scope ctx) (#{:count-block :agg-block} (:node inner)))
-      (vswap! (:diags ctx) conj
-              (error-diag (or (first (:children inner)) inner)
-                          (str "`" (if (= :count-block (:node inner)) "_count" "_agg")
-                               "` under `!" (:none-scope ctx) "` aggregates nothing — `!"
-                               (:none-scope ctx) "` keeps parents with no matching row")))
-      (case (:node inner)
-        :scalar      (lint-scalar inner entity-def ctx)
-        :relation    (lint-relation inner entity-def ctx)
-        :count-block (lint-count-block inner entity-def ctx)
-        :agg-block   (lint-agg-block inner entity-def ctx)
-        nil))))
+    (case (:node inner)
+      :scalar    (lint-scalar inner entity-def ctx)
+      :relation  (lint-relation inner entity-def ctx)
+      :aggregate (lint-aggregate inner entity-def ctx)
+      nil)))
 
 ;; ── Scalar ──────────────────────────────────────────────────────────────
+
+(defn within? [node diag]
+  (let [[from to] (:span node)]
+    (and from (<= from (:from diag)) (< (:from diag) to))))
 
 (defn get-bare-identifiers
   [parent]
@@ -154,10 +150,7 @@
       (let [field-id (first ids)
             field-name (:text field-id)
             attr-def (get-in entity-def [:attributes field-name])
-            rel-def  (get-in entity-def [:relations field-name])
-            colon-err (some #(and (= :error (:node %))
-                                  (= ":" (:text %)) %)
-                            (:children scalar-node))]
+            rel-def  (get-in entity-def [:relations field-name])]
         (cond
           (= "_args" field-name)
           (vswap! (:diags ctx) conj
@@ -165,13 +158,6 @@
                               (str "`_args` was removed — put args in parens on the "
                                    "root or relation line: `entity (…)` / `-rel (…)`. "
                                    "Parens may span multiple lines.")))
-
-          colon-err
-          (vswap! (:diags ctx) conj
-                  (error-diag colon-err
-                              (str "Unexpected `:` after '" field-name "'. "
-                                   "For relation aliases use `-" field-name ":<relation>`. "
-                                   "Scalar aliases are not supported.")))
 
           (and attr-def (:none-scope ctx)
                (not (ast/find-child scalar-node :pred-op))
@@ -191,6 +177,12 @@
                   (error-diag field-id
                               (str "'" field-name
                                    "' is a relation; prefix with '-' or '->' to select it")))
+
+          (and (compile-impl/aggregate-fns field-name) (ast/find-child scalar-node :scalar-filter))
+          (do (vswap! (:diags ctx) (fn [ds] (filterv #(not (within? scalar-node %)) ds)))
+              (vswap! (:diags ctx) conj
+                      (error-diag field-id
+                                  (str "An operation needs an alias — <alias>: " field-name "(…)"))))
 
           :else
           (vswap! (:diags ctx) conj
@@ -242,14 +234,15 @@
                 block  (ast/find-child rel-node :block)
                 ctx'   (cond-> ctx none-scope (assoc :none-scope none-scope))]
             (when (and parens target-def)
-              (lint-args-of-parens parens target-def ctx))
+              (lint-args-of-parens parens target-def
+                                   (assoc ctx :order-aliases (some-> block compile-impl/scope-aggregate-aliases))))
             (cond
               (and (not none-scope)
                    (or (nil? block) (not (has-statement-child? block))))
               (vswap! (:diags ctx) conj
                       (error-diag rel-id
-                                  (str "Relation '" rel-name
-                                       "' must have at least one child selection")))
+                                  (str "Relation '" rel-name "' must have at least one child selection — or filter the parents with "
+                                       rel-name ".<field> = …, or keep only parents without one with !" rel-name)))
 
               (and block target-def)
               (doseq [c (:children block)
@@ -268,59 +261,177 @@
                               (str "Unknown relation '" rel-name
                                    "' on " (entity-name-of entity-def (:schema ctx))))))))))
 
-;; ── _count ──────────────────────────────────────────────────────────────
+;; ── Aggregate (`alias: count(rel)`) ────────────────────────────────────
 
-(defn lint-count-block [count-node entity-def ctx]
-  (doseq [child (ast/find-children count-node :count-child)]
-    (lint-redundant-alias child ctx)
-    (let [ids (get-bare-identifiers child)]
-      (when (seq ids)
-        (let [rel-id (first ids)
-              rel-name (:text rel-id)
-              rel-def (get-in entity-def [:relations rel-name])]
-          (if rel-def
-            (let [target-def (get-in (:schema ctx) [:entities (:target rel-def)])
-                  parens (ast/find-child child :parens)]
-              (when (and parens target-def)
-                (lint-args-of-parens parens target-def ctx)))
-            (vswap! (:diags ctx) conj
-                    (error-diag rel-id
-                                (str "Unknown relation '" rel-name
-                                     "' on " (entity-name-of entity-def (:schema ctx)))))))))))
+(def ^:private aggregate-field-types
+  {"sum" #{"number"}
+   "avg" #{"number"}
+   "min" #{"number" "timestamp" "string"}
+   "max" #{"number" "timestamp" "string"}})
 
-;; ── _agg ────────────────────────────────────────────────────────────────
+(def ^:private uncountable-types #{"json" "hashed" "encrypted"})
 
-(defn lint-agg-block [agg-node entity-def ctx]
-  (doseq [agg-rel (ast/find-children agg-node :agg-relation)]
-    (lint-redundant-alias agg-rel ctx)
-    (let [ids (get-bare-identifiers agg-rel)]
-      (when (seq ids)
-        (let [rel-id (first ids)
-              rel-name (:text rel-id)
-              rel-def (get-in entity-def [:relations rel-name])]
-          (if-not rel-def
-            (vswap! (:diags ctx) conj
-                    (error-diag rel-id
-                                (str "Unknown relation '" rel-name
-                                     "' on " (entity-name-of entity-def (:schema ctx)))))
-            (when-let [target-def (get-in (:schema ctx) [:entities (:target rel-def)])]
-              (doseq [agg-attr (ast/find-children agg-rel :agg-attr)]
-                (let [attr-id (first (filter #(= :identifier (:node %))
-                                             (:children agg-attr)))
-                      attr-name (:text attr-id)
-                      attr-def (get-in target-def [:attributes attr-name])]
+(defn has-error-node? [n]
+  (boolean (some #(= :error (:node %)) (tree-seq :children :children n))))
+
+(defn aggregate-path-ids [agg-node]
+  (some->> (ast/find-child agg-node :call) (#(ast/find-child % :path)) get-bare-identifiers))
+
+(defn aggregate-shape-diags
+  "Schema-free diagnostics for one :aggregate node."
+  [agg-node]
+  (let [{:keys [target filter distinct?] f :fn :as parts} (compile-impl/aggregate-parts agg-node)
+        fn-id    (first (get-bare-identifiers agg-node))
+        call     (ast/find-child agg-node :call)
+        path-ids (aggregate-path-ids agg-node)
+        rel      (compile-impl/aggregate-relation parts)
+        count?   (= "count" f)]
+    (cond
+      (or (nil? call) (has-error-node? agg-node)) []
+
+      (not (compile-impl/aggregate-fns f))
+      [(error-diag fn-id (str "Unknown operation '" f "' — use count, sum, avg, min or max"))]
+
+      (and (nil? target) (nil? filter))
+      [(error-diag call (if count?
+                          "`count` needs a relation — count(<relation>)"
+                          (str "`" f "` needs a field — " f "(<relation>.<field>)")))]
+
+      :else
+      (vec
+       (concat
+        (when (and distinct? (not count?))
+          [(error-diag (first (get-bare-identifiers call))
+                       "`distinct` only applies to count — count(distinct <relation>.<field>)")])
+        (cond
+          (and distinct? (nil? target))
+          [(error-diag call "count(distinct …) needs a field — count(distinct <relation>.<field>)")]
+
+          (and (nil? target) (not count?))
+          [(error-diag call (str "`" f "` takes a field, then an optional filter — "
+                                 f "(<relation>.<field>, <filter>)"))]
+
+          (and count? (not distinct?) (> (count path-ids) 1))
+          [(error-diag (second path-ids)
+                       "`count` takes a relation — count(<relation>); count values with count(distinct <relation>.<field>)")]
+
+          (and (or distinct? (not count?)) (= 1 (count path-ids)))
+          [(error-diag (first path-ids) (str "`" f "` needs a field — " f "(" rel ".<field>)"))]
+
+          (and (or distinct? (not count?)) (> (count path-ids) 2))
+          [(error-diag (nth path-ids 2) "An operation reads one hop — <relation>.<field>; deeper paths belong in its filter")])
+        (keep (fn [p]
+                (let [segs (get-bare-identifiers p)
+                      head (first segs)]
                   (cond
-                    (nil? attr-def)
-                    (vswap! (:diags ctx) conj
-                            (error-diag attr-id
-                                        (str "Unknown attribute '" attr-name
-                                             "' on " (:target rel-def))))
+                    (nil? head) nil
+                    (not= rel (:text head))
+                    (error-diag head (str "Every filter path starts with the operation's relation — " rel ".<field>"))
+                    (= 1 (count segs))
+                    (error-diag head (str "'" rel "' alone is not a field — " rel ".<field>")))))
+              (compile-impl/filter-paths filter)))))))
 
-                    (not= "number" (:type attr-def))
-                    (vswap! (:diags ctx) conj
-                            (error-diag attr-id
-                                        (str "_agg requires a numeric attribute; '"
-                                             attr-name "' is " (:type attr-def))))))))))))))
+(defn filter-paths-on-relation?
+  "True when every filter path starts with `rel` and goes on to a field."
+  [filter rel]
+  (every? (fn [p] (let [segs (get-bare-identifiers p)]
+                    (and (= rel (:text (first segs))) (< 1 (count segs)))))
+          (compile-impl/filter-paths filter)))
+
+(defn or-list [xs]
+  (let [xs (vec (sort xs))]
+    (if (< (count xs) 2)
+      (str/join xs)
+      (str (str/join ", " (pop xs)) " or " (peek xs)))))
+
+(defn collect-aggregate-shape-errors
+  [ast]
+  (into []
+        (comp (filter #(= :aggregate (:node %))) (mapcat aggregate-shape-diags))
+        (tree-seq :children :children ast)))
+
+(defn lint-aggregate
+  "Schema checks for one aggregate: a to-many relation, a field of the right type, a filter over the relation's target."
+  [agg-node entity-def ctx]
+  (let [{:keys [alias filter distinct?] f :fn :as parts} (compile-impl/aggregate-parts agg-node)
+        alias-id   (some-> (ast/find-child agg-node :alias) :children first)
+        path-ids   (aggregate-path-ids agg-node)
+        rel-id     (or (first path-ids)
+                       (some-> (first (compile-impl/filter-paths filter)) get-bare-identifiers first))
+        rel-name   (:text rel-id)
+        rel-def    (get-in entity-def [:relations rel-name])
+        target-def (when rel-def (get-in (:schema ctx) [:entities (:target rel-def)]))
+        ename      (entity-name-of entity-def (:schema ctx))
+        diag!      (fn [node msg] (vswap! (:diags ctx) conj (error-diag node msg)))]
+    (cond
+      (or (has-error-node? agg-node) (not (compile-impl/aggregate-fns f)) (nil? rel-id)) nil
+
+      (:none-scope ctx)
+      (diag! agg-node (str "`" alias ": " f "(…)` under `!" (:none-scope ctx) "` aggregates nothing — `!"
+                           (:none-scope ctx) "` keeps parents with no matching row"))
+
+      :else
+      (do
+        (when (get-in entity-def [:attributes alias])
+          (diag! alias-id (str "Alias '" alias "' is already a field of " ename " — pick another name")))
+        (cond
+          (get-in entity-def [:attributes rel-name])
+          (diag! rel-id (str "'" rel-name "' is an attribute — `" f "` reads a to-many relation"))
+
+          (nil? rel-def)
+          (diag! rel-id (str "Unknown relation '" rel-name "' on " ename))
+
+          (not= "many" (:cardinality rel-def))
+          (diag! rel-id (str "'" rel-name "' is to-one — `" f "` reads a to-many relation"))
+
+          target-def
+          (do
+            (when-let [field-id (when (= 2 (count path-ids)) (second path-ids))]
+              (let [field   (:text field-id)
+                    attr    (get-in target-def [:attributes field])
+                    allowed (aggregate-field-types f)]
+                (cond
+                  (nil? attr)
+                  (diag! field-id (str "Unknown attribute '" field "' on " (:target rel-def)))
+
+                  distinct?
+                  (when (uncountable-types (:type attr))
+                    (diag! field-id (str "count(distinct …) can't compare " (:type attr) " attribute '" field "'")))
+
+                  (and allowed (not (allowed (:type attr))))
+                  (diag! field-id (str "`" f "` needs a " (or-list allowed) " attribute; '"
+                                       field "' is " (:type attr))))))
+            (when (and filter (filter-paths-on-relation? filter rel-name))
+              (lint-or-expr (compile-impl/drop-path-heads filter) target-def ctx))))))))
+
+(defn lint-aggregate-aliases
+  "An aggregate alias must be the only key of its name at its scope."
+  [tree ctx]
+  (letfn [(key-of [inner]
+            (case (:node inner)
+              :scalar   (:text (first (get-bare-identifiers inner)))
+              :relation (or (some-> (ast/find-child inner :alias) :children first :text)
+                            (:text (first (get-bare-identifiers inner))))
+              nil))
+          (walk [node]
+            (when (ast/container? node)
+              (when (#{:query :block} (:node node))
+                (let [stmts  (keep #(when (= :statement (:node %)) (first (:children %))) (:children node))
+                      others (into #{} (keep key-of) stmts)]
+                  (reduce (fn [seen inner]
+                            (if-let [alias-id (when (= :aggregate (:node inner))
+                                                (some-> (ast/find-child inner :alias) :children first))]
+                              (let [a (:text alias-id)]
+                                (when (or (seen a) (others a))
+                                  (vswap! (:diags ctx) conj
+                                          (error-diag alias-id (str "Duplicate key '" a "' at this scope — "
+                                                                    "every operation needs its own alias"))))
+                                (conj seen a))
+                              seen))
+                          #{}
+                          stmts)))
+              (run! walk (:children node))))]
+    (walk tree)))
 
 ;; ── Args inside parens ──────────────────────────────────────────────────
 
@@ -328,11 +439,33 @@
   "Each column of a `?name:order(cols…)` restriction set must be a scalar attribute of `entity-def`."
   [param-ref-node entity-def ctx]
   (doseq [col (:param-type-args param-ref-node)
-          :when (not (contains? (:attributes entity-def) col))]
+          :when (not (or (contains? (:attributes entity-def) col)
+                         (contains? (:order-aliases ctx) col)))]
     (vswap! (:diags ctx) conj
             (error-diag param-ref-node
                         (str "Unknown order column '" col "' on "
                              (entity-name-of entity-def (:schema ctx)))))))
+
+(defn lint-order-path
+  "Each segment of an `order by` column but the last is a relation; the last an attribute of where it lands, or an alias of this level."
+  [ids entity-def ctx]
+  (let [diag! (fn [node msg] (vswap! (:diags ctx) conj (error-diag node msg)))]
+    (loop [[id & more] ids
+           ent entity-def
+           first? true]
+      (let [t (:text id)
+            ename (entity-name-of ent (:schema ctx))]
+        (if (empty? more)
+          (when-not (or (contains? (:attributes ent) t)
+                        (and first? (contains? (:order-aliases ctx) t)))
+            (diag! id (if (contains? (:relations ent) t)
+                        (str "'" t "' is a relation — sort by one of its attributes: " t ".<attribute>")
+                        (str "Unknown order column '" t "' on " ename))))
+          (if-let [rel (get-in ent [:relations t])]
+            (recur more (get-in (:schema ctx) [:entities (:target rel)]) false)
+            (diag! id (if (contains? (:attributes ent) t)
+                        (str "'" t "' is an attribute, not a relation — it can't be followed by `.`")
+                        (str "Unknown relation '" t "' on " ename)))))))))
 
 (defn lint-meta-key [meta-node entity-def ctx]
   (when (and entity-def
@@ -340,12 +473,13 @@
     (if-let [pref (first (filter #(= :param-ref (:node %)) (:children meta-node)))]
       (lint-order-restriction-set pref entity-def ctx)
       (doseq [spec (ast/find-children meta-node :order-spec)
-              :let [col (first (:children spec))]
-              :when (and (= :identifier (:node col))
-                         (not (contains? (:attributes entity-def) (:text col))))]
-        (vswap! (:diags ctx) conj
-                (error-diag col (str "Unknown order column '" (:text col) "' on "
-                                     (entity-name-of entity-def (:schema ctx)))))))))
+              :let [head (first (:children spec))
+                    ids (case (:node head)
+                          :path (get-bare-identifiers head)
+                          :identifier [head]
+                          [])]
+              :when (seq ids)]
+        (lint-order-path ids entity-def ctx)))))
 
 (defn lint-args-of-parens [parens-node entity-def ctx]
   (when-let [list (ast/find-child parens-node :arg-list)]
@@ -461,8 +595,9 @@
 (defn lint-pred-op-against-type
   "Check operator/type compatibility and empty-list cases."
   [pred-op-node attr-def field-name ctx]
-  (lint-enum-literals pred-op-node attr-def field-name ctx)
   (let [[kind op-key] (classify-pred-op pred-op-node)]
+    (when-not (#{"_like" "_ilike"} op-key)
+      (lint-enum-literals pred-op-node attr-def field-name ctx))
     (when op-key
       (when (#{"in" "not_in"} kind)
         (when-let [list-node (ast/find-child pred-op-node :list-literal)]
@@ -842,7 +977,7 @@
 ;; ── Duplicate-sibling warnings ─────────────────────────────────────────
 
 (defn statement-bare-name
-  "`[:scalar|:relation id-node]` for a bare scalar or relation/count-child statement, else nil."
+  "`[:scalar|:relation id-node]` for a bare scalar or relation statement, else nil."
   [stmt-node]
   (let [inner (first (:children stmt-node))]
     (cond
@@ -851,7 +986,7 @@
                           (:children inner))]
         [:scalar id])
 
-      (#{:relation :count-child} (:node inner))
+      (= :relation (:node inner))
       (when-not (some #(= :alias (:node %)) (:children inner))
         (when-let [id (some #(when (= :identifier (:node %)) %)
                             (:children inner))]
@@ -907,7 +1042,8 @@
                                       (collect-param-ref-errors tree)
                                       (when rp (collect-param-ref-errors rp))
                                       (collect-legacy-meta-key-warnings tree)
-                                      (when rp (collect-legacy-meta-key-warnings rp)))))
+                                      (when rp (collect-legacy-meta-key-warnings rp))
+                                      (collect-aggregate-shape-errors tree))))
          root-def (when (and schema root)
                     (get-in schema [:entities root]))
          ctx      {:source source
@@ -920,7 +1056,7 @@
                            (str "Unknown entity '" root "' — not found in the deployed model."))))
      (when root-def
        (when-let [p (:root-parens tree)]
-         (lint-args-of-parens p root-def ctx))
+         (lint-args-of-parens p root-def (assoc ctx :order-aliases (compile-impl/scope-aggregate-aliases tree))))
        (doseq [c (:children tree)]
          (case (:node c)
            :statement
@@ -929,6 +1065,7 @@
            nil)))
      ;; Duplicate detection is schema-independent — runs without root-def.
      (lint-duplicate-siblings tree ctx)
+     (lint-aggregate-aliases tree ctx)
      (lint-on-placement op tree ctx)
      (op-lint-rules op tree ctx)
      @diags)))

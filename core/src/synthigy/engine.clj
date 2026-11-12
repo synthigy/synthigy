@@ -51,13 +51,14 @@
 
 (def ^:private known-args-keys
   "Operators and modifiers valid at the top of an `args` map."
-  #{:_where :_or :_and :_not :_maybe
+  #{:_or :_and :_not :_maybe
     :_limit :_offset :_order_by :_distinct :_join})
 
 (defn coerce-args
   "Reject typo'd _-keys and badly shaped modifiers at the JSON boundary."
   [args]
   (when (map? args)
+    (dataset/refuse-where! args)
     (doseq [[k _] args]
       (when (and (keyword? k)
                  (.startsWith (name k) "_")
@@ -70,7 +71,7 @@
                   :rule "args_modifier"
                   :modifier (name k)
                   :supported (mapv name (sort known-args-keys))}))))
-    (doseq [[k ok? expected] [[:_where map? "a map"] [:_not map? "a map"] [:_maybe map? "a map"]
+    (doseq [[k ok? expected] [[:_not map? "a map"] [:_maybe map? "a map"]
                               [:_or #(and (sequential? %) (every? map? %)) "a list of maps"]
                               [:_and #(and (sequential? %) (every? map? %)) "a list of maps"]
                               [:_limit nat-int? "a non-negative integer"]

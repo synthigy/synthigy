@@ -354,40 +354,12 @@
               {:message (str "Operation `" bad "` moved to the /logs endpoint")
                :code "BAD_OP"}))))
 
-(defn impersonation-refusal
-  "Why the token's OAuth client may not act as users (first failing check, most severe first), or nil when it may."
-  [iam]
-  (let [client_id (get-in iam [:claims :client_id])
-        client (when client_id (oauth/get-client client_id))
-        public? (boolean (#{:public "public"} (:type client)))
-        trusted? (boolean (get-in client [:settings "trusted"]))]
-    (cond
-      (and client_id (nil? client))
-      (ex-info "Client not found"
-               {:code "CLIENT_NOT_FOUND"
-                :client-id client_id})
-
-      (and client (false? (:active client)))
-      (ex-info "Client is inactive"
-               {:code "CLIENT_INACTIVE"
-                :client-id client_id})
-
-      (and client public?)
-      (ex-info "Public clients cannot impersonate users"
-               {:code "PUBLIC_CLIENT_FORBIDDEN"
-                :client-id client_id})
-
-      (and client_id (not trusted?))
-      (ex-info "Client not authorized for impersonation"
-               {:code "NOT_TRUSTED"
-                :client-id client_id}))))
-
 (defn with-client
   "iam plus a :client delay for `whoami` — forced only by that op, so no other request looks the client up."
   [iam]
   (cond-> iam
     iam (assoc :client (delay (when-let [id (get-in iam [:claims :client_id])]
-                                {:id id :trusted (nil? (impersonation-refusal iam))})))))
+                                {:id id :trusted (nil? (auth/impersonation-refusal iam))})))))
 
 (defn plane-handler
   "Shared Ring handler body for /data and /logs; endpoint gates which ops the
@@ -410,7 +382,7 @@
             (if-let [violation (endpoint-op-violation endpoint operations)]
               (format-response request 400 {:error violation})
               (try
-                (when-let [refusal (and acting_as (impersonation-refusal iam))]
+                (when-let [refusal (and acting_as (auth/impersonation-refusal iam))]
                   (throw refusal))
                 (format-response request 200 (update (engine/execute body (with-client iam))
                                                      :results #(wire/results (wire/key-fn key_format) %)))

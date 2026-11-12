@@ -133,9 +133,12 @@ movie (limit 20, order by votes desc)
   one record) takes none.
 
 A filter can reach through a relation: `user (roles.name = "Admin")` keeps the
-users that have such a role, whether `roles` is selected or not. Each path
-predicate asks on its own, so `roles.name = "A" and roles.active = false` can be
-met by two different roles. References filter the same way, on their label:
+users that have such a role, whether `roles` is selected or not. Predicates on
+the same relation joined by `and` or `,` describe one related row:
+`roles.name = "A" and roles.active = false` keeps users with an inactive role
+named A. To match two different rows, use two aliased relation lines
+(`-a:roles (name = "A")`, `-i:roles (active = false)`). `or` asks each side on
+its own. References filter the same way, on their label:
 `movie (modified_by.display_name = "Ana")`.
 
 A relation line needs at least one field. To keep parents by their related rows,

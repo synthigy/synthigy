@@ -300,7 +300,7 @@
   "Janitor: delete rows past expires_at (set at create, tightened at issue)."
   []
   (dataset/purge-entity (id/entity :oauth/authorization-code)
-                        {:_where {:expires_at {:_le (java.util.Date.)}}}
+                        {:expires_at {:_le (java.util.Date.)}}
                         {:code nil}))
 
 (comment

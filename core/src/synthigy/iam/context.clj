@@ -85,7 +85,7 @@
   "Sets Display Name on users that have none; idempotent."
   []
   (let [pp? (public-profile-live?)
-          rows (dataset/search-entity :iam/user {:_where {:display_name :is_null}}
+          rows (dataset/search-entity :iam/user {:display_name :is_null}
                                       (cond-> {(id/key) nil :name nil}
                                         pp? (assoc :public_profile [{:args {:_join :left}
                                                                      :selections {:name nil}}])))

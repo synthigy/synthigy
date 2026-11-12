@@ -286,14 +286,14 @@ Examples:
 
 ```
   synthigy pull --bundle postgres
-  synthigy pull --bundle sqlite --version v0.4.1
+  synthigy pull --bundle sqlite --version v0.5.0
 ```
 
 Flags:
 
 ```
       --bundle string    Bundle: sqlite | postgres | postgres-clickhouse (default "sqlite")
-      --version string   Release version (e.g. v0.4.1) (default "latest")
+      --version string   Release version (e.g. v0.5.0) (default "latest")
 ```
 
 ### `synthigy service`
@@ -341,7 +341,7 @@ Examples:
 ```
   synthigy up                                # opens the setup wizard on a fresh install
   synthigy up --bundle postgres              # needs POSTGRES_* env; persists the choice
-  synthigy up --version v0.4.1               # pin a release
+  synthigy up --version v0.5.0               # pin a release
   synthigy up --jar synthigy.jar             # local/airgap jar, no download
   synthigy up --join                         # stay attached (systemd / launchd / container PID 1)
   synthigy --env .synthigy/customer1.env up  # replaces <instance-home>/.env, for running several instances
@@ -354,7 +354,7 @@ Flags:
       --force            Re-download every module even if cached (suspected corruption)
       --jar string       Local jar, or a classpath of module jars, instead of a release download; airgap/custom builds
       --join             Stay attached to this terminal instead of detaching — for process supervisors (systemd Type=simple, launchd, a container's PID 1), which need the process they started to keep running
-      --version string   Release version to run (e.g. v0.4.1) (default "latest")
+      --version string   Release version to run (e.g. v0.5.0) (default "latest")
 ```
 
 ### `synthigy versions`

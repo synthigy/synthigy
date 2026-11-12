@@ -1498,13 +1498,13 @@
                      :path [:args]}))))
 
 (defn filter-fields
-  "Field keys an args map filters on through `_where`, `_maybe`, `_not`, `_or` and `_and`."
+  "Field keys an args map filters on through `_maybe`, `_not`, `_or` and `_and`."
   [args]
   (letfn [(walk [m]
             (when (map? m)
               (mapcat (fn [[k v]]
                         (cond
-                          (#{:_where :_maybe :_not} k) (walk v)
+                          (#{:_maybe :_not} k) (walk v)
                           (#{:_or :_and} k) (mapcat walk v)
                           (str/starts-with? (name k) "_") nil
                           :else [k]))
@@ -1619,8 +1619,84 @@
       (when (and (seq ids) (every? #(or (string? %) (uuid? %)) ids))
         {(id/key) v}))))
 
+(def args-operator-keys
+  #{:_or :_and :_not :_maybe
+    :_limit :_offset :_order_by :_distinct :_join
+    :_eq :_neq :_lt :_lte :_le :_gt :_gte :_ge
+    :_in :_nin :_not_in :_like :_ilike :_is_null :_is_not_null})
+
+(defn null-test
+  "`:none` or `:exists` when `v` only asks whether a value is there, nil otherwise."
+  [v]
+  (cond
+    (= "is_null" v) :none
+    (= "is_not_null" v) :exists
+    (#{{:_is_null true} {:_is_not_null false} {:_eq nil}} v) :none
+    (#{{:_is_null false} {:_is_not_null true} {:_neq nil}} v) :exists))
+
+(defn prune-empty-lists
+  "`v` without `_in`/`_nin`/`_not_in` over an empty list, so they constrain nothing, as at the root."
+  [v]
+  (if-not (map? v)
+    v
+    (reduce-kv
+     (fn [m k x]
+       (cond
+         (and (#{:_in :_nin :_not_in} k) (coll? x) (empty? x)) m
+         (= :_and k) (if-let [xs (seq (keep #(not-empty (prune-empty-lists %)) x))] (assoc m k (vec xs)) m)
+         (= :_or k) (let [xs (map prune-empty-lists x)] (if (some empty? xs) m (assoc m k (vec xs))))
+         (map? x) (if-let [x' (not-empty (prune-empty-lists x))] (assoc m k x') m)
+         :else (assoc m k x)))
+     {}
+     v)))
+
+(defn relation-key
+  "The args key of a condition answered through relation `k`: `kind` is :exists or :none."
+  [kind k]
+  (keyword (str "relation." (name kind)) (name k)))
+
+(defn relation-key-kind [k]
+  (case (and (keyword? k) (namespace k))
+    "relation.exists" :exists
+    "relation.none" :none
+    nil))
+
+(defn relation-condition
+  "`[key value]` of condition `v` on relation `k`: an EXISTS or NOT EXISTS key, the column itself for a to-one value test, nil when it constrains nothing."
+  [k {:keys [ref? recursion?]} v]
+  (let [to-one? (or ref? recursion?)]
+    (if-let [t (null-test v)]
+      (if to-one? [k v] [(relation-key t k) {}])
+      (let [v' (prune-empty-lists v)]
+        (cond
+          (and (map? v) (seq v) (empty? v')) nil
+          (not to-one?) [(relation-key :exists k) v']
+          (id-comparison v') [(relation-key :exists k) (id-comparison v')]
+          (and (map? v') (some #(not (args-operator-keys %)) (keys v'))) [(relation-key :exists k) v']
+          :else (throw (ex-info (format "'%s' is a reference; compare it by xid: %s = ?xid or %s.xid = ?xid"
+                                        (name k) (name k) (name k))
+                                {:code "INVALID_FILTER"
+                                 :rule "reference_by_xid"
+                                 :relation (name k)
+                                 :path [:args k]})))))))
+
+(defn relation-args
+  "`args` with every condition on a key of `relations` rewritten by `relation-condition`."
+  [args relations]
+  (if-not (map? args)
+    args
+    (reduce-kv
+     (fn [m k v]
+       (cond
+         (#{:_and :_or} k) (assoc m k (mapv #(relation-args % relations) v))
+         (#{:_maybe :_not} k) (assoc m k (relation-args v relations))
+         (contains? relations k) (if-let [[k' v'] (relation-condition k (get relations k) v)] (assoc m k' v') m)
+         :else (assoc m k v)))
+     {}
+     args)))
+
 (defn arg-relation-constraints
-  "Constraints of `args` keyed by the relation they filter through, collected across `_and`, `_or`, `_where`, `_maybe` and `_not`."
+  "Constraints of `args` keyed by the relation they filter through, collected across `_and`, `_or`, `_maybe` and `_not`."
   [args relation?]
   (if-not (map? args)
     nil
@@ -1628,7 +1704,7 @@
      (fn [m k v]
        (cond
          (#{:_and :_or} k) (reduce #(merge-with into %1 (arg-relation-constraints %2 relation?)) m v)
-         (#{:_where :_maybe :_not} k) (merge-with into m (arg-relation-constraints v relation?))
+         (#{:_maybe :_not} k) (merge-with into m (arg-relation-constraints v relation?))
          (relation? k v) (update m k (fnil conj []) v)
          :else m))
      nil
@@ -1720,9 +1796,12 @@
                   selection)
          args (reduce-kv
                (fn [args k v]
-                 (if (some? v)
-                   (assoc args k v)
-                   args))
+                 (cond
+                   (nil? v) args
+                   (contains? args k) (-> args
+                                          (dissoc k)
+                                          (update :_and (fnil conj []) {k (get args k)} {k v}))
+                   :else (assoc args k v)))
                args
                scalars)
          distinct-on (:_distinct args)
@@ -1776,10 +1855,6 @@
                         (assoc result f t))
                       nil
                       fields)
-         args-operator-keys #{:_where :_or :_and :_not :_maybe
-                              :_limit :_offset :_order_by :_distinct :_join
-                              :_eq :_neq :_lt :_lte :_le :_gt :_gte :_ge
-                              :_in :_nin :_not_in :_like :_ilike :_is_null :_is_not_null}
          arg-fields (letfn [(join-args
                               ([args] (join-args args #{}))
                               ([args result]
@@ -1806,13 +1881,14 @@
                                                       (assoc :hint (suggest-similar (name k) candidates)))))))]
                                     (reduce clojure.set/union result'
                                             (concat
-                                             (map join-args (vals (select-keys args [:_where :_maybe :_not])))
+                                             (map join-args (vals (select-keys args [:_maybe :_not])))
                                              (mapcat #(map join-args %) (vals (select-keys args [:_or :_and])))))))
                                 result
                                 args)))]
                       (join-args args))
          _ (readable-args! entity-id attribute? field->attribute
                            (concat arg-fields
+                                   (filter (set (map :key refs)) (filter-fields args))
                                    (keep (fn [[k v]] (when-not (map? v) k)) order-by)
                                    (map keyword (cond (sequential? distinct-on) distinct-on
                                                       (map? distinct-on) (:attributes distinct-on)))))
@@ -1927,10 +2003,12 @@
                                               (selection->schema (:to rdata) nil child-args)))))))))
                           nil
                           order-by-relations)
-         filter-relations (reduce-kv
+         args (relation-args args all-relations)
+         filter-relations (binding [*operation-rules* #{:read}]
+                          (reduce-kv
                            (fn [m rkey constraints]
                              (let [{:keys [relation ref? recursion?] direction :rbac/direction :as rdata} (get all-relations rkey)
-                                   filter-args {:_and (if (or ref? recursion?) (mapv #(or (id-comparison %) %) constraints) constraints)}]
+                                   filter-args {:_and constraints}]
                                (or ref? recursion? (relation-accessible? relation direction #{:read}))
                                (assoc m rkey
                                       (merge
@@ -1941,13 +2019,10 @@
                                          (label-schema (:to rdata) label nil filter-args)
                                          (selection->schema (:to rdata) nil filter-args))))))
                            nil
-                           (arg-relation-constraints
-                            args
-                            (fn [k v]
-                              (when-let [{:keys [ref? recursion?]} (get all-relations k)]
-                                (or (not (or ref? recursion?))
-                                    (and (map? v) (some #(not (args-operator-keys %)) (keys v)))
-                                    (id-comparison v))))))
+                           (reduce-kv
+                            (fn [m k cs] (update m (keyword (name k)) (fnil into []) cs))
+                            nil
+                            (arg-relation-constraints args (fn [k _] (relation-key-kind k))))))
          base-schema (hash-map
                             :entity entity-id
                             :entity/as (str (gensym "data_"))
@@ -1973,7 +2048,8 @@
                             :rls (when rls? rls)
                             :ops ops
                             :order-relations order-relations
-                            :filter-relations filter-relations)]
+                            :filter-relations filter-relations
+                            :arg-relations all-relations)]
      (enhance/apply-schema base-schema selection))))
 
 (defn label-args!
@@ -2192,9 +2268,10 @@
                    (db/cast-placeholder *db* field-type)
                    "?")]
            ;;
-          (if-let [rel (get-in schema [:filter-relations field])]
-            (let [[sql d] (relation-exists rel (if (not-empty prefix) prefix (sql-quote (:entity/table schema))) constraints)]
-              [(conj statements sql) (into data d)])
+          (if-let [kind (relation-key-kind field)]
+            (let [rel (get-in schema [:filter-relations (keyword (name field))])
+                  [sql d] (relation-exists rel (if (not-empty prefix) prefix (sql-quote (:entity/table schema))) constraints)]
+              [(conj statements (cond->> sql (= :none kind) (str "not "))) (into data d)])
           (if (boolean? constraints)
             (if (= :_distinct field)
               [statements]
@@ -2213,16 +2290,6 @@
                   skip-pred? [statements data]
                   :else
                   (case field
-                     ;;
-                    :_where
-                    (cond
-                      (not *deep*) [statements data]
-                      :else
-                      (let [[statements' data'] (query-selection->sql (assoc schema :args constraints))]
-                        (if (empty? statements')
-                          [statements data]
-                          [(conj statements [:and statements'])
-                           (into data data')])))
                     :_maybe
                     (if *ignore-maybe* [statements data]
                         (binding [*deep* false]
@@ -2290,7 +2357,7 @@
                     [statements data]
                     (if (and (some? constraints) (not (map? constraints)))
                       (throw (ex-info (str "Unknown predicate " (pr-str constraints) " on " (name field))
-                                      {:code "UNKNOWN_OPERATOR" :operator constraints :path [:_where field]}))
+                                      {:code "UNKNOWN_OPERATOR" :operator constraints :path [:args field]}))
                       (reduce-kv
                        (fn [[statements' data'] cn cv]
                          (if (or
@@ -2334,7 +2401,7 @@
                                                       ":_is_null :_is_not_null")
                                                  {:code "UNKNOWN_OPERATOR"
                                                   :operator cn
-                                                  :path [:_where]}))))
+                                                  :path [:args]}))))
                                  data (case cn
                                         (:_in :_nin :_not_in) (into data'
                                                                     (if-let [e (get encoders field)]
@@ -2402,14 +2469,7 @@
 (defn relation-on-predicate
   "Builds a LEFT relation's JOIN ON predicate fragment and its params."
   [relation-schema]
-  (let [args      (:args relation-schema)
-        legacy    (:_where args)
-        flat      (apply dissoc args (cons :_where meta-arg-keys))
-        where-args (cond
-                     (and (seq flat) (seq legacy)) (merge legacy flat)
-                     (seq flat) flat
-                     (seq legacy) legacy
-                     :else nil)]
+  (let [where-args (not-empty (apply dissoc (:args relation-schema) meta-arg-keys))]
     (when (seq where-args)
       (let [synthetic (-> relation-schema
                           (assoc :args where-args)
@@ -2443,7 +2503,7 @@
 (defn relation-exists
   "[sql params] of an EXISTS keeping a parent row with a related row through `rel` (to-many, reference or self-reference) that matches `constraints`, inside the target's read guard."
   [rel parent-as constraints]
-  (let [constraints (if (or (:ref? rel) (:recursion? rel)) (or (id-comparison constraints) constraints) constraints)
+  (let [constraints (relation-args constraints (:arg-relations rel))
         ex (:entity/as rel)
         jx (:relation/as rel)
         [psql pdata] (relation-on-predicate (assoc rel :args constraints))
@@ -2480,7 +2540,7 @@
 (defn op-expr
   "`[sql params]` of op `spec` as an aggregate over target alias `ex`, its filter as FILTER."
   [{f :fn field :field args :args rel :relation} ex]
-  (let [[stmts data] (when args (query-selection->sql (assoc rel :entity/as ex :args args)))
+  (let [[stmts data] (when args (query-selection->sql (assoc (selection->schema (:to rel) nil args) :entity/as ex)))
         col (when field (str ex "." (sql-quote (name field))))]
     [(str (case f
             :count (str "count(" ex "._eid)")
@@ -2632,6 +2692,22 @@
                         :path (conj path' :_join)})))
      (refuse-none-slice! rel path'))))
 
+(defn refuse-filter-through-cut!
+  "Throws INVALID_FILTER when args filter through a relation the same slice or purge cuts."
+  ([schema op] (refuse-filter-through-cut! schema op [:args]))
+  ([schema op path]
+   (doseq [[k rel] (:relations schema)
+           :let [k' (keyword (name k))]]
+     (when (contains? (:filter-relations schema) k')
+       (throw (ex-info (format "A %s filter through %s also picks which %s it cuts; put the condition on the relation line: ->%s (...)"
+                               (name op) (name k') (name k') (name k'))
+                       {:code "INVALID_FILTER"
+                        :rule "filter_through_cut"
+                        :relation (name k')
+                        :path (conj path k')})))
+     (when (= :purge op)
+       (refuse-filter-through-cut! rel op (conj path k'))))))
+
 (defn refuse-column-slice!
   "Throws INVALID_SLICE when a slice names a reference or a parent: those are columns, not links."
   [schema]
@@ -2654,12 +2730,12 @@
               (if (vector? args)
                 (some targeting-args? args)
                 (let [args' (dissoc args :_offset :_limit)
-                      some-constraint? (not-empty (dissoc args' :_and :_or :_where :_maybe :_join))]
+                      some-constraint? (not-empty (dissoc args' :_and :_or :_maybe :_join))]
                   (if some-constraint?
                     true
                     (some
                      targeting-args?
-                     ((juxt :_and :_or :_where :_maybe) args')))))))
+                     ((juxt :_and :_or :_maybe) args')))))))
           (targeting-schema? [[_ {:keys [args fields pinned]}]]
             (or
              pinned

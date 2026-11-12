@@ -166,6 +166,7 @@
        (plug/set-context! *db* tx)
        (binding [*operation-rules* #{:purge :delete}]
          (let [schema (selection->schema entity-id selection args)
+               _ (sql-query/refuse-filter-through-cut! schema :purge)
                roots (search-entity-roots connection schema)]
            (if (some? roots)
              (letfn [(construct-statement
@@ -292,12 +293,12 @@
                     (some targeting-args? args)
                     (let [args' (cond-> (dissoc args :_offset :_limit :_order_by :_distinct)
                                   (sql-query/relation-left? args) (dissoc :_join))
-                          some-constraint? (not-empty (dissoc args' :_and :_or :_where))]
+                          some-constraint? (not-empty (dissoc args' :_and :_or))]
                       (if some-constraint?
                         true
                         (some
                          targeting-args?
-                         ((juxt :_and :_or :_where :_maybe) args')))))))
+                         ((juxt :_and :_or :_maybe) args')))))))
               (targeting-schema? [{:keys [args fields relations]}]
                 (or
                  (targeting-args? args)
@@ -510,17 +511,18 @@
                  (some targeting-args? args)
                  ;; SLICE IS ALWAYS INNER — never count :_join or other read metadata as a row constraint
                  (let [args' (dissoc args :_offset :_limit :_join :_order_by :_distinct :_on)
-                       some-constraint? (not-empty (dissoc args' :_and :_or :_where :_maybe))]
+                       some-constraint? (not-empty (dissoc args' :_and :_or :_maybe))]
                    (if some-constraint?
                      true
                      (some
                       targeting-args?
-                      ((juxt :_and :_or :_where :_maybe) args')))))))]
+                      ((juxt :_and :_or :_maybe) args')))))))]
      (let [{:keys [relations entity/table entity/as]
             :as schema}
            (selection->schema entity-id selection args)
            _ (sql-query/refuse-none-slice! schema)
            _ (sql-query/refuse-column-slice! schema)
+           _ (sql-query/refuse-filter-through-cut! schema :slice)
            _ (doseq [{:keys [relation] direction :rbac/direction} (vals relations)]
                (sql-query/relation-accessible? relation direction #{:delete}))
            _ (sql-query/slice-hooks! schema tx)

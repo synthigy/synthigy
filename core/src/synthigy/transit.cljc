@@ -126,7 +126,12 @@
            synthigy.modeling.core.Path
            (record-write-handler
              "synthigy.modeling.core.Path"
-             (keys (synthigy.modeling.core/map->Path nil)))})
+             (keys (synthigy.modeling.core/map->Path nil)))
+
+           synthigy.modeling.core.RecursivePath
+           (record-write-handler
+             "synthigy.modeling.core.RecursivePath"
+             (keys (synthigy.modeling.core/map->RecursivePath nil)))})
 
         (synthigy-read-handlers []
           {"synthigy.dataset.core.ERDRelation"
@@ -148,7 +153,10 @@
            (record-read-handler synthigy.modeling.core/map->PathSegment)
 
            "synthigy.modeling.core.Path"
-           (record-read-handler synthigy.modeling.core/map->Path)})
+           (record-read-handler synthigy.modeling.core/map->Path)
+
+           "synthigy.modeling.core.RecursivePath"
+           (record-read-handler synthigy.modeling.core/map->RecursivePath)})
 
         (legacy-read-handlers []
           {"neyho.eywa.dataset.core.ERDRelation"

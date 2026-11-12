@@ -58,10 +58,10 @@
     (->> (as-engine
           #(dataset/search-entity
             :dataset/dataset
-            {:_where {k {:_eq dataset-id}}}
+            {k {:_eq dataset-id}}
             {k nil
              :versions [{:selections {k nil :deployed nil}
-                         :args {:_where {:name {:_eq version-name}}}}]}))
+                         :args {:name {:_eq version-name}}}]}))
          (mapcat :versions)
          (remove #(= version-id (get % k))))))
 

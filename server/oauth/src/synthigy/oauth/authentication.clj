@@ -100,6 +100,38 @@
               "Bearer token rejected")
     nil))
 
+(defn impersonation-refusal
+  "Why the token's OAuth client may not act as users (first failing check, most severe first), or nil when it may."
+  [iam]
+  (let [client_id (get-in iam [:claims :client_id])
+        client (when client_id (oauth/get-client client_id))
+        public? (boolean (#{:public "public"} (:type client)))
+        trusted? (boolean (get-in client [:settings "trusted"]))]
+    (cond
+      (nil? client_id)
+      (ex-info "Acting as a user needs a token issued to an OAuth client"
+               {:code "CLIENT_REQUIRED"})
+
+      (nil? client)
+      (ex-info "Client not found"
+               {:code "CLIENT_NOT_FOUND"
+                :client-id client_id})
+
+      (false? (:active client))
+      (ex-info "Client is inactive"
+               {:code "CLIENT_INACTIVE"
+                :client-id client_id})
+
+      public?
+      (ex-info "Public clients cannot impersonate users"
+               {:code "PUBLIC_CLIENT_FORBIDDEN"
+                :client-id client_id})
+
+      (not trusted?)
+      (ex-info "Client not authorized for impersonation"
+               {:code "NOT_TRUSTED"
+                :client-id client_id}))))
+
 (defn authenticate-request
   "Authenticate request to {:principal :claims} or nil; no audience means platform, never 'any'."
   ([request] (authenticate-request request nil))

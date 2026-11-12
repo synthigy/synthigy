@@ -110,7 +110,7 @@
 
 (def ^:private ns-prefix->topics
   "Fallback base topic by `:ns` prefix, ORDERED — first (most specific) match wins."
-  [["synthigy.files"              #{:files}]
+  [["synthigy.files.http"         #{:files}]
    ["synthigy.oauth"              #{:auth}]
    ["synthigy.oidc"               #{:auth}]
    ["synthigy.iam.audit"          #{:audit}]

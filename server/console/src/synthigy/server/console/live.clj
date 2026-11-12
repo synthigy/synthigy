@@ -82,7 +82,7 @@
   (let [user-xid   (get-in request [:console/session :resource-owner])
         current-id (get-in request [:console/session :id])]
     (stream request
-            (embedded/watch-query :oauth_session {:_where {:active {:_eq true}}}
+            (embedded/watch-query :oauth_session {:active {:_eq true}}
                                   [:xid]
                                   :acting-as nil)
             (render-push (fn [_] (widgets/sessions-table (data/my-sessions user-xid current-id)))))))
@@ -125,7 +125,7 @@
           user-xid  (get-in request [:console/session :resource-owner])
           baseline  (atom (ui/unit-values spec row0))
           records   (atom (detail-records spec row0))
-          live      (embedded/watch-query entity {:_where {:xid {:_eq xid}}}
+          live      (embedded/watch-query entity {:xid {:_eq xid}}
                                           (data/detail-selection spec)
                                           :acting-as user-xid :entity-track false
                                           :records (vec @records))]

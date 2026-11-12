@@ -217,13 +217,13 @@
   (let [cutoff (java.util.Date. (- (util/now) (util/hours 1)))]
     (doseq [entity [:oauth/access-token :oauth/refresh-token]]
       (dataset/purge-entity (id/entity entity)
-                            {:_where {:expires_at {:_le cutoff}}}
+                            {:expires_at {:_le cutoff}}
                             {:xid nil}))
     (let [retention-cutoff (java.util.Date. (- (util/now) session-row-retention))
           dead (->> (dataset/search-entity
                      (id/entity :oauth/session)
-                     {:_where {:_and [{:active {:_eq false}}
-                                      {:finished {:_le retention-cutoff}}]}}
+                     {:_and [{:active {:_eq false}}
+                             {:finished {:_le retention-cutoff}}]}
                      {:xid nil
                       :access_tokens [{:selections {:xid nil}
                                        :args {:_join :left :_limit 1}}]
@@ -234,7 +234,7 @@
                     (mapv :xid))]
       (doseq [chunk (partition-all 500 dead)]
         (dataset/purge-entity (id/entity :oauth/session)
-                              {:_where {:xid {:_in (vec chunk)}}}
+                              {:xid {:_in (vec chunk)}}
                               {:xid nil}))
       (when (seq dead)
         (log/info {:id ::janitor-swept
@@ -248,7 +248,7 @@
    (let [now (util/now)]
      (dataset/purge-entity
        (id/entity :oauth/key-pair)
-       {:_where {:modified_on {:_le (java.util.Date. (- now older-than))}}}
+       {:modified_on {:_le (java.util.Date. (- now older-than))}}
        {:kid nil}))))
 
 (defn purge-sessions

@@ -126,11 +126,11 @@
   [file-xid]
   (let [lf (fields)]
     (->> (dataset/search-entity :files/link
-                                {:_where {(:expires-at lf) {:_gt (Date.)}}
+                                {(:expires-at lf) {:_gt (Date.)}
                                  :_order_by {(:expires-at lf) :asc}}
                                 (assoc (selection lf) (:file lf)
                                        [{:selections {(id/key) nil}
-                                         :args {:_where {(id/key) {:_eq file-xid}} :_join :inner}}]))
+                                         :args {(id/key) {:_eq file-xid} :_join :inner}}]))
          (mapv #(wire lf %)))))
 
 (defn delete!
@@ -149,7 +149,7 @@
   ([t sel]
    (when (and (string? t) (re-matches token-pattern t) (deployed?))
      (access/with-principal nil
-       (first (dataset/search-entity :files/link {:_where {(:token-hash (fields)) {:_eq (token-hash t)}} :_limit 1} sel))))))
+       (first (dataset/search-entity :files/link {(:token-hash (fields)) {:_eq (token-hash t)} :_limit 1} sel))))))
 
 (defn used-up? [lf link]
   (and (limited? lf link) (>= (or (get link (:downloads lf)) 0) (get link (:max-downloads lf)))))
@@ -181,7 +181,7 @@
                            (dataset/search-entity :files/link nil
                                                   {(id/key) nil
                                                    (:file lf) [{:selections {(id/key) nil}
-                                                                :args {:_where {(id/key) {:_eq file-xid}} :_join :inner}}]})))))))
+                                                                :args {(id/key) {:_eq file-xid} :_join :inner}}]})))))))
 
 (defn sweep!
   "Delete links that expired, ran out of downloads or lost their file; answers how many."
@@ -190,7 +190,7 @@
     0
     (let [lf (fields)
           sel (selection lf)
-          found #(access/with-principal nil (dataset/search-entity :files/link {:_where %} sel))
+          found #(access/with-principal nil (dataset/search-entity :files/link % sel))
           doomed (->> (concat (found {(:expires-at lf) {:_lt (Date.)}})
                               (filter #(used-up? lf %) (found {(:max-downloads lf) {:_is_null false}}))
                               (access/with-principal nil

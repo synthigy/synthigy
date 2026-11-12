@@ -500,6 +500,9 @@
                            (lint-or-expr nested entity-def ctx))
           nil)))))
 
+(defn reference-filter-fields [attr]
+  (distinct (concat (:label attr) ["xid"])))
+
 (defn lint-arg-predicate [pred-node entity-def ctx]
   (let [path (ast/find-child pred-node :path)
         pred-op (ast/find-child pred-node :pred-op)]
@@ -519,6 +522,25 @@
                   attr (get-in current [:attributes seg-name])
                   rel  (get-in current [:relations seg-name])]
               (cond
+                (and attr (not is-last?) (:label attr))
+                (let [via (nth segs (inc i))
+                      fields (reference-filter-fields attr)]
+                  (cond
+                    (not (contains? (set fields) (:text via)))
+                    (vswap! (:diags ctx) conj
+                            (error-diag via
+                                        (str "'" seg-name "' is a reference; filter through "
+                                             (str/join ", " fields))))
+
+                    (< (+ i 2) (count segs))
+                    (vswap! (:diags ctx) conj
+                            (error-diag (nth segs (+ i 2))
+                                        (str "'" seg-name "." (:text via)
+                                             "' is a field of the reference — path cannot continue past it")))
+
+                    pred-op
+                    (lint-pred-op-against-type pred-op {:type "string"} (:text via) ctx)))
+
                 attr
                 (if is-last?
                   (recur (inc i) current attr seg-name)

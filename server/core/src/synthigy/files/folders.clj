@@ -64,24 +64,24 @@
      (mapv fact (dataset/search-entity :files/folder args selection)))))
 
 (defn engine-folder [xid]
-  (when xid (first (engine-where {:_where {(id/key) {:_eq xid}}}))))
+  (when xid (first (engine-where {(id/key) {:_eq xid}}))))
 
 (defn at-path [path]
-  (first (engine-where {:_where {(path-field) {:_eq path}}})))
+  (first (engine-where {(path-field) {:_eq path}})))
 
 (defn at-paths
   "Path -> xid of the folders among `paths`."
   [paths]
   (if (empty? paths)
     {}
-    (into {} (map (juxt :path :xid)) (engine-where {:_where {(path-field) {:_in (vec (distinct paths))}}}))))
+    (into {} (map (juxt :path :xid)) (engine-where {(path-field) {:_in (vec (distinct paths))}}))))
 
 (defn engine-children
   "The folders directly inside `xid`, at most `limit` when given."
   [xid & [limit]]
   (engine-where (cond-> {} limit (assoc :_limit limit))
                 (assoc (fact-selection) (parent-field)
-                       [{:selections {(id/key) nil} :args {:_where {(id/key) {:_eq xid}} :_join :inner}}])))
+                       [{:selections {(id/key) nil} :args {(id/key) {:_eq xid} :_join :inner}}])))
 
 (defn ref->xid
   "Folder xid for `ref`: a path when it starts with /, otherwise the xid itself."
@@ -141,15 +141,15 @@
   "The folders `xids` and every folder above them, by xid: what `served` and `wire` walk."
   [xids]
   (let [own (when-let [xs (seq (distinct (remove nil? xids)))]
-              (engine-where {:_where {(id/key) {:_in (vec xs)}}}))
+              (engine-where {(id/key) {:_in (vec xs)}}))
         above (when (seq own)
-                (engine-where {:_where {(path-field) {:_in (vec (into #{"/"} (mapcat (comp prefixes :path)) own))}}}))]
+                (engine-where {(path-field) {:_in (vec (into #{"/"} (mapcat (comp prefixes :path)) own))}}))]
     (into {} (map (juxt :xid identity)) (concat own above))))
 
 (defn chain
   "The folder at `path` and every folder above it, by xid, in one read: what `served` walks."
   [path]
-  (into {} (map (juxt :xid identity)) (engine-where {:_where {(path-field) {:_in (vec (prefixes path))}}})))
+  (into {} (map (juxt :xid identity)) (engine-where {(path-field) {:_in (vec (prefixes path))}})))
 
 (defn folder [xid]
   (when-let [row (dataset/get-entity :files/folder {(id/key) xid} {(id/key) nil (name-field) nil})]
@@ -162,7 +162,7 @@
     (if (empty? kids)
       []
       (->> (dataset/search-entity :files/folder
-                                  {:_where {(id/key) {:_in kids}} :_order_by (array-map (name-field) :asc (id/key) :asc)}
+                                  {(id/key) {:_in kids} :_order_by (array-map (name-field) :asc (id/key) :asc)}
                                   {(id/key) nil (name-field) nil})
            (map (let [all (facts kids)] #(wire {:xid (id/extract %) :name (get % (name-field))} all)))
            vec))))
@@ -252,26 +252,26 @@
         (when (and (= "/" path) (seq settings))
           (problem 403 "FORBIDDEN" "ROOT has no settings"))
         (let [by-path (at-paths (prefixes path))]
-          (loop [[p & more] (prefixes path) parent (root)]
+          (loop [[p & more] (prefixes path) parent (root) created? false]
             (cond
               (nil? p)
               (cond
                 (and (seq settings) (not (writable? parent))) (problem 403 "FORBIDDEN" "You may not change this folder")
                 :else (do (write-settings! parent settings)
-                          {:folder (folder parent)}))
+                          (cond-> {:folder (folder parent)} created? (assoc :created true))))
 
               (get by-path p)
               (let [x (get by-path p)]
-                (if (visible? x) (recur more x) (problem 404 "FOLDER_NOT_FOUND" (str "No such folder: " p))))
+                (if (visible? x) (recur more x created?) (problem 404 "FOLDER_NOT_FOUND" (str "No such folder: " p))))
 
               :else
               (let [{refused :problem :as r} (create! principal (last (remove str/blank? (str/split p #"/"))) parent)]
-                (if refused r (recur more (get-in r [:folder :xid]))))))))))
+                (if refused r (recur more (get-in r [:folder :xid]) true)))))))))
 
 (defn subtree
   "Folders at or under `path`, deepest last."
   [path]
-  (->> (engine-where {:_where {(path-field) {:_like (str (str/replace path #"[\\%_]" "\\\\$0") "%")}}})
+  (->> (engine-where {(path-field) {:_like (str (str/replace path #"[\\%_]" "\\\\$0") "%")}})
        (filter #(str/starts-with? (:path %) path))
        (sort-by (comp count :path))))
 
@@ -314,7 +314,7 @@
          (empty? (dataset/search-entity :files/file {:_limit 1}
                                         {(id/key) nil
                                          (keyword (naming/normalize-name (:to-label (model/relation :files/file->folder))))
-                                         [{:selections {(id/key) nil} :args {:_where {(id/key) {:_eq xid}} :_join :inner}}]})))))
+                                         [{:selections {(id/key) nil} :args {(id/key) {:_eq xid} :_join :inner}}]})))))
 
 (defn delete!
   "Delete folder `xid`: never ROOT, only when empty, with the caller's delete rights."

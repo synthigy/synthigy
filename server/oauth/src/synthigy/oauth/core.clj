@@ -975,9 +975,9 @@
          absolute-cutoff (java.util.Date. (- (util/now) session-absolute-ttl))
          candidates (dataset/search-entity
                      (id/entity :oauth/session)
-                     {:_where {:_and [{:active {:_eq true}}
-                                      {:_or [{:started {:_is_null true}}
-                                             {:started {:_le cutoff}}]}]}}
+                     {:_and [{:active {:_eq true}}
+                             {:_or [{:started {:_is_null true}}
+                                    {:started {:_le cutoff}}]}]}
                      {:id nil :authorized_at nil :last_seen nil})]
      (doseq [{session :id :keys [authorized_at last_seen]} candidates
              :let [idle-since (or last_seen authorized_at)

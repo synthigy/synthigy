@@ -70,11 +70,14 @@ issue tokens for your own services.
 ## Acting for a user
 
 A backend that serves users — a BFF, a job runner — can run a `/data` request
-as one of them with `"acting_as": "<user xid>"`. The user's own roles and row
-rules then apply, not the backend's. This is allowed only for a
-**confidential** client marked **trusted**; anything else is refused with
-`PUBLIC_CLIENT_FORBIDDEN` or `NOT_TRUSTED`, and an unknown or deactivated user
-with `USER_NOT_FOUND` or `USER_INACTIVE`.
+as one of them with `"acting_as": "<user xid>"`, and a `/files` request with the
+header `X-Acting-As: <user xid>` ([FILES.md](FILES.md#http)). The user's own roles
+and row rules then apply, not the backend's. This is allowed only on a token
+issued to a **confidential** client marked **trusted**; anything else is refused
+with `CLIENT_REQUIRED` (no client on the token), `PUBLIC_CLIENT_FORBIDDEN` or
+`NOT_TRUSTED`, and an unknown or deactivated user with `USER_NOT_FOUND` or
+`USER_INACTIVE`. Acting as a user is always per request: the client itself runs
+as its own identity.
 
 ## Identity providers
 

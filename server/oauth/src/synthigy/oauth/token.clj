@@ -120,11 +120,11 @@
                          {:audience {:_eq audience}})]
     (->> (core/session-row session
                            {rel [{:selections {:value nil}
-                                  :args {:_where (if audience-where
-                                                   {:_and [core/not-revoked audience-where]}
-                                                   core/not-revoked)
-                                         :_order_by {:expires_at :desc}
-                                         :_join :left}}]})
+                                  :args (assoc (if audience-where
+                                                {:_and [core/not-revoked audience-where]}
+                                                core/not-revoked)
+                                              :_order_by {:expires_at :desc}
+                                              :_join :left)}]})
          rel
          (map :value))))
 

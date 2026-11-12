@@ -182,7 +182,7 @@
   "Janitor: delete device-code rows past expires_at."
   []
   (dataset/purge-entity (id/entity :oauth/device-code)
-                        {:_where {:expires_at {:_le (java.util.Date.)}}}
+                        {:expires_at {:_le (java.util.Date.)}}
                         {:device_code nil}))
 
 (defmethod grant-token "urn:ietf:params:oauth:grant-type:device_code"

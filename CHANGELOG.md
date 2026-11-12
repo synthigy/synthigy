@@ -3,6 +3,68 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.5.0] — 2026-11-12
+
+### Added
+
+- **Acting as a user on `/files`:** `X-Acting-As: <user xid>` runs any `/files`
+  request as that user, under the `/data` `acting_as` rule (a trusted
+  confidential client's bearer token). Without a bearer token it is refused with
+  `ACTING_AS_FORBIDDEN` (a browser's sign-in cookie never acts as anyone else).
+
+### Changed
+
+- **Acting as a user needs a client:** `acting_as` (and `X-Acting-As`) on a token
+  with no `client_id` is refused with `CLIENT_REQUIRED` (403). It used to pass.
+
+- **Live events for trusted clients:** a trusted client (one allowed to act as
+  users) now gets record events for the xids it subscribed to even when its own
+  identity cannot read the row, so a BFF that is not a superuser gets live updates
+  for the rows it listed acting as a user. Payloads stay limited to what the
+  client's own roles read.
+
+- **Live events follow access changes within 10 s:** whether a subscriber may
+  read a row is checked again after 10 s instead of being remembered for the
+  whole connection. A user given access to a row starts getting its events, and
+  one who lost access stops, without reconnecting.
+
+- **One filter shape:** field predicates sit directly in `args`
+  (`{"name": {"_eq": "x"}, "_limit": 10}`), the shape XSQL already sends.
+  The `_where` wrapper is refused with `BAD_ARGS_SHAPE` at every level (root,
+  relation, operation, inside `_and`/`_or`/`_not`/`_maybe`). It returned wrong
+  rows in several positions: inside `_and`/`_or`/`_not` it failed with
+  `DB_ERROR`, under `_maybe` it was ignored, and next to a flat predicate on the
+  same field it was dropped.
+
+- **References compare by xid only:** `owner = 123` (a row number) is
+  refused with `INVALID_FILTER`; use `owner = "<xid>"` or `owner.xid`.
+
+### Fixed
+
+- A condition on a field line (`name = "n1"` in a selection) no longer replaces
+  a root filter on the same field; both apply.
+
+- **Filters on relations (0.4.2):** `owner = ?me or owner is null` keeps the
+  unowned rows; `tags is null` / `tags is not null` ask whether any tag exists;
+  `tags.name in []` is no filter, as at the root; filters inside an operation
+  (`count(lines, lines.author = ?me)`) and multi-hop paths
+  (`mother.mother.first_name`) compile correctly.
+
+- **Security:** a reference the caller may not read can no longer be filtered
+  (`approver is null`, `approver.display_name = …`); it is refused like any
+  unreadable field. Long-standing.
+
+- **Slice and purge (0.4.2):** a root filter through a relation they cut
+  (`@slice note (tags.name = "red") ->tags`) removed every link of the matching
+  rows. It is now refused with `INVALID_FILTER`; narrow on the relation line
+  (`->tags (name = "red")`).
+
+- **Purge filter rights:** filtering a purge through a relation needs only read
+  on the related entity, not delete.
+
+- **XSQL lint:** paths through a reference to its label fields or `xid`
+  (`owner.display_name = …`) are no longer flagged; other fields are.
+
 ## [0.4.2] — 2026-11-10
 
 Operations in a selection replace `_count` and `_agg`, files gain zip

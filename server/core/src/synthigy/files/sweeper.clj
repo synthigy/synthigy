@@ -102,8 +102,11 @@
         (storage/delete-blob! store key))
       (sweep-spool! now)
       (let [summary {:deleted (count doomed) :reasons (frequencies (map :reason doomed))}]
-        (log/info {:id ::swept :data (assoc summary :action :deleted :subject :files-sweeper)}
-                  (str "File sweep deleted " (count doomed) " blobs"))
+        (if (seq doomed)
+          (log/info {:id ::swept :data (assoc summary :action :deleted :subject :files-sweeper)}
+                    (str "File sweep deleted " (count doomed) " blobs"))
+          (log/debug {:id ::swept :data (assoc summary :action :deleted :subject :files-sweeper)}
+                     "File sweep found nothing to delete"))
         summary))))
 
 (defonce runner (atom nil))

@@ -441,8 +441,21 @@
       (compile-arg-list list)
       {})))
 
+(def leaf-ops #{:_eq :_neq :_lt :_le :_gt :_ge :_in :_not_in :_like :_ilike})
+
+(defn leaf-pred? [v]
+  (and (map? v) (boolean (some leaf-ops (keys v)))))
+
+(defn field-key? [k]
+  (not (str/starts-with? (name k) "_")))
+
+(defn same-row-mergeable? [x v]
+  (and (map? x) (map? v)
+       (= (leaf-pred? x) (leaf-pred? v))
+       (not (and (leaf-pred? x) (some #(contains? x %) (keys v))))))
+
 (defn deep-merge-args
-  "AND-fold sibling arg maps; colliding combinators restructure instead of clobbering."
+  "AND-fold sibling arg maps; a collision that would clobber moves both sides into `_and`."
   [a b]
   (reduce-kv
     (fn [m k v]
@@ -453,16 +466,38 @@
             (= k :_and)
             (assoc m k (into (vec x) v))
 
-            (= k :_or)
+            (#{:_or :_not} k)
             (-> m
-                (dissoc :_or)
-                (update :_and (fnil into []) [{:_or x} {:_or v}]))
+                (dissoc k)
+                (update :_and (fnil into []) [{k x} {k v}]))
 
-            (and (map? x) (map? v))
+            (same-row-mergeable? x v)
             (assoc m k (deep-merge-args x v))
+
+            (field-key? k)
+            (-> m
+                (dissoc k)
+                (update :_and (fnil into []) [{k x} {k v}]))
 
             :else (assoc m k v)))))
     a b))
+
+(defn path-pred? [m]
+  (and (map? m) (= 1 (count m))
+       (let [[k v] (first m)]
+         (and (field-key? k) (map? v) (not (leaf-pred? v))))))
+
+(defn fold-same-path
+  "Merges AND-ed predicates sharing a relation head into one map, so they constrain the same related row."
+  [ms]
+  (reduce
+    (fn [acc m]
+      (if-let [i (when (path-pred? m)
+                   (first (keep-indexed (fn [i a] (when (and (path-pred? a) (= (ffirst a) (ffirst m))) i)) acc)))]
+        (update acc i deep-merge-args m)
+        (conj acc m)))
+    []
+    ms))
 
 (defn compile-arg-list [list-node]
   (reduce
@@ -497,7 +532,7 @@
   (let [prims (ast/find-children and-node :primary-expr)]
     (if (= 1 (count prims))
       (compile-primary-expr (first prims))
-      (let [ms (remove absent? (mapv compile-primary-expr prims))]
+      (let [ms (fold-same-path (remove absent? (mapv compile-primary-expr prims)))]
         (case (count ms)
           0 absent
           1 (first ms)

@@ -90,7 +90,7 @@
                      {:id nil
                       :user [{:selections {(id/key) nil}
                               :args {:_join :inner
-                                     :_where {(id/key) {:_eq user-xid}}}}]})]
+                                     (id/key) {:_eq user-xid}}}]})]
     (core/kill-session sid)))
 
 (def ^:private deactivation-watcher-key ::deactivation-watcher)

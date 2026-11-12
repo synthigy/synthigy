@@ -83,8 +83,8 @@
     (when (= 1 (count sus))
       (throw (ex-info "Refusing to remove the last superuser" {:code -32000}))))
   (dataset/slice-entity :iam/user
-    {:_where {:name {:_eq username}}}
-    {:roles [{:args {:_where {(id/key) {:_eq (id/extract data/*ROOT*)}}}}]})
+    {:name {:_eq username}}
+    {:roles [{:args {(id/key) {:_eq (id/extract data/*ROOT*)}}}]})
   {:success true :message (str "Superuser role removed from '" username "'")})
 
 (defn by-name!

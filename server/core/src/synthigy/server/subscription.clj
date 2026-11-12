@@ -558,6 +558,8 @@
       (when (some #(nil? (async/offer! stream %)) events)
         (destroy-event-stream identity-key stream)))))
 
+(def readable-ttl-ms 10000)
+
 (defn record-visible
   "The envelope as the bound principal may see it: nil outside its read guards; a delete of a record never checked carries no values."
   [envelope readable]
@@ -566,13 +568,29 @@
       envelope
       (let [k [(:entity-xid data) (:record-xid data)]
             delete? (= "delete" (name type))
-            known (get @readable k)]
+            now (System/currentTimeMillis)
+            {:keys [ok at]} (get @readable k)
+            known (when (and (some? ok) (or delete? (< (- now at) readable-ttl-ms))) ok)]
         (cond
+          delete? (do (swap! readable dissoc k)
+                      (cond
+                        (true? known) envelope
+                        (nil? known) (update-in envelope [:delta :data] dissoc :before :after)))
           (some? known) (when known envelope)
-          delete? (update-in envelope [:delta :data] dissoc :before :after)
-          :else (let [ok (sql-query/row-readable? (:entity-xid data) (:record-xid data))]
-                  (swap! readable assoc k ok)
+          :else (let [ok (boolean (sql-query/row-readable? (:entity-xid data) (:record-xid data)))]
+                  (swap! readable assoc k {:ok ok :at now})
                   (when ok envelope)))))))
+
+(defn prune-readable!
+  [readable]
+  (let [cutoff (- (System/currentTimeMillis) readable-ttl-ms)]
+    (swap! readable #(into {} (filter (fn [[_ {:keys [at]}]] (>= at cutoff))) %))))
+
+(defn subscriber-trusted?
+  "True when the subscribing client may act as users: it can already read any row as its owner."
+  [identity-key]
+  (when-let [client-id (second identity-key)]
+    (nil? (auth/impersonation-refusal {:claims {:client_id client-id}}))))
 
 (defn ensure-delta-loop!
   "Per-identity go-loop translating batched delta envelopes into SSE events under the principal's roles."
@@ -596,15 +614,18 @@
                                batch)
                 attr-key-idx (sql-query/attribute-key-index)
                 records      (get-in @subscriptions-state [identity-key :data :records])
+                trusted?     (subscriber-trusted? identity-key)
                 events       (access/with-principal principal
                                    (into []
-                                         (comp (keep #(record-visible % readable))
+                                         (comp (keep #(if trusted? % (record-visible % readable)))
                                                (mapcat #(trans/translate-delta % attr-key-idx records roles)))
                                          all))
                 last-atom    (get-in @subscriptions-state [identity-key :data :last-seq])
                 mx           (reduce max 0 (keep :seq all))]
             (when (and last-atom (pos? mx))
               (swap! last-atom max mx))
+            (when (> (count @readable) 1024)
+              (prune-readable! readable))
             (when (seq events)
               (fan-out! identity-key events))
             (recur))

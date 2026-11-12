@@ -409,15 +409,25 @@
     "is_not_null" {:_is_not_null true}
     v))
 
+(defn refuse-where!
+  "Throws BAD_ARGS_SHAPE for `_where`: field predicates sit directly in args."
+  [args]
+  (when (and (map? args) (contains? args :_where))
+    (throw (ex-info "_where was removed; put field predicates directly in args: {\"name\": {\"_eq\": \"x\"}}"
+                    {:code "BAD_ARGS_SHAPE"
+                     :rule "args_where"
+                     :modifier "_where"}))))
+
 (defn normalize-args*
   [args]
+  (refuse-where! args)
   (if-not (map? args)
     args
     (reduce-kv
      (fn [m k v]
        (assoc m k
               (case k
-                (:_where :_not :_maybe) (normalize-args* v)
+                (:_not :_maybe) (normalize-args* v)
                 (:_or :_and) (if (sequential? v) (mapv normalize-args* v) v)
                 :_order_by (order-by-map v)
                 :_join (or (lower-keyword v) v)

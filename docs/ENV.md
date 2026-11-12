@@ -16,7 +16,7 @@ Where the instance lives and which engine runs.
 | `SYNTHIGY_HOME` |  | Instance directory: `.env`, pid files, logs, and the local database files in `db/` (`synthigy.db`, `audit.db`, `logs.db`). Unset, the CLI uses the nearest `.synthigy/` above the current directory, else `~/.synthigy`. |
 | `SYNTHIGY_ENV_FILE` |  | Profile file to use instead of `<home>/.env` (same as `--env`). |
 | `SYNTHIGY_BUNDLE` |  | Which engine bundle runs: `sqlite`, `postgres` or `postgres-clickhouse`. Unset, `synthigy up` opens the setup page. |
-| `SYNTHIGY_VERSION` | `latest` | Engine release to run, e.g. `v0.4.1`, or `latest`. |
+| `SYNTHIGY_VERSION` | `latest` | Engine release to run, e.g. `v0.5.0`, or `latest`. |
 | `SYNTHIGY_RELEASES_REPO` | `synthigy/synthigy` | GitHub repository releases are downloaded from (`owner/repo`). |
 | `SYNTHIGY_PROFILE` | `full` | `full` runs identity, OAuth and the console. `bare` runs the data API alone with NO authentication — trusted networks only. |
 | `SYNTHIGY_JAR` |  | A local jar, or a classpath of jars, to run instead of a downloaded release — custom builds, air-gapped machines and app jars ([EMBEDDED.md](EMBEDDED.md)). |

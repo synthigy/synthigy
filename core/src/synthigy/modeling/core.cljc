@@ -16,3 +16,5 @@
 (defrecord PathSegment [c1 c2])
 
 (defrecord Path [coordinates])
+
+(defrecord RecursivePath [side extent])

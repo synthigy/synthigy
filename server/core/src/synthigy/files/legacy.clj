@@ -34,7 +34,7 @@
   []
   (access/with-principal nil
     (remove #(= :FAILED (some-> (get % (k :files.file/status)) keyword))
-            (dataset/search-entity :files/file {:_where {(k :files.file/storage-key) {:_is_null true}}}
+            (dataset/search-entity :files/file {(k :files.file/storage-key) {:_is_null true}}
                                    {(id/key) nil (k :files.file/name) nil (k :files.file/content-type) nil
                                     (k :files.file/status) nil}))))
 
@@ -148,7 +148,7 @@
   "Delete legacy objects whose row is READY with a matching hash; the admin runs it after checking the migration."
   [store]
   (let [rows (access/with-principal nil
-               (dataset/search-entity :files/file {:_where {(k :files.file/status) {:_eq :READY}}}
+               (dataset/search-entity :files/file {(k :files.file/status) {:_eq :READY}}
                                       {(id/key) nil (k :files.file/hash) nil (k :files.file/storage-key) nil}))
         results (reduce (fn [acc row]
                           (let [old (legacy-key (id/extract row))]

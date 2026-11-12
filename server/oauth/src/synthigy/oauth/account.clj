@@ -56,11 +56,11 @@
   ;; :_join :inner is load-bearing — flat-LEFT would match every active session in the system.
   (dataset/search-entity
    (id/entity :oauth/session)
-   {:_where {:active {:_eq true}}}
+   {:active {:_eq true}}
    {:id nil :xid nil :started nil :last_seen nil :context nil
     :client [{:selections {:name nil} :args {:_join :left}}]
     :user [{:selections {:xid nil}
-            :args {:_join :inner :_where {:xid {:_eq user-xid}}}}]}))
+            :args {:_join :inner :xid {:_eq user-xid}}}]}))
 
 (defn sessions
   "Live sessions of `user-xid`, newest first, `current` marking `session`; the session id never leaves."

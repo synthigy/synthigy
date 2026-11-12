@@ -17,7 +17,8 @@
    clojure.data
    clojure.set
    [clojure.string :as str]
-   [synthigy.dataset.id :as id]))
+   [synthigy.dataset.id :as id]
+   [synthigy.modeling.core :as modeling]))
 
 (defn deep-merge
   "Recursively merges maps."
@@ -938,11 +939,18 @@
                                  (let [audit (not-empty (dissoc (:audit c) :actions))]
                                    (not-empty (if audit (assoc c :audit audit) (dissoc c :audit)))))))))
 
+(defn upgrade-relation [relation]
+  (if (and (= "tree" (:cardinality relation))
+           (not (instance? synthigy.modeling.core.RecursivePath (:path relation))))
+    (assoc relation :path (modeling/map->RecursivePath (select-keys (:path relation) [:side :extent])))
+    relation))
+
 (defn upgrade-model
-  "`model` in the current format: entity `:audit :actions` become stamp attributes (format 3)."
+  "`model` in the current format: entity `:audit :actions` become stamp attributes (format 3), self-loops carry a RecursivePath."
   [model]
   (some-> model
           (update :entities #(reduce-kv (fn [m k e] (assoc m k (upgrade-entity e))) (empty %) %))
+          (update :relations #(reduce-kv (fn [m k r] (assoc m k (upgrade-relation r))) (empty %) %))
           (assoc :version model-format)))
 
 (defn audit-persist?

@@ -263,7 +263,7 @@
     (shape-detail-row
      spec
      (denied->nil
-      #(first (embedded/search (:entity spec) {:_where {:xid {:_eq xid}}}
+      #(first (embedded/search (:entity spec) {:xid {:_eq xid}}
                                (detail-selection spec)))))))
 
 (def option-limit
@@ -280,7 +280,7 @@
                         (cond-> {:_order_by {:name :asc} :_limit option-limit}
                           (pos? offset) (assoc :_offset offset)
                           (not (str/blank? q))
-                          (assoc :_where {:name {:_ilike (str "%" (str/trim q) "%")}}))
+                          (assoc :name {:_ilike (str "%" (str/trim q) "%")}))
                         (link-selection link-entity show)))))))
 
 (defn link-default
@@ -295,7 +295,7 @@
    (let [xids (remove str/blank? xids)]
      (when (seq xids)
        (->> (denied->nil #(embedded/search link-entity
-                                           {:_where {:xid {:_in (vec xids)}}}
+                                           {:xid {:_in (vec xids)}}
                                            (link-selection link-entity show)))
             normalize-active
             (sort-by :name)
@@ -333,7 +333,7 @@
   (if (str/blank? xid)
     [:error "Nothing selected."]
     (try
-      (embedded/purge link-entity {:_where {:xid {:_eq xid}}} [:xid])
+      (embedded/purge link-entity {:xid {:_eq xid}} [:xid])
       [:ok xid]
       (catch clojure.lang.ExceptionInfo e
         (if (= "ENTITY_FORBIDDEN" (:code (ex-data e)))
@@ -351,7 +351,7 @@
 (defn all-grants
   [entity xid link-key]
   (access/with-principal nil
-    (-> (embedded/search entity {:_where {:xid {:_eq xid}}}
+    (-> (embedded/search entity {:xid {:_eq xid}}
                          [:xid {link-key [:xid]}])
         first
         (get link-key))))
@@ -616,8 +616,8 @@
       (doseq [[k _ link-entity] (owned-links links)
               :let [xids (mapv :xid (get row k))]
               :when (seq xids)]
-        (embedded/purge link-entity {:_where {:xid {:_in xids}}} [:xid]))
-      (embedded/purge entity {:_where {:xid {:_eq xid}}} [:xid])
+        (embedded/purge link-entity {:xid {:_in xids}} [:xid]))
+      (embedded/purge entity {:xid {:_eq xid}} [:xid])
       [:ok row]
       (catch clojure.lang.ExceptionInfo e
         (if (= "ENTITY_FORBIDDEN" (:code (ex-data e)))
@@ -740,13 +740,13 @@
 (defn owned-by
   [user-xid]
   {:user {:selections [:xid]
-          :args {:_join :inner :_where {:xid {:_eq user-xid}}}}})
+          :args {:_join :inner :xid {:_eq user-xid}}}})
 
 (defn my-sessions
   [user-xid current-id]
   (->> (access/with-principal nil
          (embedded/search :oauth_session
-                          {:_where {:active {:_eq true}}}
+                          {:active {:_eq true}}
                           (conj session-selection (owned-by user-xid))))
        (sort-by :started #(compare %2 %1))
        (mapv (fn [{:keys [id] :as s}]
@@ -764,7 +764,7 @@
                           (conj identity-selection
                                 {:user {:selections [:xid]
                                         :args {:_join :inner
-                                               :_where {:xid {:_eq user-xid}}}}})))
+                                               :xid {:_eq user-xid}}}})))
        (sort-by :linked-at #(compare %2 %1))
        vec))
 
@@ -787,8 +787,8 @@
    (when-not (str/blank? session-xid)
      (when-let [{sid :id} (first (access/with-principal nil
                                    (embedded/search :oauth_session
-                                                    {:_where {:active {:_eq true}
-                                                              :xid {:_eq session-xid}}}
+                                                    {:active {:_eq true}
+                                                     :xid {:_eq session-xid}}
                                                     (conj session-selection
                                                           (owned-by user-xid)))))]
        ;; SYSTEM: kill-session touches :oauth/session; ownership decided above
@@ -813,7 +813,7 @@
   [user-xid current-id]
   (let [others (->> (access/with-principal nil
                       (embedded/search :oauth_session
-                                       {:_where {:active {:_eq true}}}
+                                       {:active {:_eq true}}
                                        (conj session-selection (owned-by user-xid))))
                     (remove #(= current-id (:id %))))]
     (access/with-principal nil
@@ -844,7 +844,7 @@
   [user-xid]
   (let [{:keys [person_info public_profile]}
         (first (access/with-principal nil
-                 (embedded/search :user {:_where {:xid {:_eq user-xid}}}
+                 (embedded/search :user {:xid {:_eq user-xid}}
                                   [:xid
                                    {:person_info [{:args {:_join :left}
                                                    :selections (mapv first person-info-fields)}]}

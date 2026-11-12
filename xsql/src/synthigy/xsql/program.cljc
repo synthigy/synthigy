@@ -447,7 +447,12 @@
                        :message (str "@" d " before the first operation attaches to nothing and is ignored")
                        :from off :to to})
                     {:severity :error
-                     :message (str "@" d " must sit in an operation header, directly after its @verb line")
+                     :message (if-let [{:keys [op name batch]} (first (filter #(and (or (:op %) (:batch %))
+                                                                                    (> (:decl-offset %) off))
+                                                                              decls))]
+                                (str "@" d " must sit in an operation header — move it below @"
+                                     (if batch "batch" op) (when name (str " " name)))
+                                (str "@" d " must sit in an operation header, directly after its @verb line"))
                      :from off :to to})
 
                   :else (ns-casing))]

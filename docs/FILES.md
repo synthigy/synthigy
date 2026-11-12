@@ -115,6 +115,11 @@ unavailable, uploads, replacements, deletions and version calls answer
 
 Every call needs a bearer token and runs as its identity, except [links](#links) and downloads of
 public files ([Serving files to browsers](#serving-files-to-browsers)).
+A backend runs a call as one of its users with the header `X-Acting-As: <user xid>`,
+the `/data` `acting_as` rule ([OAUTH.md](OAUTH.md#acting-for-a-user)): trusted
+confidential clients only, never with a browser's sign-in cookie (403
+`ACTING_AS_FORBIDDEN`). Every SDK takes it per call (`actingAs`, `ActingAs`,
+`acting_as`, `:acting-as`).
 Errors are `{"error": {"code", "message"}}`. JSON answers are snake_case;
 `?key_format=camel`, `kebab` or `pascal` on any call cases their keys like `/data` does.
 
@@ -202,7 +207,7 @@ the page and the totals:
    "args": {"_order_by": [["size", "desc"], ["xid", "asc"]], "_limit": 200, "_offset": 0},
    "selections": {"name": null, "size": null, "content_type": null, "hash": null,
                   "uploaded_at": null, "uploaded_by": {"display_name": null},
-                  "folder": [{"args": {"_join": "inner", "_where": {"xid": {"_eq": "<folder>"}}},
+                  "folder": [{"args": {"_join": "inner", "xid": {"_eq": "<folder>"}},
                               "selections": {"xid": null}}]}},
   {"op": "sql-template",
    "template": "SELECT count(*) AS files, coalesce(sum({file.size}), 0) AS bytes FROM {file->folder.xid} WHERE {file->folder.xid} = ?folder:string",
@@ -210,7 +215,7 @@ the page and the totals:
 ```
 
 - End every sort with `["xid", "asc"]`, so pages never repeat or skip a file.
-- Inside the folder by name: `"_where": {"name": {"_ilike": "%annual%report%"}}`
+- Inside the folder by name: `"name": {"_ilike": "%annual%report%"}`
   on the search and `AND {file.name} ILIKE ?q:string` in the template, with the
   same pattern. Put `\` before a `%`, `_` or `\` the user typed.
 - Files in no folder you can see: `"_join": "none"` on `folder`, and
@@ -339,6 +344,9 @@ curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 | `FILE_NOT_FOUND` | 404 | No such file, or you cannot see it |
 | `FOLDER_NOT_FOUND` | 404 | No such folder, or you cannot see it |
 | `FORBIDDEN` | 403 | Your roles or the folder's access lists refuse it |
+| `ACTING_AS_FORBIDDEN` | 403 | `X-Acting-As` without a bearer token |
+| `CLIENT_REQUIRED`, `NOT_TRUSTED`, `PUBLIC_CLIENT_FORBIDDEN`, `CLIENT_INACTIVE` | 403 | `X-Acting-As` on a token with no client, or from a client that may not act for users |
+| `USER_NOT_FOUND` / `USER_INACTIVE` | 404 / 403 | The `X-Acting-As` user is unknown, or inactive |
 | `FILE_NAME_TAKEN` | 409 | The folder already has a file of that name |
 | `FOLDER_NAME_TAKEN` | 409 | The parent already has a folder of that name |
 | `FOLDER_NOT_EMPTY` | 409 | Deleting a folder that holds files or folders |

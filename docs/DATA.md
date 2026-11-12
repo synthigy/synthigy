@@ -14,7 +14,7 @@ Content-Type: application/json
   "key_format": "camel",
   "operations": [
     {"op": "search", "entity": "movie",
-     "args": {"_where": {"release_year": {"_gt": 1990}}, "_limit": 10},
+     "args": {"release_year": {"_gt": 1990}, "_limit": 10},
      "selections": {"title": null, "genres": {"name": null}}}
   ]
 }
@@ -71,7 +71,7 @@ Rows matching `args`, shaped by `selections`.
 
 ```json
 {"op": "search", "entity": "movie",
- "args": {"_where": {"title": {"_ilike": "%star%"}},
+ "args": {"title": {"_ilike": "%star%"},
           "_order_by": [["release_year", "desc"]],
           "_limit": 20, "_offset": 0},
  "selections": {"title": null, "release_year": null}}
@@ -79,7 +79,7 @@ Rows matching `args`, shaped by `selections`.
 
 ### `get`
 
-One row by a unique value. `args` is a flat map, not `_where`:
+One row by a unique value. `args` maps unique fields to plain values, not predicates:
 
 ```json
 {"op": "get", "entity": "movie", "args": {"xid": "…"}, "selections": {"title": null}}
@@ -104,16 +104,16 @@ an `alias`:
 
 ```json
 {"email": [
-  {"alias": "work", "args": {"_where": {"kind": {"_eq": "work"}}}, "selections": {"address": null}},
-  {"alias": "home", "args": {"_where": {"kind": {"_eq": "home"}}}, "selections": {"address": null}}
+  {"alias": "work", "args": {"kind": {"_eq": "work"}}, "selections": {"address": null}},
+  {"alias": "home", "args": {"kind": {"_eq": "home"}}, "selections": {"address": null}}
 ]}
 ```
 
 A relation never drops its parent: a movie with no matching actors is still
 returned. Add `"_join": "inner"` to a relation's `args` to return only the
 parents that have a match, or `"_join": "none"` to return only the parents
-that have no match. The relation's filters (`_where`, `_and`, `_or` and flat
-field predicates) decide what counts as a match, and only related rows you can
+that have no match. The relation's filters (field predicates, `_and`, `_or`, `_not`)
+decide what counts as a match, and only related rows you can
 read count: a row hidden from you looks absent. A `none` relation itself
 always comes back empty. `none` cannot be combined with `_maybe` and is
 refused by `slice`; any other `_join` value fails with `INVALID_JOIN`.
@@ -141,12 +141,19 @@ user, or `name` for a group or role.
 
 ### Filters and modifiers
 
+Field predicates sit directly in `args`, next to the `_`-prefixed modifiers:
+`{"title": {"_ilike": "%star%"}, "_limit": 20}`.
+A reference (`owner`, a parent) is compared by xid: `{"owner": {"_eq": "<xid>"}}`
+or `{"owner": {"xid": {"_eq": "<xid>"}}}`, which mean the same. Through a
+reference, a record hidden from you counts as absent, so `_neq` does not match
+it. Other comparisons on a reference fail with `INVALID_FILTER`.
+
 | Key | |
 |---|---|
-| `_where` | `{field: {operator: value}}` |
-| `_and`, `_or` | a list of `_where` maps |
-| `_not` | a `_where` map, negated |
-| `_maybe` | a `_where` map on a relation that does not drop parents |
+| `field` | `{operator: value}`; several fields in one map must all match |
+| `_and`, `_or` | a list of filter maps |
+| `_not` | a filter map, negated |
+| `_maybe` | a filter map on a relation that does not drop parents |
 | `_order_by` | a list of `[field, "asc"\|"desc"]` pairs — always a list, so the order survives |
 | `_limit`, `_offset` | paging |
 | `_distinct` | a list of fields |
@@ -168,14 +175,14 @@ no `_order_by`) page the same way every time.
 
 An operation computes over a relation in the database, without sending the
 related rows. It is an entry on the relation key with an `alias` (the result
-key) and an `op`; `args._where` filters the related rows. They are easiest to
+key) and an `op`; its `args` filter the related rows. They are easiest to
 write in [XSQL](XSQL.md#counts-and-aggregates):
 
 ```json
 {"title": null,
  "actors":  [{"alias": "cast", "op": "count"}],
  "ratings": [{"alias": "rating", "op": {"avg": "value"}},
-             {"alias": "fans", "op": "count", "args": {"_where": {"value": {"_ge": 4}}}}]}
+             {"alias": "fans", "op": "count", "args": {"value": {"_ge": 4}}}]}
 ```
 
 ```json
@@ -245,6 +252,12 @@ the client to create a record you can reference in the same batch.
 | `delete` | Delete by identity: a unique-key map (one record) or a list of xids (up to 1000). |
 | `purge` | Delete everything a search with the same `args` and `selections` would return. |
 
+`slice` and `purge` refuse root `args` that filter through a relation the same
+call cuts or deletes (`INVALID_FILTER`): root `args` pick the parent records,
+not which related rows go. Narrow the related rows on the relation itself,
+`"tags": [{"args": {"name": {"_eq": "red"}}}]`. Filtering a purge through a
+relation it does not delete needs only read access to the related entity.
+
 ```json
 {"op": "stack", "entity": "user_rating",
  "data": {"value": 5, "movie": {"xid": "…"}}}
@@ -296,6 +309,7 @@ Branch on `error.code`; messages may change.
 | `UNKNOWN_ENTITY`, `UNKNOWN_ATTRIBUTE` | Not in the model, or not visible to you. Carries a `hint` when a close name exists. |
 | `UNKNOWN_OPERATOR`, `BAD_ARGS_SHAPE` | A typo in `args`. |
 | `INVALID_JOIN` | `_join` is not `left`, `inner` or `none`, or `none` is used with `_maybe` or in `slice`. |
+| `INVALID_FILTER` | `slice` or `purge` root `args` filter through a relation the same call cuts or deletes, or a reference is compared to something other than an xid. |
 | `UNIQUE_VIOLATION`, `NOT_NULL_VIOLATION`, `FK_VIOLATION`, `CHECK_VIOLATION`, `TYPE_CAST_FAILURE` | The database refused the write. |
 | `DELETE_FORBIDDEN` | The record exists but your access rules hide it. |
 | `ROW_FORBIDDEN` | The write changes a record your access rules let you see but not write. |

@@ -690,6 +690,9 @@
                   data' (reduce-kv
                          (fn [data' k v]
                            (cond
+                             (not (or (contains? (:relations schema) k) (recursions k)))
+                             data'
+
                              (list-reference? v)
                              (assoc data' k (mapv
                                              #(pull-reference % (get-in schema [:relations k]) (conj cursor k))

@@ -251,9 +251,10 @@
     (if (= 1 (count ands))
       (compile-scalar-and (first ands) field)
       (let [ms (mapv #(compile-scalar-and % field) ands)]
-        (if (some absent? ms)
-          (throw-optional-in-or or-node)
-          {:_or ms})))))
+        (cond
+          (every? absent? ms) absent
+          (some absent? ms)   (throw-optional-in-or or-node ands ms)
+          :else               {:_or ms})))))
 
 (defn compile-scalar-and [and-node field]
   (let [prims (ast/find-children and-node :scalar-prim)]
@@ -514,19 +515,26 @@
     (ast/find-children list-node :arg-stmt)))
 
 (defn throw-optional-in-or
-  "Absent optional under `or` is an error: dropping a disjunct silently narrows the result."
-  [node]
-  (throw (ex-info "optional `?name?` param under `or` — dropping a disjunct is ambiguous; restructure or supply the value"
-                  {:code "PARAM_OPTIONAL_IN_OR" :span (:span node)})))
+  "An `or` that lost only some of its sides is an error: dropping a disjunct silently narrows the result."
+  [node sides compiled]
+  (let [names (->> (keep-indexed #(when (absent? (nth compiled %1)) %2) sides)
+                   (mapcat #(tree-seq :children :children %))
+                   (keep #(when (and (= :param-ref (:node %)) (:optional? %)) (str "?" (:param-name %) "?")))
+                   distinct
+                   (str/join ", "))]
+    (throw (ex-info (str "optional " names " not supplied, which empties only some sides of an `or`"
+                         " — dropping a disjunct is ambiguous; supply the value or restructure")
+                    {:code "PARAM_OPTIONAL_IN_OR" :span (:span node)}))))
 
 (defn compile-or-expr [or-node]
   (let [ands (ast/find-children or-node :and-expr)]
     (if (= 1 (count ands))
       (compile-and-expr (first ands))
       (let [ms (mapv compile-and-expr ands)]
-        (if (some absent? ms)
-          (throw-optional-in-or or-node)
-          {:_or ms})))))
+        (cond
+          (every? absent? ms) absent
+          (some absent? ms)   (throw-optional-in-or or-node ands ms)
+          :else               {:_or ms})))))
 
 (defn compile-and-expr [and-node]
   (let [prims (ast/find-children and-node :primary-expr)]

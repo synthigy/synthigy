@@ -3,6 +3,31 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.5.1] — 2026-11-15
+
+### Fixed
+
+- **json arrays read back as `{}` on SQLite:** a `json` attribute holding a
+  non-empty array was written correctly but read back as `{}` (`[["a"]]` as
+  `[{}]`). The stored values were never lost; reads now return them. A value
+  that was read as `{}` and saved back is stored as `{}`. Postgres was not
+  affected.
+
+### Changed
+
+- **XSQL lint matches the engine on two rules:** a filter through a relation
+  inside an operation (`sum(payments.amount, payments.invoice.xid is null)`) is
+  now a lint error, with the message a run already gave. An optional `?name?`
+  that could empty only some sides of an `or` is now a lint warning: such a run
+  is refused with `PARAM_OPTIONAL_IN_OR`.
+
+- **An `or` that loses every side to unset optionals drops:**
+  `name like ?q? or email like ?q?` without `q` used to be refused with
+  `PARAM_OPTIONAL_IN_OR`. It now runs with no filter, as an `and` or a single
+  predicate does. An `or` left with only some sides (`active = true or
+  name like ?q?` without `q`, or `name = ?a? or email = ?b?` with only `a`) is
+  still refused, and the message now names the unset params.
+
 ## [0.5.0] — 2026-11-12
 
 ### Added

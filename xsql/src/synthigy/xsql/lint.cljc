@@ -350,6 +350,77 @@
         (comp (filter #(= :aggregate (:node %))) (mapcat aggregate-shape-diags))
         (tree-seq :children :children ast)))
 
+(def or-forms
+  {:or-expr        [:and-expr :primary-expr]
+   :scalar-or-expr [:scalar-and-expr :scalar-prim]})
+
+(defn optional-ref? [n]
+  (and (= :param-ref (:node n)) (:optional? n)))
+
+(defn value-optional? [value-node]
+  (optional-ref? (first (:children value-node))))
+
+(defn pred-op-droppable?
+  "True when an absent `?name?` drops the predicate, as compile does."
+  [pred-op]
+  (let [children (:children pred-op)
+        word     (:text (first children))]
+    (cond
+      (nil? pred-op)            false
+      (= "is" word)             false
+      (#{"in" "not"} word)      (let [vs (some-> (ast/find-child pred-op :list-literal)
+                                                 (ast/find-children :value))]
+                                  (boolean (and (seq vs) (every? value-optional? vs))))
+      (#{"like" "ilike"} word)  (boolean (some optional-ref? children))
+      :else                     (boolean (some-> (ast/find-child pred-op :value) value-optional?)))))
+
+(declare or-droppable?)
+
+(defn prim-droppable? [prim]
+  (if (= :scalar-prim (:node prim))
+    (if-let [p (ast/find-child prim :pred-op)]
+      (pred-op-droppable? p)
+      (or-droppable? (ast/find-child prim :scalar-or-expr)))
+    (let [inner (first (:children prim))]
+      (case (:node inner)
+        :arg-predicate (pred-op-droppable? (ast/find-child inner :pred-op))
+        :grouped-expr  (or-droppable? (ast/find-child inner :or-expr))
+        false))))
+
+(defn and-droppable? [and-node prim-tag]
+  (let [prims (ast/find-children and-node prim-tag)]
+    (boolean (and (seq prims) (every? prim-droppable? prims)))))
+
+(defn or-droppable? [or-node]
+  (boolean
+   (when-let [[and-tag prim-tag] (get or-forms (:node or-node))]
+     (let [ands (ast/find-children or-node and-tag)]
+       (and (seq ands) (every? #(and-droppable? % prim-tag) ands))))))
+
+(defn optional-names [node]
+  (into #{} (keep #(when (optional-ref? %) (:param-name %))) (tree-seq :children :children node)))
+
+(defn collect-optional-in-or-warnings
+  "Warns at each `or` a run could leave with only some of its sides, which compile refuses."
+  [ast]
+  (into []
+        (keep
+         (fn [n]
+           (when-let [[and-tag prim-tag] (get or-forms (:node n))]
+             (let [ands  (ast/find-children n and-tag)
+                   sides (filter #(and-droppable? % prim-tag) ands)]
+               (when (and (< 1 (count ands))
+                          (seq sides)
+                          (or (< (count sides) (count ands))
+                              (apply not= (map optional-names sides))))
+                 (let [names (->> (mapcat #(tree-seq :children :children %) sides)
+                                  (keep #(when (optional-ref? %) (str "?" (:param-name %) "?")))
+                                  distinct)
+                       them  (if (next names) "them" "it")]
+                   (warning-diag n (str "Optional " (str/join ", " names) " under `or`: a run that empties only some of its sides is refused"
+                                        " — pass " them ", make " them " required, or move " them " out of the `or`"))))))))
+        (tree-seq :children :children ast)))
+
 (defn lint-aggregate
   "Schema checks for one aggregate: a to-many relation, a field of the right type, a filter over the relation's target."
   [agg-node entity-def ctx]
@@ -401,6 +472,12 @@
                   (and allowed (not (allowed (:type attr))))
                   (diag! field-id (str "`" f "` needs a " (or-list allowed) " attribute; '"
                                        field "' is " (:type attr))))))
+            (doseq [p (compile-impl/filter-paths filter)
+                    :let [[head seg] (get-bare-identifiers p)]
+                    :when (and seg (= rel-name (:text head))
+                               (get-in target-def [:relations (:text seg)]))]
+              (diag! seg (str "An operation filter reads attributes of " (:target rel-def)
+                              "; '" (:text seg) "' is not one")))
             (when (and filter (filter-paths-on-relation? filter rel-name))
               (lint-or-expr (compile-impl/drop-path-heads filter) target-def ctx))))))))
 
@@ -1065,7 +1142,9 @@
                                       (when rp (collect-param-ref-errors rp))
                                       (collect-legacy-meta-key-warnings tree)
                                       (when rp (collect-legacy-meta-key-warnings rp))
-                                      (collect-aggregate-shape-errors tree))))
+                                      (collect-aggregate-shape-errors tree)
+                                      (collect-optional-in-or-warnings tree)
+                                      (when rp (collect-optional-in-or-warnings rp)))))
          root-def (when (and schema root)
                     (get-in schema [:entities root]))
          ctx      {:source source

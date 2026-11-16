@@ -20,6 +20,7 @@
    [synthigy.oauth.handlers :as oauth]
    [synthigy.oauth.page.custom :as login-page]
    [synthigy.server.data :as data]
+   [synthigy.server.docs :as docs]
    [synthigy.server.health :as health]
    [synthigy.server.history :as history]
    [synthigy.server.info :as info]
@@ -129,6 +130,7 @@
   "Route table for :synthigy/server (the full deployment)."
   [{:keys [info sse-handler] :or {info {}}}]
   (register-prefix! ::login-pages login-page/mount-prefix (gated :synthigy/iam #'login-page/handler))
+  (register-prefix! ::docs docs/prefix #'docs/handler)
   (let [info-handler (fn [_]
                        {:status 200
                         :headers {"Content-Type" "application/json"}
@@ -198,6 +200,7 @@
 (defn bare-routes
   "Route table for :synthigy/bare-server, the data-only deployment."
   [{:keys [info sse-handler] :or {info {}}}]
+  (register-prefix! ::docs docs/prefix #'docs/handler)
   (let [info-handler (fn [_]
                        {:status 200
                         :headers {"Content-Type" "application/json"}

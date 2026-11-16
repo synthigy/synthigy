@@ -3,6 +3,89 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.5.3] — 2026-11-16
+
+### Added
+
+- **An operation's filter can go through relations:**
+  `unallocated: sum(payments.amount, payments.invoice is null)`,
+  `count(payments, payments.invoice.contract.active = true)`. Each hop only
+  tests the related row (EXISTS), so a sum through a to-many relation counts
+  every row once. The summed field itself stays one hop (`rel.field`).
+- **XSQL lint checks more of what a run would refuse:**
+  - In an `@sql-template`, an alias after a placeholder (`FROM {movie} m`, which
+    is broken SQL) is an error whose message names the rewrite (`m.title` →
+    `{movie.title}`). An entity named without braces (`FROM movie`) is an
+    error, as the run already refused it.
+  - A field-less chain (`{movie->genres}`) is a warning: it stands for the last
+    table alone. `@returns` naming other columns than the SELECT returns is a
+    warning.
+  - A string compared with a timestamp attribute must be a timestamp the engine
+    reads (`"2026-10-01"`, `"2026-10-01 14:30"`, …); `"1.10.2026"` is an error.
+  - An `@stack`, `@sync` or `@delete` of `File`, `Folder` or `File Link`, or an
+    `@purge` rooted at one, is an error: the engine refuses them, since
+    `/files` writes them.
+- **The engine serves its manual:** `GET /docs` (the index, opening with the
+  engine's version), `/docs/<topic>` (a page, `files`) and
+  `/docs/<topic>/<section>` (one section with its subsections, by its heading's
+  anchor). They need the same sign-in as `/schema` and answer markdown. An
+  unknown topic or section is a 404 `DOC_NOT_FOUND` listing the ones that
+  exist. The release jars carry the manual.
+- **An error with a rule names its doc:** `doc` is the manual's section on that
+  rule (`"doc": "errors/relation_data"`, read at `/docs/errors/relation_data`).
+  New pages and sections: `ERRORS.md` (one section per rule, 13 of 32 so far),
+  `AGENT_BRIEF.md` (the rules an AI agent reads first, at `/docs/brief`),
+  Linking records to files (`FILES.md`), Relation data and Transactions
+  (`DATA.md`), One dataset per domain (`MODELING.md`), and a task list at the
+  top of the index.
+- **The schema says how an entity is written:** `"writes": "link"` on `File`
+  and `Folder` (`/data` links them by xid only), `"writes": "none"` on
+  `File Link`. Other entities have no `writes`.
+
+### Fixed
+
+- **Linking a record to an existing file could fail with `ENGINE_OWNED`:** the
+  `modified_by` stamp the engine puts on the nested file row counted as a
+  change to the file. A record now links to any file its caller can read, by
+  xid.
+- **A wrong relation shape was a 500.** A string, number or boolean for a
+  to-one relation, or anything but an array of records for a to-many, is now a
+  400 `BAD_DATA_SHAPE` (rule `relation_data`) naming the relation, with a hint
+  showing its shape.
+- **`rel.xid is null` matched nothing.** It asked for a related row whose xid
+  is empty, which no row has, so `customer (payments.invoice.xid is null)`
+  returned no customers without an error. It now means "no related row", the
+  same as `rel is null`; `rel.xid is not null` means there is one.
+- **XSQL lint refused `rel is null` and `rel is not null`,** although the
+  engine runs them, and so steered users to the `.xid is null` form above.
+  Comparing a relation itself (`payments.invoice = "…"`) is still an error, and
+  its message now names the fix: test it with `is null` / `is not null`, or
+  compare its xid.
+- **An `@sql-template` with `IS [NOT] DISTINCT FROM` and no FROM of its own
+  failed** ("near LEFT: syntax error"): the operator's `FROM` was read as the
+  query's FROM clause, so the generated FROM was left out.
+
+### Changed
+
+- **The files refusals say what to do instead.** Each `ENGINE_OWNED`
+  (`files_read_only`) refusal names the `/files` call that does what was
+  refused, with a `hint`, and the `entity`, `attribute` or `relation` it is
+  about. A link to a file that doesn't exist, or that the caller can't read,
+  answers `REF_NOT_FOUND` with an upload hint, the same for both; a `File` row
+  with an unknown xid at the root of a write stays `ENGINE_OWNED`, since it
+  would create a file.
+- **An unknown name in an operation's filter** fails with `UNKNOWN_ATTRIBUTE`
+  and a did-you-mean hint, as in any other filter (was `INVALID_OPERATION`).
+- **Optional params in an `@sql-template` follow XSQL's rule.** A missing
+  `?name?` used to drop the whole top-level condition it was in, so
+  `(email = ?e? or phone = ?p?)` called with only `e` returned every row, and
+  `a = 1 and (b = ?x? or c = ?y?)` lost `a = 1` too. Now an `and` drops only
+  the parts that are missing, an `or` drops when all of its sides are missing,
+  and an `or` that would lose only some sides fails with
+  `PARAM_OPTIONAL_IN_OR`, naming the missing params. A top-level `or` no longer
+  has to be parenthesized. A template that relied on the old drop now gets the
+  error: supply the param, or move it out of the `or`.
+
 ## [0.5.2] — 2026-11-16
 
 ### Changed

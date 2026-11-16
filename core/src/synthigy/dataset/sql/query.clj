@@ -579,6 +579,7 @@
               (pr-str ident))
       (cond-> {:type ::reference-not-found
                :code "REF_NOT_FOUND"
+               :hint "Check the reference; a record you can't read counts as not found."
                :entity entity-id
                :table table
                :keys ident}
@@ -1068,6 +1069,23 @@
                 c)))
      (dissoc schema :counted? :pinned))))
 
+(defn relation-data-shape?
+  "True when `data` fits a relation of type `rtype`: one record or nil for to-one, a collection of records or nil for to-many."
+  [rtype data]
+  (if (= :many rtype)
+    (or (nil? data) (and (coll? data) (not (map? data)) (every? map? data)))
+    (or (nil? data) (map? data))))
+
+(defn relation-shape-message [rel rtype data]
+  (let [what (fn [x] (cond (string? x) "a string" (number? x) "a number" (boolean? x) "true/false"
+                           (map? x) "an object" (coll? x) "an array" (nil? x) "null" :else "a value"))]
+    (if (= :many rtype)
+      (str "Relation " rel " is to-many: pass an array of records, got "
+           (if (and (coll? data) (not (map? data)))
+             (str "an array holding " (what (first (remove map? data))))
+             (what data)))
+      (str "Relation " rel " is to-one: pass one record or null, got " (what data)))))
+
 (defn analyze-data
   ([tx entity data stack?]
    (let [data' (if (sequential? data)
@@ -1392,14 +1410,14 @@
                                rtype :type
                                :as relation} k} relations
                              constraints (get-constraints to)]
-                         (when (if (= :many rtype) (map? data) (sequential? data))
-                           (throw (ex-info (str "Relation " (name k) " is "
-                                                (if (= :many rtype)
-                                                  "to-many — pass an array of records"
-                                                  "to-one — pass one record, not an array"))
+                         (when-not (relation-data-shape? rtype data)
+                           (throw (ex-info (relation-shape-message (name k) rtype data)
                                            {:code "BAD_DATA_SHAPE"
                                             :rule "relation_data"
-                                            :relation (name k)})))
+                                            :relation (name k)
+                                            :hint (if (= :many rtype)
+                                                    (str "A to-many relation takes an array of records: {\"" (name k) "\": [{\"xid\": \"…\"}]}")
+                                                    (str "A to-one relation takes one record or null: {\"" (name k) "\": {\"xid\": \"…\"}}"))})))
                          (case rtype
                            :many
                            (if (or (empty? data) (nil? data))
@@ -1485,7 +1503,7 @@
    :attribute? (constantly true)
    :rls? false})
 
-(declare label-schema)
+(declare label-schema selection->schema)
 
 (defn readable-args!
   "Refuses a filter, sort or distinct on a field `attribute?` does not let the caller read."
@@ -1582,10 +1600,7 @@
               (invalid-op! (str "`" (name f) "` can't read " ftype " attribute '" (name field) "'")
                            {:entity tname :attribute (name field) :alias alias :path path})))
         args (not-empty args)
-        _ (doseq [k (filter-fields args)
-                  :when (not (or (contains? tfields k) (#{:_eid :xid :euuid} k)))]
-            (invalid-op! (str "An operation filter reads attributes of " tname "; '" (name k) "' is not one")
-                         {:entity tname :attribute (name k) :alias alias :path path}))
+        _ (when args (selection->schema (:to rdata) nil args))
         _ (aggregate-readable! rdata (when field [field]) [args])]
     {:alias (keyword alias)
      :fn f
@@ -1664,10 +1679,18 @@
     "relation.none" :none
     nil))
 
+(defn id-null-test
+  "The null test inside `v` when `v` only asks whether the related row's id is there (`rel.xid is null`), else `v`."
+  [v]
+  (if-let [[k t] (when (and (map? v) (= 1 (count v))) (first v))]
+    (if (and (#{:xid :euuid} k) (null-test t)) t v)
+    v))
+
 (defn relation-condition
   "`[key value]` of condition `v` on relation `k`: an EXISTS or NOT EXISTS key, the column itself for a to-one value test, nil when it constrains nothing."
   [k {:keys [ref? recursion?]} v]
-  (let [to-one? (or ref? recursion?)]
+  (let [to-one? (or ref? recursion?)
+        v (id-null-test v)]
     (if-let [t (null-test v)]
       (if to-one? [k v] [(relation-key t k) {}])
       (let [v' (prune-empty-lists v)]

@@ -469,8 +469,77 @@
   #{"group" "order" "limit" "offset" "union" "intersect" "except"
     "window" "having" "returning" "fetch" "for"})
 
+(defn span-connectives
+  "Top-level `and`/`or` tokens of `word` at `depth` between `from` and `to`; the `and` of a `between` is no connective."
+  [toks from to depth word]
+  (loop [ts (filter #(and (= :word (:kind %)) (= depth (:depth %)) (<= from (:from %)) (< (:from %) to)) toks)
+         between? false
+         out []]
+    (if-let [[t & more] (seq ts)]
+      (case (:word t)
+        "between" (recur more true out)
+        "and" (if between? (recur more false out) (recur more false (cond-> out (= "and" word) (conj t))))
+        "or" (recur more between? (cond-> out (= "or" word) (conj t)))
+        (recur more between? out))
+      out)))
+
+(defn bool-tree
+  "And/or tree of the condition between `from` and `to` at paren `depth`: `:or`/`:and` over kids, `:group` around one, `:leaf`."
+  [sql toks from to depth]
+  (let [split (fn [conns] (mapv (fn [[a b]] [(:to a) (:from b)])
+                                (partition 2 1 (concat [{:to from}] conns [{:from to}]))))
+        node  (fn [op conns] {:op op :from from :to to
+                              :kids (mapv (fn [[f t]] (bool-tree sql toks f t depth)) (split conns))})
+        ors   (span-connectives toks from to depth "or")
+        ands  (when (empty? ors) (span-connectives toks from to depth "and"))]
+    (cond
+      (seq ors)  (node :or ors)
+      (seq ands) (node :and ands)
+      :else
+      (let [text  (subs sql from to)
+            lead  (- (count text) (count (str/triml text)))
+            trail (- (count text) (count (str/trimr text)))
+            open  (+ from lead)
+            close (- to trail 1)
+            first-close (some #(when (and (= :close (:kind %)) (= depth (:depth %)) (< open (:from %) to)) (:from %)) toks)]
+        (if (and (< open close) (= "(" (subs sql open (inc open))) (= close first-close))
+          {:op :group :from from :to to :kid (bool-tree sql toks (inc open) close (inc depth))}
+          {:op :leaf :from from :to to})))))
+
+(defn prune-tree
+  "`node` without the parts holding a `dropped` occurrence, XSQL's rule: `and` drops missing parts, `or` drops only when every side is missing."
+  [node dropped]
+  (let [hit? (fn [{:keys [from to]}] (some #(<= from (:from %) (dec to)) dropped))]
+    (case (:op node)
+      :leaf (if (hit? node) :absent node)
+      :group (let [k (prune-tree (:kid node) dropped)]
+               (if (or (keyword? k) (:error k)) k (cond-> (assoc node :kid k) (:changed? k) (assoc :changed? true))))
+      (let [kids (mapv #(prune-tree % dropped) (:kids node))
+            kept (filterv map? kids)
+            errs (seq (filter #(and (map? %) (:error %)) kids))]
+        (cond
+          errs (first errs)
+          (empty? kept) :absent
+          (and (= :or (:op node)) (< (count kept) (count kids)))
+          {:error (let [names (->> (map vector (:kids node) kids)
+                                   (keep (fn [[k v]] (when (= :absent v) k)))
+                                   (mapcat (fn [{:keys [from to]}] (filter #(<= from (:from %) (dec to)) dropped)))
+                                   (map #(str "?" (:name %) "?")) distinct)]
+                    (str "optional " (str/join ", " names) " not supplied, which empties only some sides of an OR; "
+                         "supply " (if (next names) "them" "it") " or move " (if (next names) "them" "it") " out of the OR"))}
+          :else (cond-> (assoc node :kids kept)
+                  (or (< (count kept) (count kids)) (some :changed? kept)) (assoc :changed? true)))))))
+
+(defn emit-tree [sql node]
+  (if-not (:changed? node)
+    (str/trim (subs sql (:from node) (:to node)))
+    (case (:op node)
+      :group (str "(" (emit-tree sql (:kid node)) ")")
+      :and (str/join "\n  and " (map #(emit-tree sql %) (:kids node)))
+      :or (str/join " or " (map #(emit-tree sql %) (:kids node))))))
+
 (defn drop-optional-conjuncts
-  "Drop the top-level WHERE/HAVING conjunct holding each unsupplied optional param; `{:sql}` or `{:errors}`."
+  "Drop what each unsupplied optional param empties from its WHERE/HAVING clause, by XSQL's and/or rule; `{:sql}` or `{:errors}`."
   [sql dropped]
   (let [toks    (clause-tokens sql)
         clauses (->> toks
@@ -502,40 +571,24 @@
     (if (seq errs)
       {:errors (vec (distinct errs))}
       (let [by-clause (group-by first (map vector homes dropped))
-            edits
-            (for [[{:keys [kw-from body-start end depth]} pairs] by-clause
-                  :let [conns (filterv #(and (= :word (:kind %))
-                                             (= depth (:depth %))
-                                             (<= body-start (:from %))
-                                             (< (:from %) end)
-                                             (#{"and" "or"} (:word %)))
-                                       toks)]]
-              (if (some #(= "or" (:word %)) conns)
-                {:error (str "optional ?"
-                             (:name (second (first pairs)))
-                             "? under a top-level OR — dropping a conjunct is "
-                             "ambiguous; parenthesize the OR group")}
-                (let [bounds (concat [{:to body-start}] conns [{:from end}])
-                      segs   (mapv (fn [[a b]] {:from (:to a) :to (:from b)})
-                                   (partition 2 1 bounds))
-                      hit?   (fn [{:keys [from to]}]
-                               (some (fn [[_ occ]] (<= from (:from occ) (dec to)))
-                                     pairs))
-                      kept   (->> segs
-                                  (remove hit?)
-                                  (mapv #(str/trim (subs sql (:from %) (:to %)))))]
-                  {:from kw-from :to end
-                   :text (if (empty? kept)
-                           ""
-                           (str (subs sql kw-from body-start) " "
-                                (str/join "\n  and " kept) "\n"))})))
+            edits (for [[{:keys [kw-from body-start end depth]} pairs] by-clause
+                        :let [pruned (prune-tree (bool-tree sql toks body-start end depth) (map second pairs))]]
+                    (cond
+                      (= :absent pruned) {:from kw-from :to end :text ""}
+                      (:error pruned) {:error (:error pruned)}
+                      :else {:from kw-from :to end
+                             :text (str (subs sql kw-from body-start) " " (emit-tree sql pruned) "\n")}))
             edit-errs (into [] (keep :error) edits)]
         (if (seq edit-errs)
-          {:errors (vec (distinct edit-errs))}
-          {:sql (reduce (fn [s {:keys [from to text]}]
-                          (str (subs s 0 from) text (subs s to)))
-                        sql
-                        (sort-by :from > (remove :error edits)))})))))
+          {:errors (vec (distinct edit-errs)) :code "PARAM_OPTIONAL_IN_OR"}
+          ;; one pass edits only clauses no other edit contains; `rewrite` runs again for the rest
+          (let [applied (reduce (fn [acc e]
+                                  (if (some #(and (< (:from e) (:to %)) (< (:from %) (:to e))) acc) acc (conj acc e)))
+                                [] (sort-by :from > edits))]
+            {:sql (reduce (fn [s {:keys [from to text]}]
+                            (str (subs s 0 from) text (subs s to)))
+                          sql
+                          applied)}))))))
 
 ;;; ============================================================================
 ;;; Rewrite — named → positional (for the server)
@@ -728,9 +781,11 @@
                              named)]
         (if (seq dropped)
           (let [r (drop-optional-conjuncts sql dropped)]
-            (if (:errors r)
-              r
-              (rewrite (:sql r) params)))
+            (cond
+              (:errors r) r
+              ;; never recurse on an unchanged body — it would loop forever
+              (= sql (:sql r)) {:errors [(str "?" (:name (first dropped)) "? could not be dropped from its clause")]}
+              :else (rewrite (:sql r) params)))
           (let [errs (check-consistency named pmap)]
             (if (seq errs)
               {:errors errs}

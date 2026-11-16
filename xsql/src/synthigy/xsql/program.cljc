@@ -517,6 +517,107 @@
           :when diag]
       {:severity :error :message diag :from open :to (inc close)})))
 
+(def sql-after-table-words
+  "Words that may follow a table in FROM/JOIN; any other identifier there is an alias."
+  #{"join" "left" "right" "inner" "full" "cross" "outer" "natural" "lateral" "on" "using" "where" "group"
+    "order" "limit" "offset" "union" "intersect" "except" "having" "window" "fetch" "for" "returning"})
+
+(defn sql-cte-names [^String body]
+  (into #{} (map (comp str/lower-case second)) (re-seq #"(?i)\b([a-z_][a-z0-9_]*)\s+as\s*\(" body)))
+
+(defn sql-placeholder-shape-diags
+  "A field-less `{…}` given an alias of its own (broken SQL), and a bare `{a->b}` chain, which is b's table alone."
+  [^String body]
+  (for [[open close inner] (sql-placeholder-spans body)
+        :let [src (str/trim inner)]
+        :when (and (seq src) (not (str/includes? src ".")))
+        :let [after (subs body (inc close))
+              [m as? alias] (re-find #"^\s+((?i:as)\s+)?([A-Za-z_][A-Za-z0-9_]*)" after)
+              alias? (and alias (or as? (not (sql-after-table-words (str/lower-case alias)))))
+              at (when alias? (+ (inc close) (- (count m) (count alias))))
+              use (when alias? (re-find (re-pattern (str "\\b" alias "\\.([A-Za-z_][A-Za-z0-9_]*)")) body))
+              chain? (re-find sql-join-split src)]
+        d [(when alias?
+             {:severity :error
+              :message (str "`{" src "}` brings its own alias: drop `" alias "` and write "
+                            (if use
+                              (str "`" (first use) "` as `{" src "." (second use) "}`")
+                              (str "its columns as `{" src ".<field>}`")))
+              :from at :to (+ at (count alias))})
+           (when chain?
+             {:severity :warning
+              :message (str "`{" src "}` without a field is the table at the end of the path alone; read its fields as `{"
+                            src ".<field>}` and leave FROM and the joins to the resolver")
+              :from open :to (inc close)})]
+        :when d]
+    d))
+
+(defn sql-bare-table-errors
+  "An entity named bare after FROM or JOIN: the server refuses it, because it would bypass access rules."
+  [^String body schema]
+  (when (:entities schema)
+    (let [ctes (sql-cte-names body)]
+      (for [[prev kw w] (partition 3 1 (cons nil (sql-lint/bare-words body)))
+            :when (and (#{"from" "join"} (str/lower-case (:word kw)))
+                       (not (and prev (= "distinct" (str/lower-case (:word prev))))))
+            :let [n (str/lower-case (:word w))]
+            :when (and (get-in schema [:entities n]) (not (ctes n))
+                       (re-matches #"\s+" (subs body (:to kw) (:from w))))]
+        {:severity :error
+         :message (str "'" (:word w) "' is an entity: write it as {" n "} — a bare table name bypasses access rules"
+                       " and is refused when the query runs")
+         :from (:from w) :to (:to w)}))))
+
+(defn sql-split-top-level
+  "`s` split at commas outside parentheses, braces and quotes."
+  [^String s]
+  (loop [i 0 depth 0 q nil start 0 out []]
+    (if (>= i (count s))
+      (conj out (subs s start))
+      (let [c (subs s i (inc i))]
+        (cond
+          q (recur (inc i) depth (if (= c q) nil q) start out)
+          (#{"'" "\""} c) (recur (inc i) depth c start out)
+          (#{"(" "{"} c) (recur (inc i) (inc depth) nil start out)
+          (#{")" "}"} c) (recur (inc i) (dec depth) nil start out)
+          (and (= "," c) (zero? depth)) (recur (inc i) depth nil (inc i) (conj out (subs s start i)))
+          :else (recur (inc i) depth nil start out))))))
+
+(defn sql-select-columns
+  "Column names of the body's first top-level SELECT, or nil when an item has no name to read."
+  [^String body]
+  (let [toks (sql-params/clause-tokens body)
+        top  (fn [w] (filter #(and (= :word (:kind %)) (zero? (:depth %)) (= w (:word %))) toks))
+        sel  (first (top "select"))
+        ends #{"from" "where" "group" "having" "order" "limit" "offset" "union" "intersect" "except" "window" "fetch"}
+        prev (into {} (map (fn [[a b]] [(:from b) (:word a)])) (partition 2 1 (filter #(= :word (:kind %)) toks)))
+        frm  (when sel (first (filter #(and (= :word (:kind %)) (zero? (:depth %)) (ends (:word %)) (> (:from %) (:from sel))
+                                            (not (and (= "from" (:word %)) (= "distinct" (prev (:from %))))))
+                                      toks)))]
+    (when sel
+      (let [items (-> (subs body (:to sel) (if frm (:from frm) (count body)))
+                      (str/replace #"(?i)^\s*distinct\s+" "")
+                      sql-split-top-level)
+            item-name (fn [it]
+                        (let [it (str/trim it)]
+                          (or (second (re-find #"(?i)\bas\s+([A-Za-z_][A-Za-z0-9_]*)$" it))
+                              (second (re-matches #"\{[^{}]*\.([A-Za-z_][A-Za-z0-9_]*)\}" it))
+                              (second (re-matches #"[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)" it))
+                              (re-matches #"[A-Za-z_][A-Za-z0-9_]*" it))))
+            names (mapv item-name items)]
+        (when (every? some? names) names)))))
+
+(defn sql-returns-warnings
+  "Warn when `@returns` names other columns than the query's SELECT returns (heuristic, so never an error)."
+  [^String body returns [from to]]
+  (let [declared (when (string? returns)
+                   (->> (str/split returns #",") (map #(str/trim (first (str/split % #":")))) (remove str/blank?) vec))
+        actual   (sql-select-columns body)]
+    (when (and (seq declared) (seq actual) (not= (set declared) (set actual)))
+      [{:severity :warning
+        :message (str "@returns lists " (str/join ", " declared) " but the SELECT returns " (str/join ", " actual))
+        :from from :to to}])))
+
 (declare sql-output-columns)
 
 (defn sql-restriction-set-warnings
@@ -542,6 +643,23 @@
      (map #(assoc % :severity :warning) warnings)
      (sql-restriction-set-warnings body))))
 
+(defn write-mode-errors
+  "Refuse a write operation on an entity that /data only links (`writes: link`) or only reads (`writes: none`)."
+  [source {:keys [op mutate entity root decl-offset]} schema]
+  (let [target (cond mutate entity (= "purge" op) root)
+        writes (get-in schema [:entities target :writes])]
+    (when (#{"link" "none"} writes)
+      [{:severity :error
+        :from decl-offset
+        :to (or (str/index-of source "\n" decl-offset) (count source))
+        :message (str "@" op " on " target " is refused (ENGINE_OWNED): /data "
+                      (if (= "link" writes) "links " "only reads ") target
+                      (if (= "link" writes) " records by xid and never writes them." " records."))
+        :hint (if (= "link" writes)
+                (str "Create and change it through /files, then link it from your own entity by xid: {\"" target "\": {\"xid\": \"…\"}}.")
+                "Create and delete it through /files.")
+        :doc "errors/files_read_only"}])))
+
 (defn lint
   "Lint every declaration in `source` against `schema`, in full-buffer offsets."
   [source schema]
@@ -553,16 +671,22 @@
       (batch-member-errors decls)
       (directive-errors source decls)
       (mapcat
-       (fn [{:keys [op body body-offset sql? mutate errors]}]
+       (fn [{:keys [op body body-offset sql? mutate errors returns header-offsets] :as decl}]
          (concat
           errors
+          (write-mode-errors source decl schema)
           (when (and sql? (seq (str/trim (or body ""))))
-            (for [d (concat (sql-placeholder-errors body schema)
-                            (sql-param-errors body)
-                            (sql-lint/lint body))]
-              (-> d
-                  (update :from + body-offset)
-                  (update :to + body-offset))))
+            (concat
+             (for [d (concat (sql-placeholder-errors body schema)
+                             (sql-placeholder-shape-diags body)
+                             (sql-bare-table-errors body schema)
+                             (sql-param-errors body)
+                             (sql-lint/lint body))]
+               (-> d
+                   (update :from + body-offset)
+                   (update :to + body-offset)))
+             (when-let [at (get header-offsets "returns")]
+               (sql-returns-warnings body returns at))))
           (when (and (not sql?) (not mutate) (seq (str/trim (or body ""))))
             (for [d (lint-impl/lint body schema nil op)]
               (-> d

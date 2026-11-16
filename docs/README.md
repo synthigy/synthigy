@@ -1,5 +1,18 @@
 # Synthigy documentation
 
+## Tasks
+
+- [Link a record to a file](FILES.md#linking-records-to-files)
+- [Upload a file](FILES.md#http)
+- [List a folder](FILES.md#listing-a-folder-through-data)
+- [Share a folder](FILES.md#access)
+- [Give a role access to an entity](ACCESS.md#entity-and-relation-rules)
+- [Add a row rule](ACCESS.md#row-rules)
+- [Write an XSQL read](XSQL.md#a-query-is-a-shape)
+- [Write records with stack or sync](DATA.md#writing)
+- [Generate SDK functions](SDKS.md#code-generation)
+- [Read the logs of a failed request](DATALINE.md#logs)
+
 ## Start
 
 - [Getting started](GETTING_STARTED.md) — install, first instance, first model, first query
@@ -38,5 +51,7 @@
 
 ## Reference
 
+- [Errors](ERRORS.md) — what each refusal means and how to fix it
+- [Agent brief](AGENT_BRIEF.md) — the rules an AI agent needs before it writes anything
 - [Environment variables](ENV.md)
 - [CLI](CLI.md)

@@ -81,6 +81,30 @@ side and `movies` on the other is read as `movie → actors` and
 | `m2m` | many to many |
 | `tree` | an entity related to itself as parent and children |
 
+## One dataset per domain
+
+Model one dataset per business domain (HR, Finance, Invoices, Projects), never
+one dataset for everything: each deploys, versions and rolls back on its own.
+Datasets are views of one model, and the last deploy wins, whichever dataset it
+comes from.
+
+- **Change a domain in its dataset**, as a new version of it. A new domain is a
+  new dataset.
+- **Bring entities in, don't re-create them.** To relate to `User`, `Group`,
+  `File` or another dataset's `Employee`, bring the deployed entity into your
+  dataset and relate your entities to it. A second entity with the same name is
+  refused at deploy (`ENTITY_NAME_CONFLICT`); under another name it is a
+  separate, empty table.
+- **Keep your facts on your entities.** What your domain knows about a user or a
+  file goes on an entity of your own, related to it. `File` takes no attributes
+  of yours: only `/files` writes a file.
+- **A deploy carries the brought-in entity as its version has it.** An attribute
+  added to it elsewhere since is hidden until you bring the entity in again;
+  the deploy view lists it as a removal.
+
+In Studio, `pull_entity` and `pull_relation` bring a deployed entity or relation
+into the open version.
+
 ## Deploying
 
 From the **Data modeling** tool — in the console under Tools, or as a

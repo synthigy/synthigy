@@ -15,11 +15,12 @@
             [synthigy.xsql.ast :as ast]
             [synthigy.xsql.compile :as compile-impl]
             [synthigy.xsql.parser :as parser]
-            [synthigy.xsql.sql-params :as sql-params]))
+            [synthigy.xsql.sql-params :as sql-params]
+            [synthigy.timestamp :as ts]))
 
 (declare lint-statement lint-scalar lint-relation lint-aggregate
          lint-args-of-parens lint-or-expr lint-arg-predicate
-         lint-pred-op-against-type)
+         lint-pred-op-against-type classify-pred-op)
 
 (def ^:private ops-by-type
   {"string"    #{"_eq" "_neq" "_lt" "_le" "_gt" "_ge"
@@ -472,14 +473,9 @@
                   (and allowed (not (allowed (:type attr))))
                   (diag! field-id (str "`" f "` needs a " (or-list allowed) " attribute; '"
                                        field "' is " (:type attr))))))
-            (doseq [p (compile-impl/filter-paths filter)
-                    :let [[head seg] (get-bare-identifiers p)]
-                    :when (and seg (= rel-name (:text head))
-                               (get-in target-def [:relations (:text seg)]))]
-              (diag! seg (str "An operation filter reads attributes of " (:target rel-def)
-                              "; '" (:text seg) "' is not one")))
             (when (and filter (filter-paths-on-relation? filter rel-name))
-              (lint-or-expr (compile-impl/drop-path-heads filter) target-def ctx))))))))
+              (lint-or-expr (compile-impl/drop-path-heads filter) target-def
+                            (assoc ctx :path-prefix (str rel-name "."))))))))))
 
 (defn lint-aggregate-aliases
   "An aggregate alias must be the only key of its name at its scope."
@@ -630,10 +626,12 @@
                 (let [target (get-in schema [:entities (:target rel)])]
                   (cond
                     (nil? target) nil
-                    is-last? (vswap! (:diags ctx) conj
-                                     (error-diag seg
-                                                 (str "'" seg-name
-                                                      "' is a relation — path must terminate at an attribute")))
+                    is-last? (when-not (#{"is_null" "is_not_null"} (first (classify-pred-op pred-op)))
+                               (let [p (str (:path-prefix ctx) (str/join "." (map :text segs)))]
+                                 (vswap! (:diags ctx) conj
+                                         (error-diag seg
+                                                     (str "'" p "' is a relation: test it with `" p " is null` / `"
+                                                          p " is not null`, or compare its xid: `" p ".xid = …`")))))
                     :else (recur (inc i) target last-attr last-name)))
 
                 :else
@@ -691,12 +689,28 @@
                                  (str " — values are case-sensitive: \"" m "\"")
                                  (str " (" (str/join ", " members) ")"))))))))
 
+(defn lint-timestamp-literals
+  "A string compared with a timestamp attribute must be one the engine parses; otherwise the run fails."
+  [pred-op-node attr-def field-name ctx]
+  (when (= "timestamp" (:type attr-def))
+    (doseq [v (concat (ast/find-children pred-op-node :value)
+                      (some-> (ast/find-child pred-op-node :list-literal) (ast/find-children :value)))
+            :let [lit (first (:children v))
+                  x   (when (= :string (:node lit)) (compile-impl/compile-value v))]
+            :when (and (string? x) (not (ts/valid? x)))]
+      (vswap! (:diags ctx) conj
+              (error-diag lit
+                          (str "\"" x "\" is not a timestamp for '" field-name "' — use ISO-8601, UTC unless an offset"
+                               " is given: \"2026-10-01\", \"2026-10-01 14:30\", \"2026-10-01T14:30:00Z\""))))))
+
 (defn lint-pred-op-against-type
   "Check operator/type compatibility and empty-list cases."
   [pred-op-node attr-def field-name ctx]
   (let [[kind op-key] (classify-pred-op pred-op-node)]
     (when-not (#{"_like" "_ilike"} op-key)
       (lint-enum-literals pred-op-node attr-def field-name ctx))
+    (when-not (#{"_like" "_ilike"} op-key)
+      (lint-timestamp-literals pred-op-node attr-def field-name ctx))
     (when op-key
       (when (#{"in" "not_in"} kind)
         (when-let [list-node (ast/find-child pred-op-node :list-literal)]

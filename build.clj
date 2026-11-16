@@ -34,6 +34,11 @@
 ;; under synthigy/, not the jar root: b/uber append-merges every dependency's root/META-INF LICENSE and NOTICE into one file
 (def license-files ["LICENSE" "NOTICE.md" "COMMERCIAL.md"])
 
+(defn copy-docs!
+  "The public manual, docs/*.md, under synthigy/docs/ in `dir`, where the server's /docs reads it."
+  [dir]
+  (b/copy-dir {:src-dirs ["docs"] :target-dir (str dir "/synthigy/docs") :include "*.md"}))
+
 (def combo (or (System/getenv "SYNTHIGY_COMBO") "engine-postgres:audit-postgres:log-sqlite:server-enso:server-console"))
 (def aot? (= "true" (System/getenv "SYNTHIGY_AOT")))
 (def aliases (mapv keyword (str/split combo #":")))
@@ -52,6 +57,7 @@
                     aot? (assoc :ignores [#".*\.clj[cs]?$"]))))
     (doseq [f license-files]
       (b/copy-file {:src f :target (str class-dir "/synthigy/" f)}))
+    (copy-docs! class-dir)
     (when-let [v (System/getenv "SYNTHIGY_VERSION")]
       (b/write-file {:path (str class-dir "/synthigy/VERSION") :string v}))
     (when aot?
@@ -355,6 +361,7 @@
         server-cd "target/classes-server-core"]
     (b/delete {:path core-cd})
     (doseq [d core-dirs] (b/copy-dir {:src-dirs [d] :target-dir core-cd :ignores [#".*\.clj[cs]?$"]}))
+    (copy-docs! core-cd)
     (b/compile-clj {:basis witness :class-dir core-cd :ns-compile (nses-in core-dirs)})
     (doseq [p shadowed]
       (b/delete {:path (str core-cd "/" p ".clj")}))
@@ -423,6 +430,7 @@
     (b/copy-file {:src tooling-js :target (str class-dir "/synthigy/console/js/tooling.js")})
     (doseq [f license-files]
       (b/copy-file {:src f :target (str class-dir "/synthigy/" f)}))
+    (copy-docs! class-dir)
     (b/write-file {:path (str class-dir "/synthigy/VERSION") :string version})
     (b/write-pom {:class-dir class-dir :lib lib :version version
                   :basis (b/create-basis {:project {:deps (bundle-deps basis) :paths []}})

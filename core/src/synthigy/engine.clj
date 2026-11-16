@@ -21,6 +21,7 @@
    [synthigy.log.config :as log.config]
    [synthigy.log.query :as log.query]
    [synthigy.db :as db]
+   [synthigy.docs :as docs]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.access :as daccess]
    [synthigy.dataset.codegen :as codegen]
@@ -177,6 +178,11 @@
                 m)))
           {}
           error-passthrough-keys))
+
+(defn with-doc
+  "The wire error with `doc`, the manual section its rule has (`errors/<rule>`), when there is one."
+  [err]
+  (if-let [d (docs/rule-doc (:rule err))] (assoc err :doc d) err))
 
 (defn sql-cause
   [^Throwable e]
@@ -1093,11 +1099,12 @@
                       data       (enrich-position-error
                                   (merge raw (ex-data translated))
                                   op)
-                      err        (merge {:message (if translated
-                                                    (str (ex-message e) ": " (ex-message translated))
-                                                    (ex-message e))
-                                         :code    (or (:code data) "OPERATION_ERROR")}
-                                        (error-passthrough data))]
+                      err        (with-doc
+                                   (merge {:message (if translated
+                                                      (str (ex-message e) ": " (ex-message translated))
+                                                      (ex-message e))
+                                           :code    (or (:code data) "OPERATION_ERROR")}
+                                          (error-passthrough data)))]
                   {:error err :ok false}))
               (catch java.sql.SQLException e
                 (if-let [translated (some-> db/*db* (db/translate-db-exception e))]
@@ -1210,9 +1217,10 @@
               (catch clojure.lang.ExceptionInfo e
                 (let [data (enrich-position-error (ex-data e) op)]
                   {:ok false
-                   :error (merge {:message (ex-message e)
-                                  :code    (or (:code data) "OPERATION_ERROR")}
-                                 (error-passthrough data))})))))
+                   :error (with-doc
+                           (merge {:message (ex-message e)
+                                   :code    (or (:code data) "OPERATION_ERROR")}
+                                  (error-passthrough data)))})))))
         operations))
 
 (defn resolve-acting-as

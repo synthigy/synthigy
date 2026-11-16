@@ -266,6 +266,20 @@ relation it does not delete needs only read access to the related entity.
 `data` may be one record or a list. Nested records in `data` are created or
 updated and linked in the same transaction.
 
+### Relation data
+
+The schema (`GET /schema`) gives each relation a `cardinality`:
+
+| `cardinality` | `data` takes | |
+|---|---|---|
+| `one` | one record, or `null` to unlink | `"studio": {"xid": "…"}` |
+| `many` | an array of records, `[]` for none | `"genres": [{"xid": "…"}, {"xid": "…"}]` |
+
+A record with only `xid` links an existing record, one with more fields also
+updates it, and one without `xid` creates it. A bare xid, or one record where
+an array belongs, is refused with `BAD_DATA_SHAPE`
+([relation_data](ERRORS.md#relation_data)).
+
 `stack` and `sync` differ only in what happens to the relations you send:
 
 ```json
@@ -285,6 +299,8 @@ rules must let you see and write it. One write that gives a target or a child
 two owners is refused. Listing a child its parent already holds changes
 nothing. Many-to-many links are never moved.
 
+### Deleting
+
 `delete` names records by identity, never by filter:
 
 ```json
@@ -294,12 +310,21 @@ nothing. Many-to-many links are never moved.
 `args` is a map of one unique key (one record) or a list of up to 1000 xids.
 For "everything matching", use `purge` with the `args` of a search.
 
-In one request, writes run first, in order, then the reads — so a request can
-write and read the result back.
+### Transactions
+
+One write is one transaction: a `stack` or `sync` commits its whole `data`, one
+record or a list, with everything nested in it, or none of it. Send the records
+of one entity as one list, never one operation per record.
+
+Several operations in one request (a batch: `@batch` in XSQL, the SDKs' batch)
+commit one by one, in order, and then the reads run, so a request can write and
+read the result back. A failed write doesn't undo the writes before it: writes
+that must succeed together go into one write.
 
 ## Errors
 
-Branch on `error.code`; messages may change.
+Branch on `error.code`; messages may change. An error with a `rule` carries
+`hint`, the fix, and `doc`, its section in [Errors](ERRORS.md).
 
 | Code | |
 |---|---|

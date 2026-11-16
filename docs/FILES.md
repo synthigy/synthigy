@@ -89,6 +89,40 @@ created, changed and deleted only through `/files`: a write, delete, purge or
 slice of them on `/data` is refused with `ENGINE_OWNED`, for every role. The
 storage key is never readable.
 
+## Linking records to files
+
+A record links to a file by the file's xid, and by nothing else. Upload the
+file through `/files`, then put the xid it returns into your record on `/data`:
+
+```json
+{"op": "stack", "entity": "document",
+ "data": {"name": "Contract", "file": {"xid": "<file xid>"}, "attachments": [{"xid": "<file xid>"}]}}
+```
+
+```js
+const file = await client.files.put({ name: 'contract.pdf' }, bytes)
+await client.stack('document', { name: 'Contract', file: { xid: file.xid } })
+```
+
+- **Shape.** A relation to one file takes `{"xid": "…"}`, or `null` to unlink;
+  a relation to many takes an array, `[{"xid": "…"}]`
+  ([relation data](DATA.md#relation-data)). A bare xid string is refused with
+  `BAD_DATA_SHAPE`.
+- **Only the xid.** Any other field of the file in your write (`name`,
+  `folder`, …) would change the file, and a file without an xid would create
+  one: both are refused with `ENGINE_OWNED`, and the message names the
+  `/files` call to use ([files_read_only](ERRORS.md#files_read_only)).
+- **Unknown or unreadable.** A link to a file that doesn't exist, or that you
+  can't read, answers `REF_NOT_FOUND`, the same for both.
+- **The model.** Bring the deployed `File` entity into your dataset and relate
+  your entity to it; an entity of your own named `File` is refused at deploy
+  ([one dataset per domain](MODELING.md#one-dataset-per-domain)). Give `File`
+  no attributes of yours: what you know about the file (a title, a category)
+  goes on your own entity.
+- **Unlinking.** Writing the relation as `null` unlinks the record and leaves
+  the file; deleting the file is `DELETE /files/<xid>`.
+- `can_link` on folders is about [download links](#links), not this.
+
 ## Names
 
 Names are unique inside a folder and compared exactly: `Report.pdf` and

@@ -16,7 +16,7 @@ Where the instance lives and which engine runs.
 | `SYNTHIGY_HOME` |  | Instance directory: `.env`, pid files, logs, and the local database files in `db/` (`synthigy.db`, `audit.db`, `logs.db`). Unset, the CLI uses the nearest `.synthigy/` above the current directory, else `~/.synthigy`. |
 | `SYNTHIGY_ENV_FILE` |  | Profile file to use instead of `<home>/.env` (same as `--env`). |
 | `SYNTHIGY_BUNDLE` |  | Which engine bundle runs: `sqlite`, `postgres` or `postgres-clickhouse`. Unset, `synthigy up` opens the setup page. |
-| `SYNTHIGY_VERSION` | `latest` | Engine release to run, e.g. `v0.5.2`, or `latest`. |
+| `SYNTHIGY_VERSION` | `latest` | Engine release to run, e.g. `v0.5.3`, or `latest`. |
 | `SYNTHIGY_RELEASES_REPO` | `synthigy/synthigy` | GitHub repository releases are downloaded from (`owner/repo`). |
 | `SYNTHIGY_PROFILE` | `full` | `full` runs identity, OAuth and the console. `bare` runs the data API alone with NO authentication — trusted networks only. |
 | `SYNTHIGY_JAR` |  | A local jar, or a classpath of jars, to run instead of a downloaded release — custom builds, air-gapped machines and app jars ([EMBEDDED.md](EMBEDDED.md)). |
@@ -30,7 +30,7 @@ Where the instance lives and which engine runs.
 |---|---|---|
 | `SYNTHIGY_SERVER_HOST` | `localhost` | Interface the engine binds. |
 | `SYNTHIGY_SERVER_PORT` | `7887` | Port the engine serves on. |
-| `SYNTHIGY_PORTAL_PORT` | `7888` | Port of the portal (always bound to 127.0.0.1). |
+| `SYNTHIGY_PORTAL_PORT` | `7888` | Port of the portal, always bound to 127.0.0.1. `0` takes any free port at each start (`synthigy portal` finds it); `env init` and a project's first `up` write `0`. |
 | `SYNTHIGY_IAM_ROOT_URL` |  | Public URL of this instance, e.g. `https://id.example.com`. Issuer of tokens and base of every login and redirect link — set it whenever the instance is reached by any other name than localhost. |
 | `SYNTHIGY_SERVER_ALLOWED_ORIGINS` |  | Extra browser origins allowed to call the API, comma separated ([CORS.md](CORS.md)). |
 | `SYNTHIGY_SERVER_TRUST_PROXY` |  | IPs or CIDRs of the reverse proxies in front of the engine, comma separated, e.g. `127.0.0.1/32,::1/128`. Only a request arriving from one of them has its `X-Forwarded-For`, `-Host` and `-Proto` believed ([PROXY.md](PROXY.md)). |

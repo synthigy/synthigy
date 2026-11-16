@@ -31,7 +31,7 @@
 
 (defn wire->lint
   "Adapt a parsed, string-keyed `schema.json` into `{:entities {name
-   {:attributes {a {:type :unique :enum :label}} :relations {r {:target :cardinality}}}}}`."
+   {:attributes {a {:type :unique :enum :label}} :relations {r {:target :cardinality}} :writes}}}`."
   [wire]
   {:entities
    (into {}
@@ -39,16 +39,17 @@
                 (let [unique (into #{} (comp (filter #(= 1 (count %))) (map first))
                                    (get-in edef ["constraints" "unique"]))]
                   [ename
-                   {:attributes
-                    (into {} (map (fn [[a adef]]
-                                    [a (cond-> {:type   (normalize-type (get adef "type"))
-                                                :unique (contains? unique a)}
-                                         (get adef "enum") (assoc :enum (get adef "enum"))
-                                         (get adef "label") (assoc :label (vec (get adef "label"))))]))
-                          (get edef "attributes"))
-                    :relations
-                    (into {} (map (fn [[r rdef]]
-                                    [r {:target      (get rdef "to")
-                                        :cardinality (get rdef "cardinality")}]))
-                          (get edef "relations"))}])))
+                   (cond-> {:attributes
+                            (into {} (map (fn [[a adef]]
+                                            [a (cond-> {:type   (normalize-type (get adef "type"))
+                                                        :unique (contains? unique a)}
+                                                 (get adef "enum") (assoc :enum (get adef "enum"))
+                                                 (get adef "label") (assoc :label (vec (get adef "label"))))]))
+                                  (get edef "attributes"))
+                            :relations
+                            (into {} (map (fn [[r rdef]]
+                                            [r {:target      (get rdef "to")
+                                                :cardinality (get rdef "cardinality")}]))
+                                  (get edef "relations"))}
+                     (get edef "writes") (assoc :writes (get edef "writes")))])))
          (get wire "entities"))})

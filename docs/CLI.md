@@ -286,14 +286,14 @@ Examples:
 
 ```
   synthigy pull --bundle postgres
-  synthigy pull --bundle sqlite --version v0.5.2
+  synthigy pull --bundle sqlite --version v0.5.3
 ```
 
 Flags:
 
 ```
       --bundle string    Bundle: sqlite | postgres | postgres-clickhouse (default "sqlite")
-      --version string   Release version (e.g. v0.5.2) (default "latest")
+      --version string   Release version (e.g. v0.5.3) (default "latest")
 ```
 
 ### `synthigy service`
@@ -341,7 +341,7 @@ Examples:
 ```
   synthigy up                                # opens the setup wizard on a fresh install
   synthigy up --bundle postgres              # needs POSTGRES_* env; persists the choice
-  synthigy up --version v0.5.2               # pin a release
+  synthigy up --version v0.5.3               # pin a release
   synthigy up --jar synthigy.jar             # local/airgap jar, no download
   synthigy up --join                         # stay attached (systemd / launchd / container PID 1)
   synthigy --env .synthigy/customer1.env up  # replaces <instance-home>/.env, for running several instances
@@ -354,7 +354,7 @@ Flags:
       --force            Re-download every module even if cached (suspected corruption)
       --jar string       Local jar, or a classpath of module jars, instead of a release download; airgap/custom builds
       --join             Stay attached to this terminal instead of detaching — for process supervisors (systemd Type=simple, launchd, a container's PID 1), which need the process they started to keep running
-      --version string   Release version to run (e.g. v0.5.2) (default "latest")
+      --version string   Release version to run (e.g. v0.5.3) (default "latest")
 ```
 
 ### `synthigy versions`
@@ -373,6 +373,22 @@ Generate the autocompletion script for the specified shell
 
 ```
 synthigy completion
+```
+
+### `synthigy docs`
+
+Read the engine's documentation, as its version has it
+
+```
+synthigy docs [id]
+```
+
+Examples:
+
+```
+  synthigy docs
+  synthigy docs files/access
+  synthigy docs brief
 ```
 
 ### `synthigy doctor`
@@ -396,7 +412,21 @@ synthigy env
 Scaffold ./.synthigy for a project-local instance
 
 ```
-synthigy env init
+synthigy env init [flags]
+```
+
+Examples:
+
+```
+  synthigy env init
+  synthigy env init --port 7901 --portal-port 7902
+```
+
+Flags:
+
+```
+      --port string          engine port (default: the first free one from 7887)
+      --portal-port string   portal port (default: 0, any free port when it starts)
 ```
 
 ### `synthigy guide`

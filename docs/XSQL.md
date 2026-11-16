@@ -11,7 +11,7 @@ typed code from them ([SDKS.md](SDKS.md#code-generation)).
 
 ## A query is a shape
 
-```
+```xsql
 movie (release_year > ?since:int=1980, limit ?limit:int=20, order by release_year desc)
   xid
   title (ilike ?q:string="%")
@@ -36,7 +36,7 @@ condition, or paging and sorting besides a condition, give each part its own
 line: conditions first, each further condition starting with `and` / `or`, then
 `order by`, `limit` and `offset`, and the closing `)` on its own line.
 
-```
+```xsql
 user (
   name ilike ?q?
   and roles.xid in ?roles?[]
@@ -52,7 +52,7 @@ user (
 
 The same holds for a relation's arguments:
 
-```
+```xsql
 movie (xid = ?xid:string)
   title
   ->ratings (
@@ -83,8 +83,10 @@ you can read count as a match for `-` and `!`.
 `?name:type=default` — typed, with an optional default. Without a default the
 parameter is required. `?name?:type` is optional: when the caller leaves it out, the
 predicate that uses it is dropped (`title (ilike ?q?:string)` filters only when `q` is
-given). An optional parameter is not allowed under `or`, where dropping one branch would
-silently narrow the result.
+given). Under `or`, an optional parameter works when leaving it out empties every side:
+`name ilike ?q? or email ilike ?q?` drops the whole `or` without `q`, so a search box needs
+no default. An `or` that would lose only some of its sides (`active = true or name like ?q?`)
+is refused, because the side left over would silently narrow the result.
 
 Optional and default exclude each other: `?q?:string="%"` is an error. A default
 means "filter with this value", optional means "don't filter at all". String defaults
@@ -106,7 +108,7 @@ Parameters are passed as a plain object, `{"since": 1990, "q": "%star%"}`.
 Operations compute in the database — no related rows are sent. Each is a line
 `alias: op(argument)`; the alias is required and is the result key.
 
-```
+```xsql
 movie (limit 20, order by votes desc)
   title
   votes: count(movie_ratings)
@@ -122,9 +124,13 @@ movie (limit 20, order by votes desc)
 
 - `count(rel)` counts related rows, `count(<predicate>)` the ones that match,
   `count(distinct rel.field)` distinct values.
-- `sum`, `avg`, `min`, `max` take `rel.field`. A second argument filters the
-  related rows: `avg(movie_ratings.value, movie_ratings.value > 1)`. Every
-  path in a filter starts with the operation's relation.
+- `sum`, `avg`, `min`, `max` take `rel.field`, one hop. A second argument
+  filters the related rows: `avg(movie_ratings.value, movie_ratings.value > 1)`.
+  Every path in a filter starts with the operation's relation and can go on
+  through its relations: `count(movie_ratings, movie_ratings.user.active = true)`,
+  `anonymous: count(movie_ratings, movie_ratings.user is null)`. A filter only
+  tests each related row and never repeats one, so a sum stays right through a
+  to-many relation.
 - Counts are never null (0 when there are no rows); the others are null when
   no row has a value. `min` / `max` keep the field's type.
 - `order by` takes an alias (`order by votes desc`) or a related attribute
@@ -141,15 +147,32 @@ named A. To match two different rows, use two aliased relation lines
 its own. References filter the same way, on their label:
 `movie (modified_by.display_name = "Ana")`.
 
-A relation line needs at least one field. To keep parents by their related rows,
-filter instead (`roles.name = "Admin"`); to keep parents without any, use `!roles`.
+A path can also ask whether there is a related row at all: `user (roles is null)`
+keeps users without a role, `roles is not null` the ones with one, at any depth
+(`customer (payments.invoice is null)`: customers with a payment that has no
+invoice). `roles.xid is null` means the same as `roles is null`.
+
+A relation line needs at least one field, or a nested `-`/`!` line; with only
+nested lines it returns each matching row's `xid`. To keep parents by their
+related rows without returning them, filter instead (`roles.name = "Admin"`); to
+keep parents without any, use `!roles`.
+
+### Coming from SQL
+
+| In SQL | In XSQL |
+|---|---|
+| `LEFT JOIN r … WHERE r.id IS NULL` | `r is null` in a filter, or a `!r` line |
+| `WHERE EXISTS (… r.x = 1)` | `r.x = 1` |
+| `count` / `sum` per parent with `GROUP BY` | an operation line, `total: sum(r.amount, <filter>)` |
+| `HAVING`, a column compared with another column, `GROUP BY` a column | `@sql-template` |
+| two conditions on two different related rows | two aliased relation lines |
 
 ## Operation files
 
 An `.xsql` file holds named operations. A header names the verb and the
 operation; the body follows.
 
-```
+```xsql
 @search list
 movie (release_year > ?since:int=1980, limit ?limit:int=20)
   xid
@@ -177,7 +200,7 @@ movie (xid = ?xid:string)
 | `@returns name:type, …` | result columns of a sql-template |
 | `@watch` | the generated method gets a live version; on a sql-template, list the entities whose changes re-run it |
 
-```
+```xsql
 @stack add_ratings
 ?records:user_rating[]
 
@@ -193,7 +216,7 @@ For analytics a query shape cannot express, write SQL. Name entity tables in
 braces — that is how access rules reach the query. A bare `FROM movie` is
 refused.
 
-```
+```xsql
 @sql-template stats
 @namespace dashboard
 @returns total_movies:int, total_ratings:int, avg_rating:float?
@@ -205,6 +228,31 @@ FROM m, r
 
 Use one CTE per entity rather than scalar subqueries, so each is checked on its
 own. `float?` marks a column that may be null.
+
+Placeholders: `{movie}` is the entity's table, `{movie.title}` a column, and
+`{movie->genres.name}` follows a relation as a LEFT JOIN, through its junction
+table when it has one. `-` joins INNER, `<-` RIGHT and `=>` FULL OUTER; chains go
+on, `{movie->actors->awards.name}`. Access rules apply to every entity a
+placeholder reaches.
+
+The resolver writes the FROM and the joins from the placeholders, so a query
+needs neither:
+
+```xsql
+@sql-template genre_counts
+@namespace dashboard
+@returns title:string, genres:int
+SELECT {movie.title} AS title, count({movie->genres.name}) AS genres
+GROUP BY {movie.title}
+```
+
+- A placeholder brings its own table alias: `FROM {movie} m` is broken SQL.
+  Write `{movie.title}`, not `m.title`.
+- A relation is not a column of the table. Reach it through a placeholder,
+  `{movie->studio.name}`, never a guessed `movie.studio_id`.
+- `{movie->genres}` without a field is the genres table alone; read its fields as
+  `{movie->genres.name}`.
+- `@returns` names the SELECT's columns, in any order.
 
 Text columns sort in human order (see [DATA.md](DATA.md#filters-and-modifiers)).
 On SQLite, an expression over a text column — `lower(x)`, `coalesce(x, '')`,

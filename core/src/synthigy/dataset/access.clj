@@ -200,6 +200,12 @@
       named
       (into [[id-key-name]] named))))
 
+(defmulti client-writes
+  "How clients write an entity's rows on /data, by entity xid: nil freely, \"link\" by xid only, \"none\" not at all."
+  str)
+
+(defmethod client-writes :default [_] nil)
+
 (defn entity->client
   "Projects an ERD entity and its focused relations onto the client-schema
    shape."
@@ -217,15 +223,17 @@
                                (when xid (str xid))])))
                         (dataset/focus-entity-relations model entity))
         rels      (into {} (map (fn [[label v _]] [label v])) rel-rows)
-        rel-xids  (into {} (keep (fn [[label _ xid]] (when xid [label xid]))) rel-rows)]
-    {:name (:name entity)
-     :xid  (when-let [x (:xid entity)] (str x))
-     :skins (dk/label->skins (:name entity))
-     :attributes attrs
-     :relations rels
-     :constraints {:unique (entity-unique-constraints->client entity)}
-     :xids {:attributes attr-xids
-            :relations rel-xids}}))
+        rel-xids  (into {} (keep (fn [[label _ xid]] (when xid [label xid]))) rel-rows)
+        writes    (client-writes (:xid entity))]
+    (cond-> {:name (:name entity)
+             :xid  (when-let [x (:xid entity)] (str x))
+             :skins (dk/label->skins (:name entity))
+             :attributes attrs
+             :relations rels
+             :constraints {:unique (entity-unique-constraints->client entity)}
+             :xids {:attributes attr-xids
+                    :relations rel-xids}}
+      writes (assoc :writes writes))))
 
 (defn schema
   "Thin client projection of an already-IAM-filtered model, optionally

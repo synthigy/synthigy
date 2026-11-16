@@ -274,7 +274,11 @@
           (:fields (sql-query/deployed-schema-entity entity-id)))))
 
 (def ^:private select-end-pattern
-  #"(?i)\b(?:FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|UNION)\b")
+  #"(?i)(?<!\bDISTINCT\s{1,20})\bFROM\b|\b(?:WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|UNION)\b")
+
+(def ^:private from-clause-pattern
+  "A FROM clause keyword; the FROM of `IS [NOT] DISTINCT FROM` is an operator, not a clause."
+  #"(?i)(?<!\bDISTINCT\s{1,20})\bFROM\b")
 
 (defn select-item-label
   "The result column a placeholder at [start end) names when it is a whole select item — `{e.f}` or `{e.f} AS x` — else nil."
@@ -460,7 +464,7 @@
                              (entity-ref table alias)))
                          root-entities)
             from-clause (str "FROM " (str/join ", " from-parts))
-            has-from? (top-level-match #"(?i)\bFROM\b" resolved-sql)
+            has-from? (top-level-match from-clause-pattern resolved-sql)
             join-str (when (not-empty joins) (str/join "\n" joins))
             inject-str (if has-from? join-str
                            (str from-clause
@@ -842,11 +846,11 @@
    (let [template          (strip-sql-comments template)
          _                 (validate-select-only! template)
          _                 (assert-plain-literals! template)
-         {rw-sql :sql rw-params :params rw-types :types rw-errors :errors}
+         {rw-sql :sql rw-params :params rw-types :types rw-errors :errors rw-code :code}
          (sql-params/rewrite template params)
          _ (when (seq rw-errors)
              (throw (ex-info (str "Parameter error: " (str/join "; " rw-errors))
-                             {:code "TEMPLATE_PARAM_ERROR" :errors rw-errors})))
+                             {:code (or rw-code "TEMPLATE_PARAM_ERROR") :errors rw-errors})))
          rw-sql            (db/template-sql *db* rw-sql)
          template          rw-sql
          cached?           (get opts :cached true)

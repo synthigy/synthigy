@@ -72,7 +72,7 @@
       :skipped
       (try
         (if-let [{:keys [sha256 size]} (measure store old)]
-          (let [new-key (str xid "-" (id/generate))]
+          (let [new-key (str xid "/" (id/generate))]
             (storage/copy-blob! store old new-key)
             (let [copied (:size (storage/head-blob store new-key))]
               (when-not (= size copied)

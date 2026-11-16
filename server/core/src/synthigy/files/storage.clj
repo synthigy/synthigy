@@ -39,7 +39,7 @@
   (blob-file [this key]
     "The blob as a java.io.File the HTTP server can send without copying, nil when the key is absent."))
 
-(def key-pattern #"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+(def key-pattern #"[A-Za-z0-9][A-Za-z0-9_-]{0,63}(/[A-Za-z0-9][A-Za-z0-9_-]{0,63})?")
 
 (defn check-key
   "Return `key` when it is a safe storage key, else throw."

@@ -99,7 +99,7 @@ longer than 255 characters, holds `/`, `\` or control characters, or is `.` or
 
 ## Versions and deletion
 
-Replacing a file keeps the old bytes as a version. The last ten are kept, and
+Replacing a file keeps the old bytes as a version. The last 100 are kept, and
 any of them can be downloaded or restored; restoring copies no bytes. A deleted
 file's bytes stay for 30 days. Every six hours the engine deletes what nothing
 needs any more: versions past the tenth, files deleted more than 30 days ago,

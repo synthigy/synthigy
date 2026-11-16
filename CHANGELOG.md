@@ -3,6 +3,28 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.5.2] — 2026-11-16
+
+### Changed
+
+- **Files: one folder per file on local disk.** Blobs are stored at
+  `<home>/files/<file xid>/<version xid>` instead of a folder named by the
+  first two characters of the key. Those two-character folders differ only in
+  letter case (`1x`, `1X`), which macOS and Windows treat as one folder, so a
+  store copied or synced from Linux could be refused by tools such as
+  Syncthing. Storage keys are now `<file xid>/<version xid>`.
+- **Files: 100 versions kept per file** (was 10). Deleted files still keep
+  their bytes for 30 days.
+
+### Upgrade
+
+- On start, a local store is moved to the new layout and File storage keys are
+  rewritten to match. The current version of every file is kept. Older
+  versions recorded before the upgrade no longer download or restore, and
+  their bytes are removed by the next sweep.
+- An S3 store is not rewritten. Its files stay readable; blobs written before
+  the upgrade are no longer removed by the sweeper.
+
 ## [0.5.1] — 2026-11-15
 
 ### Fixed

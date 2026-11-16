@@ -21,7 +21,7 @@
 
 (def keep-count
   "Versions kept per file; older blobs are swept."
-  10)
+  100)
 
 (def deleted-grace-days
   "Days a deleted file's versions are kept."

@@ -30,7 +30,7 @@
 
 (def interval-ms (* 6 3600 1000))
 
-(def owned-key #"([A-Za-z0-9]{22})-[A-Za-z0-9]{22}")
+(def owned-key #"([A-Za-z0-9]{22})/[A-Za-z0-9]{22}")
 
 (def bare-key #"[A-Za-z0-9]{22}")
 

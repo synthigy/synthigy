@@ -154,9 +154,9 @@
     (spool-body-stream! request)))
 
 (defn store!
-  "Put the spooled bytes under a fresh storage key `<file xid>-<version xid>`; answers the key."
+  "Put the spooled bytes under a fresh storage key `<file xid>/<version xid>`; answers the key."
   [store owner {:keys [file] :as spooled} ctype]
-  (let [k (str owner "-" (id/generate))]
+  (let [k (str owner "/" (id/generate))]
     (storage/put-file! store k file (assoc spooled :content-type ctype))
     k))
 

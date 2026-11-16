@@ -12,10 +12,18 @@
 (ns synthigy.files.setup
   "The File System model and file roles the module ships."
   (:require
+   [babashka.fs :as fs]
+   [clojure.string :as str]
+   [environ.core :refer [env]]
+   [next.jdbc :as jdbc]
    [patcho.patch :as patch]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
-   [synthigy.files.model]
+   [synthigy.dataset.sql.naming :as naming]
+   [synthigy.db :as db]
+   [synthigy.files.model :as model]
+   [synthigy.files.storage :as storage]
+   [synthigy.files.storage.local :as local]
    [synthigy.iam.access :as access]
    [synthigy.iam.transfer :as transfer]
    [synthigy.log :as log]
@@ -52,7 +60,55 @@
         (dataset/reload)
         (import-roles!)))))
 
-(patch/current-version :synthigy/files "1.0.0")
+(defn local-storage? []
+  (contains? #{nil "local"} (some-> (env :synthigy-files-storage) str/trim str/lower-case not-empty)))
+
+(def sharded-key #"([A-Za-z0-9]{22})-([A-Za-z0-9]{22})")
+
+(defn move-shards!
+  "Move `<2 chars>/<file>-<version>` blobs under `root` to `<file>/<version>`, any other key to `<key>`; answers how many moved."
+  [root]
+  (let [shards (when (fs/directory? root)
+                 (filterv #(and (fs/directory? %) (= 2 (count (str (fs/file-name %))))) (fs/list-dir root)))
+        moved (volatile! 0)]
+    (doseq [shard shards
+            blob (vec (fs/list-dir shard))
+            :when (fs/regular-file? blob)
+            :let [n (str (fs/file-name blob))
+                  [_ f v] (re-matches sharded-key n)]]
+      (let [target (if f (fs/path root f v) (fs/path root n))]
+        (storage/private-dirs! (fs/parent target))
+        (fs/move blob target {:atomic-move true})
+        (vswap! moved inc)))
+    (doseq [shard shards :when (fs/exists? shard)]
+      (try (fs/delete shard) (catch java.nio.file.DirectoryNotEmptyException _)))
+    @moved))
+
+(defn rekey-rows!
+  "Rewrite File storage keys `<file>-<version>` to `<file>/<version>`; answers the row count."
+  []
+  (if-not (model/deployed?)
+    0
+    (let [t (naming/entity->table-name (model/entity :files/file))
+          c (str \" (model/column :files/file :files.file/storage-key) \")]
+      (-> (jdbc/execute-one! (:datasource db/*db*)
+                             [(format "UPDATE \"%s\" SET %s = substr(%s, 1, 22) || '/' || substr(%s, 24) WHERE length(%s) = 45 AND substr(%s, 23, 1) = '-'"
+                                      t c c c c c)])
+          :next.jdbc/update-count))))
+
+(defn rekey-local!
+  "Local store only: blobs to `<file>/<version>`, File rows to the matching keys."
+  []
+  (when (local-storage?)
+    (let [blobs (move-shards! (fs/path local/root))
+          rows (rekey-rows!)]
+      (log/info {:id ::rekeyed :data {:action :migrated :subject :files-storage :blobs blobs :rows rows}}
+                "Local file store moved to <file>/<version>"))))
+
+(patch/current-version :synthigy/files "1.1.0")
 
 (patch/upgrade :synthigy/files "1.0.0"
                (import-roles!))
+
+(patch/upgrade :synthigy/files "1.1.0"
+               (rekey-local!))

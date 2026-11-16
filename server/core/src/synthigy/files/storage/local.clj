@@ -19,15 +19,17 @@
   (:import
    [java.io File]
    [java.nio.channels Channels FileChannel]
-   [java.nio.file AtomicMoveNotSupportedException CopyOption Files NoSuchFileException
+   [java.nio.file AtomicMoveNotSupportedException CopyOption DirectoryNotEmptyException Files NoSuchFileException
     OpenOption Path StandardCopyOption StandardOpenOption]))
 
 (def root (str env/home "/files"))
 
 (defn blob-path
   ^Path [root key]
-  (storage/check-key key)
-  (fs/path root (subs key 0 (min 2 (count key))) key))
+  (fs/path root (storage/check-key key)))
+
+(defn spool-name [key suffix]
+  (str (str/replace key "/" "_") suffix))
 
 (def atomic (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE]))
 
@@ -36,7 +38,7 @@
   (try
     (Files/move source target ^"[Ljava.nio.file.CopyOption;" atomic)
     (catch AtomicMoveNotSupportedException _
-      (let [staged (fs/path root ".spool" (str key ".part"))]
+      (let [staged (fs/path root ".spool" (spool-name key ".part"))]
         (storage/private-dirs! (fs/parent staged))
         (try
           (Files/move source staged (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING]))
@@ -49,8 +51,12 @@
     (let [source (.toPath ^File file)]
       (try
         (let [target (blob-path root key)]
-          (storage/private-dirs! (fs/parent target))
-          (move-into-place! source target root key))
+          (try
+            (storage/private-dirs! (fs/parent target))
+            (move-into-place! source target root key)
+            (catch NoSuchFileException _
+              (storage/private-dirs! (fs/parent target))
+              (move-into-place! source target root key))))
         (finally (fs/delete-if-exists source)))
       nil))
   (open-blob [_ key]
@@ -76,7 +82,7 @@
   (copy-blob! [_ from to]
     (let [source (blob-path root from)
           target (blob-path root to)
-          tmp (fs/path root ".spool" (str to ".copy"))]
+          tmp (fs/path root ".spool" (spool-name to ".copy"))]
       (storage/private-dirs! (fs/parent tmp))
       (storage/private-dirs! (fs/parent target))
       (try
@@ -85,15 +91,22 @@
         (finally (fs/delete-if-exists tmp)))
       nil))
   (delete-blob! [_ key]
-    (fs/delete-if-exists (blob-path root key))
+    (let [p (blob-path root key)
+          dir (fs/parent p)]
+      (fs/delete-if-exists p)
+      (when (not= dir (fs/path root))
+        (try (fs/delete-if-exists dir) (catch DirectoryNotEmptyException _))))
     nil)
   (list-blobs [_]
-    (for [shard (fs/list-dir root)
-          :when (and (fs/directory? shard) (not (str/starts-with? (str (fs/file-name shard)) ".")))
-          blob (fs/list-dir shard)
-          :when (fs/regular-file? blob)]
-      {:key (str (fs/file-name blob))
-       :modified (.toInstant (fs/last-modified-time blob))}))
+    (letfn [(blob [key p] {:key key :modified (.toInstant (fs/last-modified-time p))})]
+      (for [entry (fs/list-dir root)
+            :let [n (str (fs/file-name entry))]
+            :when (not (str/starts-with? n "."))
+            b (cond
+                (fs/regular-file? entry) [(blob n entry)]
+                (fs/directory? entry) (for [v (fs/list-dir entry) :when (fs/regular-file? v)]
+                                        (blob (str n "/" (fs/file-name v)) v)))]
+        b)))
   storage/FileBacked
   (blob-file [_ key]
     (let [p (blob-path root key)]

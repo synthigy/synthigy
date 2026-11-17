@@ -167,17 +167,27 @@
    :args :limit :matched :xids
    :details :retryable])
 
+(defn wire-names
+  "Error data whose :entity and :attribute are names: the -name keys win, and an entity id resolves to its deployed name."
+  [data]
+  (let [entity-name (or (:entity-name data)
+                        (some-> (:entity data) dataset/deployed-entity :name))]
+    (cond-> data
+      entity-name (assoc :entity entity-name)
+      (:attribute-name data) (assoc :attribute (:attribute-name data)))))
+
 (defn error-passthrough
   "Lift error-passthrough-keys off an ex-data map, skipping nil/false and empty
    collections."
   [data]
-  (reduce (fn [m k]
-            (let [v (get data k)]
-              (if (and v (or (not (coll? v)) (seq v)))
-                (assoc m k (if (= :operator k) (str v) v))
-                m)))
-          {}
-          error-passthrough-keys))
+  (let [data (wire-names data)]
+    (reduce (fn [m k]
+              (let [v (get data k)]
+                (if (and v (or (not (coll? v)) (seq v)))
+                  (assoc m k (if (= :operator k) (str v) v))
+                  m)))
+            {}
+            error-passthrough-keys)))
 
 (defn with-doc
   "The wire error with `doc`, the manual section its rule has (`errors/<rule>`), when there is one."
@@ -883,7 +893,11 @@
                             :details conflicts})
 
       (seq changes)
-      (update (if superuser :warnings :errors) conj (system-change-problem changes)))))
+      (update (if superuser :warnings :errors) conj (system-change-problem changes))
+
+      :always
+      (-> (update :errors #(mapv with-doc %))
+          (update :warnings #(mapv with-doc %))))))
 
 (defmethod execute-operation "deploy-check"
   [ctx]
@@ -1043,9 +1057,19 @@
     (try (audit-op-completed! op started-ms result)
          (catch Throwable _))))
 
+(def args-op-hints
+  "Ops that read rows by args and take no data, with how to write their filter."
+  (let [args "Put the filter in args: {\"args\": {\"name\": {\"_eq\": \"…\"}}}; data is what stack, sync and delete write."]
+    {"search" args
+     "search-tree" args
+     "slice" args
+     "purge" args
+     "get" "get matches one row by a unique key in args: {\"args\": {\"name\": \"…\"}}; data is what stack, sync and delete write."
+     "get-tree" "get-tree starts from root: {\"root\": \"<xid>\", \"on\": \"<relation>\"}; data is what stack, sync and delete write."}))
+
 (defn assert-op-shape!
-  "Reject an operation that carries no verb, or a verb that needs an entity and
-   has none; returns ctx."
+  "Reject an operation with no verb, a verb that needs an entity and has none, or
+   a read that carries data; returns ctx."
   [ctx]
   (when (nil? (:op ctx))
     (throw (ex-info "Operation missing :op"
@@ -1058,6 +1082,15 @@
                      :rule "operation_arg"
                      :op (:op ctx)
                      :argument "entity"})))
+  (when-let [hint (args-op-hints (:op ctx))]
+    (let [data (:data ctx)]
+      (when (and (some? data) (not (and (coll? data) (empty? data))))
+        (throw (ex-info (str "`" (:op ctx) "` takes no data: it filters with args, and data would be ignored")
+                        {:code "BAD_OP"
+                         :rule "operation_shape"
+                         :op (:op ctx)
+                         :argument "data"
+                         :hint hint})))))
   ctx)
 
 (defn ^:no-doc operation-context
@@ -1111,11 +1144,13 @@
                   (let [data    (ex-data translated)
                         code    (:code data)
                         details (enrich-error-details translated op)
-                        err     (cond-> {:message (ex-message translated)
-                                         :code    code}
-                                  (seq details)     (assoc :details details)
-                                  (:hint data)      (assoc :hint (:hint data))
-                                  (:retryable data) (assoc :retryable true))]
+                        err     (with-doc
+                                  (cond-> {:message (ex-message translated)
+                                           :code    code}
+                                    (:rule data)      (assoc :rule (:rule data))
+                                    (seq details)     (assoc :details details)
+                                    (:hint data)      (assoc :hint (:hint data))
+                                    (:retryable data) (assoc :retryable true)))]
                     (case code
                       "TIMEOUT"
                       (log/warn {:id ::db-statement-timeout :error e}

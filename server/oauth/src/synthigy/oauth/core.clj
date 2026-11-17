@@ -516,6 +516,11 @@
           (swap! client-cache assoc id client)
           client)))))
 
+(defn inactive-client
+  "`id` when that client exists and is deactivated, else nil."
+  [id]
+  (when (false? (:active (get-client id))) id))
+
 (defn get-client-login-url
   "Client login URL: its bundle, else the default bundle, else built-in; a non-bundle-name setting throws."
   [client]

@@ -16,7 +16,7 @@ Where the instance lives and which engine runs.
 | `SYNTHIGY_HOME` |  | Instance directory: `.env`, pid files, logs, and the local database files in `db/` (`synthigy.db`, `audit.db`, `logs.db`). Unset, the CLI uses the nearest `.synthigy/` above the current directory, else `~/.synthigy`. |
 | `SYNTHIGY_ENV_FILE` |  | Profile file to use instead of `<home>/.env` (same as `--env`). |
 | `SYNTHIGY_BUNDLE` |  | Which engine bundle runs: `sqlite`, `postgres` or `postgres-clickhouse`. Unset, `synthigy up` opens the setup page. |
-| `SYNTHIGY_VERSION` | `latest` | Engine release to run, e.g. `v0.5.3`, or `latest`. |
+| `SYNTHIGY_VERSION` | `latest` | Engine release to run, e.g. `vX.Y.Z`, or `latest`. |
 | `SYNTHIGY_RELEASES_REPO` | `synthigy/synthigy` | GitHub repository releases are downloaded from (`owner/repo`). |
 | `SYNTHIGY_PROFILE` | `full` | `full` runs identity, OAuth and the console. `bare` runs the data API alone with NO authentication — trusted networks only. |
 | `SYNTHIGY_JAR` |  | A local jar, or a classpath of jars, to run instead of a downloaded release — custom builds, air-gapped machines and app jars ([EMBEDDED.md](EMBEDDED.md)). |
@@ -136,13 +136,13 @@ The master key protects the data keys that encrypt sensitive attributes. Keep it
 
 ## Client connection
 
-Written by `synthigy connect` and read by `synthigy exec` and the SDKs. Tokens live in `.env.token` beside the profile.
+Set in `.synthigy/.env` (or written by `synthigy connect`). `synthigy exec` and `synthigy token` turn the identity into access tokens; an SDK client reads only `SYNTHIGY_ENDPOINT` and the token `synthigy exec` hands it. Tokens live in `.env.token` beside the profile.
 
 | Variable | Default | Description |
 |---|---|---|
-| `SYNTHIGY_ENDPOINT` |  | URL of the Synthigy server this profile talks to. |
-| `SYNTHIGY_CLIENT_ID` |  | Service identity: OAuth client id (client credentials). |
-| `SYNTHIGY_CLIENT_SECRET` |  | Service identity: OAuth client secret. |
+| `SYNTHIGY_ENDPOINT` |  | URL of the Synthigy server this profile talks to. Set in `.synthigy/.env`; `synthigy connect` can write it. |
+| `SYNTHIGY_CLIENT_ID` |  | Service identity: OAuth client id (client credentials). Set in `.synthigy/.env`; `synthigy connect` can write it. |
+| `SYNTHIGY_CLIENT_SECRET` |  | Service identity: OAuth client secret. Set in `.synthigy/.env`; `synthigy connect` can write it. |
 | `SYNTHIGY_REFRESH_TOKEN` |  | User identity: refresh token from the browser login. |
 | `SYNTHIGY_TOKEN` |  | Current access token, a cache refreshed on demand. |
 | `SYNTHIGY_TOKEN_EXPIRES` |  | Expiry of that token, unix seconds. |

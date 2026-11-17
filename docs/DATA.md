@@ -129,7 +129,7 @@ user, or `name` for a group or role.
 ```
 
 - **Access.** Anyone who can read the record can read its label, without a grant
-  on User, Group or Role. The attribute's own rules still apply.
+  on User, User Group or User Role. The attribute's own rules still apply.
 - **Other fields.** Another field of the target (`name`, the login; `password`;
   `roles`) is left out, for every caller. An unknown field fails with
   `UNKNOWN_ATTRIBUTE`.
@@ -304,10 +304,10 @@ nothing. Many-to-many links are never moved.
 `delete` names records by identity, never by filter:
 
 ```json
-{"op": "delete", "entity": "movie", "args": {"xid": "…"}}
+{"op": "delete", "entity": "movie", "data": {"xid": "…"}}
 ```
 
-`args` is a map of one unique key (one record) or a list of up to 1000 xids.
+`data` is a map of one unique key (one record) or a list of up to 1000 xids.
 For "everything matching", use `purge` with the `args` of a search.
 
 ### Transactions
@@ -340,6 +340,7 @@ Branch on `error.code`; messages may change. An error with a `rule` carries
 | `ROW_FORBIDDEN` | The write changes a record your access rules let you see but not write. |
 | `SLOT_OCCUPIED` | The link you are replacing, or the one-to-one target or one-to-many child you are taking, belongs to a record your access rules hide. |
 | `BAD_DATA_SHAPE` | `data` contradicts the model, e.g. one write gives a one-to-one target or a one-to-many child two owners. |
+| `REF_NOT_FOUND` | A linked record, given by its xid or a unique key alone, matches none you can read, and you may not create it ([linked_record](ERRORS.md#linked_record)). |
 | `XSQL_PARSE_ERROR` | With line and column. |
 | `TIMEOUT` | The statement was cancelled. |
 | `INTERNAL_ERROR` | Details are in the server log only. |

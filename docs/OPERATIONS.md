@@ -93,16 +93,18 @@ you too.
 
 Roles, groups, users, OAuth clients and APIs export as JSON and import into
 another instance — development to production, or into version control. Both
-commands need a connection as a superuser.
+commands need a connection as a superuser. A profile holds one connection, so
+each instance gets a profile file of its own, here in `~/.synthigy/`, outside
+any project and out of git:
 
 ```bash
-synthigy connect https://dev.example.com
-synthigy iam export role > roles.json
-synthigy iam export client --id my-app > my-app.json
+synthigy --env ~/.synthigy/dev.env connect https://dev.example.com
+synthigy --env ~/.synthigy/dev.env iam export role > roles.json
+synthigy --env ~/.synthigy/dev.env iam export client --id my-app > my-app.json
 
-synthigy connect https://prod.example.com
-synthigy iam import role roles.json --dry-run   # validate, write nothing
-synthigy iam import role roles.json             # --mode sync (default) or stack
+synthigy --env ~/.synthigy/prod.env connect https://prod.example.com
+synthigy --env ~/.synthigy/prod.env iam import role roles.json --dry-run   # validate, write nothing
+synthigy --env ~/.synthigy/prod.env iam import role roles.json             # --mode sync (default) or stack
 ```
 
 `sync` makes each imported record, its memberships and grants included,

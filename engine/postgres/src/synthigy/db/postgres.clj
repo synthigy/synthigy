@@ -456,6 +456,12 @@
 
 (def retryable-codes #{"LOCKED" "TIMEOUT" "DB_UNAVAILABLE"})
 
+(def constraint-rules
+  {"UNIQUE_VIOLATION" "unique"
+   "NOT_NULL_VIOLATION" "required"
+   "FK_VIOLATION" "reference"
+   "CHECK_VIOLATION" "check"})
+
 (defn sqlstate->code
   [state]
   (or (sqlstate-codes state)
@@ -505,6 +511,7 @@
                                  (seq columns) (assoc :attributes columns)
                                  (seq values)  (assoc :values values)
                                  constraint    (assoc :constraint constraint))}
+               (constraint-rules code) (assoc :rule (constraint-rules code))
                (some-> m .getHint) (assoc :hint (.getHint m))
                (retryable-codes code) (assoc :retryable true)))))
 

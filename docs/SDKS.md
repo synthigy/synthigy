@@ -21,26 +21,54 @@ see [EMBEDDED.md](EMBEDDED.md).
 
 ## Connecting
 
-An application needs an address and an identity. The `synthigy` CLI keeps both
-in the project's `.synthigy/.env` and hands them to your program:
+An application needs an address and an identity. For a service — an OAuth
+client with a secret, created as in
+[Getting started](GETTING_STARTED.md#4-let-an-application-in) — both are three
+lines in `.synthigy/.env`, in the folder it runs from:
 
 ```bash
-synthigy env init                     # once: this project gets .synthigy/
-synthigy up                           # a local server, if you need one
+# .synthigy/.env
+SYNTHIGY_ENDPOINT=https://engine.example.com
+SYNTHIGY_CLIENT_ID=my-app
+SYNTHIGY_CLIENT_SECRET=<secret>
+```
 
-synthigy connect http://localhost:7887 --client-id my-app   # client from Getting started
+Run the program under `synthigy exec`:
 
+```bash
 synthigy exec -- node app.js          # or python, go run, clj …
 ```
 
-Create the client first ([Getting started](GETTING_STARTED.md#4-let-an-application-in)).
-`connect` stores the endpoint and the identity — a client id and secret, or a
-user's browser sign-in. `exec` runs your program with that environment, and
-the SDK picks it up without configuration (`connect()` with no arguments). A
-long-running program asks `exec` for a fresh token when the old one expires.
+`exec` runs your program with that environment, and the SDK picks it up without
+configuration (`connect()` with no arguments). A long-running program asks
+`exec` for a fresh token when the old one expires.
+
+A folder that only connects needs no `synthigy env init`, which sets up a local
+instance. Its `.env` names an endpoint and no `SYNTHIGY_BUNDLE` or
+`SYNTHIGY_JAR`, so no engine runs from it, and `synthigy status` shows the
+engine as `remote`. Without `env init`, protect the secret yourself:
+`chmod 600 .synthigy/.env`, and a `.synthigy/.gitignore` holding `*` keeps the
+folder out of git.
+
+`synthigy connect` is the checked way to write the same lines: it asks for the
+secret and mints one token with it before saving anything. Without
+`--client-id` it asks who is connecting; a person signs in through the browser,
+and programs under `exec` then run as that person.
+
+```bash
+synthigy connect https://engine.example.com --client-id my-app   # the service
+synthigy connect https://engine.example.com                       # you, or a service
+```
+
+`connect` saves to the nearest `.synthigy/`, here or above; with none, to
+`~/.synthigy/.env`, so in a new project create the folder first, with a
+`.gitignore` holding `*`. A profile holds one identity, and `connect` refuses
+while it has one; `synthigy disconnect` removes it, secret included.
 
 Outside `exec`, pass the endpoint and credentials to the SDK yourself, or set
-`SYNTHIGY_ENDPOINT` and `SYNTHIGY_CLIENT_ID` / `SYNTHIGY_CLIENT_SECRET`.
+`SYNTHIGY_ENDPOINT` and `SYNTHIGY_TOKEN` (from `synthigy token`; it is not
+refreshed). The code generators also read `SYNTHIGY_CLIENT_ID` and
+`SYNTHIGY_CLIENT_SECRET`.
 `synthigy token` prints an access token for `curl` and scripts.
 
 ## Code generation

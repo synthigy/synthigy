@@ -89,6 +89,16 @@
           stateless (when (nil? session) (stateless-claims token))]
 
       (cond
+        (core/inactive-client (:client_id (or stateless (extract-token-claims token))))
+        (do
+          (log/info {:id ::introspect-client-inactive
+                     :data {:action :introspected
+                            :subject :access-token
+                            :status :inactive
+                            :reason :client-inactive}}
+                    "Token of an inactive client")
+          (inactive-response))
+
         stateless
         (let [{:keys [sub client_id]} stateless]
           (log/info {:id ::introspect-active

@@ -90,7 +90,7 @@ comes from.
 
 - **Change a domain in its dataset**, as a new version of it. A new domain is a
   new dataset.
-- **Bring entities in, don't re-create them.** To relate to `User`, `Group`,
+- **Bring entities in, don't re-create them.** To relate to `User`, `User Group`,
   `File` or another dataset's `Employee`, bring the deployed entity into your
   dataset and relate your entities to it. A second entity with the same name is
   refused at deploy (`ENTITY_NAME_CONFLICT`); under another name it is a

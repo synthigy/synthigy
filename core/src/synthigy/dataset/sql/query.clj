@@ -565,9 +565,30 @@
                            (not-any? #(= % k) ckeys)))
                     (conj ks (id/key)))))))
 
+(defn relation-field-key
+  "The key a write analysis relation is written under on its from-entity, e.g. :owner."
+  [relation]
+  (some (fn [[k r]] (when (= r relation) k))
+        (:relations (deployed-schema-entity (:from relation)))))
+
+(defn reached-by
+  "The relation of a write analysis that reached `table`'s row `tmp`, or nil for a row at the root."
+  [analysis table tmp]
+  (some (fn [[relation pairs]]
+          (when (and (= table (:to/table relation)) (some #(= tmp (second %)) pairs))
+            relation))
+        (concat (:relations/one analysis) (:relations/many analysis))))
+
+(defn reached-field
+  "The field that reached `table`'s row `tmp` in a write analysis, a relation's or a tree parent's, or nil at the root."
+  [analysis table tmp]
+  (or (some-> (reached-by analysis table tmp) relation-field-key name)
+      (some (fn [[field parents]] (when (contains? parents tmp) (name field)))
+            (get-in analysis [:recursion table]))))
+
 (defn throw-reference-not-found
   "Throws when a payload reference resolves to no row the caller can see."
-  [{:keys [entity/mapping constraint]} table row relation]
+  [{:keys [entity/mapping constraint]} table row field]
   (let [entity-id (get mapping table)
         {entity-name :name} (when entity-id (deployed-entity entity-id))
         ident-keys (into #{(id/key)} (flatten (get constraint table)))
@@ -579,11 +600,12 @@
               (pr-str ident))
       (cond-> {:type ::reference-not-found
                :code "REF_NOT_FOUND"
+               :rule "linked_record"
                :hint "Check the reference; a record you can't read counts as not found."
                :entity entity-id
                :table table
                :keys ident}
-        relation (assoc :relation relation))))))
+        field (assoc :relation field))))))
 
 ;;; ============================================================================
 ;;; Type Encoding/Decoding (Database-Agnostic with Protocol)
@@ -809,11 +831,11 @@
   "Converts tmp ids to saved _eid/xid values for relations and recursions; throws on a dangling reference."
   [{:keys [entity :relations/one :relations/many recursion]
     :as analysis}]
-  (letfn [(eid [table tmp relation]
+  (letfn [(eid [table tmp]
             (when tmp
               (or (get-in entity [table tmp :_eid])
                   (throw-reference-not-found
-                   analysis table (get-in entity [table tmp]) relation))))
+                   analysis table (get-in entity [table tmp]) (reached-field analysis table tmp)))))
           (xid [table tmp]
             (when tmp (get-in entity [table tmp :xid])))]
     (as-> analysis analysis
@@ -821,15 +843,14 @@
        (fn [analysis
             {from-table :from/table
              to-table :to/table
-             relation :relation
-             :as table}
+             :as relation}
             ks]
-         (assoc-in analysis [:relations/one table]
+         (assoc-in analysis [:relations/one relation]
                    (reduce
                     (fn [result [from to]]
                       (conj result
-                            [(eid from-table from relation)
-                             (eid to-table to relation)
+                            [(eid from-table from)
+                             (eid to-table to)
                              (xid from-table from)
                              (xid to-table to)]))
                     []
@@ -840,15 +861,14 @@
        (fn [analysis
             {from-table :from/table
              to-table :to/table
-             relation :relation
-             :as table}
+             :as relation}
             ks]
-         (assoc-in analysis [:relations/many table]
+         (assoc-in analysis [:relations/many relation]
                    (reduce
                     (fn [result [from to]]
                       (conj result
-                            [(eid from-table from relation)
-                             (eid to-table to relation)
+                            [(eid from-table from)
+                             (eid to-table to)
                              (xid from-table from)
                              (xid to-table to)]))
                     []
@@ -863,8 +883,8 @@
                       (reduce-kv
                        (fn [bindings parent children]
                          (assoc bindings
-                                (eid table parent nil)
-                                (map #(eid table % nil) children)))
+                                (eid table parent)
+                                (map #(eid table %) children)))
                        nil
                        bindings)))
           analysis

@@ -12,9 +12,11 @@ sqlite`; the choice is saved ([OPERATIONS.md](OPERATIONS.md)).
 database. The setup page shows the `CREATE ROLE` / `CREATE DATABASE` SQL to
 run as the Postgres administrator first ([CONSOLE.md](CONSOLE.md)).
 
-**Port already in use.** Another instance, or a stale one, holds 7887 or 7888.
+**Port already in use.** Another instance, or a stale one, holds the engine's
+port (7887) or the portal's (7888; a project's `.synthigy/` takes any free one).
 `synthigy status` says what this instance believes is running. Give each
-instance its own `SYNTHIGY_SERVER_PORT` and `SYNTHIGY_PORTAL_PORT` in `.env`
+instance its own `SYNTHIGY_SERVER_PORT` in `.env`; `SYNTHIGY_PORTAL_PORT=0`,
+which `env init` writes, lets the portal take any free port
 ([OPERATIONS.md](OPERATIONS.md)).
 
 **The engine refuses to start after a restore or a move.** It cannot unwrap

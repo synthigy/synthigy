@@ -10,7 +10,7 @@ first superuser, Stop/Start/Restart, logs, versions and module health.
 
 ```clojure
 ;; deps.edn
-{:deps {com.synthigy/sqlite-bundle {:mvn/version "0.5.3"}}}
+{:deps {com.synthigy/sqlite-bundle {:mvn/version "0.5.4"}}}
 ```
 
 Register a patcho (`dev.gersak/patcho`) lifecycle module. Depend on
@@ -91,16 +91,21 @@ synthigy exec -- java -cp target/my-app.jar clojure.main -m synthigy.ops superus
 Put the jar and your modules in the project's `.synthigy/.env`:
 
 ```bash
-SYNTHIGY_BUNDLE=sqlite                     # the bundle your jar carries
-SYNTHIGY_JAR=/abs/path/target/my-app.jar   # absolute path
-SYNTHIGY_REQUIRE=my.app                    # namespaces to load, comma separated
-SYNTHIGY_MODULES=:my/app,:synthigy/console # modules to start, comma separated
+# the bundle your jar carries
+SYNTHIGY_BUNDLE=sqlite
+# absolute path
+SYNTHIGY_JAR=/abs/path/target/my-app.jar
+# namespaces to load, comma separated
+SYNTHIGY_REQUIRE=my.app
+# modules to start, comma separated
+SYNTHIGY_MODULES=:my/app,:synthigy/console
 ```
 
+A comment takes a line of its own: after a value, `#` is part of the value.
 The database files are in the instance's `db/` folder, next to that `.env`.
 
 ```bash
-synthigy up      # portal at http://127.0.0.1:7888
+synthigy up      # prints the portal's address
 synthigy down
 ```
 

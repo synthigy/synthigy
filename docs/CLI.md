@@ -29,6 +29,7 @@ Flags:
       --client-id string       Connect as a service: this client's id (non-interactive)
       --client-secret string   Connect as a service: this client's secret (or set SYNTHIGY_CLIENT_SECRET)
       --insecure               Skip TLS certificate verification
+      --replace                Replace the identity this profile already holds without asking
       --user                   Force the device-flow (browser) login, skipping the interactive prompt
   -v, --verbose                Verbose output
 ```
@@ -234,7 +235,35 @@ Flags:
 Delete an OAuth client and its service user
 
 ```
-synthigy iam remove-client <id>
+synthigy iam remove-client <id> [flags]
+```
+
+Flags:
+
+```
+      --local   go through the portal of the instance on this machine instead of a connected server
+```
+
+#### `synthigy iam rotate-client`
+
+Give a confidential OAuth client a new secret
+
+```
+synthigy iam rotate-client <id>
+```
+
+#### `synthigy iam set-client`
+
+Activate or deactivate an OAuth client
+
+```
+synthigy iam set-client <id> --active=true|false [flags]
+```
+
+Flags:
+
+```
+      --active   true to activate, false to deactivate (default true)
 ```
 
 ### `synthigy logs`
@@ -286,14 +315,14 @@ Examples:
 
 ```
   synthigy pull --bundle postgres
-  synthigy pull --bundle sqlite --version v0.5.3
+  synthigy pull --bundle sqlite --version vX.Y.Z
 ```
 
 Flags:
 
 ```
       --bundle string    Bundle: sqlite | postgres | postgres-clickhouse (default "sqlite")
-      --version string   Release version (e.g. v0.5.3) (default "latest")
+      --version string   Release version (e.g. vX.Y.Z) (default "latest")
 ```
 
 ### `synthigy service`
@@ -341,7 +370,7 @@ Examples:
 ```
   synthigy up                                # opens the setup wizard on a fresh install
   synthigy up --bundle postgres              # needs POSTGRES_* env; persists the choice
-  synthigy up --version v0.5.3               # pin a release
+  synthigy up --version vX.Y.Z               # pin a release
   synthigy up --jar synthigy.jar             # local/airgap jar, no download
   synthigy up --join                         # stay attached (systemd / launchd / container PID 1)
   synthigy --env .synthigy/customer1.env up  # replaces <instance-home>/.env, for running several instances
@@ -354,7 +383,7 @@ Flags:
       --force            Re-download every module even if cached (suspected corruption)
       --jar string       Local jar, or a classpath of module jars, instead of a release download; airgap/custom builds
       --join             Stay attached to this terminal instead of detaching — for process supervisors (systemd Type=simple, launchd, a container's PID 1), which need the process they started to keep running
-      --version string   Release version to run (e.g. v0.5.3) (default "latest")
+      --version string   Release version to run (e.g. vX.Y.Z) (default "latest")
 ```
 
 ### `synthigy versions`
@@ -478,13 +507,13 @@ Examples:
 
 ```
   synthigy upgrade
-  synthigy upgrade --version v0.2.0   # pin an older CLI
+  synthigy upgrade --version vX.Y.Z   # pin an older CLI
 ```
 
 Flags:
 
 ```
-      --version string   CLI release tag to install (e.g. v0.2.0) (default "latest")
+      --version string   CLI release tag to install (e.g. vX.Y.Z) (default "latest")
 ```
 
 ### `synthigy version`

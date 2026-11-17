@@ -3,6 +3,85 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.5.4] — 2026-11-17
+
+### Added
+
+- **Every error rule has its `ERRORS.md` section**, so every refusal with a
+  `rule` carries a `doc` (`errors/<rule>`), deploy and model refusals
+  included. Database constraint errors (`UNIQUE_VIOLATION`,
+  `NOT_NULL_VIOLATION`, `FK_VIOLATION`, `CHECK_VIOLATION`) now carry their
+  rule (`unique`, `required`, `reference`, `check`) and its doc, on
+  PostgreSQL and SQLite.
+- **`REF_NOT_FOUND` names its rule and doc:** `"rule": "linked_record"` and
+  `"doc": "errors/linked_record"`, on a link to any record, files included.
+  The new `ERRORS.md` section says when a link to a record that doesn't exist,
+  or that the caller can't read, is refused and when the record is created
+  instead, and what a record with more attributes than its `xid` does.
+
+### Changed
+
+- **A files refusal's hint is in your relation's shape:** a file written the
+  wrong way through a relation is answered with that relation in its shape,
+  `{"file": {"xid": "<xid>"}}` for a to-one, `{"attachments": [{"xid": "<xid>"}]}`
+  for a to-many, instead of a `<relation>` placeholder. A row at the root of a
+  write keeps both shapes. A row reached through a relation only `/files`
+  writes (a file's `folder`, a link's `file`) is refused for that relation,
+  which names the `/files` call.
+- **Getting started, SDKs and Operations lead with `.synthigy/.env`:** a
+  service is three lines there; `synthigy connect` is the checked way to write
+  them. The manual no longer gives every portal the address `127.0.0.1:7888`:
+  a project's `.synthigy/` takes any free port, which `up` prints.
+- **`AGENT_BRIEF.md` brings back two rules** the move from Studio dropped:
+  aggregates (`votes: count(movie_ratings)`; the alias sorts) and reference
+  labels (a user, group or role reference reads as its label; filter and sort
+  only by those). Other lines are shorter, so the brief still fits Studio's
+  4,096-character instructions.
+
+- **Errors name their entity and attribute:** `entity` and `attribute` on an
+  error are names (`"User"`, `"title"`), as `ERRORS.md` says. Refusals such as
+  `REF_NOT_FOUND`, `ROW_FORBIDDEN`, `CREATE_FORBIDDEN` and `ATTRIBUTE_FORBIDDEN`
+  gave the entity's internal id.
+
+- **Runs on Clojure 1.12.6** (was 1.12.0, on which telemere breaks `#uuid`
+  literals in compiled code).
+
+### Fixed
+
+- **A deactivated OAuth client still got tokens** from `/oauth/token`. Every
+  grant now answers 401 `invalid_client` "Client is inactive", and
+  introspection reports that client's tokens `active: false`. Its tokens were
+  already refused on use. Removing or deactivating a client also revokes its
+  live tokens.
+- **`DATA.md` and `ERRORS.md` showed `delete` with `args`**; `delete` reads
+  its records from `data`, so that example was refused.
+- **`search`, `get`, the tree reads, `slice` and `purge` ignored a `data`
+  key**, so a filter sent there instead of in `args` matched every row, and a
+  `purge` would have removed them. They refuse it with `BAD_OP`
+  (`"argument": "data"`) and a hint that shows `args`.
+- **`REF_NOT_FOUND` gave the relation's internal id as `relation`**
+  (`"relation": "NWwVJG6ympZP99zoS2E7F8"`). It is the field the missing record
+  was linked under, `"owner"`, also for a file link; a record at the root of
+  the write carries none.
+- **Deleting a dataset answered `null`** on PostgreSQL
+  (`{"op": "delete", "entity": "dataset", "data": {"xid": "…"}}`), where the
+  SDKs document `true`. It answers `true`, also when the dataset is already
+  gone.
+- **`AGENT_BRIEF.md` called the `User Group` entity `Group`**, and so did
+  `MODELING.md`.
+- **`OPERATIONS.md` moved IAM between instances with two `connect`s in one
+  profile**, and the second is refused. Each instance now gets its own `--env`
+  profile.
+- **`EMBEDDED.md` and `PROXY.md` put comments after `.env` values**, and a
+  value keeps everything after `=`, comment included. The comments now take
+  lines of their own.
+- **A `REF_NOT_FOUND` on a tree parent named no relation.** A `parent` that
+  points at a record the caller can't read or create carries
+  `"relation": "parent"`, the tree's field, like a link through any other
+  relation.
+- **`deploy-check` problems carried a `rule` but no `doc`.** They carry the
+  same `doc` as the refusal `deploy` answers.
+
 ## [0.5.3] — 2026-11-16
 
 ### Added

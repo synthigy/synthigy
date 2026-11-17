@@ -7,7 +7,8 @@ Copy-paste configs are at the bottom.
 ## Engine settings
 
 ```bash
-SYNTHIGY_SERVER_HOST=127.0.0.1                    # reachable only through the proxy
+# reachable only through the proxy
+SYNTHIGY_SERVER_HOST=127.0.0.1
 SYNTHIGY_IAM_ROOT_URL=https://synthigy.example.com
 SYNTHIGY_SERVER_TRUST_PROXY=127.0.0.1/32,::1/128
 ```
@@ -44,8 +45,10 @@ SYNTHIGY_SERVER_TRUST_PROXY=127.0.0.1/32,::1/128
   local dev install, and it issues the session cookie without `Secure`. Forwarding
   `X-Forwarded-Proto` and `X-Forwarded-Host` helps only when the proxy is listed in
   `SYNTHIGY_SERVER_TRUST_PROXY`; otherwise the engine drops those headers.
-- **Never proxy port 7888**, the portal: it trusts anything from 127.0.0.1, so a
-  local proxy would publish it. Reach it with `ssh -L 7888:127.0.0.1:7888 <host>`.
+- **Never proxy the portal** (port 7888, or any free port for a project's
+  `.synthigy/`, which `synthigy portal` prints): it trusts anything from
+  127.0.0.1, so a local proxy would publish it. Reach it with
+  `ssh -L 7888:127.0.0.1:7888 <host>`, with that port in place of 7888.
 - **Firewall 7887** so nothing bypasses the proxy.
 
 ---

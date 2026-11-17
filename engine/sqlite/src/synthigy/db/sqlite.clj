@@ -418,6 +418,7 @@
                    (str entity " must be unique on (" (str/join ", " attrs) ")")
                    :else "Field must be unique")
                  {:code "UNIQUE_VIOLATION"
+                  :rule "unique"
                   :details (cond-> {:rule "unique"}
                              entity      (assoc :entity entity)
                              (seq attrs) (assoc :attributes attrs))}))
@@ -429,6 +430,7 @@
                    (str entity "." attr " is required")
                    "Field is required")
                  {:code "NOT_NULL_VIOLATION"
+                  :rule "required"
                   :details (cond-> {:rule "required"}
                              entity (assoc :entity entity)
                              attr   (assoc :attributes [attr]))}))
@@ -436,11 +438,13 @@
       (str/includes? msg "FOREIGN KEY constraint failed")
       (ex-info "Referenced record does not exist"
                {:code "FK_VIOLATION"
+                :rule "reference"
                 :details {:rule "reference"}})
 
       (str/includes? msg "CHECK constraint failed")
       (ex-info "Field violates a check constraint"
                {:code "CHECK_VIOLATION"
+                :rule "check"
                 :details {:rule "check"}})
 
       (= "SQLITE_CONSTRAINT_TRIGGER" code)

@@ -716,7 +716,7 @@
             (throw e)))))))
 
 (defn destroy!
-  "Destroy a dataset — recalls all versions and removes tables, schema, versions and the dataset record."
+  "Destroy a dataset — recalls all versions and removes tables, schema, versions and the dataset record; true when done."
   [dataset]
   (let [actor (log/current-principal-xid)
         base  (cond-> {:subject :dataset
@@ -727,11 +727,11 @@
                :data (assoc base :action :destroying)}
               (str "Destroying dataset " (or (:name dataset) "(unnamed)")))
     (try
-      (let [result (model-change :destroy (:name dataset) nil #(core/destroy! *db* dataset))]
-        (log/warn {:id ::destroyed
-                   :data (assoc base :action :destroyed)}
-                  (str "Destroyed dataset " (or (:name dataset) "(unnamed)")))
-        result)
+      (model-change :destroy (:name dataset) nil #(core/destroy! *db* dataset))
+      (log/warn {:id ::destroyed
+                 :data (assoc base :action :destroyed)}
+                (str "Destroyed dataset " (or (:name dataset) "(unnamed)")))
+      true
       (catch Throwable e
         (log/error! {:id ::destroy-failed
                      :data (assoc base :action :destroy-failed)}

@@ -23,6 +23,7 @@
    [synthigy.log :as log]
    [nano-id.core :as nano-id]
    [synthigy.dataset :as dataset]
+   [synthigy.dataset.delta :as delta]
    [synthigy.dataset.id :as id]
    [synthigy.iam :as iam]
    [synthigy.iam.service-user :as service-user]
@@ -177,6 +178,42 @@
   (doseq [token-key [:access_token :refresh_token]
           token (client-token-values session client-id token-key audience)]
     (revoke-token token-key token)))
+
+(defn client-gone?
+  [client-id]
+  (let [client (iam/get-client client-id)]
+    (or (nil? client) (false? (:active client)))))
+
+(defn revoke-gone-client-tokens!
+  "Revoke the live token rows of every client that is removed or deactivated."
+  []
+  (let [now (java.util.Date.)
+        revoked (for [token-key [:access_token :refresh_token]
+                      :let [rows (dataset/search-entity (token-entity token-key)
+                                                        {:_and [core/not-revoked {:expires_at {:_gt now}}]}
+                                                        {:value nil})
+                            gone (into {} (map (juxt identity client-gone?))
+                                       (distinct (keep (comp :client_id token-payload :value) rows)))]
+                      {:keys [value]} rows
+                      :when (gone (:client_id (token-payload value)))]
+                  (do (revoke-token token-key value) value))
+        n (count (doall revoked))]
+    (when (pos? n)
+      (log/info {:id ::gone-client-tokens-revoked
+                 :data {:action :cleanup :subject :oauth-clients :tokens n}}
+                "Revoked the tokens of removed or deactivated clients"))
+    n))
+
+(defn watch-client-changes!
+  "Idempotently subscribe to App updates and deletes, revoking the tokens of clients left gone."
+  []
+  (when-let [app-xid (some-> (id/entity :iam/app) str)]
+    (delta/subscribe! ::client-token-watcher
+                      {:entity-xids #{app-xid} :ops #{:update :delete}}
+                      (fn [_env] (revoke-gone-client-tokens!)))))
+
+(defn unwatch-client-changes! []
+  (delta/unsubscribe! ::client-token-watcher))
 
 (defn revoke-session-tokens
   ([session] (revoke-session-tokens session :any))
@@ -740,7 +777,7 @@
        "Client authentication failed"))))
 
 (defn token-endpoint
-  [{{:keys [grant_type]
+  [{{:keys [grant_type client_id refresh_token]
      :as oauth-request} :params
     :as request}]
   (log/debug {:id ::token-endpoint-request
@@ -752,7 +789,17 @@
     (case grant_type
       ("authorization_code" "refresh_token" "urn:ietf:params:oauth:grant-type:device_code" "client_credentials")
       (try
-        (grant-token oauth-request)
+        (if-let [inactive (core/inactive-client (or (not-empty client_id) (some-> refresh_token token-client)))]
+          (do
+            (log/warn {:id ::client-inactive
+                       :data {:action :rejected
+                              :subject :access-token
+                              :flow grant_type
+                              :reason :client-inactive
+                              :client inactive}}
+                      "Token request from an inactive client")
+            (token-error 401 "invalid_client" "Client is inactive"))
+          (grant-token oauth-request))
         (catch clojure.lang.ExceptionInfo ex
           (let [{:keys [client_id requested-audience]} (ex-data ex)]
             (if-not requested-audience

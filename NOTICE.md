@@ -113,7 +113,7 @@ The full license text ships beside the font files as `OFL.txt`.
 - environ/environ 1.2.0
 - hiccup/hiccup 2.0.0-RC3
 - metosin/jsonista 0.3.13
-- org.clojure/clojure 1.12.0
+- org.clojure/clojure 1.12.6
 - org.clojure/core.async 1.6.681
 - org.clojure/core.cache 1.1.234
 - org.clojure/core.memoize 1.0.253

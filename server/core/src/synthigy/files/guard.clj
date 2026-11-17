@@ -19,6 +19,7 @@
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.sql.naming :as naming]
+   [synthigy.dataset.sql.query :as query]
    [synthigy.files.model :as model]))
 
 (def ^:dynamic *module-write*
@@ -53,8 +54,15 @@
   (binding [*module-write* true]
     (f)))
 
-(def link-hint
-  "Link your record to the file or folder by its xid alone: {\"<relation>\": {\"xid\": \"<xid>\"}} to one, {\"<relation>\": [{\"xid\": \"<xid>\"}]} to many.")
+(defn link-hint
+  "How to link by xid: in the shape of `relation`, the one that reached the row, or both shapes for a row at the root."
+  [relation]
+  (str "Link your record to the file or folder by its xid alone: "
+       (if-let [k (some-> relation query/relation-field-key name)]
+         (if (= :many (:type relation))
+           (str "{\"" k "\": [{\"xid\": \"<xid>\"}]}.")
+           (str "{\"" k "\": {\"xid\": \"<xid>\"}}."))
+         "{\"<relation>\": {\"xid\": \"<xid>\"}} to one, {\"<relation>\": [{\"xid\": \"<xid>\"}]} to many.")))
 
 (defn files-problem
   "A `files_read_only` refusal: what was refused and how /files does it."
@@ -82,43 +90,46 @@
 
 (defn entity-label [entity-key] (:name (model/entity entity-key)))
 
-(defn create-problem [entity-key]
+(defn create-problem [entity-key relation]
   (case entity-key
-    :files/file (files-problem "Files are created through /files, by uploading them (POST /files?name=…); /data links existing ones by xid." link-hint
-                               :entity (entity-label entity-key))
+    :files/file (files-problem "Files are created through /files, by uploading them (POST /files?name=…); /data links existing ones by xid."
+                               (link-hint relation) :entity (entity-label entity-key))
     :files/folder (files-problem "Folders are created through /files (POST /files/folders {\"name\", \"parent\"}); /data links existing ones by xid."
-                                 link-hint :entity (entity-label entity-key))
+                                 (link-hint relation) :entity (entity-label entity-key))
     (files-problem "Download links are created through /files (POST /files/<file xid>/links)."
                    "Create the link with POST /files/<file xid>/links and share the URL it returns." :entity (entity-label entity-key))))
 
 (defn not-found-problem
   "A nested reference to a row the caller can't see, unknown or unreadable alike, as storage reports it."
-  [entity-key xid]
-  {:code "REF_NOT_FOUND"
-   :message (str "Referenced '" (entity-label entity-key) "' not found: " (pr-str {:xid xid}))
-   :hint (case entity-key
-           :files/file "Check the xid, or upload the file with POST /files first; a file you can't read counts as not found."
-           "Check the xid; a record you can't read counts as not found.")
-   :entity (entity-label entity-key) :xids [xid]})
+  [entity-key xid relation]
+  (let [field (some-> relation query/relation-field-key name)]
+    (cond-> {:code "REF_NOT_FOUND"
+             :rule "linked_record"
+             :message (str "Referenced '" (entity-label entity-key) "' not found: " (pr-str {:xid xid}))
+             :hint (case entity-key
+                     :files/file "Check the xid, or upload the file with POST /files first; a file you can't read counts as not found."
+                     "Check the xid; a record you can't read counts as not found.")
+             :entity (entity-label entity-key) :xids [xid]}
+      field (assoc :relation field))))
 
 (defn unknown-problem
   "A row naming an xid no such row has: /data would create it, which only /files does."
-  [entity-key xid]
+  [entity-key xid relation]
   (files-problem (str "No " (entity-label entity-key) " has xid \"" xid "\"; "
                       (case entity-key
                         :files/file "files are created through /files: upload with POST /files?name=… and link the xid it returns."
                         :files/folder "folders are created through /files (POST /files/folders); link the xid it returns."
                         "download links are created through /files (POST /files/<file xid>/links)."))
-                 link-hint :entity (entity-label entity-key) :xids [xid]))
+                 (link-hint relation) :entity (entity-label entity-key) :xids [xid]))
 
-(defn attribute-problem [entity-key column]
+(defn attribute-problem [entity-key column relation]
   (files-problem (str "A " (entity-label entity-key) " row in a /data write carries only its xid; `" (name column) "` is set through /files"
                       (case entity-key
                         :files/file " (PATCH /files/<xid>)"
                         :files/folder " (PATCH /files/folders/<xid>)"
                         "")
                       ".")
-                 link-hint :entity (entity-label entity-key) :attribute (name column)))
+                 (link-hint relation) :entity (entity-label entity-key) :attribute (name column)))
 
 (defn owned-relation-problems
   "Relation id → the refusal naming the /files call that writes it."
@@ -145,28 +156,34 @@
 (defn write-problem
   "The first /files rule `analysis` breaks, as a refusal, or nil; a reference to a row the caller can read passes."
   [analysis]
-  (or
-   (some (fn [entity-key]
-           (when-let [e (model/entity entity-key)]
-             (let [table (naming/entity->table-name e)
-                   rows (get-in analysis [:entity table])
-                   subject (get-in analysis [:subject table] #{})
-                   link-only (get-in analysis [:link-only table] #{})
-                   columns (attribute-columns entity-key)
-                   checked (remove (fn [[id _]] (link-only id)) rows)
-                   readable (readable-xids entity-key (distinct (keep (comp :xid second) checked)))]
-               (or (when (some (fn [[_ row]] (not (:xid row))) rows) (create-problem entity-key))
-                   (some (fn [[_ row]] (some #(when (columns %) (attribute-problem entity-key %)) (keys row))) rows)
-                   (some (fn [[id {:keys [xid]}]]
-                           (when (and xid (not (readable xid)))
-                             (if (subject id) (unknown-problem entity-key xid) (not-found-problem entity-key xid))))
-                         checked)))))
-         [:files/file :files/folder :files/link])
-   (let [folders (naming/entity->table-name (model/entity :files/folder))
-         owned (owned-relation-problems)]
-     (or (when (seq (get-in analysis [:recursion folders])) (parent-problem))
-         (some (fn [[{:keys [relation]} pairs]] (when (seq pairs) (get owned relation)))
-               (concat (:relations/one analysis) (:relations/many analysis)))))))
+  (let [owned (owned-relation-problems)]
+    (or
+     (some (fn [entity-key]
+             (when-let [e (model/entity entity-key)]
+               (let [table (naming/entity->table-name e)
+                     rows (get-in analysis [:entity table])
+                     subject (get-in analysis [:subject table] #{})
+                     link-only (get-in analysis [:link-only table] #{})
+                     columns (attribute-columns entity-key)
+                     checked (remove (fn [[id _]] (link-only id)) rows)
+                     readable (readable-xids entity-key (distinct (keep (comp :xid second) checked)))
+                     refuse (fn [id problem]
+                              (let [relation (query/reached-by analysis table id)]
+                                (or (get owned (:relation relation)) (problem relation))))]
+                 (or (some (fn [[id row]] (when-not (:xid row) (refuse id #(create-problem entity-key %)))) rows)
+                     (some (fn [[id row]]
+                             (some (fn [column] (when (columns column) (refuse id #(attribute-problem entity-key column %))))
+                                   (keys row)))
+                           rows)
+                     (some (fn [[id {:keys [xid]}]]
+                             (when (and xid (not (readable xid)))
+                               (refuse id #((if (subject id) unknown-problem not-found-problem) entity-key xid %))))
+                           checked)))))
+           [:files/file :files/folder :files/link])
+     (let [folders (naming/entity->table-name (model/entity :files/folder))]
+       (or (when (seq (get-in analysis [:recursion folders])) (parent-problem))
+           (some (fn [[{:keys [relation]} pairs]] (when (seq pairs) (get owned relation)))
+                 (concat (:relations/one analysis) (:relations/many analysis))))))))
 
 (defn assert-write!
   "Refuse a principal's write that creates or changes a file, folder or link or one of the module's relations; links to existing files and folders pass."

@@ -22,19 +22,24 @@ synthigy env init        # this folder gets its own instance in .synthigy/
 synthigy up
 ```
 
-The first `up` downloads a Java runtime and the engine into `~/.synthigy` and
-starts the **portal**; open `http://127.0.0.1:7888`. Pick a bundle —
-`sqlite` needs nothing else; `postgres` needs a database you created — and
-check it: **Check file** for SQLite, **Test connection** for PostgreSQL.
-Choose where uploaded files are kept, local disk or an S3 bucket (**Test
-bucket**). **Launch** unlocks once the checks pass. When the engine is up,
-the portal asks for the first superuser.
+`env init` gives the instance its own engine port, 7887 unless that is taken,
+and prints it; the examples below use 7887, so use the port it printed. The
+first `up` downloads a Java runtime into `~/.synthigy`, starts the **portal**
+and opens it in your browser. The portal takes a free port each time it
+starts: `up` prints the address, and `synthigy portal` opens it again whenever
+you need it. Pick a bundle — `sqlite` needs nothing else; `postgres` needs a
+database you created — and check it: **Check file** for SQLite, **Test
+connection** for PostgreSQL (the first check downloads the engine). Choose
+where uploaded files are kept, local disk or an S3 bucket (**Test bucket**).
+**Launch** unlocks once the checks pass. When the engine is up, the portal
+asks for the first superuser.
 
 `synthigy up --bundle sqlite` skips the choice.
 
-The engine now serves on `http://localhost:7887`, with the **console** at
-`http://localhost:7887/console`. Sign in there as the superuser. The portal
-runs the instance; the console administers it ([CONSOLE.md](CONSOLE.md)).
+The engine now serves on its port, here `http://localhost:7887`, with the
+**console** at `http://localhost:7887/console`. Sign in there as the superuser.
+The portal runs the instance; the console administers it
+([CONSOLE.md](CONSOLE.md)).
 
 ## 3. Model your data
 
@@ -52,14 +57,28 @@ In the API the names are snake case: entity `movie`, attributes `title` and
 ```bash
 synthigy iam add-client "My App" --id my-app --type confidential \
   --grant client_credentials --role "Dataset Explorer" --api Synthigy --local
-synthigy connect http://localhost:7887 --client-id my-app
 ```
 
-`add-client` prints the secret once; `connect` asks for it and saves the
-identity in `.synthigy/`. **Dataset Explorer** lets the application read the
-model, which code generation needs. What data it may read and write is decided
-by your entities' access rules — and an entity with access control off is open
-to every signed-in client ([ACCESS.md](ACCESS.md)).
+`add-client` prints the secret once. The application's identity is three lines;
+add them to `.synthigy/.env`, the file `env init` created:
+
+```bash
+SYNTHIGY_ENDPOINT=http://localhost:7887
+SYNTHIGY_CLIENT_ID=my-app
+SYNTHIGY_CLIENT_SECRET=<secret>
+```
+
+`synthigy exec` hands them to your program, and `synthigy token` mints tokens
+from them. `env init` made the file private (mode 0600) and keeps `.synthigy/`
+out of git. To have the three checked first, run
+`synthigy connect http://localhost:7887 --client-id my-app` instead of editing
+the file: it asks for the secret, mints one token to prove they work, and
+writes the same lines.
+
+**Dataset Explorer** lets the application read the model, which code generation
+needs. What data it may read and write is decided by your entities' access
+rules — and an entity with access control off is open to every signed-in client
+([ACCESS.md](ACCESS.md)).
 
 ## 5. Write, then read
 

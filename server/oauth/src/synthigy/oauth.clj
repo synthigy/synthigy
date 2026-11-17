@@ -31,7 +31,7 @@
    synthigy.oauth.patch
    [synthigy.oauth.persistence :as persistence]
    ;; side effects: grant-token/sign-token/session-kill-hook defmethods
-   [synthigy.oauth.token]
+   [synthigy.oauth.token :as token]
    [synthigy.util :as util]))
 
 (defn generate-code-challenge
@@ -290,6 +290,7 @@
     (reset! last-janitor-run (System/currentTimeMillis))
     (try
       (persistence/clean-expired-rows!)
+      (token/revoke-gone-client-tokens!)
       (catch Throwable e
         (log/error! {:id ::janitor-failed
                      :msg "OAuth store janitor failed"
@@ -314,6 +315,7 @@
     (run-janitor!)
     (core/monitor-client-change)
     (onboarding/start-deactivation-watcher!)
+    (token/watch-client-changes!)
     (log/debug {:id ::maintenance-finish} "OAuth maintenance finish")
     (Thread/sleep period))
   data)
@@ -330,7 +332,8 @@
   (send-off maintenance-agent assoc :running false)
   (alter-var-root #'cors/*origin-allowed?* (constantly cors/allow-all))
   (core/evict-clients!)
-  (onboarding/stop-deactivation-watcher!))
+  (onboarding/stop-deactivation-watcher!)
+  (token/unwatch-client-changes!))
 
 (lifecycle/register-module!
  :synthigy/oauth

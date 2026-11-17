@@ -19,7 +19,7 @@
  :paths ["core/src" "resources" "xsql/src"]
 
  :deps
- {org.clojure/clojure {:mvn/version "1.12.0"}
+ {org.clojure/clojure {:mvn/version "1.12.6"}
   org.clojure/core.async {:mvn/version "1.6.681"}
   org.clojure/core.cache {:mvn/version "1.1.234"}
   metosin/jsonista {:mvn/version "0.3.13"}

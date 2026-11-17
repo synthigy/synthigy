@@ -5,15 +5,16 @@ Synthigy has two web surfaces for two kinds of people.
 | | Portal | Console |
 |---|---|---|
 | For | whoever runs the instance | users and administrators of the instance |
-| Address | `http://127.0.0.1:7888` — this machine only | `/console` on the engine, e.g. `https://id.example.com/console` |
+| Address | `http://127.0.0.1:7888`, or any free port for a project's `.synthigy/` (`synthigy portal` opens it) — this machine only | `/console` on the engine, e.g. `https://id.example.com/console` |
 | Sign-in | none: being on the machine is the access | a Synthigy account |
 | Served by | the `synthigy` CLI | the engine |
 
 ## Portal
 
 Started by `synthigy up` and opened with `synthigy portal`. It binds to
-127.0.0.1 only; to reach a remote instance, forward the port:
-`ssh -L 7888:127.0.0.1:7888 server`.
+127.0.0.1 only; to reach a remote instance, forward its port:
+`ssh -L 7888:127.0.0.1:7888 server`, or for a project's `.synthigy/` the port
+`synthigy portal` prints there.
 
 **First run** is a setup page: pick a bundle, connect the database, choose
 where audit and logs go and where uploaded files are kept (local disk or an S3

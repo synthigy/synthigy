@@ -6,7 +6,7 @@
 | **Profile** | The `.env` file of an instance, read by the CLI, the portal and the SDKs. `--env <file>` picks another one. |
 | **Bundle** | Which engine runs: `sqlite`, `postgres` or `postgres-clickhouse`. One database, plus where history and logs go. |
 | **Engine** | The Synthigy server: data API, identity, OAuth and the console, in one JVM process. |
-| **Portal** | The page the CLI serves on `127.0.0.1:7888` to run the instance: setup, health, upgrades, encryption custody, superusers. No sign-in; being on the machine is the access ([CONSOLE.md](CONSOLE.md)). |
+| **Portal** | The page the CLI serves on 127.0.0.1 (port 7888, or any free port for a project's `.synthigy/`; `synthigy portal` opens it) to run the instance: setup, health, upgrades, encryption custody, superusers. No sign-in; being on the machine is the access ([CONSOLE.md](CONSOLE.md)). |
 | **Console** | `/console` on the engine, signed in with a Synthigy account: your profile, administration, and the data modeling, data console and log cockpit tools. |
 | **Dataset** | One named data model, with versions. The live model of the instance is the latest deployed version of every dataset ([MODELING.md](MODELING.md)). |
 | **Version** | One editable draft of a dataset. Deploying makes it live; a deployed version never changes. |

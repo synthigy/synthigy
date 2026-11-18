@@ -19,6 +19,7 @@
    [synthigy.log :as log]
    [synthigy.oauth.handlers :as oauth]
    [synthigy.oauth.page.custom :as login-page]
+   [synthigy.server.admission :as admission]
    [synthigy.server.data :as data]
    [synthigy.server.docs :as docs]
    [synthigy.server.health :as health]
@@ -178,7 +179,7 @@
      ["/.well-known/synthigy" :get #'info/handler]
      ["/health" :get (health/handler [:synthigy/dataset :synthigy/iam])]
 
-     ["/data" :post #'data/handler]
+     ["/data" :post (admission/wrap #'data/handler)]
 
      ["/logs" :post #'data/logs-handler]
 
@@ -189,7 +190,6 @@
              ;; IAM configuration transfer — ROOT-gated inside the handler
      ["/iam/export" :get (gated :synthigy/iam #'data/iam-export-handler)]
      ["/iam/import" :post (gated :synthigy/iam #'data/iam-import-handler)]
-     ["/iam/clients" :post (gated :synthigy/iam #'data/iam-add-client-handler)]
 
      ["/history" :post #'history/handler]
 
@@ -208,7 +208,7 @@
     [["/info" :get info-handler]
      ["/.well-known/synthigy" :get #'info/handler]
      ["/health" :get (health/handler [:synthigy/dataset])]
-     ["/data" :post #'data/handler]
+     ["/data" :post (admission/wrap #'data/handler)]
      ["/logs" :post #'data/logs-handler]
      ["/schema" :get #'data/schema-handler]
      ["/lint" :post #'data/lint-handler]

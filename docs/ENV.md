@@ -60,6 +60,7 @@ The `sqlite` bundle keeps `synthigy.db` and `audit.db` in `<home>/db/`.
 | Variable | Default | Description |
 |---|---|---|
 | `SQLITE_POOL_SIZE` | `8` | Most connections in the pool. |
+| `SQLITE_SYNCHRONOUS` | `NORMAL` | When `synthigy.db` commits reach the disk: `NORMAL` (at WAL checkpoints; a power loss or OS crash can lose the last commits, a process crash cannot) or `FULL` (every commit, slower writes). `OFF` and `EXTRA` are accepted too. |
 
 ## PostgreSQL
 
@@ -72,7 +73,7 @@ The `postgres` and `postgres-clickhouse` bundles. Synthigy never creates the dat
 | `POSTGRES_DB` | `synthigy` | Database name. |
 | `POSTGRES_USER` | `postgres` | User. |
 | `POSTGRES_PASSWORD` |  | Password. |
-| `POSTGRES_POOL_SIZE` | `20` | Connections in the main pool. |
+| `POSTGRES_POOL_SIZE` | `50` | Connections in the main pool. |
 | `POSTGRES_DRAINER_POOL_SIZE` | `2` | Connections of the separate pool that writes audit history. |
 | `POSTGRES_JIT` | `off` | PostgreSQL JIT for engine connections. `on` restores the server's own setting. Off by default because the engine's short queries pay hundreds of milliseconds of JIT compile time. |
 

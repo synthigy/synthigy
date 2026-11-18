@@ -661,7 +661,8 @@
                                  :relations (map (juxt :from-label :to-label) cr)
                                  :recursive (map (juxt :from-label :to-label) crr)}}}
                "Transform projection analysis")
-    (jdbc/with-transaction [tx ds]
+    (sqlite/with-writer
+     (fn [] (jdbc/with-transaction [tx ds]
       (when (not-empty re)
         (log/info {:id ::entities-reactivating :data {:count (count re)}}
                   "Reactivating entities (tables already exist)")
@@ -920,7 +921,7 @@
                      :table-name table
                      :column-name (column-name tl)
                      :sql sql}
-                    ex))))))))
+                    ex))))))))))
 
 (defn get-dataset-versions
   "All versions of a dataset by id or :name, newest modified_on first."

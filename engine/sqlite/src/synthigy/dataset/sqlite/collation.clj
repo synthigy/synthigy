@@ -19,6 +19,7 @@
    [synthigy.dataset.core :as core]
    [synthigy.dataset.sql.naming :refer [normalize-name entity->table-name]]
    [synthigy.db :refer [*db*]]
+   [synthigy.db.sqlite :as sqlite-db]
    [synthigy.log :as log]))
 
 (def human-types #{"string" "enum"})
@@ -116,12 +117,13 @@
 (defn collate-columns!
   "Swaps every pending string/enum column to COLLATE HUMAN in one transaction; returns table → columns."
   []
-  (jdbc/with-transaction [tx (:datasource *db*)]
+  (sqlite-db/with-writer
+   (fn [] (jdbc/with-transaction [tx (:datasource *db*)]
     (let [pending (pending-columns tx)]
       (doseq [[table columns] pending]
         (swap-columns! tx table (zipmap (distinct columns) (repeat human-ddl)))
         (log/debug {:id ::table-collated :data {:table table :columns columns}} "Collated columns HUMAN"))
-      pending)))
+      pending)))))
 
 (def versions-ddl
   "CREATE TABLE IF NOT EXISTS __collation_versions__ (name TEXT PRIMARY KEY, version TEXT NOT NULL)")

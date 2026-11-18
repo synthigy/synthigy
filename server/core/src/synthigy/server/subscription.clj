@@ -35,7 +35,7 @@
   (:import
    [java.time Instant]))
 
-(declare ensure-delta-loop! ensure-model-loop! cleanup-identity!
+(declare ensure-delta-loop! ensure-model-loop! cleanup-identity! clear-subscriptions!
          ensure-model-chan fan-out!)
 
 ;;; ============================================================================
@@ -56,18 +56,24 @@
 
 (defonce ^:private loops (atom {}))
 
-(defn claim-loop!
-  "Atomically claim the loop slot for [identity-key kind]; true iff this caller won it."
-  [identity-key kind]
-  (let [[old _] (swap-vals! loops update identity-key (fnil conj #{}) kind)]
-    (not (contains? (get old identity-key) kind))))
+(defonce ^:private stream-sessions (atom {}))
 
-(defn end-loop! [identity-key kind]
+(defn claim-loop!
+  "Claim the loop slot for [identity-key kind]; the winner gets a token that only it can release with."
+  [identity-key kind]
+  (let [token (Object.)
+        [_ now] (swap-vals! loops (fn [m] (if (get-in m [identity-key kind]) m (assoc-in m [identity-key kind] token))))]
+    (when (identical? token (get-in now [identity-key kind]))
+      token)))
+
+(defn end-loop!
+  "Release a loop slot, only if it is still held with `token`."
+  [identity-key kind token]
   (swap! loops (fn [m]
-                 (let [s' (disj (get m identity-key #{}) kind)]
-                   (if (seq s')
-                     (assoc m identity-key s')
-                     (dissoc m identity-key))))))
+                 (if (identical? token (get-in m [identity-key kind]))
+                   (let [m' (update m identity-key dissoc kind)]
+                     (if (seq (get m' identity-key)) m' (dissoc m' identity-key)))
+                   m))))
 
 ;;; ============================================================================
 ;;; Identity
@@ -82,6 +88,34 @@
       [(or sub (some-> (:principal iam) id/extract)) client_id])
     ["anonymous" (or (get-in request [:headers "x-synthigy-client"])
                      (get-in request [:query-params "client"]))]))
+
+(defn request-stream
+  "The client-minted stream id of the request (?stream= or the X-Synthigy-Stream header), or nil."
+  [request]
+  (let [sid (or (get-in request [:query-params "stream"])
+                (get-in request [:headers "x-synthigy-stream"]))]
+    (when (and (string? sid) (re-matches #"[A-Za-z0-9_-]{8,64}" sid))
+      sid)))
+
+(defn body-stream
+  "The stream id a /set body names, whichever way its keys were parsed."
+  [body]
+  (let [sid (or (get body "stream") (get body :stream))]
+    (when (string? sid) sid)))
+
+(defn stream-session
+  "The session key of one stream: its identity plus the stream id."
+  [identity-key stream-id]
+  [(first identity-key) (second identity-key) stream-id])
+
+(defn session-key
+  "Where a subscription request applies: the named stream's own session, else (no id) the identity-wide one."
+  [identity-key stream-id]
+  (cond
+    (nil? stream-id) identity-key
+    (contains? @event-streams (stream-session identity-key stream-id)) (stream-session identity-key stream-id)
+    :else (throw (ex-info "No open event stream with that id; open /data/events?stream=<id> first"
+                          {:code "STREAM_NOT_FOUND" :stream stream-id}))))
 
 ;;; ============================================================================
 ;;; Subscription Management
@@ -198,7 +232,7 @@
   "Per-identity go-loop draining batch-chan, batching for 100ms, translating +
    coalescing by coalesce-key-fn, then fanning out."
   [identity-key loop-kind batch-chan translate-fn coalesce-key-fn]
-  (when (claim-loop! identity-key loop-kind)
+  (when-let [token (claim-loop! identity-key loop-kind)]
     (async/go-loop []
       (if-let [first-env (async/<! batch-chan)]
         (let [batch (loop [batch [first-env]]
@@ -214,7 +248,7 @@
           (when (seq coalesced)
             (fan-out! identity-key coalesced))
           (recur))
-        (end-loop! identity-key loop-kind)))))
+        (end-loop! identity-key loop-kind token)))))
 
 (defn ensure-track-batch-chan!
   "Per-identity sliding channel for track-key (:entity or :relation)."
@@ -333,7 +367,8 @@
     (do (when-let [ch (get-in @subscriptions-state [identity-key :model :chan])]
           (async/unsub dataset/publisher :model/deployed ch)
           (async/close! ch))
-        (swap! subscriptions-state update identity-key dissoc :model))))
+        (swap! subscriptions-state update identity-key dissoc :model)
+        (swap! loops update identity-key dissoc :model))))
 
 (defn set-subscriptions!
   "Replace the full subscription state for identity-key with the request body's
@@ -404,13 +439,23 @@
                (empty? validated-entity)
                (empty? validated-relation)
                (empty? model-types))
-          (cleanup-identity! identity-key)
+          (if (= 3 (count identity-key))
+            (clear-subscriptions! identity-key)
+            (cleanup-identity! identity-key))
 
           :else
           (do (when (seq validated-data)     (ensure-delta-loop!          identity-key principal))
               (when (seq validated-entity)   (ensure-entity-delta-loop!   identity-key))
               (when (seq validated-relation) (ensure-relation-delta-loop! identity-key))))
         {:ok true}))))
+
+(defn set-stream-subscriptions!
+  "set-subscriptions!, then drop the session again if its stream closed while the set was applied."
+  [session body principal]
+  (let [result (set-subscriptions! session body principal)]
+    (when (and (= 3 (count session)) (not (contains? @event-streams session)))
+      (cleanup-identity! session))
+    result))
 
 (defn model-fingerprint
   "Set of visible entity+relation IDs for a principal's access context."
@@ -476,7 +521,7 @@
 ;;; Delta → Event Translation
 ;;; ============================================================================
 
-(declare destroy-event-stream)
+(declare destroy-event-stream destroy-identity-stream)
 
 (def ^:private stream-max-lifetime-ms
   "Hard lifetime for one SSE stream; `SYNTHIGY_SERVER_SSE_MAX_LIFETIME_MS` overrides, 0 disables."
@@ -493,11 +538,18 @@
               default)))))
 
 (defn create-event-stream
-  "Create a new SSE output channel for an identity."
-  [identity-key]
+  "Create a new SSE output channel for an identity; with a stream id it also gets a session of its own."
+  ([identity-key] (create-event-stream identity-key nil))
+  ([identity-key stream-id]
   (let [ch (async/chan (async/sliding-buffer 50))
         [user-xid client-id] identity-key
-        stream-count (inc (count (get @event-streams identity-key)))]
+        stream-count (inc (count (get @event-streams identity-key)))
+        own (when stream-id (stream-session identity-key stream-id))]
+    (when own
+      (when-let [old (first (get @event-streams own))]
+        (destroy-event-stream identity-key old))
+      (swap! stream-sessions assoc ch own)
+      (swap! event-streams assoc own #{ch}))
     (swap! event-streams update identity-key (fnil conj #{}) ch)
     (when (pos? stream-max-lifetime-ms)
       (async/go
@@ -515,15 +567,23 @@
                :data {:action :opened
                       :subject :sse-connection
                       :client client-id
-                      :stream-count stream-count}}
+                      :stream-count stream-count
+                      :stream stream-id}}
               "SSE connection opened")
-    ch))
+    ch)))
 
 (defn destroy-event-stream
-  "Remove an SSE output channel; when the last stream for an identity closes,
-   immediately tear the whole session down."
-  [identity-key stream-chan]
+  "Remove an SSE output channel and its own session; when the last stream for an identity closes,
+   immediately tear the identity-wide session down."
+  [session stream-chan]
+  (let [identity-key [(first session) (second session)]
+        [old _] (swap-vals! stream-sessions dissoc stream-chan)]
+    (destroy-identity-stream identity-key stream-chan (get old stream-chan))))
+
+(defn destroy-identity-stream
+  [identity-key stream-chan own]
   (async/close! stream-chan)
+  (when own (cleanup-identity! own))
   (swap! event-streams update identity-key disj stream-chan)
   (let [[user-xid client-id] identity-key
         remaining (count (get @event-streams identity-key))
@@ -595,7 +655,7 @@
 (defn ensure-delta-loop!
   "Per-identity go-loop translating batched delta envelopes into SSE events under the principal's roles."
   [identity-key principal]
-  (when (claim-loop! identity-key :data)
+  (when-let [token (claim-loop! identity-key :data)]
     (let [batch-chan (get-in @subscriptions-state [identity-key :data :batch-chan])
           roles      (access/project-role-xids principal)
           readable   (atom {})]
@@ -629,13 +689,13 @@
             (when (seq events)
               (fan-out! identity-key events))
             (recur))
-          (end-loop! identity-key :data))))))
+          (end-loop! identity-key :data token))))))
 
 (defn ensure-model-loop!
   "Model event go-loop for an identity; closes over the principal for per-user
    model filtering."
   [identity-key principal]
-  (when (claim-loop! identity-key :model)
+  (when-let [token (claim-loop! identity-key :model)]
     (let [model-chan (get-in @subscriptions-state [identity-key :model :chan])
           superuser? (access/with-principal principal
                        (daccess/superuser?))
@@ -662,7 +722,7 @@
                 (when (seq types)
                   (fan-out! identity-key (mapv (fn [t] {:event t :data data}) types)))))
             (recur))
-          (end-loop! identity-key :model))))))
+          (end-loop! identity-key :model token))))))
 
 (comment
   (require '[synthigy.transit :refer [->transit]])
@@ -673,9 +733,8 @@
             :timestamp (str (Instant/now))
             :model (->transit (dataset/deployed-model))}}]))
 
-(defn cleanup-identity!
-  "Tear down every resource owned by identity-key — delta subscriptions, batch +
-   model channels, open SSE streams, loop state."
+(defn clear-subscriptions!
+  "Drop every subscription resource of a session — delta subscriptions, batch + model channels, loop state — keeping its streams."
   [identity-key]
   (delta/unsubscribe! (data-sub-key     identity-key))
   (delta/unsubscribe! (entity-sub-key   identity-key))
@@ -686,11 +745,16 @@
   (when-let [model-chan (get-in @subscriptions-state [identity-key :model :chan])]
     (async/unsub dataset/publisher :model/deployed model-chan)
     (async/close! model-chan))
-  (doseq [stream (get @event-streams identity-key)]
-    (async/close! stream))
   (swap! subscriptions-state dissoc identity-key)
-  (swap! event-streams       dissoc identity-key)
   (swap! loops               dissoc identity-key))
+
+(defn cleanup-identity!
+  "Tear down every resource owned by a session, its open SSE streams included."
+  [identity-key]
+  (let [[old _] (swap-vals! event-streams dissoc identity-key)]
+    (clear-subscriptions! identity-key)
+    (doseq [stream (get old identity-key)]
+      (async/close! stream))))
 
 (defn cleanup-all! []
   (doseq [identity-key (keys @subscriptions-state)]
@@ -711,7 +775,10 @@
                                            :code "INVALID_BODY"}})
           (try
             (access/with-principal (:principal iam)
-              (data/json-response 200 (set-subscriptions! (request-identity request iam) body (:principal iam))))
+              (data/json-response 200 (set-stream-subscriptions!
+                                       (session-key (request-identity request iam)
+                                                    (or (request-stream request) (body-stream body)))
+                                       body (:principal iam))))
             (catch clojure.lang.ExceptionInfo e
               (let [code (:code (ex-data e))]
                 (data/json-response (case code
@@ -727,7 +794,11 @@
     (if (and iam-active? (not iam))
       (-> (data/json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
           (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
-      (data/json-response 200 (subscription-status (request-identity request iam))))))
+      (try
+        (data/json-response 200 (subscription-status (session-key (request-identity request iam)
+                                                                  (request-stream request))))
+        (catch clojure.lang.ExceptionInfo e
+          (data/json-response 400 {:error {:message (ex-message e) :code (:code (ex-data e))}}))))))
 
 (defn format-sse [{:keys [event data]}]
   (str "event: " event "\n"

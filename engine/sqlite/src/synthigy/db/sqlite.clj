@@ -48,14 +48,23 @@
                       {:driver (some-> (Class/forName "org.sqlite.JDBC") .getProtectionDomain .getCodeSource .getLocation str)}
                       e)))))
 
+(defonce writer (java.util.concurrent.locks.ReentrantLock. true))
+
+(defn with-writer
+  "Runs `f` holding the process-wide, first-come write lock of the SQLite database."
+  [f]
+  (.lock ^java.util.concurrent.locks.ReentrantLock writer)
+  (try (f) (finally (.unlock ^java.util.concurrent.locks.ReentrantLock writer))))
+
 (defn connect
   "Opens a Hikari pool over the SQLite file at `path`; returns the SQLite record."
-  [{:keys [path max-connections]
-    :or {max-connections 8}
+  [{:keys [path max-connections synchronous]
+    :or {max-connections 8 synchronous "NORMAL"}
     :as config}]
-  (log/info {:id ::connecting :data {:path path}} "Connecting to SQLite database")
+  (log/info {:id ::connecting :data {:path path :synchronous synchronous}} "Connecting to SQLite database")
   (io/make-parents (str path))
-  (let [jdbc-url (str "jdbc:sqlite:" path "?journal_mode=WAL&busy_timeout=30000&transaction_mode=IMMEDIATE")
+  (let [jdbc-url (str "jdbc:sqlite:" path "?journal_mode=WAL&synchronous=" synchronous
+                      "&busy_timeout=30000&transaction_mode=IMMEDIATE")
         datasource (doto
                      (HikariDataSource.)
                      (.setDriverClassName "org.sqlite.JDBC")
@@ -81,13 +90,23 @@
                 "Connected to SQLite database")
       (db/map->SQLite (assoc config :datasource datasource)))))
 
+(defn synchronous-mode
+  "SQLITE_SYNCHRONOUS as a pragma value; NORMAL when unset."
+  [v]
+  (let [m (str/upper-case (str/trim (or v "NORMAL")))]
+    (if (#{"OFF" "NORMAL" "FULL" "EXTRA"} m)
+      m
+      (throw (ex-info (str "SQLITE_SYNCHRONOUS must be OFF, NORMAL, FULL or EXTRA, not " (pr-str v))
+                      {:value v})))))
+
 (defn from-env
   "SQLite connection config: the instance's db/synthigy.db, pool size from SQLITE_POOL_SIZE."
   []
   (let [path (str synthigy.env/db-dir "/synthigy.db")]
     (log/info {:id ::path-from-env :data {:path path}} "SQLite database path")
     {:path path
-     :max-connections (Integer/parseInt (env :sqlite-pool-size "8"))}))
+     :max-connections (Integer/parseInt (env :sqlite-pool-size "8"))
+     :synchronous (synchronous-mode (env :sqlite-synchronous))}))
 
 (defn freelist-count
   [db]

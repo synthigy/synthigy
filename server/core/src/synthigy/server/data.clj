@@ -292,52 +292,6 @@
         (catch Throwable e
           (json-response 500 {:error {:message (ex-message e) :code "INTERNAL_ERROR"}}))))))
 
-(defn by-name!
-  "Resolves entity names to refs in ONE query, naming every miss — callers
-   create nothing until all of them resolve."
-  [entity-id names label]
-  (when (seq names)
-    (let [wanted (set names)
-          found (dataset/search-entity entity-id
-                                       {:name {:_in (vec wanted)}}
-                                       {(id/key) nil :name nil})
-          missing (remove (set (map :name found)) wanted)]
-      (when (seq missing)
-        (throw (ex-info (str "Unknown " label "(s): " (str/join ", " missing))
-                        {:code "BAD_REQUEST"})))
-      (vec found))))
-
-(defn iam-add-client-handler
-  "Ring handler for POST /iam/clients, ROOT-only — the one place a client secret is returned."
-  [request]
-  (let [iam (auth/authenticate-request request engine/platform-audience)]
-    (if-not iam
-      (-> (json-response 401 {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})
-          (assoc-in [:headers "WWW-Authenticate"] (auth/challenge request)))
-      (try
-        (access/with-principal (:principal iam)
-          (require-root!)
-          (let [{:keys [id name type secret settings roles apis]
-                 :or {type "public"}} (parse-request-body request)]
-            (when (str/blank? name)
-              (throw (ex-info "Missing required field: name" {:code "BAD_REQUEST"})))
-            (when-not (#{"public" "confidential"} type)
-              (throw (ex-info (str "Unknown type: " type)
-                              {:code "BAD_REQUEST" :valid ["public" "confidential"]})))
-            (when (and (or (seq roles) (seq apis)) (not= type "confidential"))
-              (throw (ex-info "roles/apis require type=confidential" {:code "BAD_REQUEST"})))
-            (let [roles (by-name! :iam/user-role roles "role")
-                  apis (by-name! :iam/api apis "API")
-                  client (iam/add-client {:id id :name name :type (keyword type)
-                                          :secret secret :settings settings :apis apis})]
-              (when (seq roles)
-                (iam/set-user {(id/key) (id/extract (:service-user client)) :roles roles}))
-              (json-response 200 {:id (:id client) :secret (:secret client) :type type
-                                  :roles (mapv :name roles) :apis (mapv :name apis)}))))
-        (catch clojure.lang.ExceptionInfo e (transfer-error-response e))
-        (catch Throwable e
-          (json-response 500 {:error {:message (ex-message e) :code "INTERNAL_ERROR"}}))))))
-
 (def ^:private observability-ops
   "Ops served by /logs, and only /logs."
   #{"log-query" "log-histogram" "traffic-stats" "log-config"})

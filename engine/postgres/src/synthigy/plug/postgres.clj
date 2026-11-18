@@ -160,23 +160,38 @@
     (jdbc/execute! tx
                    ["ALTER TABLE __relation_delta_queue RENAME COLUMN seq TO id"])))
 
+(defn xid-columns
+  "Every [table column] in the public schema among from_xid, to_xid and xid."
+  [tx]
+  (into #{}
+        (map (juxt :tbl :col))
+        (jdbc/execute! tx
+                       ["SELECT c.relname AS tbl, a.attname AS col
+                           FROM pg_attribute a
+                           JOIN pg_class c ON c.oid = a.attrelid
+                           JOIN pg_namespace n ON n.oid = c.relnamespace
+                          WHERE n.nspname = 'public' AND a.attnum > 0 AND NOT a.attisdropped
+                            AND a.attname IN ('from_xid', 'to_xid', 'xid')"]
+                       {:builder-fn rs/as-unqualified-lower-maps})))
+
 (defn ensure-xid-columns!
-  [tx table]
-  (jdbc/execute! tx
-                 [(format "ALTER TABLE \"%s\" ADD COLUMN IF NOT EXISTS from_xid TEXT" table)])
-  (jdbc/execute! tx
-                 [(format "ALTER TABLE \"%s\" ADD COLUMN IF NOT EXISTS to_xid TEXT" table)]))
+  [tx table existing]
+  (doseq [col ["from_xid" "to_xid"]
+          :when (not (contains? existing [table col]))]
+    (jdbc/execute! tx
+                   [(format "ALTER TABLE \"%s\" ADD COLUMN IF NOT EXISTS %s TEXT" table col)])))
 
 (defn ensure-entity-xid-columns!
   "Adds a missing `xid` column to every relation parent table."
-  [_tx relations]
+  [tx relations existing]
   (let [parent-tables (->> relations
                            (mapcat (juxt :from/table :to/table))
                            (remove nil?)
                            set)]
-    (doseq [t parent-tables]
+    (doseq [t parent-tables
+            :when (not (contains? existing [t "xid"]))]
       (try
-        (jdbc/execute! _tx
+        (jdbc/execute! tx
                        [(format "ALTER TABLE \"%s\" ADD COLUMN IF NOT EXISTS xid VARCHAR(64)" t)])
         (catch Throwable e
           (log/warn {:id ::entity-xid-column-add-failed
@@ -227,57 +242,130 @@
                 (supervisor/progress-update! {:done (min (- end lo) span) :total span})
                 (recur end)))))))))
 
-(defn install-relation-trigger!
-  "Idempotently attaches the relation-plug triggers to one link table, freezing `audit?` into TG_ARGV."
-  [tx {rel-id      :relation
-       table       :table
-       from        :from/field
-       to          :to/field
-       from-table  :from/table
-       to-table    :to/table}
+(defn function-body
+  [ddl]
+  (subs ddl (+ 2 (str/index-of ddl "$$")) (str/last-index-of ddl "$$")))
+
+(defn installed-functions
+  "{name body} of the public functions matching the `where` SQL predicate."
+  [tx where]
+  (into {}
+        (map (juxt :proname :prosrc))
+        (jdbc/execute! tx
+                       [(str "SELECT p.proname, p.prosrc FROM pg_proc p"
+                             " JOIN pg_namespace n ON n.oid = p.pronamespace"
+                             " WHERE n.nspname = 'public' AND " where)]
+                       {:builder-fn rs/as-unqualified-lower-maps})))
+
+(defn sync-functions!
+  "Creates or replaces each `{name ddl}` whose installed body differs."
+  [tx installed desired]
+  (doseq [[fn-name ddl] desired
+          :when (not= (get installed fn-name) (function-body ddl))]
+    (jdbc/execute! tx [ddl])))
+
+(defn trigger-args
+  [^bytes tgargs]
+  (if (pos? (alength tgargs))
+    (vec (butlast (.split (String. tgargs "UTF-8") "\u0000" -1)))
+    []))
+
+(defn installed-triggers
+  "{[table name] spec} of the public non-internal triggers matching the `where` SQL predicate."
+  [tx where]
+  (into {}
+        (map (fn [{:keys [tbl name fn type old new args]}]
+               [[tbl name]
+                {:fn     fn
+                 :args   (trigger-args args)
+                 :timing (if (bit-test type 1) "BEFORE" "AFTER")
+                 :level  (if (bit-test type 0) "ROW" "STATEMENT")
+                 :events (cond-> #{}
+                           (bit-test type 2) (conj "INSERT")
+                           (bit-test type 3) (conj "DELETE")
+                           (bit-test type 4) (conj "UPDATE"))
+                 :other  (bit-and type (bit-not 31))
+                 :old    old
+                 :new    new}]))
+        (jdbc/execute! tx
+                       [(str "SELECT c.relname AS tbl, t.tgname AS name, p.proname AS fn,"
+                             " t.tgtype::int AS type, t.tgoldtable AS old, t.tgnewtable AS new,"
+                             " t.tgargs AS args"
+                             " FROM pg_trigger t"
+                             " JOIN pg_class c ON c.oid = t.tgrelid"
+                             " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                             " JOIN pg_proc p ON p.oid = t.tgfoid"
+                             " WHERE NOT t.tgisinternal AND n.nspname = 'public' AND " where)]
+                       {:builder-fn rs/as-unqualified-lower-maps})))
+
+(defn trigger-spec
+  [fn-name args timing level events old new]
+  {:fn fn-name :args (mapv str args) :timing timing :level level :events (set events)
+   :other 0 :old old :new new})
+
+(defn create-trigger-ddl
+  [[table trigger] {fn-name :fn :keys [args timing level events old new]}]
+  (str "CREATE TRIGGER " trigger " " timing " "
+       (str/join " OR " (filter events ["INSERT" "UPDATE" "DELETE"]))
+       " ON \"" table "\""
+       (when (or old new)
+         (str " REFERENCING"
+              (when old (str " OLD TABLE AS " old))
+              (when new (str " NEW TABLE AS " new))))
+       " FOR EACH " level
+       " EXECUTE FUNCTION " fn-name "("
+       (str/join ", " (map #(str "'" (str/replace % "'" "''") "'") args))
+       ")"))
+
+(defn sync-table-triggers!
+  "Brings one table's plug triggers to `desired` in one transaction; an unchanged trigger is never touched."
+  [tx table installed desired]
+  (let [mine?   (fn [[[t _] _]] (= t table))
+        stale   (for [[k spec] (filter mine? installed)
+                      :when (not= spec (get desired k))]
+                  k)
+        missing (for [[k spec] (filter mine? desired)
+                      :when (not= spec (get installed k))]
+                  [k spec])]
+    (when (or (seq stale) (seq missing))
+      (jdbc/with-transaction [t tx]
+        (doseq [[_ trigger] stale]
+          (jdbc/execute! t [(format "DROP TRIGGER IF EXISTS %s ON \"%s\"" trigger table)]))
+        (doseq [[k spec] missing]
+          (jdbc/execute! t [(create-trigger-ddl k spec)]))))))
+
+(defn relation-trigger-specs
+  "{[table name] spec} of the relation-plug triggers of one link table; `audit?` is frozen into TG_ARGV."
+  [{rel-id     :relation
+    table      :table
+    from       :from/field
+    to         :to/field
+    from-table :from/table
+    to-table   :to/table}
    audit?]
-  (ensure-xid-columns! tx table)
-  (jdbc/execute! tx
-                 [(format "DROP TRIGGER IF EXISTS trg_relation_xid_populate ON \"%s\"" table)])
-  (when (= :xid (id/key))
-    (jdbc/execute! tx
-                   [(format "CREATE TRIGGER trg_relation_xid_populate
-                BEFORE INSERT ON \"%s\"
-                FOR EACH ROW
-                EXECUTE FUNCTION synthigy_relation_xid_populate('%s', '%s', '%s', '%s')"
-                            table from-table to-table (name from) (name to))]))
-  (doseq [trg ["trg_relation_audit" "trg_relation_audit_ins" "trg_relation_audit_del"]]
-    (jdbc/execute! tx [(format "DROP TRIGGER IF EXISTS %s ON \"%s\"" trg table)]))
-  (jdbc/execute! tx
-                 [(format "CREATE TRIGGER trg_relation_audit_ins
-              AFTER INSERT ON \"%s\"
-              REFERENCING NEW TABLE AS new_rows
-              FOR EACH STATEMENT
-              EXECUTE FUNCTION synthigy_emit_relation_delta('%s', '%s', '%s', '%s')"
-                          table (str rel-id) (name from) (name to) (if audit? "true" "false"))])
-  (jdbc/execute! tx
-                 [(format "CREATE TRIGGER trg_relation_audit_del
-              AFTER DELETE ON \"%s\"
-              REFERENCING OLD TABLE AS old_rows
-              FOR EACH STATEMENT
-              EXECUTE FUNCTION synthigy_emit_relation_delta('%s', '%s', '%s', '%s')"
-                          table (str rel-id) (name from) (name to) (if audit? "true" "false"))])
-  (jdbc/execute! tx
-                 [(format "DROP TRIGGER IF EXISTS trg_relation_notify ON \"%s\"" table)])
-  (jdbc/execute! tx
-                 [(format "CREATE TRIGGER trg_relation_notify
-              AFTER INSERT OR DELETE ON \"%s\"
-              FOR EACH STATEMENT
-              EXECUTE FUNCTION synthigy_notify_delta_ready()"
-                          table)]))
+  (let [emit-args [(str rel-id) (name from) (name to) (if audit? "true" "false")]]
+    (cond-> {[table "trg_relation_audit_ins"]
+             (trigger-spec "synthigy_emit_relation_delta" emit-args
+                           "AFTER" "STATEMENT" ["INSERT"] nil "new_rows")
+             [table "trg_relation_audit_del"]
+             (trigger-spec "synthigy_emit_relation_delta" emit-args
+                           "AFTER" "STATEMENT" ["DELETE"] "old_rows" nil)
+             [table "trg_relation_notify"]
+             (trigger-spec "synthigy_notify_delta_ready" []
+                           "AFTER" "STATEMENT" ["INSERT" "DELETE"] nil nil)}
+      (= :xid (id/key))
+      (assoc [table "trg_relation_xid_populate"]
+             (trigger-spec "synthigy_relation_xid_populate"
+                           [from-table to-table (name from) (name to)]
+                           "BEFORE" "ROW" ["INSERT"] nil nil)))))
 
 (defn entity-emit-fn-name
   [entity-xid]
-  (str "synthigy_emit_" entity-xid "_delta"))
+  (str/lower-case (str "synthigy_emit_" entity-xid "_delta")))
 
 (defn entity-trigger-name
   [entity-xid kind]
-  (str "trg_" entity-xid "_entity_" (name kind)))
+  (str/lower-case (str "trg_" entity-xid "_entity_" (name kind))))
 
 (defn entity-user-fields
   "Sorted {column attribute-xid} of the user-defined fields of a schema entity."
@@ -371,53 +459,20 @@
      entity-xid al o-pairs n-pairs changed
      entity-xid al o-pairs)))
 
-(defn drop-stale-plug-triggers-on-table!
-  "Drops every plug trigger on `table`, legacy table-name-keyed and xid-keyed alike."
-  [tx table]
-  (let [stale (jdbc/execute! tx
-                             ["SELECT tgname AS trigger_name
-                  FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
-                  JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE NOT t.tgisinternal
-                    AND n.nspname = 'public'
-                    AND c.relname = ?
-                    AND (tgname LIKE 'trg\\_%\\_entity\\_audit%' ESCAPE '\\'
-                      OR tgname LIKE 'trg\\_%\\_entity\\_notify' ESCAPE '\\')"
-                              table])]
-    (doseq [{trigger :pg_trigger/trigger_name} stale]
-      (jdbc/execute! tx
-                     [(format "DROP TRIGGER IF EXISTS %s ON \"%s\"" trigger table)]))))
-
-(defn install-entity-triggers!
-  "Idempotently (re)installs an entity's emit fn plus its per-op and notify triggers."
-  [tx entity-xid {table :table :as entity} audit?]
-  (when (seq (entity-user-fields entity))
-    (let [fn-name         (entity-emit-fn-name entity-xid)
-          audit-trg-name  (entity-trigger-name entity-xid :audit)
-          notify-trg-name (entity-trigger-name entity-xid :notify)]
-      (drop-stale-plug-triggers-on-table! tx table)
-      (jdbc/execute! tx [(entity-emit-fn-ddl entity-xid entity audit?)])
-      (jdbc/execute! tx
-                     [(format "CREATE TRIGGER %s_ins AFTER INSERT ON \"%s\"
-                  REFERENCING NEW TABLE AS new_rows
-                  FOR EACH STATEMENT EXECUTE FUNCTION %s()"
-                              audit-trg-name table fn-name)])
-      (jdbc/execute! tx
-                     [(format "CREATE TRIGGER %s_upd AFTER UPDATE ON \"%s\"
-                  REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
-                  FOR EACH STATEMENT EXECUTE FUNCTION %s()"
-                              audit-trg-name table fn-name)])
-      (jdbc/execute! tx
-                     [(format "CREATE TRIGGER %s_del AFTER DELETE ON \"%s\"
-                  REFERENCING OLD TABLE AS old_rows
-                  FOR EACH STATEMENT EXECUTE FUNCTION %s()"
-                              audit-trg-name table fn-name)])
-      (jdbc/execute! tx
-                     [(format "CREATE TRIGGER %s
-                  AFTER INSERT OR UPDATE OR DELETE ON \"%s\"
-                  FOR EACH STATEMENT
-                  EXECUTE FUNCTION synthigy_notify_delta_ready()"
-                              notify-trg-name table)]))))
+(defn entity-trigger-specs
+  "{[table name] spec} of one entity's per-op and notify triggers."
+  [entity-xid {table :table}]
+  (let [emit  (entity-emit-fn-name entity-xid)
+        audit (entity-trigger-name entity-xid :audit)]
+    {[table (str audit "_ins")]
+     (trigger-spec emit [] "AFTER" "STATEMENT" ["INSERT"] nil "new_rows")
+     [table (str audit "_upd")]
+     (trigger-spec emit [] "AFTER" "STATEMENT" ["UPDATE"] "old_rows" "new_rows")
+     [table (str audit "_del")]
+     (trigger-spec emit [] "AFTER" "STATEMENT" ["DELETE"] "old_rows" nil)
+     [table (entity-trigger-name entity-xid :notify)]
+     (trigger-spec "synthigy_notify_delta_ready" []
+                   "AFTER" "STATEMENT" ["INSERT" "UPDATE" "DELETE"] nil nil)}))
 
 (def ^:private drain-batch-size 2000)  ; ponytail: claim window; 500→2000 cuts lock cycles ~4x under burst
 (def ^:private listen-poll-ms 10000)
@@ -667,50 +722,32 @@
                  :data {:action :stopped :subject :relation-drainer}}
                 "Relation drainer loop exited"))))
 
-(defn drop-stale-relation-triggers!
-  [tx]
-  (let [staleish
-        (jdbc/execute! tx
-                       ["SELECT tgname AS trigger_name, c.relname AS table_name
-            FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
-            WHERE NOT t.tgisinternal
-              AND tgname IN ('trg_relation_audit',
-                             'trg_relation_audit_ins',
-                             'trg_relation_audit_del',
-                             'trg_relation_notify',
-                             'trg_relation_xid_populate')"])]
-    (doseq [{table :pg_class/table_name
-             trigger :pg_trigger/trigger_name} staleish]
-      (jdbc/execute! tx
-                     [(format "DROP TRIGGER IF EXISTS %s ON \"%s\"" trigger table)]))))
+(def relation-triggers-where
+  "t.tgname IN ('trg_relation_audit', 'trg_relation_audit_ins', 'trg_relation_audit_del',
+                'trg_relation_notify', 'trg_relation_xid_populate')")
 
-(defn drop-stale-entity-fns!
-  "Drops every per-entity emit fn; the reconcile recreates the live ones."
-  [tx]
-  (let [staleish
-        (jdbc/execute! tx
-                       ["SELECT proname FROM pg_proc
-            JOIN pg_namespace n ON n.oid = pronamespace
-            WHERE n.nspname = 'public'
-              AND proname LIKE 'synthigy\\_emit\\_%\\_delta' ESCAPE '\\'
-              AND proname <> 'synthigy_emit_relation_delta'"])]
-    (doseq [{p :pg_proc/proname} staleish]
-      (try
-        (jdbc/execute! tx [(format "DROP FUNCTION IF EXISTS %s() CASCADE" p)])
-        (catch Throwable e
-          (log/warn {:id ::stale-fn-drop-failed
-                     :data {:proname p}}
-                    (.getMessage e)))))))
+(def entity-triggers-where
+  "(t.tgname LIKE 'trg\\_%\\_entity\\_audit%' ESCAPE '\\'
+    OR t.tgname LIKE 'trg\\_%\\_entity\\_notify' ESCAPE '\\')")
+
+(def relation-functions-where
+  "p.proname IN ('synthigy_emit_relation_delta', 'synthigy_notify_delta_ready',
+                 'synthigy_relation_xid_populate')")
+
+(def entity-functions-where
+  "p.proname LIKE 'synthigy\\_emit\\_%\\_delta' ESCAPE '\\'
+   AND p.proname <> 'synthigy_emit_relation_delta'")
 
 (defn reconcile-relations!
-  "Idempotently installs the relation queue, emit fns and per-relation triggers, then backfills xids."
+  "Brings the relation queue, emit fns and per-relation triggers to the model, then backfills xids."
   [_db tx schema-relations]
   (migrate-legacy-queue! tx)
-  (drop-stale-relation-triggers! tx)
   (jdbc/execute! tx [delta-queue-ddl])
-  (jdbc/execute! tx [relation-emit-fn-ddl])
-  (jdbc/execute! tx [notify-fn-ddl])
-  (jdbc/execute! tx [relation-xid-populate-fn-ddl])
+  (sync-functions! tx
+                   (installed-functions tx relation-functions-where)
+                   {"synthigy_emit_relation_delta"   relation-emit-fn-ddl
+                    "synthigy_notify_delta_ready"    notify-fn-ddl
+                    "synthigy_relation_xid_populate" relation-xid-populate-fn-ddl})
   (let [rel-seq (if (map? schema-relations)
                   (vals schema-relations)
                   schema-relations)
@@ -728,10 +765,18 @@
                          rel-seq)
         unique-by-table (into {}
                               (filter (fn [[_t r]] (some? (:relation r))))
-                              unique-by-table)]
-    (ensure-entity-xid-columns! tx (vals unique-by-table))
-    (doseq [rel (vals unique-by-table)]
-      (install-relation-trigger! tx rel (policy/audited-relation? (str (:relation rel)))))
+                              unique-by-table)
+        columns   (xid-columns tx)
+        installed (installed-triggers tx relation-triggers-where)
+        desired   (into {}
+                        (map (fn [rel]
+                               (relation-trigger-specs rel (policy/audited-relation? (str (:relation rel))))))
+                        (vals unique-by-table))]
+    (ensure-entity-xid-columns! tx (vals unique-by-table) columns)
+    (doseq [table (keys unique-by-table)]
+      (ensure-xid-columns! tx table columns))
+    (doseq [table (distinct (map first (concat (keys desired) (keys installed))))]
+      (sync-table-triggers! tx table installed desired))
     (doseq [[i rel] (map-indexed vector (vals unique-by-table))]
       (supervisor/progress-update! {:detail (format "relation xids %d/%d · %s"
                                                     (inc i) (count unique-by-table) (:table rel))
@@ -749,37 +794,58 @@
   nil)
 
 (defn reconcile-entities!
-  "Idempotently installs the entity queue and per-entity triggers; skipped in :euuid mode."
+  "Brings the entity queue, per-entity emit fns and triggers to the model; skipped in :euuid mode."
   [_db tx schema-entities]
   (if (not= :xid (id/key))
     (log/info {:id ::entity-plug-skipped-legacy-id
                :data {:action :skipped :subject :entity-plug
                       :reason "id-key is :euuid; xid columns absent on entity tables"}}
               "Entity plug triggers skipped (euuid mode)")
-    (do
-      (drop-stale-entity-fns! tx)
-      (jdbc/execute! tx [entity-queue-ddl])
-      (let [pairs (cond
-                    (map? schema-entities) (seq schema-entities)
-                    (sequential? schema-entities)
-                    (map (fn [[id ent]] [id ent]) schema-entities)
-                    :else nil)]
-        (doseq [[entity-id entity] pairs]
-          (when (:table entity)
-            (try
-              (install-entity-triggers! tx (str entity-id) entity
-                                        (policy/audited-entity? (str entity-id)))
-              (catch Throwable e
-                (if (relation-missing? e)
-                  (log/warn {:id ::table-missing-skipped
-                             :data {:action :skipped :subject :plug
-                                    :phase :entity-trigger
-                                    :table (:table entity)
-                                    :entity-id (str entity-id)}}
-                            "Entity table missing; skipping trigger install (model/schema drift)")
-                  (log/error! {:id ::entity-trigger-install-failed
-                               :data {:table (:table entity)
-                                      :entity-id (str entity-id)}} e)))))))))
+    (let [_         (jdbc/execute! tx [entity-queue-ddl])
+          entities  (for [[entity-id entity] (cond
+                                               (map? schema-entities) (seq schema-entities)
+                                               (sequential? schema-entities) schema-entities
+                                               :else nil)
+                          :when (and (:table entity) (seq (entity-user-fields entity)))]
+                      [(str entity-id) entity])
+          functions (into {}
+                          (map (fn [[xid entity]]
+                                 [(entity-emit-fn-name xid)
+                                  (entity-emit-fn-ddl xid entity (policy/audited-entity? xid))]))
+                          entities)
+          desired   (into {} (map (fn [[xid entity]] (entity-trigger-specs xid entity))) entities)
+          installed-fns (installed-functions tx entity-functions-where)
+          installed (installed-triggers tx entity-triggers-where)
+          table->id (into {} (map (fn [[xid entity]] [(:table entity) xid])) entities)]
+      (doseq [[fn-name ddl] functions]
+        (try
+          (sync-functions! tx installed-fns {fn-name ddl})
+          (catch Throwable e
+            (when-not (relation-missing? e)
+              (log/error! {:id ::entity-trigger-install-failed
+                           :data {:function fn-name}} e)))))
+      (doseq [table (distinct (map first (concat (keys desired) (keys installed))))]
+        (try
+          (sync-table-triggers! tx table installed desired)
+          (catch Throwable e
+            (if (relation-missing? e)
+              (log/warn {:id ::table-missing-skipped
+                         :data {:action :skipped :subject :plug
+                                :phase :entity-trigger
+                                :table table
+                                :entity-id (table->id table)}}
+                        "Entity table missing; skipping trigger install (model/schema drift)")
+              (log/error! {:id ::entity-trigger-install-failed
+                           :data {:table table
+                                  :entity-id (table->id table)}} e)))))
+      (doseq [fn-name (keys installed-fns)
+              :when (not (contains? functions fn-name))]
+        (try
+          (jdbc/execute! tx [(format "DROP FUNCTION IF EXISTS %s() CASCADE" fn-name)])
+          (catch Throwable e
+            (log/warn {:id ::stale-fn-drop-failed
+                       :data {:proname fn-name}}
+                      (.getMessage e)))))))
   nil)
 
 (defn set-context!

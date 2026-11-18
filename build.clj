@@ -41,6 +41,7 @@
 
 (def combo (or (System/getenv "SYNTHIGY_COMBO") "engine-postgres:audit-postgres:log-sqlite:server-enso:server-console"))
 (def aot? (= "true" (System/getenv "SYNTHIGY_AOT")))
+(def compile-opts {:direct-linking (= "true" (System/getenv "SYNTHIGY_DIRECT_LINKING"))})
 (def aliases (mapv keyword (str/split combo #":")))
 (def class-dir "target/classes")
 (def uber-file (format "target/synthigy-%s.jar" (str/replace combo ":" "-")))
@@ -62,7 +63,7 @@
       (b/write-file {:path (str class-dir "/synthigy/VERSION") :string v}))
     (when aot?
       (let [nses (remove no-aot (mapcat #(find/find-namespaces-in-dir (java.io.File. ^String %)) dirs))]
-        (b/compile-clj {:basis basis :class-dir class-dir :ns-compile (vec nses)})))
+        (b/compile-clj {:basis basis :class-dir class-dir :ns-compile (vec nses) :compile-opts compile-opts})))
     ;; :local/root lib sources enter via b/uber, not copy-dir — any local
     ;; lib outside the synthigy/patcho packages needs its own exclude here
     (b/uber {:class-dir class-dir :uber-file uber-file :basis basis
@@ -284,7 +285,7 @@
                                            (remove #(str/ends-with? % ".class")))
                                  (file-seq (java.io.File. cd)))]
       (doseq [d dirs] (b/copy-dir {:src-dirs [d] :target-dir cd :ignores [#".*\.clj[cs]?$"]}))
-      (b/compile-clj {:basis compile-basis :class-dir cd :ns-compile owned})
+      (b/compile-clj {:basis compile-basis :class-dir cd :ns-compile owned :compile-opts compile-opts})
       (doseq [^java.io.File f (file-seq (java.io.File. cd))]
         (when (and (.isFile f) (staged-resources (.getPath f))) (.delete f))))
     ;; purge-foreign! alone is enough here: a stub-compiled shadowed class
@@ -362,7 +363,7 @@
     (b/delete {:path core-cd})
     (doseq [d core-dirs] (b/copy-dir {:src-dirs [d] :target-dir core-cd :ignores [#".*\.clj[cs]?$"]}))
     (copy-docs! core-cd)
-    (b/compile-clj {:basis witness :class-dir core-cd :ns-compile (nses-in core-dirs)})
+    (b/compile-clj {:basis witness :class-dir core-cd :ns-compile (nses-in core-dirs) :compile-opts compile-opts})
     (doseq [p shadowed]
       (b/delete {:path (str core-cd "/" p ".clj")}))
     (b/uber {:class-dir core-cd :uber-file "target/synthigy-core.jar"

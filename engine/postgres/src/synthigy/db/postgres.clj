@@ -88,6 +88,7 @@
                      (.setInitializationFailTimeout 0)
                      (.setConnectionInitSql (init-sql jit?))
                      (.setMaximumPoolSize max-connections)
+                     (.setMinimumIdle (min 10 max-connections))
                      (.setConnectionTestQuery "select 1")
                      (.setKeepaliveTime 30000)
                      (.setConnectionTimeout 30000)
@@ -122,7 +123,7 @@
                        :password password
                        :user user
                        :jit? (= "on" (str/lower-case (str (env :postgres-jit "off"))))
-                       :max-connections (Integer/parseInt (env :postgres-pool-size "20")))]
+                       :max-connections (Integer/parseInt (env :postgres-pool-size "50")))]
     (check-connection-params data)
     data))
 

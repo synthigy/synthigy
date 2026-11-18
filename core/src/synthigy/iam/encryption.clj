@@ -73,7 +73,7 @@
 (defn generate-key-pair
   "Generate a new 2048-bit RSA keypair as {:kid :public :private}."
   []
-  (let [generator (KeyPairGenerator/getInstance "RSA")
+  (let [generator (doto (KeyPairGenerator/getInstance "RSA") (.initialize 2048))
         key-pair (.generateKeyPair generator)
         public (.getPublic key-pair)
         private (.getPrivate key-pair)]

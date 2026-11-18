@@ -69,21 +69,40 @@
                     rand-62)]
     (java.util.UUID. msb lsb)))
 
-(defn drop-all-plug-triggers-for-table!
-  "Drops every plug trigger on `table`, whatever its name shape."
-  [tx table]
-  (let [stale (->> (jdbc/execute! tx
-                     ["SELECT name FROM sqlite_master
-                       WHERE type = 'trigger'
-                         AND tbl_name = ?
-                         AND (name LIKE 'trg_%_entity_audit_%'
-                           OR name LIKE 'trg_%_audit_insert'
-                           OR name LIKE 'trg_%_audit_delete')"
-                      table])
-                   (map :sqlite_master/name)
-                   (remove nil?))]
-    (doseq [trg stale]
-      (jdbc/execute! tx [(format "DROP TRIGGER IF EXISTS \"%s\"" trg)]))))
+(defn installed-triggers
+  "{name {:table :sql}} of every plug trigger."
+  [tx]
+  (into {}
+        (map (fn [{:keys [name tbl_name sql]}] [name {:table tbl_name :sql sql}]))
+        (jdbc/execute! tx
+                       ["SELECT name, tbl_name, sql FROM sqlite_master
+                         WHERE type = 'trigger'
+                           AND (name LIKE 'trg_%_entity_audit_%'
+                             OR name LIKE 'trg_%_audit_insert'
+                             OR name LIKE 'trg_%_audit_delete')"]
+                       {:builder-fn rs/as-unqualified-maps})))
+
+(defn entity-trigger?
+  [trigger-name]
+  (str/includes? trigger-name "_entity_audit_"))
+
+(defn sync-table-triggers!
+  "Brings one table's plug triggers to `desired` in one transaction; an unchanged trigger is never touched."
+  [tx table installed desired]
+  (let [mine?   (fn [[_ spec]] (= table (:table spec)))
+        stale   (for [[trigger spec] (filter mine? installed)
+                      :when (not= spec (get desired trigger))]
+                  trigger)
+        missing (for [[trigger spec] (filter mine? desired)
+                      :when (not= spec (get installed trigger))]
+                  spec)]
+    (when (or (seq stale) (seq missing))
+      (sqlite-db/with-writer
+       (fn [] (jdbc/with-transaction [t tx]
+          (doseq [trigger stale]
+            (jdbc/execute! t [(format "DROP TRIGGER IF EXISTS \"%s\"" trigger)]))
+          (doseq [{:keys [sql]} missing]
+            (jdbc/execute! t [sql]))))))))
 
 (defn relation-trigger-name
   [rel-xid op]
@@ -158,14 +177,23 @@
   (when-not (column-exists? tx table "seq")
     (jdbc/execute! tx [(format "ALTER TABLE \"%s\" ADD COLUMN seq INTEGER" table)])))
 
+(defn link-xid-columns
+  "Every [table column] among from_xid and to_xid."
+  [tx]
+  (into #{}
+        (map (juxt :tbl :col))
+        (jdbc/execute! tx
+                       ["SELECT m.name AS tbl, p.name AS col
+                           FROM sqlite_master m, pragma_table_info(m.name) p
+                          WHERE m.type = 'table' AND p.name IN ('from_xid', 'to_xid')"]
+                       {:builder-fn rs/as-unqualified-maps})))
+
 (defn ensure-xid-columns!
-  [tx table]
-  (when-not (column-exists? tx table "from_xid")
+  [tx table existing]
+  (doseq [col ["from_xid" "to_xid"]
+          :when (not (contains? existing [table col]))]
     (jdbc/execute! tx
-                   [(format "ALTER TABLE \"%s\" ADD COLUMN from_xid TEXT" table)]))
-  (when-not (column-exists? tx table "to_xid")
-    (jdbc/execute! tx
-                   [(format "ALTER TABLE \"%s\" ADD COLUMN to_xid TEXT" table)])))
+                   [(format "ALTER TABLE \"%s\" ADD COLUMN %s TEXT" table col)])))
 
 (defn backfill-xid-columns!
   "Fills NULL from_xid/to_xid from the entity tables; safe to re-run."
@@ -187,13 +215,11 @@
                  " WHERE to_xid IS NULL")
             table to-table table (name to-field))]))
 
-(defn install-relation-triggers!
-  "Reinstalls the INSERT/DELETE plug triggers on one link table; throws when the table is missing."
-  [tx {table :table :as rel} audit?]
-  (ensure-xid-columns! tx table)
-  (drop-all-plug-triggers-for-table! tx table)
-  (jdbc/execute! tx [(insert-trigger-ddl rel audit?)])
-  (jdbc/execute! tx [(delete-trigger-ddl rel audit?)]))
+(defn relation-trigger-specs
+  "{name {:table :sql}} of the INSERT/DELETE plug triggers of one link table."
+  [{rel-id :relation table :table :as rel} audit?]
+  {(relation-trigger-name (str rel-id) :insert) {:table table :sql (insert-trigger-ddl rel audit?)}
+   (relation-trigger-name (str rel-id) :delete) {:table table :sql (delete-trigger-ddl rel audit?)}})
 
 (defn entity-trigger-name
   [entity-xid op]
@@ -317,14 +343,13 @@
             al
             pairs)))
 
-(defn install-entity-triggers!
-  "Reinstalls the INSERT/UPDATE/DELETE plug triggers on one entity table."
-  [tx entity-xid {table :table :as entity} audit?]
+(defn entity-trigger-specs
+  "{name {:table :sql}} of the INSERT/UPDATE/DELETE plug triggers of one entity table."
+  [entity-xid {table :table :as entity} audit?]
   (when (seq (entity-user-fields entity))
-    (drop-all-plug-triggers-for-table! tx table)
-    (jdbc/execute! tx [(entity-insert-trigger-ddl entity-xid entity audit?)])
-    (jdbc/execute! tx [(entity-update-trigger-ddl entity-xid entity audit?)])
-    (jdbc/execute! tx [(entity-delete-trigger-ddl entity-xid entity audit?)])))
+    {(entity-trigger-name entity-xid :insert) {:table table :sql (entity-insert-trigger-ddl entity-xid entity audit?)}
+     (entity-trigger-name entity-xid :update) {:table table :sql (entity-update-trigger-ddl entity-xid entity audit?)}
+     (entity-trigger-name entity-xid :delete) {:table table :sql (entity-delete-trigger-ddl entity-xid entity audit?)}}))
 
 ;; 2000, not PG's 500 — SQLite has no SKIP LOCKED.
 (def ^:private drain-batch-size 2000)
@@ -424,8 +449,9 @@
                             {:builder-fn rs/as-unqualified-maps})]
     (when (seq rows)
       (write! provider (mapv (fn [{:keys [seq ts payload]}] (assoc (->envelope ts payload) :seq seq)) rows))
-      (jdbc/with-transaction [tx ds]
-        (jdbc/execute! tx [(str "DELETE FROM " pending " WHERE seq IN (" (str/join "," (map :seq rows)) ")")])))
+      (sqlite-db/with-writer
+       (fn [] (jdbc/with-transaction [tx ds]
+          (jdbc/execute! tx [(str "DELETE FROM " pending " WHERE seq IN (" (str/join "," (map :seq rows)) ")")])))))
     (count rows)))
 
 (defn pending-envelopes
@@ -463,7 +489,7 @@
   [db]
   (loop [audited? false]
     (let [ds       (:datasource db)
-          claim    (fn [q] (jdbc/with-transaction [tx ds] (claim-batch! tx (queues q))))
+          claim    (fn [q] (sqlite-db/with-writer (fn [] (jdbc/with-transaction [tx ds] (claim-batch! tx (queues q))))))
           rel-envs (claim :relation)
           _        (publish! rel-envs)
           ent-envs (claim :entity)
@@ -584,8 +610,16 @@
         unique-by-table (into {}
                               (filter (fn [[_t r]] (some? (:relation r))))
                               unique-by-table)]
-    (doseq [rel (vals unique-by-table)]
-      (install-relation-triggers! tx rel (policy/audited-relation? (str (:relation rel)))))
+    (let [columns   (link-xid-columns tx)
+          installed (into {} (remove (comp entity-trigger? key)) (installed-triggers tx))
+          desired   (into {}
+                          (map (fn [rel]
+                                 (relation-trigger-specs rel (policy/audited-relation? (str (:relation rel))))))
+                          (vals unique-by-table))]
+      (doseq [table (keys unique-by-table)]
+        (ensure-xid-columns! tx table columns))
+      (doseq [table (distinct (map :table (concat (vals desired) (vals installed))))]
+        (sync-table-triggers! tx table installed desired)))
     (doseq [rel (vals unique-by-table)]
       (try
         (backfill-xid-columns! tx rel)
@@ -607,16 +641,26 @@
                 (map (fn [[id ent]] [id ent]) schema-entities)
 
                 :else
-                nil)]
-    (doseq [[entity-id entity] pairs]
-      (when (:table entity)
-        (try
-          (install-entity-triggers! tx (str entity-id) entity
-                                    (policy/audited-entity? (str entity-id)))
-          (catch Throwable e
-            (log/error! {:id ::entity-trigger-install-failed
-                         :data {:table (:table entity)
-                                :entity-id (str entity-id)}} e))))))
+                nil)
+        installed (into {} (filter (comp entity-trigger? key)) (installed-triggers tx))
+        desired   (into {}
+                        (keep (fn [[entity-id entity]]
+                                (when (:table entity)
+                                  (try
+                                    (entity-trigger-specs (str entity-id) entity
+                                                          (policy/audited-entity? (str entity-id)))
+                                    (catch Throwable e
+                                      (log/error! {:id ::entity-trigger-install-failed
+                                                   :data {:table (:table entity)
+                                                          :entity-id (str entity-id)}} e)
+                                      nil)))))
+                        pairs)]
+    (doseq [table (distinct (map :table (concat (vals desired) (vals installed))))]
+      (try
+        (sync-table-triggers! tx table installed desired)
+        (catch Throwable e
+          (log/error! {:id ::entity-trigger-install-failed
+                       :data {:table table}} e)))))
   nil)
 
 (defn set-context!
@@ -625,17 +669,12 @@
   (jdbc/execute! tx [audit-ctx-ddl])
   (let [principal (access/current-principal)]
     (jdbc/execute! tx
-                   ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('actor_xid', ?)"
-                    (some-> principal :xid str)])
-    (jdbc/execute! tx
-                   ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('request_id', ?)"
-                    (log/request-id)])
-    (jdbc/execute! tx
-                   ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('scope_xid', ?)"
-                    (some-> principal :scope-xid str)]))
-  (jdbc/execute! tx
-                 ["INSERT OR REPLACE INTO _ctx (k, v) VALUES ('txid', ?)"
-                  (str (uuid-v7))])
+                   [(str "INSERT OR REPLACE INTO _ctx (k, v) VALUES"
+                         " ('actor_xid', ?), ('request_id', ?), ('scope_xid', ?), ('txid', ?)")
+                    (some-> principal :xid str)
+                    (log/request-id)
+                    (some-> principal :scope-xid str)
+                    (str (uuid-v7))]))
   nil)
 
 (defn start-drainer!

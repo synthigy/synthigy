@@ -3,6 +3,31 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.5.5] — 2026-11-18
+
+### Added
+- **One subscription set per event stream.** `GET /data/events?stream=<id>` (an id the client picks,
+  8–64 of `A-Za-z0-9_-`) gives that stream its own set: `/data/subscription/set` and `/status` with the same
+  `stream` (body field or `X-Synthigy-Stream`) apply to it alone, events for it reach only that stream, and
+  closing it drops only its set. Several processes on one client id no longer overwrite each other. Without
+  an id the set stays per client, as before. Unknown stream: 400 `STREAM_NOT_FOUND`.
+- **`/data` turns excess load away with `503 SERVER_BUSY`** (`Retry-After: 1`,
+  `retryable: true`) instead of letting requests queue for the database until clients time
+  out. Requests are admitted in arrival order, up to twice the database pool at once, with as
+  many again waiting at most a second. On every server adapter.
+
+### Changed
+- **`POSTGRES_POOL_SIZE` defaults to 50** (was 20). The pool keeps 10 connections open when idle and
+  grows to the limit under load; keep the sum of every client's limit under Postgres
+  `max_connections` (100 by default).
+- **HikariCP 7.1.0** (was 6.2.1): it parks instead of spinning when it hands a
+  connection to a waiting virtual thread.
+
+### Removed
+- **`POST /iam/clients`.** Create a client over `/data` (an `oauth_client` row
+  with a secret you pick) or with `synthigy iam add-client`. `/iam/export` and
+  `/iam/import` stay.
+
 ## [0.5.4] — 2026-11-17
 
 ### Added

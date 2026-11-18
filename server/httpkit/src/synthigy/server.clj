@@ -75,7 +75,7 @@
                    "WWW-Authenticate" (auth/challenge request)}
          :body (json/write-str {:error {:message "Unauthorized" :code "UNAUTHORIZED"}})}
         (let [identity-key (subscription/request-identity request iam)
-              stream-chan  (subscription/create-event-stream identity-key)
+              stream-chan  (subscription/create-event-stream identity-key (subscription/request-stream request))
               started-ms   (System/currentTimeMillis)
               events-sent  (java.util.concurrent.atomic.AtomicLong. 0)
               bytes-sent   (java.util.concurrent.atomic.AtomicLong. 0)]

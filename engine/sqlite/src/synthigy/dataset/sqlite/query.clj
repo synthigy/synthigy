@@ -42,6 +42,7 @@
             inner-exists]]
    [synthigy.db :refer [*db*] :as db]
    [synthigy.db.sql :as sql]
+   [synthigy.db.sqlite :as sqlite-db]
    [synthigy.log :as log])
   (:import
    [java.sql PreparedStatement]
@@ -56,10 +57,11 @@
   "sync (stack? false) or stack in a fresh tx, then wakes the drainer."
   [entity-id data stack?]
   (binding [sql-query/*fetch-mode* :serial]
-    (let [r (with-open [connection (jdbc/get-connection (:datasource *db*))]
-              (jdbc/with-transaction [tx connection]
-                (plug/set-context! *db* tx)
-                (sql-query/set-entity tx (id/entity entity-id) data stack?)))]
+    (let [r (sqlite-db/with-writer
+              (fn [] (with-open [connection (jdbc/get-connection (:datasource *db*))]
+                       (jdbc/with-transaction [tx connection]
+                         (plug/set-context! *db* tx)
+                         (sql-query/set-entity tx (id/entity entity-id) data stack?)))))]
       (plug/wake-drainer!)
       r)))
 
@@ -147,7 +149,8 @@
 
 (defn purge-entity
   ([entity-id args selection]
-   (let [r (with-open [connection (jdbc/get-connection (:datasource *db*))]
+   (let [r (sqlite-db/with-writer
+              (fn [] (with-open [connection (jdbc/get-connection (:datasource *db*))]
              (jdbc/with-transaction [tx connection]
                (plug/set-context! *db* tx)
                (binding [*operation-rules* #{:purge :delete}]
@@ -176,7 +179,7 @@
                                       "Purging entity rows")
                            (sql/execute! connection query core/*return-type*))
                          response))
-                     [])))))]
+                     [])))))))]
      (plug/wake-drainer!)
      r)))
 
@@ -395,12 +398,13 @@
 (defn delete-entity
   "RLS-scoped unique-key delete: true when deleted or missing, DELETE_FORBIDDEN when hidden."
   ([entity-id args]
-   (let [r (with-open [connection (jdbc/get-connection (:datasource *db*))]
+   (let [r (sqlite-db/with-writer
+              (fn [] (with-open [connection (jdbc/get-connection (:datasource *db*))]
              (jdbc/with-transaction [tx connection]
                (plug/set-context! *db* tx)
                (if (sequential? args)
                  (delete-entity-batch connection entity-id args)
-                 (delete-entity tx entity-id args))))]
+                 (delete-entity tx entity-id args))))))]
      (plug/wake-drainer!)
      r))
   ([connection entity-id args]
@@ -495,10 +499,11 @@
 ;; FIXME
 (defn slice-entity
   ([entity-id args selection]
-   (let [r (with-open [connection (jdbc/get-connection (:datasource *db*))]
+   (let [r (sqlite-db/with-writer
+              (fn [] (with-open [connection (jdbc/get-connection (:datasource *db*))]
              (jdbc/with-transaction [tx connection]
                (plug/set-context! *db* tx)
-               (slice-entity tx entity-id args selection)))]
+               (slice-entity tx entity-id args selection)))))]
      (plug/wake-drainer!)
      r))
   ([tx entity-id args selection]

@@ -16,6 +16,7 @@
     [patcho.lifecycle :as lifecycle]
     [synthigy.dataset :as dataset]
     [synthigy.db :as db]
+    [synthigy.db.sqlite :as sqlite-db]
     [synthigy.log :as log]
     [synthigy.plug.sqlite :as plug]
     [synthigy.plug.wake :as wake]))
@@ -52,8 +53,9 @@
   (dataset/remove-model-watch! model-watch-key)
   (plug/stop-drainer! db/*db*)
   (try
-    (jdbc/with-transaction [tx (:datasource db/*db*)]
-      (plug/strip-all! db/*db* tx))
+    (sqlite-db/with-writer
+     (fn [] (jdbc/with-transaction [tx (:datasource db/*db*)]
+        (plug/strip-all! db/*db* tx))))
     (catch Throwable e
       (log/warn {:id ::strip-on-stop-failed
                  :data {:action :stopping :subject :plug}}

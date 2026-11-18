@@ -57,18 +57,18 @@
   :engine-postgres
   {:extra-paths ["engine/postgres/src"]
    :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}
-                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
+                com.zaxxer/HikariCP {:mvn/version "7.1.0"}}}
 
   :engine-sqlite
   {:extra-paths ["engine/sqlite/src"]
    :extra-deps {com.synthigy/sqlite-jdbc {:mvn/version "3.47.1.0-icu78.3"}
-                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}}
+                com.zaxxer/HikariCP {:mvn/version "7.1.0"}}}
 
   ;; DEPRECATED: unmaintained and untested, ships in no bundle — kept for a possible future onboarding
   :engine-cockroach
   {:extra-paths ["engine/cockroach/src"]
    :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}
-                com.zaxxer/HikariCP        {:mvn/version "6.2.1"}}}
+                com.zaxxer/HikariCP        {:mvn/version "7.1.0"}}}
 
   ;; compile witness: core builds against it, nothing ships it
   :engine-stub
@@ -221,7 +221,7 @@
   :gen
   {:extra-paths ["engine/postgres/src" "audit/memory/src" "log/memory/src"]
    :extra-deps {org.postgresql/postgresql {:mvn/version "42.7.4"}
-                com.zaxxer/HikariCP {:mvn/version "6.2.1"}}
+                com.zaxxer/HikariCP {:mvn/version "7.1.0"}}
    :exec-fn synthigy.embedded.gen/generate!
    :exec-args {:dir "resources/xsql"
                :out "server/console/gen"

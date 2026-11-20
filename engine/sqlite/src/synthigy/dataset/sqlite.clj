@@ -20,6 +20,7 @@
    [patcho.lifecycle :as lifecycle]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.core :as core]
+   [synthigy.dataset.lock :as lock]
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.sql.errors :as errors]
@@ -166,7 +167,7 @@
      empty?
      [(column-name n)
       (type->ddl t)
-      (when (and (= "timestamp" t) (core/stamp attribute))
+      (when (and (= "timestamp" t) (core/audit-stamp attribute))
         "DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))")]))))
 
 (defn normalized-enum-value [value]
@@ -289,8 +290,8 @@
         (filter
          (fn [entity]
            (and (not (core/added? entity))
-                (false? (:active (core/suppress entity)))
-                (true? (:active entity))))
+                (not (core/active? (core/suppress entity)))
+                (core/active? entity)))
          (core/get-entities projection))
         ;;
         changed-enties
@@ -1146,7 +1147,9 @@
               _ (check-entity-name-conflicts! global model)
 
             ;; refuse before any DDL if the result would drop a guard — the op fail-closes silently
-              _ (rls/assert-guards-compile! (core/preview-model this version) model)
+              preview (core/preview-model this version)
+              _ (lock/assert-model! preview)
+              _ (rls/assert-guards-compile! preview model)
 
               _ (core/mount this (assoc version :model (core/with-merged-config global model)))
 
@@ -1641,6 +1644,18 @@
     32766)
 
   (row-lock-clause [_db]
+    nil)
+
+  (now-expr [_db]
+    "strftime('%Y-%m-%d %H:%M:%f', 'now')")
+
+  (now-plus-seconds-expr [_db]
+    "strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || ? || ' seconds')")
+
+  (seconds-until-expr [_db timestamp-sql]
+    (str "(julianday(" timestamp-sql ") - julianday('now')) * 86400.0"))
+
+  (claim-lock-clause [_db _alias]
     nil))
 
 (extend-type SQLite

@@ -22,6 +22,10 @@
     "name" : "schema:read",
     "xid" : "7ipbiNugGoy2y2DTNZWgEo"
   }, {
+    "description" : "Release row locks held by another user, on rows the caller may update",
+    "name" : "data:unlock",
+    "xid" : "M8yA8LEL6hnbYXCg3dFmsC"
+  }, {
     "description" : "Allows user to delete dataset, and all tables that are specific only to that dataset",
     "name" : "dataset:delete",
     "xid" : "Dbr3yWGb9wAcQvutHy6pfM"

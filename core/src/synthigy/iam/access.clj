@@ -327,7 +327,7 @@
   []
   (let [model (dataset/deployed-model)
         role (core/get-entity model (some-> (id/entity :iam/user-role) str))]
-    (boolean (some #(and (:active %) (= "scopes" (:to-label %)))
+    (boolean (some #(and (core/active? %) (= "scopes" (:to-label %)))
                    (core/focus-entity-relations model role)))))
 
 (defn load-scopes

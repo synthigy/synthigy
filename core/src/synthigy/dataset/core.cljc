@@ -20,6 +20,11 @@
    [synthigy.dataset.id :as id]
    [synthigy.modeling.core :as modeling]))
 
+(defn active?
+  "False only for an explicit `:active false`; a missing `:active` counts as active."
+  [x]
+  (not (false? (:active x))))
+
 (defn deep-merge
   "Recursively merges maps."
   [& maps]
@@ -353,7 +358,7 @@
   (get-entity-unique-constraints [this]
     ;; all-or-nothing: never narrow a unique group, drop it entirely if any
     ;; member is inactive
-    (let [active-attributes (set (map id/extract (filter :active (:attributes this))))]
+    (let [active-attributes (set (map id/extract (filter active? (:attributes this))))]
       (reduce
        (fn [r constraint-group]
          (if (and (seq constraint-group) (every? active-attributes constraint-group))
@@ -570,7 +575,7 @@
         merged-attrs (vec
                       (for [attr-uuid all-attr-uuids]
                         (if-let [attr2 (get attrs2-by-id attr-uuid)]
-                          (assoc attr2 :active (not (false? (:active attr2))))
+                          (assoc attr2 :active (active? attr2))
                           (assoc (get attrs1-by-id attr-uuid) :active false))))]
     (assoc entity2 :attributes merged-attrs)))
 
@@ -887,10 +892,18 @@
   3)
 
 (defn stamp
-  "When the system sets `attribute`: :create, :modify, or nil when it does not."
+  "When the system sets `attribute`: :create, :modify, :lock (user), :lock-until (timestamp), or nil."
   [attribute]
-  (when (#{"timestamp" "user"} (:type attribute))
-    (#{:create :modify} (get-in attribute [:configuration :stamp]))))
+  (let [s (get-in attribute [:configuration :stamp])]
+    (case (:type attribute)
+      "timestamp" (#{:create :modify :lock-until} s)
+      "user" (#{:create :modify :lock} s)
+      nil)))
+
+(defn audit-stamp
+  "The :create/:modify stamp of `attribute`, nil for lock stamps and plain attributes."
+  [attribute]
+  (#{:create :modify} (stamp attribute)))
 
 (defn stamp-write
   "What a client value for a stamp attribute gets: :ignore (dropped) or :refuse."
@@ -900,7 +913,7 @@
 (defn stamp-attributes
   "Active attributes of `entity` the system sets."
   [entity]
-  (filter #(and (not (false? (:active %))) (stamp %)) (:attributes entity)))
+  (filter #(and (active? %) (stamp %)) (:attributes entity)))
 
 (def audit-stamps
   "The stamp attributes format 3 makes of `:audit :actions`, as [action column name type stamp]."
@@ -977,7 +990,7 @@
   "Index-stable DDL view of unique groups — dead groups are nil'd in place,
    never compacted."
   [entity]
-  (let [active (set (map id/extract (filter :active (:attributes entity))))]
+  (let [active (set (map id/extract (filter active? (:attributes entity))))]
     (mapv (fn [group]
             (when (and (seq group) (every? active group))
               (vec group)))
@@ -1147,17 +1160,14 @@
   "Is attr-id an active attribute of entity?"
   [entity attr-id]
   (boolean
-   (some #(and (:active %) (= attr-id (id/extract %)))
+   (some #(and (active? %) (= attr-id (id/extract %)))
          (:attributes entity))))
 
 (defn validate-guard-paths
   "Validates guard conditions against current model state — a dangling one drops
    the whole guard at deploy."
   [guard model entity]
-  ;; only an EXPLICIT :active false counts as inactive; nil (authored,
-  ;; not-yet-deployed) does not
-  (let [model-relations (set (map id/extract
-                                  (remove #(false? (:active %)) (get-relations model))))]
+  (let [model-relations (set (map id/extract (filter active? (get-relations model))))]
     (reduce
      (fn [acc condition]
        (let [valid?
@@ -1201,7 +1211,7 @@
   "Validates unique-key groups; a group is invalid when any member attribute is
    missing or inactive."
   [entity]
-  (let [active (set (map id/extract (filter :active (:attributes entity))))]
+  (let [active (set (map id/extract (filter active? (:attributes entity))))]
     (reduce
      (fn [acc group]
        (if (empty? group)
@@ -1291,7 +1301,7 @@
   (let [ref-types #{"user" "group" "role"}
         attributes (or (:attributes entity) [])]
     (->> (filter (fn [attr]
-                   (and (:active attr)
+                   (and (active? attr)
                         (contains? ref-types (:type attr))))
                  attributes)
          (map-indexed
@@ -1353,8 +1363,8 @@
                            relation-label (or (:to-label relation) (:from-label relation) "")]
                        (if (or (and (contains? visited origin-id)
                                     (not (and self? (not self-hop?))))
-                               (false? (:active relation))
-                               (false? (:active target-entity)))
+                               (not (active? relation))
+                               (not (active? target-entity)))
                          acc
                          (let [new-step (cond-> {:relation-id (id/extract relation)
                                                  :label relation-label
@@ -1369,7 +1379,7 @@
                                ;; — nearly every entity is audited
                                target-refs (when-not is-iam?
                                              (->> (:attributes target-entity)
-                                                  (filter #(and (:active %)
+                                                  (filter #(and (active? %)
                                                                 (contains? ref-types (:type %))))))
                                iam-path (when is-iam?
                                           {:id (get-path-label (+ path-idx (count (:paths acc))))

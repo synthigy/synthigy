@@ -64,6 +64,16 @@ Created On, Created By, Modified On and Modified By. They replace the old entity
 audit switch, and an upgrade turns that switch into these attributes on the same
 columns.
 
+**Locks.** A `user` attribute stamped **Lock** holds who has locked a record, and
+a `timestamp` attribute stamped **Lock expiry** when the lock ends, after its TTL
+in seconds. An entity with a Lock is lockable: `claim` locks free records to the
+caller, `release` clears them, and while a record is locked only its holder may
+change its attributes ([data](DATA.md#writing)). Links to and from it stay free, and
+delete and purge ignore locks. Without a Lock expiry a
+lock lasts until it is released. Locking and releasing do not count as changes:
+modify stamps and history stay as they were. One Lock and one Lock expiry per
+entity; the modeler's **Add lock** adds both.
+
 **Removing an attribute** from a deployed model deactivates it. The column and
 its data stay in the database; the attribute disappears from the API.
 

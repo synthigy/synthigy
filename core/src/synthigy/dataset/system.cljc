@@ -64,7 +64,7 @@
 
 (defn attribute-value [k a]
   (case k
-    :active (not (false? (:active a)))
+    :active (core/active? a)
     :configuration (not-empty (:configuration a))
     (get a k)))
 
@@ -72,7 +72,7 @@
   (case k
     (:from :to) (id/extract (get r k))
     :configuration (not-empty (:configuration r))
-    :active (not (false? (:active r)))
+    :active (core/active? r)
     (get r k)))
 
 (defn entity-changes
@@ -86,7 +86,7 @@
     (concat
      (when (not= (:name before) (:name after))
        [(assoc entity :field :name)])
-     (when (not= (false? (:active before)) (false? (:active after)))
+     (when (not= (core/active? before) (core/active? after))
        [(assoc entity :field :active)])
      (for [k (sort (distinct (concat (keys (config before)) (keys (config after)))))
            :when (not= (get (config before) k) (get (config after) k))]
@@ -219,12 +219,95 @@
   [x]
   (if (keyword? x) (subs (str x) 1) (str x)))
 
-(defn change-text [{:keys [entity attribute relation field change]}]
-  (str (or relation (cond-> entity attribute (str "." attribute)))
+(defn change-subject [{:keys [entity attribute relation]}]
+  (or relation (cond-> entity attribute (str "." attribute))))
+
+(defn change-text [{:keys [field change] :as c}]
+  (str (change-subject c)
        " "
        (if change
          (label change)
          (str (label field) " changed"))))
+
+(defn field-value
+  "The value `x`, an entity or relation, holds for the field of `change`."
+  [x {:keys [attribute_id relation_id field]}]
+  (cond
+    relation_id (relation-value field x)
+    attribute_id (attribute-value field (some #(when (= attribute_id (id/extract %)) %) (:attributes x)))
+    (= :name field) (:name x)
+    (= :active field) (core/active? x)
+    :else (get-in x [:configuration field])))
+
+(defn change-values
+  "`change` of `before` -> `after` with the `:before` and `:after` values of its field."
+  [before after c]
+  (cond-> c
+    (not (:change c)) (assoc :before (field-value before c) :after (field-value after c))))
+
+(defn overriding
+  "Changes of `before` -> `after` that leave the field off what `own`, another dataset's copy, declares."
+  [before after own changes]
+  (for [c changes
+        :let [c (change-values before after c)]
+        :when (or (:change c) (not= (field-value own c) (:after c)))]
+    c))
+
+(defn shared-overrides
+  "Per dataset in `others` (`{:dataset :model}`), what `preview` changes in `global` against what its model declares; system ones excluded."
+  [global preview others {:keys [entities relations]}]
+  (vec
+   (for [{:keys [dataset model]} others
+         :let [changes
+               (concat
+                (for [e (core/get-entities model)
+                      :let [eid (id/extract e)
+                            before (core/get-entity global eid)
+                            after (core/get-entity preview eid)
+                            declared (set (map id/extract (:attributes e)))]
+                      :when (and before after (not (contains? entities eid)))
+                      c (overriding before after e
+                                    (filter #(or (nil? (:attribute_id %)) (contains? declared (:attribute_id %)))
+                                            (entity-changes before after)))]
+                  c)
+                (for [r (core/get-relations model)
+                      :let [rid (id/extract r)
+                            before (core/get-relation global rid)
+                            after (core/get-relation preview rid)]
+                      :when (and before after (not (contains? relations rid)))
+                      c (overriding before after r (relation-changes before after))]
+                  c))]
+         :when (seq changes)]
+     {:dataset (:name dataset) :dataset_id (id/extract dataset) :changes (vec changes)})))
+
+(defn value-text [v]
+  (cond
+    (nil? v) "none"
+    (string? v) v
+    (keyword? v) (label v)
+    (map? v) (str "{" (str/join ", " (map (fn [[k x]] (str (label k) ": " (value-text x))) v)) "}")
+    (coll? v) (str "[" (str/join ", " (map value-text v)) "]")
+    :else (str v)))
+
+(defn override-text [{:keys [dataset changes]}]
+  (str dataset ": "
+       (str/join ", " (map (fn [{:keys [field before after] :as c}]
+                             (if (contains? c :before)
+                               (str (change-subject c) " " (label field) " " (value-text before) " -> " (value-text after))
+                               (change-text c)))
+                           changes))))
+
+(defn overrides-text
+  "`overrides` as text, at most `n` (10) changes across all datasets."
+  ([overrides] (overrides-text overrides 10))
+  ([overrides n]
+   (let [total (reduce + (map (comp count :changes) overrides))
+         shown (loop [[o & more] overrides left n acc []]
+                 (if (and o (pos? left))
+                   (recur more (- left (count (:changes o))) (conj acc (update o :changes #(take left %))))
+                   acc))]
+     (str (str/join "; " (map override-text shown))
+          (when (> total n) (str "; and " (- total n) " more"))))))
 
 (defn conflict-key [{:keys [entity name]}]
   [(id/extract entity) name])

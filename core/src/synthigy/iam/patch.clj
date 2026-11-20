@@ -33,7 +33,7 @@
 ;; Component Version Registration
 ;; ============================================================================
 
-(patch/current-version :synthigy/iam "1.0.3")
+(patch/current-version :synthigy/iam "1.0.4")
 ;; ============================================================================
 ;; Version Patches
 ;; ============================================================================
@@ -63,7 +63,7 @@
   [to-entity-id]
   (let [model (dataset/deployed-model)]
     (some (fn [r]
-            (when (and (:active r)
+            (when (and (core/active? r)
                        (= (id/extract (:from r)) (id/entity :iam/user))
                        (= (id/extract (:to r)) to-entity-id))
               r))
@@ -160,3 +160,8 @@
 
 (patch/upgrade :synthigy/iam "1.0.3"
                (context/fill-display-names!))
+
+(patch/upgrade :synthigy/iam "1.0.4"
+               (with-principal nil
+                 (transfer/import-api "exports/api_synthigy.json")
+                 (transfer/import-role "exports/role_data_unlock_admin.json")))

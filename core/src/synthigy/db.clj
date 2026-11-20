@@ -51,6 +51,17 @@
     [this entity-id data]
     "Delete entity records identified by data."))
 
+(defprotocol RecordLockProtocol
+  (claim-entity
+    [this entity-id args selection]
+    "Lock the free rows args select to the caller and return them per selection.")
+  (release-entity
+    [this entity-id data]
+    "Clear the locks of the rows data names.")
+  (sweep-locks
+    [this]
+    "Clear every expired lock; returns seconds to the next expiry, or nil when none is held."))
+
 ;;; ============================================================================
 ;;; Database Records
 ;;; ============================================================================

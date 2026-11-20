@@ -193,6 +193,8 @@ movie (xid = ?xid:string)
 | `@sql-template <name>` | raw SQL, see below |
 | `@purge <name>` | delete the rows the body matches |
 | `@slice <name>` | unlink the relations the body names |
+| `@claim <name>` | lock up to `limit` free rows the body matches to the caller and return them |
+| `@release <name>` | clear the caller's locks; the body is a data parameter: `?ids:job[]` |
 | `@sync`, `@stack`, `@delete` | writes; the body is a data parameter: `?records:movie[]` |
 | `@batch <name>: a b c` | run several operations of the file in one request |
 | `@description <text>` | documents the operation above it |

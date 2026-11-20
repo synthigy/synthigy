@@ -18,11 +18,11 @@
             [clojure.string :as str]
             [clojure.walk :as walk]))
 
-(def ^:private read-verbs #{"search" "get" "slice" "purge"})
+(def ^:private read-verbs #{"search" "get" "slice" "purge" "claim"})
 
 (def ^:private op-start-re
   "Matches an operation-start `@verb` line; header directives excluded."
-  #"@(?:search|get|sql-template|slice|purge|sync|stack|delete|batch)\b")
+  #"@(?:search|get|sql-template|slice|purge|claim|sync|stack|delete|release|batch)\b")
 
 (defn returns->result
   "Synthesizes a result tree from a sql-template `@returns` spec."

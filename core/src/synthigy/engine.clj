@@ -26,6 +26,7 @@
    [synthigy.dataset.access :as daccess]
    [synthigy.dataset.codegen :as codegen]
    [synthigy.dataset.core :as dataset.core]
+   [synthigy.dataset.lock :as lock]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.key :as dk]
    [synthigy.dataset.runtime :as runtime]
@@ -88,7 +89,7 @@
                        :expected expected}))))
   args)
 
-(def ^:private write-ops #{"sync" "stack" "delete" "purge" "slice"})
+(def ^:private write-ops #{"sync" "stack" "delete" "purge" "slice" "claim" "release"})
 
 (defn write-op? [{:keys [op]}] (contains? write-ops op))
 
@@ -249,7 +250,7 @@
 (def capability-scopes
   "Every scope this engine enforces — capabilities RBAC cannot express; never entity CRUD."
   #{"dataset:load" "dataset:delete" "dataset:deploy"
-    "schema:read" "log:read" "log:configure" "dataset:subscription"})
+    "schema:read" "log:read" "log:configure" "dataset:subscription" "data:unlock"})
 
 (defn assert-scope!
   "Assert the current user holds scope or any alternates; throws FORBIDDEN
@@ -489,6 +490,8 @@
            "slice"     (dataset/slice-entity entity-id args selection)
            "delete"    (dataset/delete-entity entity-id data)
            "purge"     (dataset/purge-entity entity-id args selection)
+           "claim"     (dataset/claim-entity entity-id args selection)
+           "release"   (dataset/release-entity entity-id data)
            (throw (ex-info (str "Unknown operation: " op)
                            {:code "UNKNOWN_OP" :op op})))))
 
@@ -527,6 +530,15 @@
                  (when (> (count changes) 10) (str "; and " (- (count changes) 10) " more")))
    :hint "Accept the global model for these entities (Pull or Revert in the deploy drawer), then deploy."
    :details changes})
+
+(defn shared-override-problem
+  [overrides]
+  {:code "SHARED_ENTITY_OVERRIDE"
+   :rule "shared_entity"
+   :message (str "Last deploy wins: this deploy changes what other datasets declare. "
+                 (system/overrides-text overrides))
+   :hint "Deploy if intended; to keep another dataset's copy, bring the entity in again as deployed."
+   :details overrides})
 
 (defn problem-ex [{:keys [message] :as problem}]
   (ex-info message (dissoc problem :message)))
@@ -615,6 +627,14 @@
 (defmethod execute-operation "delete"
   [ctx]
   (execute-operation-chain ctx "delete"))
+
+(defmethod execute-operation "claim"
+  [ctx]
+  (execute-operation-chain (assert-map-selections ctx) "claim"))
+
+(defmethod execute-operation "release"
+  [ctx]
+  (execute-operation-chain ctx "release"))
 
 ;; deliberately not scope-gated — entity/relation RBAC and RLS still apply
 (defmethod execute-operation "sql-template"
@@ -823,7 +843,8 @@
   [version]
   (let [superuser (access/superuser?)
         stored (dataset/stored-version version)
-        system-ids (dataset/system-ids)
+        latest (dataset/latest-models)
+        system-ids (dataset/system-ids latest)
         global (or (dataset/deployed-model)
                    (dataset.core/map->ERDModel {:entities {} :relations {}}))
         candidate (dataset/persisted-model (:model version))
@@ -831,6 +852,9 @@
         name-conflicts (system/new-name-conflicts global preview)
         conflicts (mapv system/conflict-details (system/new-field-conflicts global preview))
         changes (system/system-changes global preview system-ids)
+        overrides (system/shared-overrides global preview
+                                           (remove #(= (id/extract (:dataset version)) (id/extract (:dataset %))) latest)
+                                           system-ids)
         system-version? (system/system-model? candidate)
         rls-additions (when-not system-version?
                         (system/system-rls-additions global candidate system-ids))
@@ -839,10 +863,14 @@
         marked (system/system-marks global preview candidate
                                     (contains? (:datasets system-ids) (id/extract (:dataset version))))
         broken-guards (guard-problem preview candidate)
-        name-taken (dataset-version/name-problem version)]
+        name-taken (dataset-version/name-problem version)
+        lock-problems (lock/model-problems preview)]
     (cond-> {:errors [] :warnings []}
       name-taken
       (update :errors conj name-taken)
+
+      (seq lock-problems)
+      (update :errors conj (lock/problems-error lock-problems))
 
       broken-guards
       (update :errors conj broken-guards)
@@ -894,6 +922,9 @@
 
       (seq changes)
       (update (if superuser :warnings :errors) conj (system-change-problem changes))
+
+      (seq overrides)
+      (update :warnings conj (shared-override-problem overrides))
 
       :always
       (-> (update :errors #(mapv with-doc %))
@@ -991,6 +1022,14 @@
     (try (count (.getBytes ^String (pr-str d) "UTF-8"))
          (catch Throwable _ nil))))
 
+(defn model-entity-name
+  "The deployed model name of an op's entity, or the name the caller sent when it does not resolve."
+  [{:keys [entity entity-id]}]
+  (when entity
+    (or (try (:name (dataset/deployed-entity (or entity-id (sql-query/resolve-entity entity))))
+             (catch Throwable _ nil))
+        entity)))
+
 (defn audit-op-completed!
   "Emit :synthigy.server.data/op-completed info row for one /data op; always
    fires for ops in audit-ops."
@@ -1015,7 +1054,7 @@
                             :elapsed-ms elapsed-ms
                             :row-count  row-count}
                      user-xid                (assoc :user-xid user-xid)
-                     (:entity op)            (assoc :entity (:entity op))
+                     (:entity op)            (assoc :entity (model-entity-name op))
                      (:on op)                (assoc :on (:on op))
                      (and (not write?)
                           (:selections op))  (-> (assoc :selection-shape
@@ -1064,6 +1103,7 @@
      "search-tree" args
      "slice" args
      "purge" args
+     "claim" args
      "get" "get matches one row by a unique key in args: {\"args\": {\"name\": \"…\"}}; data is what stack, sync and delete write."
      "get-tree" "get-tree starts from root: {\"root\": \"<xid>\", \"on\": \"<relation>\"}; data is what stack, sync and delete write."}))
 
@@ -1099,16 +1139,16 @@
   (as-> (merge op ctx) ctx
     (if (= "xsql" (:op ctx)) (coerce-xsql-op ctx) ctx)
     (assert-op-shape! ctx)
-    (if (= "delete" (:op ctx))
+    (if (#{"delete" "release"} (:op ctx))
       (update ctx :data
               (fn [data]
                 (cond
                   (map? data) data
                   (sequential? data) (sql-query/check-delete-batch! data)
-                  :else (throw (ex-info "delete :data must be a map or a vector of xid strings"
+                  :else (throw (ex-info (str (:op ctx) " :data must be a map or a vector of xid strings")
                                         {:code "BAD_DATA_SHAPE"
                                          :rule "delete_data"
-                                         :op "delete"})))))
+                                         :op (:op ctx)})))))
       ctx)
     (update ctx :args coerce-args)
     (if (:entity ctx)

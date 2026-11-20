@@ -1,0 +1,9 @@
+{
+  "active" : true,
+  "description" : "Releases row locks held by other users, on rows the holder's other roles let them update. No entity access of its own.",
+  "name" : "Data Unlock Admin",
+  "scopes" : [ {
+    "xid" : "M8yA8LEL6hnbYXCg3dFmsC"
+  } ],
+  "xid" : "ZywYRfHJ85pJZ8WF17SNAE"
+}

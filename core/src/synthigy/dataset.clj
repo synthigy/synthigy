@@ -30,6 +30,7 @@
    synthigy.dataset.operations
    [synthigy.dataset.patch.model :as model]
    [synthigy.dataset.projection :as projection]
+   [synthigy.dataset.sweeper :as sweeper]
    [synthigy.dataset.system :as system]
    [synthigy.db :as db :refer [*db*]]
    [synthigy.env :as env]
@@ -310,30 +311,39 @@
   []
   (<-resource "dataset/synthigy.json"))
 
-(defn system-datasets
-  "Ids of the datasets whose latest deployed version carries a system model."
+(defn latest-models
+  "`{:dataset :model}` of every dataset's latest deployed version, by dataset name."
   []
   (binding [synthigy.dataset.access/*access-control* (synthigy.dataset.access/->AllowAllAccess)]
     (try
-      (reduce (fn [acc {did (id/key) [v] :versions}]
-                (let [model (:model v)
-                      model (if (string? model) (<-transit model) model)]
-                  (cond-> acc (system/system-model? model) (conj did))))
-              #{}
-              (db/search-entity *db* :dataset/dataset nil
-                                {(id/key) nil
-                                 :versions [{:selections {(id/key) nil :model nil}
-                                             :args {:deployed {:_eq true}
-                                                    :_order_by {:deployed_on :desc}
-                                                    :_limit 1}}]}))
+      (->> (db/search-entity *db* :dataset/dataset nil
+                             {(id/key) nil
+                              :name nil
+                              :versions [{:selections {(id/key) nil :model nil}
+                                          :args {:deployed {:_eq true}
+                                                 :_order_by {:deployed_on :desc}
+                                                 :_limit 1}}]})
+           (keep (fn [d]
+                   (when-let [model (:model (first (:versions d)))]
+                     {:dataset (select-keys d [(id/key) :name])
+                      :model (adapt-model-to-provider (if (string? model) (<-transit model) model))})))
+           (sort-by (comp str :name :dataset))
+           vec)
       (catch clojure.lang.ExceptionInfo e
-        (if (= "UNKNOWN_ATTRIBUTE" (:code (ex-data e))) #{} (throw e))))))
+        (if (= "UNKNOWN_ATTRIBUTE" (:code (ex-data e))) [] (throw e))))))
+
+(defn system-datasets
+  "Ids of the datasets whose latest deployed version carries a system model."
+  ([] (system-datasets (latest-models)))
+  ([latest]
+   (into #{} (comp (filter (comp system/system-model? :model)) (map (comp id/extract :dataset))) latest)))
 
 (defn system-ids
   "System entities (id -> :closed or :open) and relations the deployed model marks, and the system datasets."
-  []
-  (system/model-system-ids (or (deployed-model) (core/map->ERDModel {:entities {} :relations {}}))
-                           (system-datasets)))
+  ([] (system-ids (latest-models)))
+  ([latest]
+   (system/model-system-ids (or (deployed-model) (core/map->ERDModel {:entities {} :relations {}}))
+                            (system-datasets latest))))
 
 (defn bootstrap-version
   "Synthigy model without RLS, for compiling the meta tables before the global model exists."
@@ -553,6 +563,18 @@
   "Deletes every row matching `args` and returns them shaped by `selection`."
   [entity-id args selection]
   (db/purge-entity *db* (id/entity entity-id) (normalize-config-args args) (normalize-selection selection)))
+
+(defn claim-entity
+  "Locks the free rows matching `args` to the caller and returns them shaped by `selection`."
+  [entity-id args selection]
+  (let [r (db/claim-entity *db* (id/entity entity-id) (normalize-config-args args) (normalize-selection selection))]
+    (when (seq r) (sweeper/wake!))
+    r))
+
+(defn release-entity
+  "Clears the locks of the rows a unique-key map or a vector of xid strings names."
+  [entity-id data]
+  (db/release-entity *db* (id/entity entity-id) (cond-> data (map? data) dk/normalize-keys)))
 
 (defn delete-entity
   "Deletes by a unique-key map (one row) or a vector of xid strings (one transaction)."
@@ -923,6 +945,7 @@
                                   (patch/deployed-version :synthigy.dataset/model)
                                   (patch/version :synthigy.dataset/model))
    (patch/level! :synthigy.dataset/model)
+   (sweeper/start!)
    nil))
 
 (defn stop
@@ -930,6 +953,7 @@
   []
   (log/info {:id ::stopping :data {:action :stopping :subject :dataset}} "Stopping Datasets")
 
+  (sweeper/stop!)
   (delta/shutdown!)
 
   (log/info {:id ::stopped :data {:action :stopped :subject :dataset}} "Datasets stopped")

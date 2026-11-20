@@ -40,7 +40,15 @@
   (max-bind-params [db]
     "Hard cap on bound parameters per prepared statement, used to size bulk-write chunks.")
   (row-lock-clause [db]
-    "SELECT suffix locking the selected rows until commit, or nil where writers are serialized anyway."))
+    "SELECT suffix locking the selected rows until commit, or nil where writers are serialized anyway.")
+  (now-expr [db]
+    "SQL for the database's current time, in the format timestamp columns store.")
+  (now-plus-seconds-expr [db]
+    "SQL for the current time plus one bound parameter of seconds.")
+  (seconds-until-expr [db timestamp-sql]
+    "SQL for the seconds from now until `timestamp-sql`.")
+  (claim-lock-clause [db alias]
+    "Suffix of claim's roots select that skips rows another claim is taking, or nil."))
 
 ;;; ============================================================================
 ;;; Protocol 3: SchemaManager

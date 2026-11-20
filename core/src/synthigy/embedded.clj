@@ -124,6 +124,18 @@
         :selections (selection/normalize selection)}
        opts))
 
+(defn claim
+  "Lock up to `:_limit` free matching records to the caller and return them."
+  [entity args selection & {:as opts}]
+  (run {:op "claim" :entity (name entity) :args args
+        :selections (selection/normalize selection)}
+       opts))
+
+(defn release
+  "Clear the caller's locks on the records a unique-key map or a vector of xids names."
+  [entity data & {:as opts}]
+  (run {:op "release" :entity (name entity) :data data} opts))
+
 (defn sql-template
   "Execute an ERD-aware SQL template."
   [template params & {:keys [cached] :or {cached true} :as opts}]

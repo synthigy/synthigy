@@ -130,6 +130,29 @@ records that have no link: `slice` cuts links, so it would have none to cut.
 `relation` names it. Leave `_join` out and narrow the links that go with the
 relation's own `args`; in an XSQL `@slice`, write `->tags`, not `!tags`.
 
+### record_lock
+
+`RECORD_LOCKED`. Another user holds a lock on a record whose attributes this
+write changes; the whole write is refused. Links, delete and purge are never
+refused by a lock. `xids` names the records and
+`details` gives each one's `holder` and `until`. Wait for the lock to expire,
+ask the holder to `release` it, or, with scope `data:unlock`, release it
+yourself. Not retryable: unlike `LOCKED`, which is a busy database, it lasts
+until the lock is released or expires.
+
+The other refusals of this rule: `LOCK_NOT_LOCKABLE`, `claim` or `release` on
+an entity without a Lock attribute; `LOCK_LIMIT_REQUIRED`, `claim` without a
+limit; `LOCK_LIMIT_TOO_LARGE`, a `claim` limit above what one statement can bind
+(`max` gives it, about 32 000 on SQLite and 65 000 on Postgres); `LOCK_DISTINCT`, `claim` with `_distinct`; `LOCK_NO_PRINCIPAL`, `claim`
+with no signed-in user to hold the lock; `LOCK_MODEL_INVALID`, a deploy whose
+lock attributes break a rule (one Lock and one Lock expiry per entity, an expiry
+needs a Lock, a TTL is a positive number of seconds).
+
+```json
+{"op": "claim", "entity": "job", "args": {"status": {"_eq": "queued"}, "_limit": 5},
+ "selections": {"xid": null, "payload": null}}
+```
+
 ## Database constraints
 
 ### unique
@@ -339,6 +362,21 @@ it. A recall or destroy that would change one is refused the same way.
 `field` that differs or the `change`. Bring the entity in again as deployed
 (Pull or Revert in the deploy view, `pull_entity` in Studio). A superuser's
 deploy only warns. Deploying is the human's.
+
+### shared_entity
+
+`SHARED_ENTITY_OVERRIDE`, a warning only: it never stops a deploy. Datasets
+are views of one model and the last deploy wins, whichever dataset it came
+from. This deploy changes an entity or relation another dataset also
+declares, so that dataset will see the change too. `details` lists each
+affected `dataset` with its `changes`: the entity or relation, the
+attribute, and the `field` with its `before` and `after` values, or the
+`change`. An attribute going from `active` true to false is hidden for
+everyone (its column and data stay). If the change is intended, deploy. To
+keep the other dataset's version, bring the entity in again as deployed
+(Pull in the deploy view, `pull_entity` in Studio) and redo only your own
+edits. Deploying is the human's. System entities are reported under
+[system_entity](#system_entity) instead.
 
 ### system_entity_rls
 

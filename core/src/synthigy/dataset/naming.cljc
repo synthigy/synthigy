@@ -24,15 +24,13 @@
         str/lower-case
         (str/replace #"[\s_\-.\$\[\]\{\}\#]+" "_"))))
 
-(defn active? [x]
-  (not (false? (:active x))))
 
 (defn entity-name-conflicts
   "Active entities whose normalized names collide, as {:name :entities}."
   [model]
   (when model
     (->> (core/get-entities model)
-         (filter active?)
+         (filter core/active?)
          (remove #(str/blank? (:name %)))
          (group-by #(normalize (:name %)))
          (keep (fn [[nname group]]
@@ -46,7 +44,7 @@
   (let [nname (normalize new-name)]
     (when (and model (not (str/blank? nname)))
       (some (fn [e]
-              (when (and (active? e)
+              (when (and (core/active? e)
                          (= nname (normalize (:name e)))
                          (not= entity-id (id/extract e)))
                 e))
@@ -58,7 +56,7 @@
   (let [nname (normalize new-name)]
     (when-not (str/blank? nname)
       (some (fn [a]
-              (when (and (active? a)
+              (when (and (core/active? a)
                          (= nname (normalize (:name a)))
                          (not= attribute-id (id/extract a)))
                 a))
@@ -70,7 +68,7 @@
   (let [nname (normalize new-name)]
     (when-not (str/blank? nname)
       (some (fn [a]
-              (when (and (not (active? a))
+              (when (and (not (core/active? a))
                          (= nname (normalize (:name a))))
                 a))
             attributes))))
@@ -78,7 +76,7 @@
 (defn attribute-sources
   [entity]
   (->> (:attributes entity)
-       (filter active?)
+       (filter core/active?)
        (remove #(str/blank? (:name %)))
        (map (fn [a] {:name (normalize (:name a)) :display (:name a)
                      :kind :attribute :ref a}))))
@@ -88,7 +86,7 @@
   [model entity-id]
   (let [ids (conj (core/clone-ids model entity-id) entity-id)]
    (->> (core/get-relations model)
-       (filter active?)
+       (filter core/active?)
        (mapcat (fn [r]
                  (let [from-id (id/extract (:from r))
                        to-id   (id/extract (:to r))]
@@ -110,7 +108,7 @@
   [model]
   (when model
     (->> (core/get-entities model)
-         (filter active?)
+         (filter core/active?)
          (mapcat (fn [e]
                    (->> (entity-field-sources model e)
                         (group-by :name)

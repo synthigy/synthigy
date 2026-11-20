@@ -18,6 +18,8 @@
    [synthigy.dataset.core :as core]
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
+   [synthigy.dataset.lock :as lock]
+   [synthigy.dataset.sql.lock :as sql-lock]
    [synthigy.dataset.postgres.fused :as fused]
    [synthigy.plug.postgres :as plug]
    [synthigy.util :as util]
@@ -95,20 +97,18 @@
       (plug/set-context! *db* tx)
       (sql-query/set-entity tx (id/entity entity-id) data stack?))))
 
-(defn search-entity-roots
-  "Root `_eid`s matching the schema's filters; INNER relations scope via correlated EXISTS, never JOIN."
-  ([schema]
-   (with-open [connection (jdbc/get-connection (:datasource *db*))]
-     (search-entity-roots connection schema)))
-  ([connection schema]
+(defn roots-sql
+  "[sql params unbounded?] selecting the root `_eid`s that match `schema`'s filters."
+  ([schema] (roots-sql schema nil))
+  ([schema {:keys [where where-params suffix]}]
    (let [focused-schema (focus-order schema)
          root-as  (:entity/as focused-schema)
          root-tbl (:entity/table focused-schema)
          ;; never keep :relations here — EXISTS does not join relation aliases into FROM
-         [where where-data] (search-stack-args (dissoc focused-schema :relations))
+         [filters filter-data] (search-stack-args (dissoc focused-schema :relations))
          [exists-sql exists-data] (inner-exists focused-schema root-as)
          where-all (clojure.string/join
-                    " and " (remove clojure.string/blank? [where exists-sql]))
+                    " and " (remove clojure.string/blank? [filters exists-sql where]))
          distinct-on (distinct->sql schema)
          [modifiers order-data] (if (sql-query/term-order? schema)
                                   (sql-query/related-modifiers focused-schema)
@@ -118,12 +118,22 @@
                              root-as root-as root-tbl root-as)
                      query
                  (if (not-empty where-all) (str query \newline "where " where-all) query)
-                 (if modifiers (str query " " modifiers) query))
-         data (vec (concat where-data exists-data order-data))
-         [r :as ids] (if (and (empty? where-all)
-                              (nil? distinct-on)
-                              (not (some #{:_limit :_offset :_order_by}
-                                         (keys (:args schema)))))
+                 (if modifiers (str query " " modifiers) query)
+                 (if suffix (str query " " suffix) query))]
+     [query
+      (vec (concat filter-data exists-data where-params order-data))
+      (and (empty? where-all)
+           (nil? distinct-on)
+           (not (some #{:_limit :_offset :_order_by} (keys (:args schema)))))])))
+
+(defn search-entity-roots
+  "Root `_eid`s matching the schema's filters; INNER relations scope via correlated EXISTS, never JOIN."
+  ([schema]
+   (with-open [connection (jdbc/get-connection (:datasource *db*))]
+     (search-entity-roots connection schema)))
+  ([connection schema]
+   (let [[query data unbounded?] (roots-sql schema)
+         [r :as ids] (if unbounded?
                        nil
                        (do
                          (log/trace {:id :synthigy.dataset.sql/roots-query
@@ -608,3 +618,21 @@
   (db/delete-entity
     [_ entity-id data]
     (delete-entity (id/entity entity-id) data)))
+
+(defn lock-tx
+  "Runs `(f tx)` in a transaction whose writes are lock ops."
+  [f]
+  (with-open [connection (jdbc/get-connection (:datasource *db*))]
+    (jdbc/with-transaction [tx connection]
+      (binding [lock/*op* true]
+        (plug/set-context! *db* tx))
+      (f tx))))
+
+(extend-type synthigy.db.Postgres
+  db/RecordLockProtocol
+  (db/claim-entity [_ entity-id args selection]
+    (sql-lock/claim-entity {:roots-sql roots-sql :lock-tx lock-tx} (id/entity entity-id) args selection))
+  (db/release-entity [_ entity-id data]
+    (lock-tx #(sql-lock/release! % (id/entity entity-id) data)))
+  (db/sweep-locks [_]
+    (sql-lock/sweep-locks lock-tx)))

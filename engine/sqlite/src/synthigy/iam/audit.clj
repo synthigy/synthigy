@@ -68,7 +68,7 @@
             :let [table (entity->table-name entity)
                   stamps (stamp-columns entity)
                   columns (when (seq stamps) (table-columns tx table))
-                  timestamps (keep (fn [[c t _]] (when (= "timestamp" t) c)) stamps)
+                  timestamps (keep (fn [[c t s]] (when (and (= "timestamp" t) (not= :lock-until s)) c)) stamps)
                   sets (stamp-update-sets stamps)
                   update-trigger (str "stamp_" table)
                   insert-trigger (str "stamp_" table "_insert")]]
@@ -87,8 +87,12 @@
                            " BEGIN UPDATE \"" table "\" SET "
                            (str/join ", " (map #(str "\"" % "\" = COALESCE(NEW.\"" % "\", " now-sql ")") timestamps))
                            " WHERE _eid = NEW._eid; END")]))
+      (when (and (seq sets) (some (fn [[_ _ s]] (= :lock s)) stamps))
+        (execute! tx ["CREATE TABLE IF NOT EXISTS _ctx (k TEXT PRIMARY KEY, v TEXT)"]))
       (when (seq sets)
         (execute! tx [(str "CREATE TRIGGER \"" update-trigger "\" AFTER UPDATE ON \"" table "\" FOR EACH ROW"
+                           (when (some (fn [[_ _ s]] (= :lock s)) stamps)
+                             " WHEN (SELECT v FROM _ctx WHERE k = 'lock_op') IS NOT 'on'")
                            " BEGIN UPDATE \"" table "\" SET " (str/join ", " sets) " WHERE _eid = NEW._eid; END")]))
       (when (seq stamps)
         (log/debug {:id ::table-audited :data {:table table :stamps (mapv first stamps)}}

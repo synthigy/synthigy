@@ -314,10 +314,9 @@
   "Attributes active in the deployed entity but not active (or absent) in the candidate entity."
   [deployed-entity candidate-entity]
   (when deployed-entity
-    (let [active? (fn [a] (not (false? (:active a))))
-          cand-active (set (map id/extract (filter active? (:attributes candidate-entity))))]
+    (let [cand-active (set (map id/extract (filter dataset/active? (:attributes candidate-entity))))]
       (->> (:attributes deployed-entity)
-           (filter active?)
+           (filter dataset/active?)
            (remove #(contains? cand-active (id/extract %)))))))
 
 (defn project-models
@@ -393,10 +392,10 @@
                 d #(dataset/diff %)]
             (cond-> {}
               :always (assoc :added (vec (keep #(when (dataset/added? %) (:name %)) attrs)))
-              :always (assoc :reactivated (vec (keep #(when (and (false? (:active (d %))) (not (false? (:active %))))
+              :always (assoc :reactivated (vec (keep #(when (and (not (dataset/active? (d %))) (dataset/active? %))
                                                        (:name %))
                                                     attrs)))
-              :always (assoc :modified (vec (keep #(when (and (dataset/diff? %) (not (false? (:active (d %)))))
+              :always (assoc :modified (vec (keep #(when (and (dataset/diff? %) (dataset/active? (d %)))
                                                     (:name %))
                                                  attrs)))
               :always (assoc :removed (vec (map :name (removed-attributes

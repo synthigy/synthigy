@@ -23,7 +23,7 @@
 
 (def ^:private xsql-verbs
   "Mirrors synthigy.xsql.program/doc-verbs — kept hand-copied to stay diffable with synthigy.gen."
-  #{"search" "get" "search-tree" "get-tree" "slice" "purge" "sql-template"})
+  #{"search" "get" "search-tree" "get-tree" "slice" "purge" "claim" "sql-template"})
 
 (def ^:private core-syms
   (set (map str (keys (ns-publics 'clojure.core)))))

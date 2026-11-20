@@ -3,6 +3,36 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.5.6] — 2026-11-20
+
+### Added
+- **Record locks.** A `user` attribute stamped **Lock** (plus an optional `timestamp` stamped
+  **Lock expiry** with a TTL in seconds) makes an entity lockable. `claim` (`@claim` in XSQL) locks
+  up to `_limit` free records a search with the same args matches to the caller and returns them;
+  records the caller already holds match too and get a new lease, which is the heartbeat. `release`
+  (`@release`) clears them, by xids or a unique key. While a record is locked only its holder may
+  change its columns or move it to another tree parent; others get `RECORD_LOCKED` (`xids`,
+  `details [{xid holder until}]`). Links to or from a locked record, slice, delete and purge
+  ignore locks, so a lock never waits on, or deadlocks with, other rows. Concurrent claims never
+  hand one record to two callers (Postgres `skip locked`; SQLite's single writer). Expired locks are
+  free at once and swept in the background. Claiming and releasing are not changes: modify stamps
+  and history stay as they were. New scope `data:unlock` and role **Data Unlock Admin** release
+  locks other users hold; a superuser too may release, never write through one. Errors
+  `RECORD_LOCKED`, `LOCK_NOT_LOCKABLE`, `LOCK_LIMIT_REQUIRED`, `LOCK_LIMIT_TOO_LARGE`,
+  `LOCK_DISTINCT`, `LOCK_NO_PRINCIPAL`, `LOCK_MODEL_INVALID` ([ERRORS.md](docs/ERRORS.md#record_lock)).
+- **`deploy-check` warns about shared-entity overrides** (`SHARED_ENTITY_OVERRIDE`, rule
+  `shared_entity`). When a deploy changes an entity or relation another dataset also declares
+  (last deploy wins), the warning names each affected dataset and lists every change with its
+  `before` and `after` values. A warning only: the deploy still goes through. System entities stay
+  under `SYSTEM_ENTITY_ALTERED`.
+
+### Changed
+- **`op-completed` log rows name the model entity** (`Ticket`), however the op named it: an XSQL
+  document used to log its root (`ticket`), an op map whatever the caller sent.
+- **A missing `active` on a model element counts as active everywhere.** Deploy, schema, access
+  and the client schema now read it the same way; only an explicit `false` retires an entity,
+  relation, attribute or enum value.
+
 ## [0.5.5] — 2026-11-18
 
 ### Added

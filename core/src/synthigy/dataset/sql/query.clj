@@ -31,6 +31,7 @@
    [synthigy.dataset.encryption :as denc]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.key :as dk]
+   [synthigy.dataset.lock :as lock]
    [synthigy.dataset.rls :as rls-runtime]
    [synthigy.dataset.sql.naming :refer [normalize-name
                                         normalized-enum-value
@@ -811,7 +812,7 @@
   [analysis entity-id]
   (let [eid (some-> (access/current-principal) :_eid)
         {:keys [table fields]} (get (deployed-schema) entity-id)
-        ks (keep #(when (and (:stamp %) (= "user" (:type %))) (:key %)) (vals fields))]
+        ks (keep #(when (and (#{:create :modify} (:stamp %)) (= "user" (:type %))) (:key %)) (vals fields))]
     (if (and eid (seq ks))
       (update-in analysis [:entity table]
                  (fn [rows] (reduce-kv (fn [rows tmp-id _] (reduce #(assoc-in %1 [tmp-id %2] eid) rows ks)) rows rows)))
@@ -929,7 +930,7 @@
                                         (assoc f :reference/entity ref-entity-id)
                                         f)))))
                          {}
-                         (filter :active (:attributes entity)))
+                         (filter core/active? (:attributes entity)))
 
             fields base-fields
 
@@ -940,7 +941,7 @@
                (case t
                  "tree" :recursions
                  :relations))
-             (filter :active (core/focus-entity-relations model entity)))
+             (filter core/active? (core/focus-entity-relations model entity)))
 
             base-relations (reduce
                             (fn [relations
@@ -979,6 +980,7 @@
                                       (keyword (normalize-name name))))
                                   (:attributes entity))
             compiled-rls (rls/compile-entity-rls model entity)
+            entity-lock (lock/schema-lock entity #(keyword (normalize-name (:name %))))
             entity-schema (cond->
                            {:table table
                             :name (:name entity)
@@ -997,7 +999,9 @@
                             :recursions recursions
                             :relations relations}
                             compiled-rls
-                            (assoc :rls compiled-rls))]
+                            (assoc :rls compiled-rls)
+                            entity-lock
+                            (assoc :lock entity-lock))]
         (assoc schema entity-id  entity-schema)))
     {}
     (core/get-entities model))))
@@ -1141,7 +1145,7 @@
                               (assoc result key
                                      (into #{}
                                            (comp
-                                            (remove #(false? (:active %)))
+                                            (filter core/active?)
                                             (keep :name)
                                             (map normalized-enum-value))
                                            vs))
@@ -3571,6 +3575,101 @@
     (assert-from-side-writable! tx from-table from-table existing wg))
   analysis)
 
+(defn lock-state
+  "{_eid row} of `table`'s rows `eids` with id, holder, until and expired, locked until commit."
+  [tx table {:keys [holder until]} eids]
+  (let [c #(str "\"" (name %) "\"")]
+    (into {}
+          (comp (mapcat
+                 (fn [chunk]
+                   (sql/execute!
+                    tx
+                    (into [(str "select _eid, \"" (name (id/key)) "\" as id, " (c holder) " as holder"
+                                (when until (str ", " (c until) " as until, (" (c until) " is null or " (c until) " < " (proto/now-expr *db*) ") as expired"))
+                                " from \"" table "\" where _eid in (" (str/join "," (repeat (count chunk) "?")) ")"
+                                (proto/row-lock-clause *db*))]
+                          chunk)
+                    :raw)))
+                (map (juxt :_eid identity)))
+          (partition-all (chunk-rows-for 1) (vec (set eids))))))
+
+(defn lock-free? [{:keys [holder expired]}]
+  (or (nil? holder) (true? expired) (= 1 expired)))
+
+(defn lock-instant [v]
+  (cond
+    (nil? v) nil
+    (instance? java.util.Date v) (str (.toInstant ^java.util.Date v))
+    (instance? java.time.LocalDateTime v) (str (.toInstant (.atZone ^java.time.LocalDateTime v java.time.ZoneOffset/UTC)))
+    (string? v) (str (.toInstant (.atZone (java.time.LocalDateTime/parse (str/replace v " " "T")) java.time.ZoneOffset/UTC)))
+    :else (str v)))
+
+(defn holder-ids
+  "{user _eid user id} of the `eids` that hold locks."
+  [tx eids]
+  (if-let [eids (seq (distinct (remove nil? eids)))]
+    (into {}
+          (map (juxt :_eid :id))
+          (sql/execute! tx (into [(str "select _eid, \"" (name (id/key)) "\" as id from \"user\" where _eid in ("
+                                       (str/join "," (repeat (count eids) "?")) ")")]
+                                 eids)
+                        :raw))
+    {}))
+
+(defn throw-locked [tx entity-name rows]
+  (let [ids (holder-ids tx (map :holder rows))]
+    (throw
+     (ex-info (str (count rows) " " entity-name " record(s) are locked by another user")
+              {:code "RECORD_LOCKED"
+               :rule "record_lock"
+               :entity-name entity-name
+               :xids (mapv :id rows)
+               :details (mapv #(cond-> {:xid (:id %) :holder (some-> (ids (:holder %)) str)}
+                                 (:until %) (assoc :until (lock-instant (:until %))))
+                              rows)}))))
+
+(defn throw-locked-hidden []
+  (throw (ex-info "A record outside your access scope is locked by another user"
+                  {:code "RECORD_LOCKED"
+                   :rule "record_lock"})))
+
+(defn assert-rows-unlocked!
+  "Throws RECORD_LOCKED when another user holds a lock on any of `entity-id`'s rows `eids`; rows the caller cannot read are never named."
+  [tx entity-id eids]
+  (when-let [me (and (seq eids) (access/principal-eid))]
+    (let [{:keys [table lock name]} (deployed-schema-entity entity-id)]
+      (when lock
+        (when-let [held (seq (remove #(or (lock-free? %) (= me (:holder %)))
+                                     (vals (lock-state tx table lock eids))))]
+          (let [guard (read-scope-guard entity-id table)
+                hidden (if guard (set (rows-outside tx table (map :_eid held) guard)) #{})
+                shown (remove (comp hidden :_eid) held)]
+            (if (seq shown)
+              (throw-locked tx name shown)
+              (throw-locked-hidden))))))))
+
+(defn assert-unlocked!
+  "Throws RECORD_LOCKED when this write changes columns of a row another user holds; created and link-only rows pass."
+  [tx {:keys [entity created] :as analysis}]
+  (when (access/principal-eid)
+    (doseq [[table rows] entity
+            :let [entity-id (get-in analysis [:entity/mapping table])
+                  schema (when entity-id (deployed-schema-entity entity-id))]
+            :when (:lock schema)
+            :let [fresh (get created table #{})
+                  resolved (get-in analysis [:resolved table] #{})
+                  re-parented (mapcat (fn [[_ by-parent]] (mapcat val by-parent))
+                                      (get-in analysis [:recursion table]))
+                  eids (concat
+                        (keep (fn [[tmp row]]
+                                (let [e (:_eid row)]
+                                  (when-not (or (nil? e) (contains? fresh e) (contains? resolved tmp))
+                                    e)))
+                              rows)
+                        (remove #(contains? fresh %) re-parented))]]
+      (assert-rows-unlocked! tx entity-id eids)))
+  analysis)
+
 (defn link-relations
   ([tx analysis] (link-relations tx analysis true))
   ([tx analysis stack?]
@@ -4127,7 +4226,9 @@
                (and create-guard (seq created))
                (update-in [:created entity-table] (fnil into #{}) (map :_eid created))
                (and create-guard (not resolve-only?))
-               (update-in [:guarded entity-table] (fnil into #{}) (map :_eid result)))
+               (update-in [:guarded entity-table] (fnil into #{}) (map :_eid result))
+               resolve-only?
+               (update-in [:resolved entity-table] (fnil into #{}) (keys mapping)))
              mapping))))
       analysis
       (group-entity-rows rows)))
@@ -4164,6 +4265,7 @@
          (project-saved-entities result)
          ;; never gate after link-relations — a denied write would still evict
          (assert-links-writable! tx result)
+         (assert-unlocked! tx result)
          (link-relations tx result stack?)
          (assert-created-writable! tx result)
          (pull-roots result))))))

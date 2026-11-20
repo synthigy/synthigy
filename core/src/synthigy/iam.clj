@@ -392,6 +392,7 @@
                   "exports/role_dataset_modeler.json"
                   "exports/role_dataset_explorer.json"
                   "exports/role_xsql_developer.json"
+                  "exports/role_data_unlock_admin.json"
                   "exports/role_iam_admin.json"
                   "exports/role_user_admin.json"
                   "exports/role_role_admin.json"

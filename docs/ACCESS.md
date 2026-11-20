@@ -109,6 +109,7 @@ Some operations are not about records and are granted as **scopes** on a role:
 | `schema:read` | read the model as a schema, for code generation and editor tooling |
 | `log:read` | query logs and traffic |
 | `log:configure` | change log levels and destinations at runtime |
+| `data:unlock` | release row locks held by another user, on records you may update |
 
 ## Built-in roles
 
@@ -128,6 +129,7 @@ Synthigy ships these roles; use them as they are or as a starting point.
 | Dataset Modeler | Modeling the datasets shared with it |
 | Dataset Explorer | Reading the whole dataset catalog |
 | XSQL Developer | The schema for code generation and editor tooling; no data access |
+| Data Unlock Admin | Releases row locks other users hold (`data:unlock`), on records the holder's other roles may update |
 | File Admin, File User, File Reader | Files and folders ([Files](FILES.md#access)) |
 
 ## Delegated administration

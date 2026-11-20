@@ -17,6 +17,7 @@
    [synthigy.dataset.core :as dataset]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.key :as dk]
+   [synthigy.dataset.lock :as lock]
    [synthigy.dataset.sql.naming :as naming]))
 
 ;;; ============================================================================
@@ -170,20 +171,20 @@
 (defn attribute->client
   "Projects an active attribute to its client-schema [name facts] pair."
   [{:keys [name type constraint configuration] :as attribute}]
-  (when (:active attribute)
+  (when (dataset/active? attribute)
     [(*name-fn* name)
      (cond-> {:type (or type "string") :skins (dk/label->skins name)}
        (dataset/mandatory-constraint? constraint) (assoc :nullable false)
        (= "enum" type)   (assoc :enum (mapv :name (:values configuration)))
        (and (= "enum" type)
-            (some (complement :active) (:values configuration)))
-       (assoc :retired (into [] (comp (remove :active) (map :name)) (:values configuration)))
+            (some (complement dataset/active?) (:values configuration)))
+       (assoc :retired (into [] (comp (remove dataset/active?) (map :name)) (:values configuration)))
        (= "hashed" type) (assoc :write-only true)
        (dataset/stamp attribute) (assoc :read-only true)
        (dataset/reference-label type) (assoc :label (vec (sort (map clojure.core/name (dataset/reference-label type))))))]))
 
 (defn attribute->xid-pair [attribute]
-  (when (and (:active attribute) (:xid attribute))
+  (when (and (dataset/active? attribute) (:xid attribute))
     [(*name-fn* (:name attribute)) (str (:xid attribute))]))
 
 (defn entity-unique-constraints->client [entity]
@@ -213,8 +214,8 @@
   (let [active-attrs (:attributes entity)
         attrs        (into {} (keep attribute->client) active-attrs)
         attr-xids    (into {} (keep attribute->xid-pair) active-attrs)
-        rel-rows  (keep (fn [{:keys [xid to to-label cardinality active]}]
-                          (when (and active (seq to-label))
+        rel-rows  (keep (fn [{:keys [xid to to-label cardinality] :as relation}]
+                          (when (and (dataset/active? relation) (seq to-label))
                             (let [label (*name-fn* to-label)]
                               [label
                                {:to (*name-fn* (:name to))
@@ -232,7 +233,8 @@
              :relations rels
              :constraints {:unique (entity-unique-constraints->client entity)}
              :xids {:attributes attr-xids
-                    :relations rel-xids}}
+                    :relations rel-xids}
+             :lock (lock/schema-lock entity #(*name-fn* (:name %)))}
       writes (assoc :writes writes))))
 
 (defn schema

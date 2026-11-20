@@ -32,7 +32,7 @@
   "Keys of `row` that write an attribute of entity `entity-key`; stamps are the system's, never content."
   [entity-key row]
   (let [attribute-keys (into #{}
-                             (comp (filter :active) (remove core/stamp) (map (comp keyword normalize-name :name)))
+                             (comp (filter core/active?) (remove core/stamp) (map (comp keyword normalize-name :name)))
                              (:attributes (core/get-entity (dataset/deployed-model) (id/entity entity-key))))]
     (filter attribute-keys (keys row))))
 

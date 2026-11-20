@@ -39,14 +39,17 @@
 (defn stamp-trigger-body
   "The BEFORE UPDATE statements that keep `stamps`, or nil when none needs one."
   [stamps]
-  (not-empty
-   (apply str
-          (for [[c t s] stamps]
-            (case [t s]
-              ["timestamp" :modify] (str "NEW.\"" c "\" = localtimestamp; ")
-              ["timestamp" :create] (str "NEW.\"" c "\" = OLD.\"" c "\"; ")
-              ["user" :create] (str "NEW.\"" c "\" = COALESCE(OLD.\"" c "\", NEW.\"" c "\"); ")
-              nil)))))
+  (when-let [body (not-empty
+                   (apply str
+                          (for [[c t s] stamps]
+                            (case [t s]
+                              ["timestamp" :modify] (str "NEW.\"" c "\" = localtimestamp; ")
+                              ["timestamp" :create] (str "NEW.\"" c "\" = OLD.\"" c "\"; ")
+                              ["user" :create] (str "NEW.\"" c "\" = COALESCE(OLD.\"" c "\", NEW.\"" c "\"); ")
+                              nil))))]
+    (if (some (fn [[_ _ s]] (= :lock s)) stamps)
+      (str "IF current_setting('synthigy.lock_op', true) = 'on' THEN RETURN NEW; END IF; " body)
+      body)))
 
 (defn transform-audit-impl
   "Ensures every stamp column of `entities`, the timestamp defaults and one stamp trigger per table."
@@ -61,10 +64,11 @@
                   trigger (str "stamp_" table)
                   stamps (stamp-columns entity)
                   body (stamp-trigger-body stamps)]]
-      (doseq [[c t _] stamps]
+      (doseq [[c t s] stamps]
         (if (= "timestamp" t)
           (do (execute! tx [(str "ALTER TABLE \"" table "\" ADD COLUMN IF NOT EXISTS \"" c "\" timestamp")])
-              (execute! tx [(str "ALTER TABLE \"" table "\" ALTER COLUMN \"" c "\" SET DEFAULT localtimestamp")]))
+              (execute! tx [(str "ALTER TABLE \"" table "\" ALTER COLUMN \"" c "\""
+                                 (if (= :lock-until s) " DROP DEFAULT" " SET DEFAULT localtimestamp"))]))
           (do (execute! tx [(str "ALTER TABLE \"" table "\" ADD COLUMN IF NOT EXISTS \"" c "\" bigint")])
               (when user-table?
                 (execute! tx [(str "DO $$ BEGIN ALTER TABLE \"" table "\" ADD CONSTRAINT \"" table "_" c "_fkey\""

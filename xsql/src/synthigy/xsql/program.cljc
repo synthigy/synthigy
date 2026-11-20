@@ -21,8 +21,8 @@
             [synthigy.xsql.sql-params :as sql-params]))
 
 (def doc-verbs
-  "Op verbs that form XSQL operation documents (read + destroy)."
-  #{"search" "get" "search-tree" "get-tree" "sql-template" "slice" "purge"})
+  "Op verbs that form XSQL operation documents (read, destroy, claim)."
+  #{"search" "get" "search-tree" "get-tree" "sql-template" "slice" "purge" "claim"})
 
 (def tree-verbs
   "Recursive read verbs walking the self-relation named by `_on`; they return a flat row list."
@@ -30,7 +30,7 @@
 
 (def mutate-verbs
   "Mutation verbs: the body is a `?var:Entity[]` data variable, not a rooted XSQL query."
-  #{"sync" "stack" "delete"})
+  #{"sync" "stack" "delete" "release"})
 
 (def ^:private raw-verbs
   "Ops whose body is raw (not rooted XSQL)."
@@ -217,11 +217,17 @@
                  (conj {:severity :warning
                         :message "@sql-template without @returns — result columns are untyped in generated SDKs"
                         :from decl-off :to decl-to})
-                 (and (sequential? watch) (not sql?))
+                 (and (sequential? watch) (not sql?) (not (#{"claim" "purge" "slice"} verb)) (not (tree-verbs verb)))
                  (conj (let [[from to] (anchor "watch")]
                          {:severity :warning
                           :message (str "@watch entity list is only used by @sql-template — @"
                                         verb " derives its dependencies; use bare @watch")
+                          :from from :to to}))
+                 (and watch (#{"claim" "purge" "slice"} verb))
+                 (conj (let [[from to] (anchor "watch")]
+                         {:severity :warning
+                          :message (str "@watch is ignored on @" verb
+                                        " — writes have no watch variant")
                           :from from :to to}))
                  (and watch (tree-verbs verb))
                  (conj (let [[from to] (anchor "watch")]
@@ -532,7 +538,7 @@
         :let [src (str/trim inner)]
         :when (and (seq src) (not (str/includes? src ".")))
         :let [after (subs body (inc close))
-              [m as? alias] (re-find #"^\s+((?i:as)\s+)?([A-Za-z_][A-Za-z0-9_]*)" after)
+              [m as? alias] (re-find #"^\s+([Aa][Ss]\s+)?([A-Za-z_][A-Za-z0-9_]*)" after)
               alias? (and alias (or as? (not (sql-after-table-words (str/lower-case alias)))))
               at (when alias? (+ (inc close) (- (count m) (count alias))))
               use (when alias? (re-find (re-pattern (str "\\b" alias "\\.([A-Za-z_][A-Za-z0-9_]*)")) body))
@@ -646,7 +652,7 @@
 (defn write-mode-errors
   "Refuse a write operation on an entity that /data only links (`writes: link`) or only reads (`writes: none`)."
   [source {:keys [op mutate entity root decl-offset]} schema]
-  (let [target (cond mutate entity (= "purge" op) root)
+  (let [target (some-> (cond mutate entity (#{"purge" "claim"} op) root) str/lower-case)
         writes (get-in schema [:entities target :writes])]
     (when (#{"link" "none"} writes)
       [{:severity :error
@@ -659,6 +665,70 @@
                 (str "Create and change it through /files, then link it from your own entity by xid: {\"" target "\": {\"xid\": \"…\"}}.")
                 "Create and delete it through /files.")
         :doc "errors/files_read_only"}])))
+
+(defn lock-errors
+  "Refuse @claim/@release on an entity the schema says has no lock; silent when the schema carries no lock info."
+  [source {:keys [op entity root decl-offset]} schema]
+  (let [target (some-> (case op "claim" root "release" entity nil) str/lower-case)
+        edef   (get-in schema [:entities target])]
+    (when (and target (contains? edef :lock) (nil? (:lock edef)))
+      [{:severity :error
+        :from decl-offset
+        :to (or (str/index-of source "\n" decl-offset) (count source))
+        :message (str "@" op " on " target " is refused: " target " is not lockable.")
+        :hint (str "Give " target " a Lock attribute (a user attribute stamped as the lock holder) in the model and deploy it.")}])))
+
+(def claim-limit-caps
+  "The engine's claim cap, max bind parameters less 64: refused everywhere above :all, on SQLite above :sqlite."
+  {:sqlite 32702 :all 65471})
+
+(defn claim-limit-value [value]
+  (let [raw (case (:node value) :number (:text value) :param-ref (:param-default value) nil)]
+    (when (and raw (re-matches #"\d+" raw))
+      #?(:clj (Long/parseLong raw) :cljs (js/parseInt raw 10)))))
+
+(defn claim-arg-errors
+  "Refuse an @claim whose root has no required `limit`, a limit over the cap, or `distinct` (LOCK_LIMIT_REQUIRED, LOCK_LIMIT_TOO_LARGE, LOCK_DISTINCT)."
+  [{:keys [op body body-offset]}]
+  (when (and (= "claim" op) (seq (str/trim (or body ""))))
+    (let [ast    (xparser/parse body)
+          metas  (for [stmt (some-> ast :root-parens :children first :children)
+                       m    (:children stmt)
+                       :when (= :meta-key (:node m))]
+                   m)
+          key-of (fn [m] (some-> m :children first :text str/lower-case))
+          limit  (some #(when (= "limit" (key-of %)) %) metas)
+          value  (some-> limit :children second)
+          span   (fn [n] (let [[f t] (:span n)] {:from (+ body-offset f) :to (+ body-offset t)}))
+          root   (or (:root-entity ast) {:span [0 0]})]
+      (concat
+       (cond
+         (nil? limit)
+         [(merge (span root)
+                 {:severity :error
+                  :message  "@claim needs a limit (LOCK_LIMIT_REQUIRED): it locks at most that many rows."
+                  :hint     "Add limit to the root, e.g. job (status = \"queued\", limit 10)."})]
+         (:optional? value)
+         [(merge (span limit)
+                 {:severity :error
+                  :message  "@claim limit can't be optional (LOCK_LIMIT_REQUIRED): without it the claim is refused."
+                  :hint     "Use ?n:int or give it a default, e.g. ?n:int=10."})]
+
+         (some-> (claim-limit-value value) (> (:all claim-limit-caps)))
+         [(merge (span value)
+                 {:severity :error
+                  :message  (str "@claim limit is at most " (:all claim-limit-caps) " (LOCK_LIMIT_TOO_LARGE).")
+                  :hint     "Claim in batches: a smaller limit, then claim again."})]
+
+         (some-> (claim-limit-value value) (> (:sqlite claim-limit-caps)))
+         [(merge (span value)
+                 {:severity :warning
+                  :message  (str "@claim limit over " (:sqlite claim-limit-caps) " is refused on SQLite engines (LOCK_LIMIT_TOO_LARGE).")
+                  :hint     "Fine on Postgres; claim in smaller batches to run everywhere."})])
+       (for [m metas :when (= "distinct" (key-of m))]
+         (merge (span m)
+                {:severity :error
+                 :message  "@claim refuses distinct (LOCK_DISTINCT): it locks whole rows."}))))))
 
 (defn lint
   "Lint every declaration in `source` against `schema`, in full-buffer offsets."
@@ -675,6 +745,8 @@
          (concat
           errors
           (write-mode-errors source decl schema)
+          (lock-errors source decl schema)
+          (claim-arg-errors decl)
           (when (and sql? (seq (str/trim (or body ""))))
             (concat
              (for [d (concat (sql-placeholder-errors body schema)
@@ -720,7 +792,10 @@
 (defn compile-parsed
   "Bind `params` into a `parse-compiled` result; same output as `compile`."
   [decls params]
-  (mapv (fn [{:keys [op name description namespace watch returns body body-ast sql? batch mutate] :as decl}]
+  (into []
+   (comp
+    (remove (fn [{:keys [op batch body]}] (and (nil? op) (not batch) (str/blank? body))))
+    (map (fn [{:keys [op name description namespace watch returns body body-ast sql? batch mutate] :as decl}]
           (cond
             batch  decl
             mutate decl
@@ -734,8 +809,8 @@
                                       (lift-tree-shape op compiled)
                                       compiled)))
                      namespace (assoc :namespace namespace)
-                     watch     (assoc :watch watch))))
-        decls))
+                     (and watch (not (#{"claim" "purge" "slice"} op))) (assoc :watch watch))))))
+   decls))
 
 (defn compile
   "Compile every declaration to its wire shape, preserving order."
@@ -779,9 +854,11 @@
    {:label "@sql-template" :type "keyword" :section "Operations" :detail "raw SQL, {Entity.field} placeholders"}
    {:label "@slice"        :type "keyword" :section "Operations" :detail "destroy — slice matched rows"}
    {:label "@purge"        :type "keyword" :section "Operations" :detail "destroy — delete matched rows"}
+   {:label "@claim"        :type "keyword" :section "Operations" :detail "write — lock free matched rows, return them"}
    {:label "@sync"         :type "keyword" :section "Operations" :detail "mutate — declarative records"}
    {:label "@stack"        :type "keyword" :section "Operations" :detail "mutate — additive records"}
    {:label "@delete"       :type "keyword" :section "Operations" :detail "mutate — by ids"}
+   {:label "@release"      :type "keyword" :section "Operations" :detail "write — unlock rows by ids"}
    {:label "@description"  :type "keyword" :section "Directives" :detail "document the op above"}
    {:label "@namespace"    :type "keyword" :section "Directives" :detail "codegen namespace"}
    {:label "@returns"      :type "keyword" :section "Directives" :detail "sql-template result columns — name:type, …"}

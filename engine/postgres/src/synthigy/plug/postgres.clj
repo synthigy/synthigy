@@ -20,6 +20,7 @@
    [synthigy.dataset.access :as access]
    [synthigy.dataset.delta :as delta]
    [synthigy.dataset.id :as id]
+   [synthigy.dataset.lock :as lock]
    [synthigy.dataset.sql.query :as sql-query]
    [synthigy.json :refer [read-str]]
    [synthigy.log :as log]
@@ -399,7 +400,10 @@
         n-pairs (jsonb-build-pairs fields "n")
         o-pairs (jsonb-build-pairs fields "o")
         changed (attribute-when-distinct fields "o" "n")
-        al      (if audit? "true" "false")]
+        al      (if audit? "true" "false")
+        al-update (if (and audit? (:lock entity))
+                    "(COALESCE(current_setting('synthigy.lock_op', true), '') <> 'on')"
+                    al)]
     (format
      "CREATE OR REPLACE FUNCTION %s()
        RETURNS TRIGGER AS $$
@@ -456,7 +460,7 @@
        END $$ LANGUAGE plpgsql"
      (entity-emit-fn-name entity-xid)
      entity-xid al n-pairs
-     entity-xid al o-pairs n-pairs changed
+     entity-xid al-update o-pairs n-pairs changed
      entity-xid al o-pairs)))
 
 (defn entity-trigger-specs
@@ -855,10 +859,12 @@
     (jdbc/execute! tx
                    [(str "SELECT set_config('synthigy.actor_xid', ?, true),"
                          " set_config('synthigy.request_id', ?, true),"
-                         " set_config('synthigy.scope_xid', ?, true)")
+                         " set_config('synthigy.scope_xid', ?, true),"
+                         " set_config('synthigy.lock_op', ?, true)")
                     (some-> principal :xid str)
                     (log/request-id)
-                    (some-> principal :scope-xid str)]))
+                    (some-> principal :scope-xid str)
+                    (if lock/*op* "on" "")]))
   nil)
 
 (defn start-drainer!

@@ -251,6 +251,8 @@ the client to create a record you can reference in the same batch.
 | `slice` | Unlink the relations named in `selections` from the records matching `args`. |
 | `delete` | Delete by identity: a unique-key map (one record) or a list of xids (up to 1000). |
 | `purge` | Delete everything a search with the same `args` and `selections` would return. |
+| `claim` | Lock up to `_limit` free records a search with the same `args` matches to you, and return them per `selections`. Records you already hold match too and get a new lease. Needs a Lock attribute on the entity ([modeling](MODELING.md#entities-and-attributes)). |
+| `release` | Clear your locks on records named like `delete`: a unique-key map or a list of xids. |
 
 `slice` and `purge` refuse root `args` that filter through a relation the same
 call cuts or deletes (`INVALID_FILTER`): root `args` pick the parent records,
@@ -338,6 +340,7 @@ Branch on `error.code`; messages may change. An error with a `rule` carries
 | `UNIQUE_VIOLATION`, `NOT_NULL_VIOLATION`, `FK_VIOLATION`, `CHECK_VIOLATION`, `TYPE_CAST_FAILURE` | The database refused the write. |
 | `DELETE_FORBIDDEN` | The record exists but your access rules hide it. |
 | `ROW_FORBIDDEN` | The write changes a record your access rules let you see but not write. |
+| `RECORD_LOCKED` | Another user holds a lock on a record whose attributes the write changes ([record_lock](ERRORS.md#record_lock)). |
 | `SLOT_OCCUPIED` | The link you are replacing, or the one-to-one target or one-to-many child you are taking, belongs to a record your access rules hide. |
 | `BAD_DATA_SHAPE` | `data` contradicts the model, e.g. one write gives a one-to-one target or a one-to-many child two owners. |
 | `REF_NOT_FOUND` | A linked record, given by its xid or a unique key alone, matches none you can read, and you may not create it ([linked_record](ERRORS.md#linked_record)). |

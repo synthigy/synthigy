@@ -20,6 +20,7 @@
    [patcho.lifecycle :as lifecycle]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.core :as core]
+   [synthigy.dataset.lock :as lock]
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.id :as id]
    synthigy.dataset.operations
@@ -164,7 +165,7 @@
      empty?
      [(column-name n)
       (type->ddl t)
-      (when (and (= "timestamp" t) (core/stamp attribute))
+      (when (and (= "timestamp" t) (core/audit-stamp attribute))
         "default localtimestamp")]))))
 
 (defn normalized-enum-value [value]
@@ -279,8 +280,8 @@
         (filter
          (fn [entity]
            (and (not (core/added? entity))
-                (false? (:active (core/suppress entity)))
-                (true? (:active entity))))
+                (not (core/active? (core/suppress entity)))
+                (core/active? entity)))
          (core/get-entities projection))
         changed-enties
         (filter
@@ -1193,7 +1194,9 @@
               _ (check-entity-name-conflicts! global model)
 
             ;; refuse before any DDL if the result would drop a guard — the op fail-closes silently
-              _ (rls/assert-guards-compile! (core/preview-model this version) model)
+              preview (core/preview-model this version)
+              _ (lock/assert-model! preview)
+              _ (rls/assert-guards-compile! preview model)
 
               _ (core/mount this (update version :model #(core/with-merged-config global %)))
 
@@ -1892,7 +1895,19 @@
     65535)
 
   (row-lock-clause [_db]
-    " for no key update"))
+    " for no key update")
+
+  (now-expr [_db]
+    "localtimestamp")
+
+  (now-plus-seconds-expr [_db]
+    "(localtimestamp + make_interval(secs => ?))")
+
+  (seconds-until-expr [_db timestamp-sql]
+    (str "extract(epoch from " timestamp-sql " - localtimestamp)"))
+
+  (claim-lock-clause [_db alias]
+    (str "for no key update of " alias " skip locked")))
 
 (extend-type Postgres
   proto/SchemaManager

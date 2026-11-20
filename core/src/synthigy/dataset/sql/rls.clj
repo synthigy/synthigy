@@ -28,7 +28,7 @@
   (let [attr-uuid (:attribute condition)
         ;; dangling attr must DROP the rule, never throw — never core/get-attribute here
         attr (some #(when (= attr-uuid (id/extract %)) %) (:attributes entity))]
-    (when (and attr (:active attr))
+    (when (and attr (core/active? attr))
       (let [attr-type (:type attr)]
         (when (#{"user" "group" "role"} attr-type)
           {:type :ref
@@ -43,7 +43,7 @@
   (let [rel-id (:relation-id step)
         relation (core/get-relation model rel-id)]
     (cond
-      (not (and relation (:active relation)))
+      (not (and relation (core/active? relation)))
       nil
 
       (core/recursive-relation? relation)
@@ -121,7 +121,7 @@
               ;; dangling attr drops the rule, never throw — same safe lookup as compile-ref-condition
               final-attr (when final-entity
                            (some #(when (= attr-uuid (id/extract %)) %) (:attributes final-entity)))]
-          (when (and final-attr (:active final-attr))
+          (when (and final-attr (core/active? final-attr))
             (let [attr-type (:type final-attr)]
               (when (#{"user" "group" "role"} attr-type)
                 {:type :hybrid
@@ -204,7 +204,7 @@
   [model]
   (vec
    (for [entity (core/get-entities model)
-         :when (and (:active entity) (core/rls-enabled? entity))
+         :when (and (core/active? entity) (core/rls-enabled? entity))
          guard (core/get-rls-guards entity)
          :let [unresolved (unresolved-conditions model entity guard)]
          :when (or (empty? (:conditions guard)) (seq unresolved))]

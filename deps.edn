@@ -25,7 +25,7 @@
   metosin/jsonista {:mvn/version "0.3.13"}
   com.cognitect/transit-clj {:mvn/version "1.0.333"}
 
-;; Auth/Crypto
+  ;; Auth/Crypto
   buddy/buddy-sign {:mvn/version "3.6.1-359"}
   buddy/buddy-core {:mvn/version "1.12.0-430"}
   buddy/buddy-hashers {:mvn/version "2.0.167"}
@@ -36,7 +36,7 @@
   com.github.seancorfield/next.jdbc {:mvn/version "1.3.955"}
   babashka/fs {:mvn/version "0.5.22"}
 
-;; Configuration
+  ;; Configuration
   environ/environ {:mvn/version "1.2.0"}
 
   ;; Logging
@@ -113,8 +113,7 @@
   {:extra-paths ["log/duckdb/src" "lib/duckdb/src"]
    :extra-deps {org.duckdb/duckdb_jdbc {:mvn/version "1.1.3"}}}
 
-  
-  ;; =========================================================================
+;; =========================================================================
   ;; Libraries — on a module's classpath, never shipped as a dimension.
   ;; A module that needs one repeats its path (and deps) in its own alias.
   ;; =========================================================================

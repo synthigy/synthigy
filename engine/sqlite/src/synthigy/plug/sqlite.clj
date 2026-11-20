@@ -21,6 +21,7 @@
     [synthigy.db.sqlite :as sqlite-db]
     [synthigy.dataset.delta :as delta]
     [synthigy.dataset.id :as id]
+    [synthigy.dataset.lock :as lock]
     [synthigy.json :refer [read-str]]
     [synthigy.log :as log]
     [synthigy.plug.values :as values]
@@ -282,7 +283,10 @@
         before (attribute-json-pairs fields "OLD")
         after  (attribute-json-pairs fields "NEW")
         when-clause (attribute-when-distinct fields)
-        al     (if audit? "json('true')" "json('false')")]
+        al     (cond
+                 (not audit?) "json('false')"
+                 (:lock entity) "CASE WHEN (SELECT v FROM _ctx WHERE k='lock_op') IS 'on' THEN json('false') ELSE json('true') END"
+                 :else "json('true')")]
     (format "CREATE TRIGGER \"%s\"
              AFTER UPDATE ON \"%s\"
              FOR EACH ROW
@@ -670,11 +674,12 @@
   (let [principal (access/current-principal)]
     (jdbc/execute! tx
                    [(str "INSERT OR REPLACE INTO _ctx (k, v) VALUES"
-                         " ('actor_xid', ?), ('request_id', ?), ('scope_xid', ?), ('txid', ?)")
+                         " ('actor_xid', ?), ('request_id', ?), ('scope_xid', ?), ('txid', ?), ('lock_op', ?)")
                     (some-> principal :xid str)
                     (log/request-id)
                     (some-> principal :scope-xid str)
-                    (str (uuid-v7))]))
+                    (str (uuid-v7))
+                    (when lock/*op* "on")]))
   nil)
 
 (defn start-drainer!

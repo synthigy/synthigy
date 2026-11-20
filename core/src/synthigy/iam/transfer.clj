@@ -18,6 +18,7 @@
    [clojure.walk :as walk]
    [jsonista.core :as j]
    [synthigy.dataset :as dataset]
+   [synthigy.dataset.core :as core]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.sql.naming :refer [normalize-name]]
    [synthigy.dataset.sql.query :as sql.query]
@@ -84,7 +85,7 @@
   "ACTIVE attribute key -> type string for a deployed entity, by resolved id."
   [entity-id]
   (into {}
-        (comp (filter :active)
+        (comp (filter core/active?)
               (map (juxt (comp keyword normalize-name :name) :type)))
         (:attributes (dataset/deployed-entity entity-id))))
 

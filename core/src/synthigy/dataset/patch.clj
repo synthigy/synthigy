@@ -28,13 +28,12 @@
 (defn model-ids
   "Active and all entity, relation and attribute ids of a model, for before/after comparison."
   [model]
-  (let [active? #(not (false? (:active %)))
-        entities (core/get-entities model)
+  (let [entities (core/get-entities model)
         attr-ids (fn [pred] (set (for [e entities a (:attributes e) :when (pred a)]
                                    [(id/extract e) (id/extract a)])))]
-    {:entities (set (map id/extract (filter active? entities)))
-     :relations (set (map id/extract (filter active? (core/get-relations model))))
-     :attributes (attr-ids active?)
+    {:entities (set (map id/extract (filter core/active? entities)))
+     :relations (set (map id/extract (filter core/active? (core/get-relations model))))
+     :attributes (attr-ids core/active?)
      :all-attributes (attr-ids any?)}))
 
 (defn retire-datasets!
@@ -50,16 +49,16 @@
             version-ids (set (map id/extract (:versions datasets)))
             exclusive (concat (core/find-exclusive-entities global version-ids)
                               (core/find-exclusive-relations global version-ids))
-            {blocking true orphaned false} (group-by #(not (false? (:active %))) exclusive)
+            {blocking true orphaned false} (group-by core/active? exclusive)
             label #(or (:name %) (str (:from-label %) "->" (:to-label %)))
             synthigy (:model (dataset/latest-deployed-version (id/data :synthigy/id)))
             uncovered (when synthigy
                         (for [e (some-> (dataset/latest-deployed-version (id/data :dataset/id)) :model core/get-entities)
                               a (:attributes e)
-                              :when (not (false? (:active a)))
+                              :when (core/active? a)
                               :let [a' (some #(when (= (id/extract a) (id/extract %)) %)
                                              (:attributes (core/get-entity synthigy (id/extract e))))]
-                              :when (or (nil? a') (false? (:active a')))]
+                              :when (or (nil? a') (not (core/active? a')))]
                           (str (:name e) "." (:name a))))]
         (cond
           (nil? synthigy)

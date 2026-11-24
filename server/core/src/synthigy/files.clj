@@ -13,12 +13,12 @@
   "The :synthigy/files module: file bytes stored behind the File System dataset."
   (:require
    [clojure.string :as str]
-   [environ.core :refer [env]]
    [patcho.lifecycle :as lifecycle]
    [patcho.patch :as patch]
    [synthigy.audit.protocol :as audit]
    [synthigy.dataset :as dataset]
    [synthigy.db :as db]
+   [synthigy.env :as senv :refer [setting]]
    synthigy.files.guard
    [synthigy.files.folders :as folders]
    [synthigy.files.http :as http]
@@ -43,15 +43,15 @@
 (defn storage-from-env
   "The blob store SYNTHIGY_FILES_STORAGE selects."
   []
-  (case (some-> (env :synthigy-files-storage) str/trim str/lower-case not-empty)
+  (case (some-> (setting :synthigy-files-storage) str/trim str/lower-case not-empty)
     (nil "local") (local/create)
-    "s3" (s3/create {:bucket (not-empty (env :synthigy-files-s3-bucket))
-                     :region (not-empty (env :synthigy-files-s3-region))
-                     :endpoint (not-empty (env :synthigy-files-s3-endpoint))
-                     :path-style? (flag? (env :synthigy-files-s3-path-style))
-                     :access-key (not-empty (env :synthigy-files-s3-access-key-id))
-                     :secret-key (not-empty (env :synthigy-files-s3-secret-access-key))})
-    (throw (ex-info (str "SYNTHIGY_FILES_STORAGE must be local or s3, got " (env :synthigy-files-storage))
+    "s3" (s3/create {:bucket (not-empty (setting :synthigy-files-s3-bucket))
+                     :region (not-empty (setting :synthigy-files-s3-region))
+                     :endpoint (not-empty (setting :synthigy-files-s3-endpoint))
+                     :path-style? (flag? (setting :synthigy-files-s3-path-style))
+                     :access-key (not-empty (setting :synthigy-files-s3-access-key-id))
+                     :secret-key (not-empty (setting :synthigy-files-s3-secret-access-key))})
+    (throw (ex-info (str "SYNTHIGY_FILES_STORAGE must be local or s3, got " (setting :synthigy-files-storage))
                     {:code :storage-unavailable}))))
 
 (defn require-durable-audit!
@@ -112,11 +112,28 @@
   :start start
   :stop stop})
 
-(supervisor/register-method! "files.migrate" (fn [settings] (migrate/start! *storage* settings)))
+(supervisor/restartable! :synthigy/files)
+
+(defn settings-overrides
+  "The `files.migrate` settings as `synthigy.env` setting keys, so a later restart builds the store a commit installed."
+  [{:keys [storage bucket region endpoint path_style access_key_id secret_access_key]}]
+  {:synthigy-files-storage (str storage)
+   :synthigy-files-s3-bucket (str bucket)
+   :synthigy-files-s3-region (str region)
+   :synthigy-files-s3-endpoint (str endpoint)
+   :synthigy-files-s3-path-style (str (true? path_style))
+   :synthigy-files-s3-access-key-id (str access_key_id)
+   :synthigy-files-s3-secret-access-key (str secret_access_key)})
+
+(supervisor/register-method! "files.migrate" (fn [settings] (migrate/start! (fn [] *storage*) settings)))
 
 (supervisor/register-method! "files.migrate.status" (fn [_] (migrate/status)))
 
 (supervisor/register-method! "files.migrate.commit"
-  (fn [_] (migrate/commit! #(alter-var-root #'*storage* (constantly %)))))
+  (fn [_]
+    (let [settings (:settings @migrate/state)]
+      (migrate/commit! (fn [target]
+                         (alter-var-root #'*storage* (constantly target))
+                         (swap! senv/overrides merge (settings-overrides settings)))))))
 
 (supervisor/register-method! "files.migrate.abort" (fn [_] (migrate/abort!)))

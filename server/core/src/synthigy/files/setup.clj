@@ -14,13 +14,13 @@
   (:require
    [babashka.fs :as fs]
    [clojure.string :as str]
-   [environ.core :refer [env]]
    [next.jdbc :as jdbc]
    [patcho.patch :as patch]
    [synthigy.dataset :as dataset]
    [synthigy.dataset.id :as id]
    [synthigy.dataset.sql.naming :as naming]
    [synthigy.db :as db]
+   [synthigy.env :refer [setting]]
    [synthigy.files.model :as model]
    [synthigy.files.storage :as storage]
    [synthigy.files.storage.local :as local]
@@ -61,7 +61,7 @@
         (import-roles!)))))
 
 (defn local-storage? []
-  (contains? #{nil "local"} (some-> (env :synthigy-files-storage) str/trim str/lower-case not-empty)))
+  (contains? #{nil "local"} (some-> (setting :synthigy-files-storage) str/trim str/lower-case not-empty)))
 
 (def sharded-key #"([A-Za-z0-9]{22})-([A-Za-z0-9]{22})")
 

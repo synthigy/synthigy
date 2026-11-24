@@ -42,7 +42,8 @@
 
 (def client-modules
   "Optional modules that change what a client can call, by their discovery name."
-  {:synthigy/files "files"})
+  {:synthigy/files "files"
+   :synthigy/apps "apps"})
 
 (defn running-client-modules []
   (not-empty (vec (for [[k n] client-modules :when (lifecycle/started? k)] n))))

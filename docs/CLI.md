@@ -338,7 +338,32 @@ synthigy service
 Install and enable the service for the current instance home
 
 ```
-synthigy service install
+synthigy service install [flags]
+```
+
+Examples:
+
+```
+  synthigy service install
+  sudo synthigy service install --apps   # once per machine, before running apps
+  sudo synthigy service install --apps --apps-pool 6G   # apps with 6 GB for their volumes
+  sudo synthigy service install --domain box.example.com --email ops@example.com   # a server, Let's Encrypt
+  sudo synthigy service install --domain box.example.com --cert fullchain.pem --key key.pem   # a server, your certificate
+```
+
+Flags:
+
+```
+      --acme-url string      With --domain and no --cert: an ACME directory other than Let's Encrypt (staging, or your company's)
+      --apps                 Set up this machine to run apps: the synthigy-apps user, its Podman socket and the egress filter (root)
+      --apps-domain string   With --domain: the domain App hostnames live under, e.g. example.com for an engine at engine.example.com (default: the --domain name)
+      --apps-pool string     With --apps or --domain: make or grow the volume pool for Apps to this size, e.g. 2G, 6G or 12G; it never shrinks (root)
+      --cert string          With --domain: the certificate chain (PEM) for the name and *.<apps domain>; without it certificates come from ACME
+      --domain string        Make this machine a server for this name: a system service as user synthigy on ports 443 and 80, Podman and apps (root)
+      --email string         With --domain and no --cert: the contact address for the ACME account
+      --fresh                With --domain: start the server's instance empty instead of moving yours in
+      --key string           With --domain: the certificate's private key (PEM)
+      --portal-user string   With --apps: the user the portal runs as (default: the user who ran sudo)
 ```
 
 #### `synthigy service status`
@@ -354,7 +379,14 @@ synthigy service status
 Stop, disable and remove the service (the instance data is untouched)
 
 ```
-synthigy service uninstall
+synthigy service uninstall [flags]
+```
+
+Flags:
+
+```
+      --apps     Remove the apps socket and egress filter instead (root); the synthigy-apps user stays
+      --server   Remove the server service instead (root); its user and instance stay
 ```
 
 ### `synthigy up`
@@ -392,6 +424,130 @@ List available Synthigy releases
 
 ```
 synthigy versions
+```
+
+## App — run apps beside the engine
+
+### `synthigy app`
+
+Run apps on this machine
+
+```
+synthigy app
+```
+
+#### `synthigy app deploy`
+
+Pack an app and run it on the connected engine
+
+```
+synthigy app deploy [name | archive.tar] [flags]
+```
+
+Examples:
+
+```
+  synthigy app deploy shop
+  synthigy app deploy dist/shop-v1.4.0.tar --client-id shop-preview --client-name shop-preview
+```
+
+Flags:
+
+```
+      --client-id string     Deploy to this OAuth client id instead of the manifest's clientId
+      --client-name string   The name that client must have instead of the manifest's clientName
+      --timeout duration     How long to wait for the package to run (default 10m0s)
+      --version string       Package version (default: git describe --tags --always --dirty)
+```
+
+#### `synthigy app logs`
+
+Show a deployed app's output, usage and events from the connected engine
+
+```
+synthigy app logs <client-id> [flags]
+```
+
+Examples:
+
+```
+  synthigy app logs shop
+  synthigy app logs shop --kind usage --since 1h
+  synthigy app logs shop --since 2026-11-23T10:00:00Z --json
+```
+
+Flags:
+
+```
+      --json           One JSON row per line, as the engine keeps it
+      --kind string    Only output, usage or event (default: all)
+      --limit int      At most this many rows, the newest (max 1000) (default 200)
+      --since string   From this long ago (1h, 30m) or an ISO time
+      --until string   Up to this long ago or an ISO time
+```
+
+#### `synthigy app ls`
+
+List the apps running on this machine
+
+```
+synthigy app ls
+```
+
+#### `synthigy app pack`
+
+Build and check an app's image into dist/<name>-<version>.tar
+
+```
+synthigy app pack [name] [flags]
+```
+
+Examples:
+
+```
+  synthigy app pack shop
+  synthigy app pack --version 1.4.0
+```
+
+Flags:
+
+```
+      --version string   Package version (default: git describe --tags --always --dirty)
+```
+
+#### `synthigy app run`
+
+Start an app from a packed image archive, replacing its running package
+
+```
+synthigy app run <archive.tar> [flags]
+```
+
+Examples:
+
+```
+  synthigy app run dist/shop-v1.tar --name shop --health /healthz -e GREETING=hi
+```
+
+Flags:
+
+```
+      --cpu int               CPU limit in millicores (default 500)
+  -e, --env-var stringArray   Environment variable KEY=VALUE (repeatable)
+      --health string         Path that must answer 2xx or 3xx before the app counts as started
+      --host stringArray      Hostname the proxy routes to this service (repeatable)
+      --kind string           service or worker (default "service")
+      --memory int            Memory limit in MB (default 256)
+      --name string           App name (required)
+      --package string        Package id (default: local-<timestamp>)
+```
+
+#### `synthigy app stop`
+
+Stop an app and remove its container
+
+```
+synthigy app stop <name>
 ```
 
 ## Common

@@ -4,18 +4,30 @@
     "xid" : "1ubBUFuDpcpqxY94TECvMw"
   }, {
     "xid" : "3vhKU5p1QK9KPoyLoYkYW9"
+  }, {
+    "xid" : "48ttr3UJwRPRv5RMHxLQhD"
+  }, {
+    "xid" : "2kBjxvzeLMG4v2bSrTcv3z"
   } ],
   "create_entities" : [ {
     "xid" : "1ubBUFuDpcpqxY94TECvMw"
   }, {
     "xid" : "3vhKU5p1QK9KPoyLoYkYW9"
+  }, {
+    "xid" : "48ttr3UJwRPRv5RMHxLQhD"
+  }, {
+    "xid" : "2kBjxvzeLMG4v2bSrTcv3z"
   } ],
   "delete_entities" : [ {
     "xid" : "1ubBUFuDpcpqxY94TECvMw"
   }, {
     "xid" : "3vhKU5p1QK9KPoyLoYkYW9"
+  }, {
+    "xid" : "48ttr3UJwRPRv5RMHxLQhD"
+  }, {
+    "xid" : "2kBjxvzeLMG4v2bSrTcv3z"
   } ],
-  "description" : "OAuth application surface: clients, APIs, scopes. Sessions read-only; tokens and keys are system-only.",
+  "description" : "OAuth application surface: clients, their app hostnames and volumes, APIs, scopes. Sessions read-only; tokens and keys are system-only.",
   "name" : "App Developer",
   "read_entities" : [ {
     "xid" : "P2G9jsr3FReSGAs1AfeErp"
@@ -26,6 +38,10 @@
     "xid" : "1ubBUFuDpcpqxY94TECvMw"
   }, {
     "xid" : "3vhKU5p1QK9KPoyLoYkYW9"
+  }, {
+    "xid" : "48ttr3UJwRPRv5RMHxLQhD"
+  }, {
+    "xid" : "2kBjxvzeLMG4v2bSrTcv3z"
   } ],
   "xid" : "WpET587T1WTUG2di3J4BXQ"
 }

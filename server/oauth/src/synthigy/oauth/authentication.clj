@@ -149,12 +149,7 @@
 
 (defn session-cookie
   [request]
-  (some->> (get-in request [:headers "cookie"])
-           (re-find (re-pattern (str "(?:^|;\\s*)"
-                                     (java.util.regex.Pattern/quote (oauth/session-cookie-name request))
-                                     "=([^;]+)")))
-           second
-           not-empty))
+  (oauth/request-cookie request (oauth/session-cookie-name request)))
 
 (defn log-context
   "Who a request is, for its log lines: principal, client, and session/token ids — never a credential."

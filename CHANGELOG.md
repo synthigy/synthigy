@@ -3,6 +3,47 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.6.0] — 2026-11-24
+
+### Added
+- **Apps.** A new module runs containerised Apps beside the engine, through the portal
+  (`synthigy app pack | deploy | run | ls`). An App is a confidential OAuth client with a
+  service user; dataset **Synthigy Apps** holds its packages, configuration, variables,
+  hostnames and volumes. Setting a package's `Active` deploys it; `Status` goes `starting`,
+  `running`, `restarting` (the portal restarts a crashed App) or `failed` with `Last Error`.
+  Hostnames get certificates, and the client's callback and logout URLs follow them. New roles
+  **App Developer**, **App Deployer** and **App Program**. Discovery
+  (`/.well-known/synthigy`) lists `apps` in `modules` while the module runs.
+- **App Variables marked Sensitive** read and show in history as `null` to everyone but the
+  App's own service user, and stay sensitive (`SENSITIVE_STAYS`).
+- **App Volumes.** Persistent storage mounted at a path the developer picks (`/data` by
+  default), several per App within its `Volume Limit MB`, resized without a restart. The
+  engine reports `State`, `Used MB` and `Last Error`. A volume of a deleted App is kept 7 days
+  (`Delete After`), then deleted. Refusals: `VOLUME_REFUSED`, `ENGINE_OWNED`
+  ([ERRORS.md](docs/ERRORS.md#apps_volume)).
+- **App logs and usage.** An App's output, CPU/memory/volume samples and events go to the log
+  store under topic `apps`; `/logs` op `app-logs` reads one App's lines for anyone who may read
+  the App.
+- **Files and Apps restart without the engine** (portal `module.restart`), applying their
+  settings; they refuse while the engine is warm and not yet started.
+
+### Changed
+- **Writes the engine makes on its own** (no signed-in caller: deploys, background jobs, App
+  status) now stamp the **Synthigy** user as Created/Modified By, in every dataset. Before, the
+  stamp was left empty.
+- **Cookies on a secure origin are `__Host-` prefixed** (`__Host-idsrv.session`,
+  `__Host-device_confirm`, `__Host-federated_state`), so a sibling host, such as an App's, cannot
+  plant or overwrite them. Plain http on loopback keeps the old names. A browser signed in
+  before the upgrade signs in once again.
+- **A custom device page must post `user_code`** with the confirm form; see
+  `docs/example-login-page/device.html`.
+
+### Fixed
+- **Sign-in from a page on another site.** A federated sign-in is bound to the browser that
+  started it (login CSRF); `prompt=login` no longer signs the browser out of the engine;
+  `/oauth/logout` with an `id_token_hint` for a session that is gone asks before it ends
+  anything; cookie values that contain another cookie's name are no longer read as that cookie.
+
 ## [0.5.6] — 2026-11-20
 
 ### Added

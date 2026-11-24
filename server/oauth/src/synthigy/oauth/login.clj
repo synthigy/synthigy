@@ -27,17 +27,6 @@
    [synthigy.oauth.page.login :refer [login-html]]
    [synthigy.oauth.page.logout :as page.logout]))
 
-;; No Max-Age/Expires = browser-session cookie (RFC 6265); never write "Expires=Session", it's malformed.
-(defn session-cookie
-  ([session] (session-cookie session nil))
-  ([session request]
-   {(core/session-cookie-name request) (merge {:value session
-                                               :path "/"
-                                               :http-only true}
-                                              (if (core/loopback-http? request)
-                                                {:secure false :same-site :lax}
-                                                {:secure true :same-site :none}))}))
-
 (defn abort-authorization!
   "RFC 6749 §4.1.2.1: send the client its error the way a code would have been sent."
   [authorization-code error]
@@ -102,7 +91,7 @@
     {:redirect-uri redirect-uri
      :response-mode response_mode
      :client client
-     :cookies (session-cookie session)
+     :cookies (core/session-cookie session)
      :params (cond-> {:code authorization-code
                       :iss (core/domain+)}  ; RFC 9207 Issuer Identification
                (not-empty state) (assoc :state state))})))
@@ -165,7 +154,7 @@
   "Sign `user` in to the account page: a new session, its cookie, and the way there."
   [request user amr json? back]
   (let [sid     (open-session! user "account" amr (core/client-info request))
-        cookies (session-cookie sid request)]
+        cookies (core/session-cookie sid request)]
     (log/info {:id ::account-login
                :user-xid (:xid user)
                :data {:action :authenticated :subject :account
@@ -454,7 +443,9 @@
          idsrv-session :idsrv/session} params
         claims (hint-claims id_token_hint)
         hinted-client (hint-client-id claims)
-        session (or (core/sid-session (:sid claims)) idsrv-session)
+        hinted (let [s (some-> claims :sid core/sid-session)]
+                 (when (and s (:active (core/get-session s))) s))
+        session (or hinted idsrv-session)
         client-id (or (not-empty client_id)
                       hinted-client
                       (:id (core/get-session-client session)))
@@ -465,7 +456,7 @@
                        :headers {"Content-Type" "text/html"}
                        :body (json/write-str message)})
         clear-cookie (when (and idsrv-session (= session idsrv-session))
-                       {(core/session-cookie-name request) {:value "" :max-age 0 :path "/"}})]
+                       (core/session-cookie nil request))]
     (cond
       (and (not-empty id_token_hint) (nil? claims))
       (bad-request "Provided 'id_token_hint' is not valid")
@@ -477,14 +468,14 @@
            (not (core/redirect-allowed? post_logout_redirect_uri logout-redirections (core/native-client? logout-client))))
       (bad-request "Provided 'post_logout_redirect_uri' is not valid")
 
-      ;; OIDC RP-Initiated Logout §2: no hint, so the cookie alone can't prove the user asked
-      (and (nil? claims)
+      ;; OIDC RP-Initiated Logout §2: no hint naming a live session, so the cookie alone can't prove the user asked
+      (and (nil? hinted)
            idsrv-session
            (= session idsrv-session)
            (:active (core/get-session session))
            (not (logout-confirmed? request session)))
       (page.logout/confirm-page {:confirm (logout-confirm-token session)
-                                 :client_id client_id
+                                 :client_id (or (not-empty client_id) hinted-client)
                                  :post_logout_redirect_uri post_logout_redirect_uri
                                  :state state}
                                 (:name logout-client))

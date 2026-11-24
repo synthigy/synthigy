@@ -52,8 +52,9 @@
 
     Both POST to /oauth/device/activate (explicit action — this page is GET-only):
       entry   → send `user_code`         (server finds the code, hands off to login)
-      confirm → send `action=confirm|cancel` only — the device_confirm cookie
-                (SameSite=Lax, set by the server on the redirect) carries the rest.
+      confirm → send `user_code` back with `action=confirm|cancel` — the
+                device_confirm cookie (set by the server on the redirect) carries
+                the rest, and the server confirms only the code the POST names.
                 No token in the page; the browser attaches the cookie for you.
 
     The markup is the entry step. On the confirm step the script below fills the
@@ -166,8 +167,8 @@
         $('title').textContent = 'Confirm device code';
         $('desc').textContent = 'Check that this code matches the one on your device.';
         $('foot').textContent = "Didn't start this on your own device? Choose Cancel.";
-        // Confirm mode carries state in the cookie, not the form — drop the hidden field.
-        $('user_code').remove();
+        // The server confirms only the code the form names: post it back as it came.
+        $('user_code').value = code;
         $('continue').remove();
         $('hint-entry').remove();
         // device.js puts the spinner on whichever of Confirm / Cancel was pressed.

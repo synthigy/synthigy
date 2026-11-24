@@ -331,24 +331,27 @@
                       (cond-> {:error error-code}
                         description (assoc :error_description description)))})))))))
 
-;; SameSite=Lax on the confirm cookie is the CSRF defense — never relax it or confirm without the cookie.
+(def confirm-ttl-ms 300000) ; 5 minutes
 
-(def ^:private confirm-cookie-name "device_confirm")
-(def ^:private confirm-ttl-ms 300000) ; 5 minutes
+(defn confirm-cookie-name
+  "device_confirm, `__Host-` prefixed wherever it is Secure, so a sibling host cannot set it itself."
+  [request]
+  (cond->> "device_confirm" (not (core/loopback-http? request)) (str "__Host-")))
 
 (defn confirm-cookie [device-code user-code request]
-  {confirm-cookie-name
+  {(confirm-cookie-name request)
    {:value (encrypt {:device-code device-code
                      :user-code user-code
                      :exp (+ (System/currentTimeMillis) confirm-ttl-ms)})
-    :path "/oauth/device"
+    :path "/"
     :http-only true
     :secure (not (core/loopback-http? request))
     :same-site :lax
     :max-age (quot confirm-ttl-ms 1000)}})
 
-(def ^:private clear-confirm-cookie
-  {confirm-cookie-name {:value "" :path "/oauth/device" :max-age 0}})
+(defn clear-confirm-cookie [request]
+  {(confirm-cookie-name request) {:value "" :path "/" :max-age 0 :http-only true
+                                  :secure (not (core/loopback-http? request)) :same-site :lax}})
 
 (defn device-activation-handler
   "OAuth 2.0 Device Activation page: GET renders entry/confirm, POST confirms or cancels."
@@ -400,7 +403,7 @@
                :body (str (device/authorize {::complete? false}))}))
 
         :post
-        (let [confirm (get-in request [:cookies confirm-cookie-name :value])]
+        (let [confirm (core/request-cookie request (confirm-cookie-name request))]
           (cond
             (some? action)
             (if (nil? confirm)
@@ -414,31 +417,37 @@
                   (or (nil? exp) (< exp now))
                   {:status 400
                    :headers {"Content-Type" "text/html"}
-                   :cookies clear-confirm-cookie
+                   :cookies (clear-confirm-cookie request)
                    :body (str (device/authorize {::error :expired}))}
 
                   (or (nil? expires-at) (< expires-at now))
                   {:status 400
                    :headers {"Content-Type" "text/html"}
-                   :cookies clear-confirm-cookie
+                   :cookies (clear-confirm-cookie request)
                    :body (str (device/authorize {::error :expired}))}
 
                   (not= real-code user-code)
                   {:status 400
                    :headers {"Content-Type" "text/html"}
-                   :cookies clear-confirm-cookie
+                   :cookies (clear-confirm-cookie request)
+                   :body (str (device/authorize {::error :malicous-code}))}
+
+                  ;; never confirm a code the request doesn't name — any page can make the GET set this cookie for its own code
+                  (not= user_code user-code)
+                  {:status 400
+                   :headers {"Content-Type" "text/html"}
                    :body (str (device/authorize {::error :malicous-code}))}
 
                   (= action "confirm")
                   (assoc (redirect-to-login {:device-code device-code
                                              :ip remote-addr
                                              :user-agent user-agent})
-                         :cookies clear-confirm-cookie)
+                         :cookies (clear-confirm-cookie request))
 
                   (= action "cancel")
                   (assoc (redirect-to-canceled {:user-code user-code
                                                 :device-code device-code})
-                         :cookies clear-confirm-cookie)
+                         :cookies (clear-confirm-cookie request))
 
                   :else
                   {:status 400

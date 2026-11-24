@@ -17,6 +17,7 @@
     [patcho.lifecycle :as lifecycle]
     [synthigy.boot :as boot]
     [synthigy.dataline :as dataline]
+    [synthigy.env :as senv]
     [synthigy.json :as json]
     [synthigy.log :as log]))
 
@@ -132,10 +133,17 @@
                            "on a launch classpath — the JVM would silently run whichever "
                            "comes first.")
                       {:code -32000 :duplicates dupes})))
-    (if (seq @start-modules)
+    (cond
+      (empty? @start-modules)
+      (throw (ex-info "no start modules configured — serve! was called without :modules"
+                      {:code -32000}))
+
+      (not (progress-begin! :boot "starting"))
+      {:success false :error (str "busy: " (:phase (progress)))}
+
+      :else
       ;; a failure answers {:success false …}, never throws — the daemon keeps the warm engine for diagnosis
       (try
-        (progress-begin! :boot "starting")
         (boot/start! (or (app-modules) @start-modules)
                      {:on-phase progress-phase! :namespaces (env-list :synthigy-require)})
         (reset! start-error nil)
@@ -149,9 +157,7 @@
                              :data {:action :starting :subject :http-server}}
                             t)
                 {:success false :error (boot/root-cause-message t)})))
-        (finally (when (progress-running? :boot) (progress-finish!))))
-      (throw (ex-info "no start modules configured — serve! was called without :modules"
-                      {:code -32000})))))
+        (finally (progress-finish!))))))
 
 (register-method! "server.stop"
   (fn [_]
@@ -168,13 +174,130 @@
                   (lifecycle/started? :synthigy/console))
        :message (if running? "Server is running" "Server is stopped")})))
 
+(defonce restartable (atom #{}))
+
+(defn restartable!
+  "Let the portal stop, start and restart `topic` on its own; only for modules the server never needs."
+  [topic]
+  (swap! restartable conj topic)
+  nil)
+
+(defn restartable? [topic]
+  (boolean (and (contains? @restartable topic) (lifecycle/module-info topic))))
+
+(defn module-topic
+  "The restartable module `params` names, or an error."
+  [{:keys [module]}]
+  (let [topic (keyword (str/replace (str module) #"^:" ""))]
+    (when-not (restartable? topic)
+      (throw (ex-info (str "not a module that restarts on its own: " module) {:code -32602})))
+    topic))
+
+(defn env-overrides
+  "`env` (\"SYNTHIGY_FILES_X\" -> value) as setting keys; only the module's own SYNTHIGY_<NAME>_ keys."
+  [topic env]
+  (let [prefix (str "SYNTHIGY_" (str/upper-case (str/replace (name topic) "-" "_")) "_")]
+    (into {}
+          (for [[k v] env :let [k (name k)]]
+            (if (str/starts-with? k prefix)
+              [(keyword (str/lower-case (str/replace k "_" "-"))) (str v)]
+              (throw (ex-info (str k " does not belong to " topic) {:code -32602})))))))
+
+(defn dependents
+  "Started modules that need `topic`."
+  [topic]
+  (filterv #(and (not= % topic) (lifecycle/started? %) (contains? (boot/closure %) topic))
+           (keys (:modules (lifecycle/system-report)))))
+
+(defn missing-dependencies
+  "Direct dependencies of `topic` that are not running."
+  [topic]
+  (vec (sort (remove lifecycle/started? (:depends-on (lifecycle/module-info topic))))))
+
+(defn refuse-cold-start
+  "A refusal while a dependency of `topic` is down, so a warm engine never boots behind server.start."
+  [topic]
+  (when-let [missing (not-empty (missing-dependencies topic))]
+    {:success false :module (str topic)
+     :error (str topic " needs " (str/join ", " missing) " running first; its settings apply when it starts")}))
+
+(defn module-op!
+  "Run `f` in the activity slot; a failure answers {:success false}, never throws."
+  [op topic f]
+  (if-not (progress-begin! op (str op " " topic))
+    {:success false :error (str "busy: " (:op (progress)))}
+    (try
+      (f)
+      {:success true :module (str topic) :started (lifecycle/started? topic)}
+      (catch Throwable t
+        (log/error! {:id ::module-op-failed
+                     :msg "Module operation failed — the engine keeps running"
+                     :data {:action op :subject :module :module topic}}
+                    t)
+        {:success false :module (str topic) :error (boot/root-cause-message t)})
+      (finally (progress-finish!)))))
+
+(defonce stopped-with (atom {}))
+
+(defn start-with-dependents!
+  "Start `topic`, then try each of `after` even when it fails."
+  [topic after]
+  (try
+    (lifecycle/start! topic)
+    (finally
+      (doseq [m after]
+        (try (lifecycle/start! m) (catch Throwable _ nil))))))
+
+(defn with-not-started [result after]
+  (cond-> result
+    (seq after) (assoc :not-started (mapv str (remove lifecycle/started? after)))))
+
+(register-method! "module.stop"
+  (fn [params]
+    (let [topic (module-topic params)
+          after (dependents topic)]
+      (module-op! :stopping topic
+                  (fn []
+                    (lifecycle/stop! topic)
+                    (swap! stopped-with update topic (fnil into []) after))))))
+
+(register-method! "module.start"
+  (fn [params]
+    (let [topic (module-topic params)
+          overrides (env-overrides topic (:env params))
+          after (get @stopped-with topic [])]
+      (swap! senv/overrides merge overrides)
+      (with-not-started
+        (or (refuse-cold-start topic)
+            (module-op! :starting topic
+                        (fn []
+                          (start-with-dependents! topic after)
+                          (swap! stopped-with dissoc topic))))
+        after))))
+
+(register-method! "module.restart"
+  (fn [params]
+    (let [topic (module-topic params)
+          overrides (env-overrides topic (:env params))
+          after (into (dependents topic) (get @stopped-with topic))]
+      (swap! senv/overrides merge overrides)
+      (with-not-started
+        (or (refuse-cold-start topic)
+            (module-op! :restarting topic
+                        (fn []
+                          (lifecycle/stop! topic)
+                          (start-with-dependents! topic after)
+                          (swap! stopped-with dissoc topic))))
+        after))))
+
 (register-method! "modules"
   (fn [_]
     {:modules
      (vec (for [[topic {:keys [status depends-on doc error]}] (sort-by key (:modules (lifecycle/system-report)))]
             (cond-> {:topic (str topic)
                      :status (name status)
-                     :depends-on (mapv str depends-on)}
+                     :depends-on (mapv str depends-on)
+                     :restartable (restartable? topic)}
               doc (assoc :doc doc)
               error (assoc :error (:message error)
                            :error-at (str (.toInstant ^java.util.Date (:timestamp error)))))))
@@ -194,6 +317,37 @@
   (locking System/out
     (println (json/write-str msg))
     (flush)))
+
+(defonce pending (atom {}))
+
+(defonce call-counter (atom 0))
+
+(defn call-portal
+  "Ask the supervising portal to run `method`; answers its result, throws its error or after `timeout-ms`."
+  [method params timeout-ms]
+  (when-not (log/supervised?)
+    (throw (ex-info "No portal supervises this engine" {:code :no-portal})))
+  (let [id (str "engine-" (swap! call-counter inc))
+        answer (promise)]
+    (swap! pending assoc id answer)
+    (try
+      (write-frame! {:jsonrpc "2.0" :id id :method method :params params})
+      (let [{:keys [result error] :as msg} (deref answer timeout-ms ::timeout)]
+        (cond
+          (= ::timeout msg) (throw (ex-info (str "The portal did not answer " method " in time") {:code :portal-timeout}))
+          error (throw (ex-info (str (:message error)) {:code :portal-error :rpc error}))
+          :else result))
+      (finally (swap! pending dissoc id)))))
+
+(defn answer!
+  "Hand a portal response to the call waiting for it; false when nobody is."
+  [{:keys [id] :as msg}]
+  (if-let [p (get @pending id)]
+    (do (deliver p msg) true)
+    false))
+
+(defn response? [msg]
+  (and (contains? msg :id) (not (contains? msg :method))))
 
 (defonce ^:private serving (atom nil))
 
@@ -216,8 +370,11 @@
                          ;; each frame on its own thread — a long verb must never block ping/doctor
                          (future
                            (try
-                             (when-let [resp (dispatch (json/read-str line))]
-                               (write-frame! resp))
+                             (let [msg (json/read-str line)]
+                               (if (response? msg)
+                                 (answer! msg)
+                                 (when-let [resp (dispatch msg)]
+                                   (write-frame! resp))))
                              (catch Throwable e
                                (log/error! {:id ::frame-failed
                                             :msg "Failed to handle supervision frame"

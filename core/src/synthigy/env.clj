@@ -15,6 +15,13 @@
    [clojure.string]
    [environ.core :refer [env]]))
 
+(defonce overrides (atom {}))
+
+(defn setting
+  "The value of env key `k`, or the override a module restart set for it."
+  [k]
+  (get @overrides k (env k)))
+
 (def home (str (fs/expand-home (env :synthigy-home "~/.synthigy"))))
 
 (def db-dir

@@ -152,10 +152,16 @@
 
 <!-- confirm step: ?user_code=XXXX-XXXX -->
 <form method=\"post\" action=\"/oauth/device/activate\">
+  <input type=\"hidden\" name=\"user_code\" id=\"user_code\">
   <p>Sign in on the device showing <b id=\"code\"></b>?</p>
   <button name=\"action\" value=\"confirm\">Confirm</button>
   <button name=\"action\" value=\"cancel\">Cancel</button>
-</form>")
+</form>
+<script>
+  const code = new URLSearchParams(location.search).get('user_code');
+  document.getElementById('code').textContent = code;
+  document.getElementById('user_code').value = code;
+</script>")
 
 (def status-snippet
   "const q = new URLSearchParams(location.search);
@@ -254,10 +260,12 @@ if (secure) {
       :cols ["Field" "Required" "Meaning"]
       :rows [["user_code" "yes" "The code as typed, e.g. ABCD-EFGH."]]}
      {:heading "Confirm step: POST to /oauth/device/activate"
-      :text (str "Send nothing else — the browser carries a short-lived confirmation cookie the server set when it "
-                 "redirected here. Use an explicit form action; this page lives under /login/.")
+      :text (str "Send the code back with the action. The browser also carries a short-lived confirmation cookie "
+                 "the server set when it redirected here, and the server confirms only the code the POST names. "
+                 "Use an explicit form action; this page lives under /login/.")
       :cols ["Field" "Required" "Meaning"]
-      :rows [["action" "yes" "confirm or cancel."]]}
+      :rows [["user_code" "yes" "The code from ?user_code=, unchanged."]
+             ["action" "yes" "confirm or cancel."]]}
      {:heading "Minimal page"
       :code device-snippet}]}
 

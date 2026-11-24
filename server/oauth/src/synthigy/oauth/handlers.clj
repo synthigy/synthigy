@@ -75,6 +75,7 @@
 (def login
   "OAuth login page handler (GET displays the form, POST authenticates and creates a session)."
   (-> #'login/login-handler
+      core/wrap-refuse-cross-origin-post
       wrap-frame-deny
       wrap-keyword-params
       wrap-params
@@ -109,6 +110,7 @@
 (def device-activation
   "OAuth 2.0 Device Activation handler (GET displays the form, POST confirms/cancels)."
   (-> #'device/device-activation-handler
+      core/wrap-refuse-cross-origin-post
       wrap-frame-deny
       wrap-keyword-params
       wrap-params

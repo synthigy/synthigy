@@ -45,7 +45,7 @@
     (when-let [{:keys [principal claims]} (authentication/authenticate-request request core/platform-audience)]
       (when-let [user (account-user (:xid principal))]
         {:user user :session (core/sid-session (:sid claims))}))
-    (let [sid (get-in request [:cookies (core/session-cookie-name request) :value])]
+    (let [sid (core/request-cookie request (core/session-cookie-name request))]
       (when-let [user (some-> sid core/live-session-owner :xid account-user)]
         {:user user :session sid}))))
 
@@ -305,5 +305,5 @@
                          :data {:action :killed :subject :session :session (core/short-id sid) :own own?}}
                         "Session ended by its owner")
               (cond-> (respond request 200 {:revoked 1} (if own? "signed_out" "revoked"))
-                own? (assoc :cookies {(core/session-cookie-name request) {:value "" :path "/" :max-age 0}})))
+                own? (assoc :cookies (core/session-cookie nil request))))
             (respond request 404 {:error "session_not_found"} nil)))))))

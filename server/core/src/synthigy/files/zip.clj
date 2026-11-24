@@ -13,7 +13,7 @@
   "Zip many stored files into one streamed download."
   (:require
    [clojure.string :as str]
-   [environ.core :refer [env]]
+   [synthigy.env :refer [setting]]
    [synthigy.files.storage :as storage]
    [synthigy.log :as log])
   (:import
@@ -22,7 +22,7 @@
    [java.util.zip Deflater ZipEntry ZipOutputStream]))
 
 (defn env-long [k default]
-  (or (some-> (env k) str/trim not-empty parse-long) default))
+  (or (some-> (setting k) str/trim not-empty parse-long) default))
 
 (defn max-bytes [] (env-long :synthigy-files-zip-max-bytes (* 2 1024 1024 1024)))
 

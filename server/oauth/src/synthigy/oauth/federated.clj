@@ -193,10 +193,24 @@
 (require 'synthigy.oauth.federated.oidc)
 (require 'synthigy.oauth.federated.oauth2)
 
+(def state-ttl-ms 600000)
+
+(defn state-cookie-name
+  "federated_state, `__Host-` prefixed wherever it is Secure, so a sibling host cannot set it itself."
+  [request]
+  (cond->> "federated_state" (not (core/loopback-http? request)) (str "__Host-")))
+
+(defn state-cookie
+  "The cookie that ties a flow's state to the browser that started it; a nil `nonce` deletes it."
+  [request nonce]
+  {(state-cookie-name request) {:value (or nonce "") :path "/" :http-only true
+                                :secure (not (core/loopback-http? request)) :same-site :lax
+                                :max-age (if nonce (quot state-ttl-ms 1000) 0)}})
+
 (defn begin-upstream
-  "PKCE + nonce, sign `extra` into state, 302 to the IdP."
-  ([cfg provider extra] (begin-upstream cfg provider extra nil))
-  ([cfg provider extra prompt]
+  "PKCE + nonce, sign `extra` into state, 302 to the IdP; the nonce also goes into the browser's state cookie."
+  ([request cfg provider extra] (begin-upstream request cfg provider extra nil))
+  ([request cfg provider extra prompt]
    (let [n (b64url (nonce/random-bytes 16))
          {:keys [verifier challenge]} (pkce-pair)
          our-state (core/encrypt (merge {:p provider :n n :v verifier} extra))]
@@ -205,7 +219,8 @@
                                                        :state our-state
                                                        :nonce n
                                                        :challenge challenge}
-                                                prompt (assoc :prompt prompt)))}})))
+                                                prompt (assoc :prompt prompt)))}
+      :cookies (state-cookie request n)})))
 
 (defn handle-login
   "Login mode: resolve or provision the user, then finish the downstream authorization_code flow."
@@ -279,7 +294,7 @@
                   "Console login via federated identity")
         {:status 303
          :headers {"Location" (or (console-return return) "/console")}
-         :cookies (login/session-cookie sid)}))))
+         :cookies (core/session-cookie sid)}))))
 
 (defn handle-account-login
   "Account mode: sign an already-linked identity in to its own account page; never provisions."
@@ -294,7 +309,7 @@
 (defn handle-reauth
   "Step-up via an already-linked identity: re-stamp the current session, never mint one."
   [request id provider reauth-session return]
-  (let [current (get-in request [:cookies (core/session-cookie-name request) :value])
+  (let [current (core/request-cookie request (core/session-cookie-name request))
         owner   (some-> current core/live-session-owner)
         err     #(error-redirect % (return-target return))]
     (cond
@@ -346,7 +361,7 @@
 (defn handle-link
   "Link mode: attach (iss,sub) to the currently authenticated account."
   [request id provider link-session return]
-  (let [current (get-in request [:cookies (core/session-cookie-name request) :value])
+  (let [current (core/request-cookie request (core/session-cookie-name request))
         owner   (some-> current core/live-session-owner)
         err     #(error-redirect % (return-target return))]
     (cond
@@ -425,7 +440,7 @@
         (not (:enabled cfg)) (err "provider_disabled")
 
         (= mode "console")
-        (try (begin-upstream cfg provider (cond-> {:console true}
+        (try (begin-upstream request cfg provider (cond-> {:console true}
                                             (console-return return) (assoc :r return))
                              (safe-prompt (:prompt (:params request))))
              (catch Throwable e
@@ -434,10 +449,10 @@
                (err "provider_unsupported")))
 
         (= mode "reauth")
-        (let [session (get-in request [:cookies (core/session-cookie-name request) :value])]
+        (let [session (core/request-cookie request (core/session-cookie-name request))]
           (if-not (some-> session core/live-session-owner)
             (err "link_requires_login")
-            (try (begin-upstream cfg provider (cond-> {:reauth session}
+            (try (begin-upstream request cfg provider (cond-> {:reauth session}
                                                 (console-return return) (assoc :r return))
                                   "login")
                  (catch Throwable e
@@ -447,7 +462,7 @@
                    (err "provider_unsupported")))))
 
         (= mode "link")
-        (let [session (get-in request [:cookies (core/session-cookie-name request) :value])]
+        (let [session (core/request-cookie request (core/session-cookie-name request))]
           (cond
             (not (some-> session core/live-session-owner))
             (err "link_requires_login")
@@ -457,7 +472,7 @@
             (err "link_reauth_required")
 
             :else
-            (try (begin-upstream cfg provider (cond-> {:link session}
+            (try (begin-upstream request cfg provider (cond-> {:link session}
                                                 (console-return return) (assoc :r return))
                                   "select_account")
                  (catch Throwable e
@@ -471,7 +486,7 @@
           ;; `m` is keyed by dispatch FAMILY ("google"), not the row's URL slug.
           (if (and m (not (contains? m (name (:provider cfg)))))
             (error-redirect "claim_method_not_allowed")
-            (try (begin-upstream cfg provider {:claim {:u u :n n :r r}})
+            (try (begin-upstream request cfg provider {:claim {:u u :n n :r r}})
                  (catch Throwable e
                    (log/warn {:id ::start-failed :data {:provider provider :err (.getMessage e)}}
                              "Federated claim start failed")
@@ -484,7 +499,7 @@
                           (= "account" flow) (cond-> {:account true} back (assoc :b back)))]
           (if (nil? extra)
             (error-redirect "no_flow")
-            (try (begin-upstream cfg provider extra)
+            (try (begin-upstream request cfg provider extra)
                  (catch Throwable e
                    (log/warn {:id ::start-failed :data {:provider provider :err (.getMessage e)}}
                              "Federated start failed")
@@ -500,6 +515,7 @@
           (when state (core/decrypt state))
           cfg (registry/resolve-provider provider)
           client-info (core/client-info request)
+          ours? (and nonce (= nonce (core/request-cookie request (state-cookie-name request))))
           err (fn [code]
                 (cond
                   console?     (error-redirect code "/console/login")
@@ -508,29 +524,33 @@
                   (or link-session reauth-session) (error-redirect code (return-target return))
                   ac-code      (login-retry code ac-code)
                   :else        (error-redirect code (return-target return))))]
-      (cond
-        error       (err (str "idp_" error))
-        (nil? cfg)  (err "state_invalid")
-        (nil? code) (err "no_code")
-        :else
-        (try
-          (let [id (fetch-identity cfg {:code code
-                                        :redirect-uri (callback-uri)
-                                        :verifier verifier
-                                        :nonce nonce
-                                        :iss iss})]
-            (cond
-              (nil? id)    (err "token_invalid")
-              claim        (handle-claim id (:provider cfg) claim)
-              reauth-session (handle-reauth request id (:provider cfg) reauth-session return)
-              link-session (handle-link request id (:provider cfg) link-session return)
-              console?     (handle-console-login id (:provider cfg) return client-info)
-              account?     (handle-account-login request id (:provider cfg) back)
-              :else        (handle-login id (:provider cfg) ac-code client-info)))
-          (catch Throwable e
-            (log/error {:id ::callback-failed :data {:provider provider :err (.getMessage e)}}
-                       "Federated callback failed")
-            (err "callback_error")))))))
+      (cond->
+       (cond
+         error       (err (str "idp_" error))
+         (nil? cfg)  (err "state_invalid")
+         ;; never finish a flow this browser didn't start — any page can send it an attacker's code and state
+         (not ours?) (err "state_invalid")
+         (nil? code) (err "no_code")
+         :else
+         (try
+           (let [id (fetch-identity cfg {:code code
+                                         :redirect-uri (callback-uri)
+                                         :verifier verifier
+                                         :nonce nonce
+                                         :iss iss})]
+             (cond
+               (nil? id)    (err "token_invalid")
+               claim        (handle-claim id (:provider cfg) claim)
+               reauth-session (handle-reauth request id (:provider cfg) reauth-session return)
+               link-session (handle-link request id (:provider cfg) link-session return)
+               console?     (handle-console-login id (:provider cfg) return client-info)
+               account?     (handle-account-login request id (:provider cfg) back)
+               :else        (handle-login id (:provider cfg) ac-code client-info)))
+           (catch Throwable e
+             (log/error {:id ::callback-failed :data {:provider provider :err (.getMessage e)}}
+                        "Federated callback failed")
+             (err "callback_error"))))
+       ours? (update :cookies merge (state-cookie request nil))))))
 
 (defn providers-handler
   "GET /oauth/federated/providers — public JSON list of active providers, never secrets."

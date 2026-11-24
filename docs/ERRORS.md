@@ -79,6 +79,50 @@ A link to a file that doesn't exist, or that you can't read, answers
 upload the file first. See
 [Linking records to files](FILES.md#linking-records-to-files).
 
+
+### apps_status
+
+`ENGINE_OWNED`. An App Package's `Status` and `Last Error` are written by the
+engine alone: it sets them while it starts the package and when the start
+succeeds or fails. To deploy, set `Active` and read `Status` back:
+
+```json
+{"op": "stack", "entity": "app_package", "data": {"xid": "…", "active": true}}
+```
+
+`Status` goes `starting`, then `running`, or `failed` with the reason in
+`Last Error`. A failed start leaves the package that was running before.
+
+### apps_hostname
+
+An App's hostnames:
+
+| Code | Refused | Do instead |
+|---|---|---|
+| `HOSTNAME_INVALID` | A `name` that is not one lowercase DNS name: letters, digits, dots and dashes, no scheme, port or path | Send `app.example.com`, not `https://App.example.com/` |
+| `ROW_FORBIDDEN` | Giving a hostname to an App you may not change | Ask someone in the App's owner group, or an admin |
+
+### apps_sensitive
+
+`SENSITIVE_STAYS`. A sensitive App Variable stays sensitive: setting
+`Sensitive` back to `false` is refused, because its value has already been
+hidden from everyone but the App. Set a new `Value`, or delete the variable and
+create a plain one. Reads and history show a sensitive `Value` as `null` to
+everyone except the App's own service user.
+
+### apps_volume
+
+An App Volume:
+
+| Code | Refused | Do instead |
+|---|---|---|
+| `ENGINE_OWNED` | Writing `State`, `Used MB`, `Last Error` or `Delete After` | Set `Size MB` and `Mount Path`; the engine reports the rest |
+| `VOLUME_REFUSED` | Sizes that add up to more than the App's `Volume Limit MB`, or an App with no limit | Shrink a volume, or raise the limit in the App's configuration |
+| `VOLUME_REFUSED` | Two volumes at one `Mount Path` | Give each its own path |
+| `VOLUME_REFUSED` | A path that is not absolute, has `.` or `..`, or sits under a system directory (`/etc`, `/usr`, …) | Use a path of your own, such as `/data` (the default) or `/srv/uploads` |
+
+A resize is checked together with the App's other volumes.
+
 ### stamp
 
 `ATTRIBUTE_FORBIDDEN`. A stamp attribute (who created or changed a record, and

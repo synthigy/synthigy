@@ -93,7 +93,7 @@
 
 (defn finish! [outcome]
   (supervisor/progress-finish!)
-  (swap! state #(when % (-> % (merge outcome) (dissoc :source :target :stop)))))
+  (swap! state #(when % (-> % (merge outcome) (dissoc :source :target :stop :settings)))))
 
 (defn move!
   "The background half of a move: copy, pause, catch up, then wait at :ready for commit or abort."
@@ -146,32 +146,38 @@
         {:verdict {:ok false :kind "invalid" :message (or (ex-message e) (.getSimpleName (class e)))}}))))
 
 (defn begin!
-  "Start moving every blob of `source` to `target` in the background; answers a verdict at once."
-  [source target]
-  (cond
-    (= (location source) (location target))
-    {:ok false :kind "invalid" :message "Files are already stored there"}
-    (not (supervisor/progress-begin! :files-migrate "listing files"))
-    {:ok false :kind "busy" :message "Another long operation is running on this engine"}
-    :else
-    (do
-      (reset! state {:phase :listing :source source :target target :started-at (java.util.Date.)})
-      (log/info {:id ::starting :data {:action :migrating :subject :files-storage :to (first (location target))}}
-                "Moving files to a new store")
-      (future (move! source target))
-      {:ok true :kind "ok" :message "Moving files"})))
+  "Start moving every blob of the live store to `target` in the background; answers a verdict at once."
+  ([source target] (begin! (constantly source) target nil))
+  ([source-fn target settings]
+   (if-not (supervisor/progress-begin! :files-migrate "listing files")
+     {:ok false :kind "busy" :message "Another long operation is running on this engine"}
+     (let [source (source-fn)]
+       (cond
+         (nil? source)
+         (do (supervisor/progress-finish!)
+             {:ok false :kind "invalid" :message "The files module is not running"})
+         (= (location source) (location target))
+         (do (supervisor/progress-finish!)
+             {:ok false :kind "invalid" :message "Files are already stored there"})
+         :else
+         (do
+           (reset! state {:phase :listing :source source :target target :settings settings :started-at (java.util.Date.)})
+           (log/info {:id ::starting :data {:action :migrating :subject :files-storage :to (first (location target))}}
+                     "Moving files to a new store")
+           (future (move! source target))
+           {:ok true :kind "ok" :message "Moving files"}))))))
 
 (defn start!
-  "Check the store `settings` describe, then begin moving `source` there."
-  [source settings]
-  (if (nil? source)
+  "Check the store `settings` describe, then begin moving the live store `(source-fn)` there."
+  [source-fn settings]
+  (if (nil? (source-fn))
     {:ok false :kind "invalid" :message "The files module is not running"}
     (let [{:keys [target verdict]} (checked-target settings)]
-      (or verdict (begin! source target)))))
+      (or verdict (begin! source-fn target settings)))))
 
 (defn status []
   (if-let [s @state]
-    (-> s (dissoc :source :target :stop) (update :phase name) (assoc :paused (paused?)))
+    (-> s (dissoc :source :target :stop :settings) (update :phase name) (assoc :paused (paused?)))
     {:phase nil}))
 
 (defn commit!

@@ -100,7 +100,9 @@
                                    text))]
        [:div.sy-card-body
         (if complete?
-          [:form.sy-form {:method "post" :id "device-form"}
+          ;; never post to the page's own URL — a stray ?action= there would win over the pressed button
+          [:form.sy-form {:method "post" :action "/oauth/device/activate" :id "device-form"}
+           [:input {:type "hidden" :name "user_code" :value user-code}]
            (code-field chars true false)
            [:div.sy-actions
             (button :secondary "Cancel" {:name "action" :value "cancel"})

@@ -1,0 +1,19 @@
+{
+  "active" : true,
+  "description" : "Reads its own app's packages, variables, hostnames, volumes and configuration; held by an app's service user.",
+  "name" : "App Program",
+  "read_entities" : [ {
+    "xid" : "1ubBUFuDpcpqxY94TECvMw"
+  }, {
+    "xid" : "MCsKVzxJgzPhaq7JUZHhoQ"
+  }, {
+    "xid" : "SibsLcBKQStgE3nnix9Kfv"
+  }, {
+    "xid" : "48ttr3UJwRPRv5RMHxLQhD"
+  }, {
+    "xid" : "VHs8edb4LphZJ8X3DviL8s"
+  }, {
+    "xid" : "2kBjxvzeLMG4v2bSrTcv3z"
+  } ],
+  "xid" : "QzM4DheVDJC86jBHCTaQCE"
+}

@@ -96,16 +96,22 @@ there, and it comes back to `/oauth/account` once signed in. Pass `client_id` an
 Answers `/oauth/device/activate` twice:
 
 - **Entry**, no code in the URL: POST `user_code` to `/oauth/device/activate`.
-- **Confirm**, `?user_code=XXXX`: show the code and POST `action=confirm` or
-  `action=cancel` to `/oauth/device/activate`. The browser carries a short-lived
-  `SameSite=Lax` cookie that the server set; no token in the page.
+- **Confirm**, `?user_code=XXXX`: show the code, and POST it back as
+  `user_code` with `action=confirm` or `action=cancel` to
+  `/oauth/device/activate`. The browser also carries a short-lived cookie that
+  the server set; no token in the page. The server confirms only the code the
+  POST names, so a confirm without `user_code` is refused.
 
 ```html
 <form method="post" action="/oauth/device/activate">
+  <input type="hidden" name="user_code" id="user_code">
   <p>Confirm code: <b id="code"></b></p>
   <button name="action" value="confirm">Confirm</button>
   <button name="action" value="cancel">Cancel</button>
 </form>
-<script>document.getElementById('code').textContent =
-  new URLSearchParams(location.search).get('user_code');</script>
+<script>
+  const code = new URLSearchParams(location.search).get('user_code');
+  document.getElementById('code').textContent = code;
+  document.getElementById('user_code').value = code;
+</script>
 ```

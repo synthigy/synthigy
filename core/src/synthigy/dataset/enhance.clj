@@ -11,6 +11,7 @@
 
 (ns synthigy.dataset.enhance
   "Injects access-control conditions into query schemas before execution."
+  (:refer-clojure :exclude [read])
   (:require
    [synthigy.log :as log]
    [synthigy.dataset.access :as access]
@@ -177,6 +178,44 @@
   ([entity-id relations tx] (apply-slice *db* entity-id relations tx))
   ([db entity-id relations tx]
    (slice db entity-id relations tx)))
+
+(defmulti read
+  "Changes field values in the rows a read returns of one entity, a map of _eid to row; dispatches on [(class db) entity xid]."
+  (fn [db entity-id rows]
+    [(class db) (id/xid-of entity-id)])
+  :default ::default)
+
+(defmethod read ::default
+  [_ _ rows]
+  rows)
+
+(defn read-hook?
+  ([entity-id] (read-hook? *db* entity-id))
+  ([db entity-id]
+   (not= (get-method read [(class db) (id/xid-of entity-id)])
+         (get-method read ::default))))
+
+(defn apply-read
+  "Applies read enhancement to `rows` of `entity-id` — no-op when there is no current principal."
+  [entity-id rows]
+  (if (and (access/current-principal) (read-hook? entity-id))
+    (read *db* entity-id rows)
+    rows))
+
+(defmulti history
+  "Attribute keys whose audited values `/history` hides from everyone, as {record-xid #{key}}, for `record-xids` of one entity; dispatches on [(class db) entity xid]."
+  (fn [db entity-id record-xids]
+    [(class db) (id/xid-of entity-id)])
+  :default ::default)
+
+(defmethod history ::default
+  [_ _ _]
+  nil)
+
+(defn apply-history
+  "Applies history enhancement to `record-xids` of `entity-id`."
+  [entity-id record-xids]
+  (history *db* entity-id record-xids))
 
 (defn apply-schema
   "Entry point for schema enhancement — no-op when there is no current

@@ -22,11 +22,13 @@
    [synthigy.log :as log]
    clojure.zip
    [next.jdbc :as jdbc]
+   [next.jdbc.result-set :as jdbc-rs]
    [nano-id.core :refer [nano-id]]
    [synthigy.dataset
     :refer [deployed-relation deployed-entity deployed-model]]
    [synthigy.dataset.access :as access :refer [*operation-rules*]]
    [synthigy.dataset.core :as core]
+   [synthigy.data :as data]
    [synthigy.dataset.enhance :as enhance]
    [synthigy.dataset.encryption :as denc]
    [synthigy.dataset.id :as id]
@@ -690,73 +692,119 @@
 ;;; Response Construction (Database-Agnostic)
 ;;; ============================================================================
 
+(defn enhance-reads
+  "Runs each queried entity's read enhancement over its rows in `db`."
+  [schema db]
+  (let [entities (loop [todo [schema] seen {}]
+                   (if-let [[{t :entity/table e :entity :as s} & more] (seq todo)]
+                     (recur (concat more (vals (:relations s)))
+                            (cond-> seen (and t e (not (contains? seen t))) (assoc t e)))
+                     seen))]
+    (reduce-kv
+     (fn [db t e]
+       (if (contains? db t) (update db t #(enhance/apply-read e %)) db))
+     db
+     entities)))
+
+(defn enhance-tree
+  "Runs each entity's read enhancement over a nested result whose objects carry :_eid."
+  [schema objs]
+  (if-not (access/current-principal)
+    objs
+    (letfn [(children [objs k]
+              (mapcat #(let [v (get % k)] (cond (vector? v) v (map? v) [v])) objs))
+            (collect [acc {e :entity :as schema} objs]
+              (reduce-kv (fn [acc k rs] (collect acc rs (children objs k)))
+                         (cond-> acc
+                           (and e (enhance/read-hook? e)) (update e (fnil into {}) (keep #(when-let [x (:_eid %)] [x %])) objs))
+                         (:relations schema)))
+            (rebuild [enhanced {e :entity :as schema} o]
+              (when o
+                (let [o (if-let [row (get-in enhanced [e (:_eid o)])]
+                          (merge o (select-keys row (keys (:fields schema))))
+                          o)]
+                  (reduce-kv (fn [o k rs]
+                               (let [v (get o k)]
+                                 (cond
+                                   (vector? v) (assoc o k (mapv #(rebuild enhanced rs %) v))
+                                   (map? v) (assoc o k (rebuild enhanced rs v))
+                                   :else o)))
+                             o
+                             (:relations schema)))))]
+      (let [rows (collect {} schema objs)]
+        (if (empty? rows)
+          objs
+          (let [enhanced (reduce-kv (fn [m e rs] (assoc m e (enhance/apply-read e rs))) {} rows)]
+            (mapv #(rebuild enhanced schema %) objs)))))))
+
 (defn construct-response
   "Rebuilds the nested object graph from flat DB records ([table id] references,
    self references resolved in a second pass)."
   [{:keys [entity/table recursions]
-    :as schema} {:keys [ops]
-                 :as db} found-records]
-  (letfn [(reference? [value]
-            (vector? value))
-          (list-reference? [value]
-            (and
-             (vector? value)
-             (every? vector? value)))
-          (narrow [schema]
-            (concat
-             (keys (:fields schema))
-             (keys (:relations schema))
-             recursions))
-          (pull-reference [[table id] schema cursor]
-            (let [data (merge
-                        (select-keys (get-in db [table id]) (narrow schema))
-                        (get-in ops [cursor id]))
-                  data' (reduce-kv
-                         (fn [data' k v]
-                           (cond
-                             (not (or (contains? (:relations schema) k) (recursions k)))
-                             data'
-
-                             (list-reference? v)
-                             (assoc data' k (mapv
-                                             #(pull-reference % (get-in schema [:relations k]) (conj cursor k))
-                                             (distinct v)))
-                               ;;
-                             (and (recursions k) (not= v id) (not= v [table id]))
-                             (let [child-schema (or (get-in schema [:relations k]) schema)]
-                               (if (vector? v)
-                                 (assoc data' k (pull-reference v child-schema cursor))
-                                 (assoc data' k (pull-reference [table v] child-schema cursor))))
-                              ;;
-                             (and (not (recursions k)) (reference? v))
-                             (assoc data' k (pull-reference v (get-in schema [:relations k]) (conj cursor k)))
-                              ;;
-                             (= v [table id])
-                             (assoc data' k ::self)
-                              ;;
-                             :else data'))
-                         data
-                         data)]
-              (reduce-kv
-               (fn [data k v]
-                 (if (not= v ::self) data
-                     (assoc data k data)))
-               data'
-               data')))]
-    (let [final (mapv
-                 (fn [id]
-                   (pull-reference [table id] schema [::ROOT]))
-                 (reduce
-                  (fn [r root]
-                    (if (get-in db [table root])
-                      (conj r root)
-                      r))
-                  []
-                  (get
-                   found-records
-                   (keyword ((sql/get-label-fn core/*return-type*) (:entity/as schema)))
-                   (keys (get db table)))))]
-      final)))
+    :as schema} db found-records]
+  (let [db (enhance-reads schema db)
+        ops (:ops db)]
+    (letfn [(reference? [value]
+              (vector? value))
+            (list-reference? [value]
+              (and
+               (vector? value)
+               (every? vector? value)))
+            (narrow [schema]
+              (concat
+               (keys (:fields schema))
+               (keys (:relations schema))
+               recursions))
+            (pull-reference [[table id] schema cursor]
+              (let [data (merge
+                          (select-keys (get-in db [table id]) (narrow schema))
+                          (get-in ops [cursor id]))
+                    data' (reduce-kv
+                           (fn [data' k v]
+                             (cond
+                               (not (or (contains? (:relations schema) k) (recursions k)))
+                               data'
+  
+                               (list-reference? v)
+                               (assoc data' k (mapv
+                                               #(pull-reference % (get-in schema [:relations k]) (conj cursor k))
+                                               (distinct v)))
+                                 ;;
+                               (and (recursions k) (not= v id) (not= v [table id]))
+                               (let [child-schema (or (get-in schema [:relations k]) schema)]
+                                 (if (vector? v)
+                                   (assoc data' k (pull-reference v child-schema cursor))
+                                   (assoc data' k (pull-reference [table v] child-schema cursor))))
+                                ;;
+                               (and (not (recursions k)) (reference? v))
+                               (assoc data' k (pull-reference v (get-in schema [:relations k]) (conj cursor k)))
+                                ;;
+                               (= v [table id])
+                               (assoc data' k ::self)
+                                ;;
+                               :else data'))
+                           data
+                           data)]
+                (reduce-kv
+                 (fn [data k v]
+                   (if (not= v ::self) data
+                       (assoc data k data)))
+                 data'
+                 data')))]
+      (let [final (mapv
+                   (fn [id]
+                     (pull-reference [table id] schema [::ROOT]))
+                   (reduce
+                    (fn [r root]
+                      (if (get-in db [table root])
+                        (conj r root)
+                        r))
+                    []
+                    (get
+                     found-records
+                     (keyword ((sql/get-label-fn core/*return-type*) (:entity/as schema)))
+                     (keys (get db table)))))]
+        final))))
 
 ;;; ============================================================================
 ;;; Cursor System (Schema Tree Navigation)
@@ -807,13 +855,25 @@
    nil
    tmp-rows))
 
+(defn synthigy-eid
+  "The Synthigy user's _eid as the write's own transaction sees it, or nil where there is none (bare, first setup)."
+  [tx]
+  (when-let [table (:table (get (deployed-schema) (id/entity :iam/user)))]
+    (some-> (jdbc/execute-one! tx [(str "select _eid from \"" table "\" where " (name (id/key)) " = ?")
+                                   (id/extract data/*SYNTHIGY*)]
+                               {:builder-fn jdbc-rs/as-unqualified-lower-maps})
+            :_eid)))
+
 (defn stamp-principal
-  "`analysis` with the bound principal in every user stamp of `entity-id`'s rows."
-  [analysis entity-id]
-  (let [eid (some-> (access/current-principal) :_eid)
-        {:keys [table fields]} (get (deployed-schema) entity-id)
-        ks (keep #(when (and (#{:create :modify} (:stamp %)) (= "user" (:type %))) (:key %)) (vals fields))]
-    (if (and eid (seq ks))
+  "`analysis` with the bound principal in every user stamp of `entity-id`'s rows; the engine's own writes stamp the Synthigy user."
+  [analysis entity-id tx]
+  (let [{:keys [table fields]} (get (deployed-schema) entity-id)
+        ks (keep #(when (and (#{:create :modify} (:stamp %)) (= "user" (:type %))) (:key %)) (vals fields))
+        eid (when (seq ks)
+              (if-let [p (access/current-principal)]
+                (:_eid p)
+                (synthigy-eid tx)))]
+    (if eid
       (update-in analysis [:entity table]
                  (fn [rows] (reduce-kv (fn [rows tmp-id _] (reduce #(assoc-in %1 [tmp-id %2] eid) rows ks)) rows rows)))
       analysis)))
@@ -824,7 +884,7 @@
   (reduce-kv
    (fn [final _ entity-id]
      (binding [*operation-rules* #{:create :update}]
-       (enhance/apply-write entity-id (stamp-principal final entity-id) tx)))
+       (enhance/apply-write entity-id (stamp-principal final entity-id tx) tx)))
    result
    (:entity/mapping result)))
 

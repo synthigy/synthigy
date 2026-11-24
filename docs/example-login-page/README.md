@@ -71,8 +71,9 @@ show the card right away.
 
 The server owns the flow; these pages only preserve what the server hands them —
 - login: the opaque `?state=` → hidden field → POST to `/oauth/login`
-- device-confirm: the `device_confirm` cookie (the browser sends it; the page
-  posts only `action`)
+- device-confirm: `?user_code=` → hidden field → POST with `action` to
+  `/oauth/device/activate`; the browser also sends the `device_confirm` cookie,
+  and the server confirms only the code the POST names
 - error: read `?error=` and display
 
 Break that round-trip and the flow breaks. Everything else is yours to style.

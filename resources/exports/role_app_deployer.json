@@ -1,0 +1,40 @@
+{
+  "active" : true,
+  "create_entities" : [ {
+    "xid" : "MCsKVzxJgzPhaq7JUZHhoQ"
+  }, {
+    "xid" : "SibsLcBKQStgE3nnix9Kfv"
+  }, {
+    "xid" : "DK41BPRFuMKYtMzdomVQLU"
+  } ],
+  "delete_entities" : [ {
+    "xid" : "MCsKVzxJgzPhaq7JUZHhoQ"
+  }, {
+    "xid" : "SibsLcBKQStgE3nnix9Kfv"
+  } ],
+  "description" : "Deploys packages and variables for the apps it is a deployer of, uploads their archives, and reads their hostnames, volumes and configuration.",
+  "name" : "App Deployer",
+  "read_entities" : [ {
+    "xid" : "1ubBUFuDpcpqxY94TECvMw"
+  }, {
+    "xid" : "MCsKVzxJgzPhaq7JUZHhoQ"
+  }, {
+    "xid" : "SibsLcBKQStgE3nnix9Kfv"
+  }, {
+    "xid" : "DK41BPRFuMKYtMzdomVQLU"
+  }, {
+    "xid" : "WfcjKW6boVAH5LFGehEgKr"
+  }, {
+    "xid" : "48ttr3UJwRPRv5RMHxLQhD"
+  }, {
+    "xid" : "VHs8edb4LphZJ8X3DviL8s"
+  }, {
+    "xid" : "2kBjxvzeLMG4v2bSrTcv3z"
+  } ],
+  "update_entities" : [ {
+    "xid" : "MCsKVzxJgzPhaq7JUZHhoQ"
+  }, {
+    "xid" : "SibsLcBKQStgE3nnix9Kfv"
+  } ],
+  "xid" : "C9myrHx3HXke5F15mVym8P"
+}

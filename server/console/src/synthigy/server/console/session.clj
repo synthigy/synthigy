@@ -18,7 +18,7 @@
 
 (defn session-id
   [request]
-  (not-empty (get-in request [:cookies (oauth/session-cookie-name request) :value])))
+  (oauth/request-cookie request (oauth/session-cookie-name request)))
 
 (defn current-session
   [request]
@@ -49,6 +49,11 @@
                    (get-in request [:headers "host"]))
       :else     true)))
 
+(defn own-page?
+  [request]
+  (or (= "none" (get-in request [:headers "sec-fetch-site"]))
+      (oauth/same-origin? request)))
+
 (def ^:private login-redirect
   {:status 303 :headers {"Location" "/console/login"}})
 
@@ -71,7 +76,7 @@
         (if-let [principal (some-> (:resource-owner session)
                                    iam.context/get-user-context)]
           (do
-            (touch! session)
+            (when (own-page? request) (touch! session))
             (access/with-principal principal
               (handler (assoc request
                               :console/session session

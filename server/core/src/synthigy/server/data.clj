@@ -294,7 +294,7 @@
 
 (def ^:private observability-ops
   "Ops served by /logs, and only /logs."
-  #{"log-query" "log-histogram" "traffic-stats" "log-config"})
+  #{"log-query" "log-histogram" "traffic-stats" "log-config" "app-logs"})
 
 (defn endpoint-op-violation
   "Error map when one of operations is mounted on the other endpoint; nil when legal."

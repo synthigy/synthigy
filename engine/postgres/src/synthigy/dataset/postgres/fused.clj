@@ -368,7 +368,7 @@
                          :elapsed-ms elapsed}}
                  "Fused root query")
       (when (seq objs)
-        (attach-ops con schema (mapv #(coerce-node schema %) (expand-tree con schema objs)))))))
+        (q/enhance-tree schema (attach-ops con schema (mapv #(coerce-node schema %) (expand-tree con schema objs))))))))
 
 (defn search
   "Fused `search-entity`."

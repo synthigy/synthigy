@@ -209,11 +209,9 @@
         (core/touch-session! cookie-session)
         (core/authorization-response redirect_uri response-params response_mode))
 
+      ;; never drop the cookie on this GET — any page can send it; a completed login replaces it
       force-login?
-      (assoc (login-redirect {:prompt prompt})
-             :cookies {(core/session-cookie-name request) {:value ""
-                                                           :max-age 0
-                                                           :path "/"}})
+      (login-redirect {:prompt prompt})
 
       ;; TODO: full consent flow — for now treated like normal login
       prompt-consent?

@@ -148,6 +148,22 @@ Set in `.synthigy/.env` (or written by `synthigy connect`). `synthigy exec` and 
 | `SYNTHIGY_TOKEN` |  | Current access token, a cache refreshed on demand. |
 | `SYNTHIGY_TOKEN_EXPIRES` |  | Expiry of that token, unix seconds. |
 
+## Proxy and apps
+
+The portal in front of the engine and the apps it runs.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SYNTHIGY_PROXY_MODE` |  | `http`: the portal answers `SYNTHIGY_SERVER_PORT` and passes requests to apps by hostname (`<app>.localhost`) and everything else to the engine. `tls`: the same on TLS. `off`: the engine binds the port itself. `synthigy env init` writes `http` into a new `.env`; unset means `off`. |
+| `SYNTHIGY_ENGINE_PORT` |  | Loopback port of the engine behind the proxy. Unset, the portal picks a free one. |
+| `SYNTHIGY_PROXY_TRUST` |  | CIDRs of trusted edges (a load balancer in front). Their `X-Forwarded-*` headers are kept; anyone else's are replaced. |
+| `SYNTHIGY_PROXY_HTTP_PORT` |  | `tls` mode: plain HTTP port that redirects to HTTPS and answers ACME challenges (default 80, `off` to disable). |
+| `SYNTHIGY_PROXY_CERT` |  | `tls` mode: PEM certificate chain file. With `SYNTHIGY_PROXY_KEY` it wins over ACME; renewed files are picked up without a restart. |
+| `SYNTHIGY_PROXY_KEY` |  | `tls` mode: PEM private key file of that certificate. |
+| `SYNTHIGY_PROXY_ACME_URL` |  | `tls` mode without certificate files: ACME directory to get certificates from (default Let's Encrypt). |
+| `SYNTHIGY_PROXY_ACME_EMAIL` |  | Contact address of the ACME account. |
+| `SYNTHIGY_APPS_DOMAIN` |  | Domain app hostnames go under (`<app>.<domain>`). Unset, apps go under the engine's own name. |
+
 ## CLI and network
 
 Read by the `synthigy` CLI only.

@@ -19,6 +19,7 @@
     [synthigy.dataset :as dataset]
     [synthigy.dataset.access :as daccess]
     [synthigy.dataset.core :as core]
+    [synthigy.dataset.enhance :as enhance]
     [synthigy.dataset.id :as id]
     [synthigy.dataset.sql.query :as sql-query]
     [synthigy.iam.access :as access]
@@ -267,6 +268,30 @@
         ("events" "since") (rows result)
         result)))))
 
+(defn hidden-cells
+  "{record-xid #{attribute key}} that `enhance/history` hides among `subjects`."
+  [subjects]
+  (reduce-kv (fn [acc e rows] (merge acc (enhance/apply-history e (set (map :record-xid rows)))))
+             {}
+             (group-by :entity-xid (filter #(and (:entity-xid %) (:record-xid %)) subjects))))
+
+(defn hide-cells
+  "Null the values `hidden` names in an op's result; the change itself stays."
+  [result op hidden record-xid]
+  (if (empty? hidden)
+    result
+    (let [blank (fn [m ks] (when m (reduce (fn [m k] (if (contains? m k) (assoc m k nil) m)) m ks)))
+          row (fn [r] (if (contains? (get hidden (:record-xid r)) (some-> (:attribute-xid r) keyword))
+                        (assoc r :value nil)
+                        r))
+          ks (get hidden record-xid)]
+      (case op
+        "get-at"           (blank result ks)
+        "diff"             (some-> result (update :before blank ks) (update :after blank ks))
+        "timeline"         (update-vals result #(mapv row %))
+        ("events" "since") (mapv row result)
+        result))))
+
 (defn execute
   "Run a /history request body and return {:op op :result …} — the
    transport-free core shared by the HTTP handler and embedded."
@@ -281,8 +306,10 @@
     (access/with-principal principal
       (let [denied     (denied)
             result     (execute-op audit/*audit-provider* op opts)
-            record-xid (some-> (wire-get opts "record-xid") str)]
-        {:op op :result (filter-result op result denied
-                                       (when denied (record-visibility (subjects op result record-xid)))
-                                       record-xid)}))))
+            record-xid (some-> (wire-get opts "record-xid") str)
+            subjects  (subjects op result record-xid)]
+        {:op op :result (-> (filter-result op result denied
+                                           (when denied (record-visibility subjects))
+                                           record-xid)
+                            (hide-cells op (hidden-cells subjects) record-xid))}))))
 

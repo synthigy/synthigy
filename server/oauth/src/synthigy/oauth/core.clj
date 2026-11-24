@@ -901,6 +901,36 @@
       referer (contains? (own-origins request) (uri-origin referer))
       :else   false)))
 
+(defn cross-origin?
+  "True when a browser says the request came from another origin (Sec-Fetch-Site, else Origin); a request with neither came from no browser's page."
+  [request]
+  (let [{site "sec-fetch-site" origin "origin"} (:headers request)]
+    (cond
+      site   (not (contains? #{"same-origin" "none"} site))
+      origin (not (contains? (own-origins request) origin))
+      :else  false)))
+
+(defn wrap-refuse-cross-origin-post
+  "Ring middleware refusing a POST another site's page sent, so no page signs a browser in or confirms a device for it."
+  [handler]
+  (fn [request]
+    (if (and (= :post (:request-method request)) (cross-origin? request))
+      {:status 403 :headers {"Content-Type" "text/plain"} :body "Cross-origin request refused"}
+      (handler request))))
+
+(defn request-cookie
+  "Cookie `cookie-name` from the Cookie header, matched as a whole pair and decoded as Ring's wrap-cookies encoded it; a name=value inside another cookie's value is never it."
+  [request cookie-name]
+  (some-> (get-in request [:headers "cookie"])
+          (str/split #";")
+          (->> (some (fn [pair]
+                       (let [pair (str/triml pair)
+                             i (str/index-of pair "=")]
+                         (when (and i (= cookie-name (subs pair 0 i)))
+                           (not-empty (subs pair (inc i))))))))
+          codec/form-decode-str
+          not-empty))
+
 (defn loopback-http?
   "True when the engine is reached over plain http on loopback, where Safari drops Secure cookies."
   ([] (loopback-http? nil))
@@ -911,7 +941,7 @@
                    (localhost-redirect? origin))))))
 
 (defn session-cookie-name
-  "idsrv.session, suffixed with the port when the engine's origin is off its scheme's default port."
+  "idsrv.session, suffixed with the port off its scheme's default port, and `__Host-` prefixed wherever the cookie is Secure."
   ([] (session-cookie-name nil))
   ([request]
    (let [port (try (let [uri (java.net.URI. (public-origin request))
@@ -919,7 +949,20 @@
                      (when-not (contains? #{-1 ({"http" 80 "https" 443} (.getScheme uri))} port)
                        port))
                    (catch Exception _ nil))]
-     (cond-> "idsrv.session" port (str "." port)))))
+     (cond->> (cond-> "idsrv.session" port (str "." port))
+       (not (loopback-http? request)) (str "__Host-")))))
+
+;; No Max-Age/Expires = browser-session cookie (RFC 6265); never write "Expires=Session", it's malformed.
+(defn session-cookie
+  "The session cookie for a response; a blank value deletes it, with the attributes a browser needs to accept that for a `__Host-` cookie."
+  ([value] (session-cookie value nil))
+  ([value request]
+   {(session-cookie-name request)
+    (cond-> (merge {:value (or value "") :path "/" :http-only true}
+                   (if (loopback-http? request)
+                     {:secure false :same-site :lax}
+                     {:secure true :same-site :none}))
+      (str/blank? value) (assoc :max-age 0))}))
 
 (defn parse-body
   "Parse a request body by Content-Type (transit/edn/JSON); nil on any bad body."
@@ -957,7 +1000,7 @@
   "Ring middleware mapping the session cookie to the :idsrv/session param."
   [handler]
   (fn [request]
-    (let [idsrv-session (get-in request [:cookies (session-cookie-name request) :value])]
+    (let [idsrv-session (request-cookie request (session-cookie-name request))]
       (if (empty? idsrv-session)
         (handler request)
         (handler (assoc-in request [:params :idsrv/session] idsrv-session))))))

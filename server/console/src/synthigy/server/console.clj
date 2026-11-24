@@ -26,7 +26,7 @@
    [synthigy.oauth.account :as account]
    [synthigy.oauth.core :as oauth]
    [synthigy.oauth.federated.registry :as registry]
-   [synthigy.oauth.login :as oauth.login]
+   [synthigy.oauth.handlers :as oauth.handlers]
    [synthigy.oauth.page.custom :as custom]
    [synthigy.server.console.data :as data]
    [synthigy.server.console.live :as live]
@@ -143,7 +143,7 @@
                     "Console login")
           {:status 303
            :headers {"Location" "/console"}
-           :cookies (oauth.login/session-cookie sid request)}))
+           :cookies (oauth/session-cookie sid request)}))
         (html-response (login-page/render {:error "Wrong username or password."
                                            :username username
                                            :invalid? true}))))))
@@ -155,7 +155,7 @@
     (do (some-> (session/current-session request) :id oauth/kill-session)
         {:status 303
          :headers {"Location" "/console/login?logged_out=1"}
-         :cookies {(oauth/session-cookie-name request) {:value "" :path "/" :max-age 0}}})))
+         :cookies (oauth/session-cookie nil request)})))
 
 (defn kill-session!
   [request]
@@ -1017,7 +1017,7 @@
                  (ui/error-page "Something went wrong"
                                 "The request could not be completed. Try again, or go back to the console."))}))))
 
-(def wrapped-handler (wrap-cookies #'handler))
+(def wrapped-handler (-> #'handler wrap-cookies oauth.handlers/wrap-frame-deny))
 
 (defn ensure-redirect
   "Allow-list with `uri` added when missing; never removes an entry."

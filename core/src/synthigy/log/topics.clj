@@ -16,12 +16,13 @@
 
 (def parent-topics
   "The closed set of top-level topics. Lenses subscribe at this level."
-  #{:system :dataset :auth :traffic :audit :files :diagnostic})
+  #{:system :dataset :auth :traffic :audit :files :apps :diagnostic})
 
 (def child-topics
   "The closed set of two-level topics (`parent/child`); a child never appears without its parent."
   #{:traffic/request :traffic/op :traffic/sse
-    :traffic/subscription :traffic/delta})
+    :traffic/subscription :traffic/delta
+    :apps/output :apps/usage :apps/event})
 
 (def all-topics
   "The closed vocabulary of topics a signal may be tagged with."
@@ -35,7 +36,11 @@
   "Exact `:id` → topics, authoritative over all other rules; covers the
    per-request/op firehose."
   {:synthigy.server/request-completed #{:traffic/request}
-   :synthigy.server.data/op-completed #{:traffic/op}})
+   :synthigy.server.data/op-completed #{:traffic/op}
+   :synthigy.apps.output/line #{:apps/output}
+   :synthigy.apps.output/dropped #{:apps/output}
+   :synthigy.apps.output/sample #{:apps/usage}
+   :synthigy.apps.deploy/app-event #{:apps/event}})
 
 (def ^:private traffic-id-prefix->topic
   "Id-NAME prefix → authoritative traffic child topic, regardless of
@@ -111,6 +116,7 @@
 (def ^:private ns-prefix->topics
   "Fallback base topic by `:ns` prefix, ORDERED — first (most specific) match wins."
   [["synthigy.files.http"         #{:files}]
+   ["synthigy.apps"               #{:apps}]
    ["synthigy.oauth"              #{:auth}]
    ["synthigy.oidc"               #{:auth}]
    ["synthigy.iam.audit"          #{:audit}]
@@ -179,7 +185,7 @@
             t (add-parents t)
             t (cond-> t
                 (and degraded? (not (contains? t :traffic))) (conj :system)
-                (not (some t [:dataset :auth :traffic :files])) (conj :system)
+                (not (some t [:dataset :auth :traffic :files :apps])) (conj :system)
                 diag?                                   (conj :diagnostic))]
         t))))
 

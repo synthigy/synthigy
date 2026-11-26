@@ -175,7 +175,7 @@
                (mount-synthigy-schema!)
                (fix-deployed-on!))
 
-(patch/current-version :synthigy/dataset "1.9.0")
+(patch/current-version :synthigy/dataset "1.9.1")
 
 (defn shipped-system-versions
   "The system model versions core ships."

@@ -38,7 +38,7 @@
 (def package-selection
   {:xid nil :name nil :active nil :status nil :last_error nil :manifest nil :uploaded_on nil
    :app [{:selections {:xid nil :id nil :name nil :type nil :active nil :settings nil
-                          :configuration [{:selections {:memory_limit_mb nil :cpu_limit_millicores nil :volume_limit_mb nil}}]
+                          :configuration [{:selections {:memory_limit_mb nil :cpu_limit_millicores nil :volume_limit_mb nil :sandbox_type nil}}]
                           :variables [{:selections {:name nil :value nil :type nil}}]}}]
    :archive [{:selections {:xid nil}}]})
 
@@ -94,10 +94,15 @@
       (throw (ex-info "SYNTHIGY_IAM_ROOT_URL has no host name, so apps have no address under it" {})))
     h))
 
-(defn apps-domain
-  "The domain an app's label rows live under: SYNTHIGY_APPS_DOMAIN, else the engine's own host."
+(defn nested?
+  "This engine runs as a relaxed App of another one: a tenant."
   []
-  (if-let [d (some-> (env/setting :synthigy-apps-domain) str/trim not-empty str/lower-case)]
+  (= "1" (env/setting :synthigy-apps-nested)))
+
+(defn apps-domain
+  "The domain an app's label rows live under: SYNTHIGY_APPS_DOMAIN, else the engine's own host; a tenant's Apps always live under the tenant's host."
+  []
+  (if-let [d (when-not (nested?) (some-> (env/setting :synthigy-apps-domain) str/trim not-empty str/lower-case))]
     (if (re-matches domain d)
       d
       (throw (ex-info (str "SYNTHIGY_APPS_DOMAIN " (pr-str d) " is not a domain name: give a host name, no scheme or port") {})))
@@ -126,6 +131,9 @@
         ((reserved apps engine) n)
         (throw (ex-info (str "The hostname " n " is reserved on this engine") {}))
         :else (str n "." apps))
+
+      (nested?)
+      (throw (ex-info (str "The custom hostname " n " is refused inside a tenant: only names under " apps " reach it") {}))
 
       (or (> (count n) 253) (not (re-matches domain n)))
       (throw (ex-info (str "The hostname " (pr-str name) " is not a domain name") {}))
@@ -306,14 +314,21 @@
         (dataset/stack-entity :iam/app {:id id :secret secret})
         secret))))
 
+(defn relaxed? [client]
+  (= "relaxed" (some-> (get-in client [:configuration :sandbox_type]) name)))
+
 (defn deploy-request
   "The portal request; a client with a running package keeps its secret, which the portal carries over, so a failed switch never breaks the running one."
   ([pkg running?] (deploy-request pkg running? nil))
   ([{:keys [xid manifest] client :app} running? secret]
-  (let [endpoint (or (not-empty env/iam-root-url)
+  (let [_ (when (and (relaxed? client) (nested?))
+            (throw (ex-info "A relaxed sandbox is refused inside a tenant" {})))
+        endpoint (or (not-empty env/iam-root-url)
                      (throw (ex-info "SYNTHIGY_IAM_ROOT_URL is not set, so the app cannot be told where the engine is" {})))
         kind (or (manifest-value manifest :kind) "service")
         names (when (= "service" kind) (hosts client))
+        _ (when (and (relaxed? client) (next names))
+            (throw (ex-info (str "A tenant answers on one hostname, its own name; this one has " (count names) ": " (str/join ", " names)) {})))
         env (cond-> (assoc (environment (:variables client)) "SYNTHIGY_ENDPOINT" endpoint)
               (:id client) (assoc "SYNTHIGY_CLIENT_ID" (:id client))
               (seq names) (assoc "SYNTHIGY_APP_URL" (app-url (first names))))
@@ -324,6 +339,7 @@
                         :kind kind
                         :healthCheckPath (health-path manifest)}
                        (when names {:hosts names})
+                       (when (relaxed? client) {:sandbox "relaxed"})
                        (when (seq vols) {:volumes (volumes/request vols)})
                        (limits manifest client))]
     (cond
@@ -541,8 +557,28 @@
     (supervisor/call-portal "app.stop" {:app app} deploy-timeout-ms)
     (log/info {:id ::stopped :data {:action :stopped :subject :app :app app}} "App of a deleted package stopped")))
 
+(defonce failed-renames (atom {}))
+
+(defn rename-tenant!
+  "Restart an App under the hostnames its rows name now, for a tenant (its Apps are named after it) and for an App inside a tenant (its env names it); answers the portal's hosts."
+  [xid]
+  (let [pkg (package xid)
+        source (atom nil)]
+    (try
+      (let [request (deploy-request pkg true)
+            archive (reset! source (archive-source pkg))
+            answer (supervisor/call-portal "app.deploy"
+                                           (assoc request :archive (select-keys archive [:path]) :restart true)
+                                           deploy-timeout-ms)]
+        (log/info {:id ::tenant-renamed :data {:action :restarted :subject :app :client (get-in pkg [:app :xid]) :package xid
+                                               :hosts (mapv :name (:hosts answer))}}
+                  "Tenant restarted under its new hostname")
+        (:hosts answer))
+      (finally
+        (some-> @source :spooled storage/discard!)))))
+
 (defn sync-hosts!
-  "Give each running service the hostnames its rows name, every App giving names up before any takes one, and keep its package's Last Error on its certificates."
+  "Give each running service the hostnames its rows name, every App giving names up before any takes one, and keep its package's Last Error on its certificates; a tenant restarts to change its name."
   []
   (when-let [apps (seq (try (portal-apps) (catch Throwable _ nil)))]
     (let [pkgs (into {} (comp (filter running?) (map (juxt :xid identity)))
@@ -550,24 +586,36 @@
                        (dataset/search-entity :apps/package {:active {:_eq true}}
                                               {:xid nil :status nil :last_error nil :manifest nil
                                                :app [{:selections {:xid nil :hostnames [{:selections {:name nil :custom nil}}]}}]})))
-          live (for [{:keys [app package status hosts]} apps
+          live (for [{:keys [app package status hosts sandbox]} apps
                      :let [pkg (pkgs package)]
                      :when (and pkg (= "running" status) (= "service" (or (manifest-value (:manifest pkg) :kind) "service")))]
                  (let [wanted (try (row-names (apps-domain) (box-host) (get-in pkg [:app :hostnames]))
                                    (catch Throwable t t))]
-                   {:app app :pkg pkg :hosts hosts :wanted wanted}))
+                   {:app app :pkg pkg :hosts hosts :wanted wanted :tenant (or (= "relaxed" (some-> sandbox name)) (nested?))}))
           state (atom (into {} (map (fn [{:keys [app hosts]}] [app {:hosts hosts}])) live))
+          call! (fn [app f]
+                  (try (swap! state assoc app {:hosts (f)})
+                       (catch Throwable t (swap! state assoc-in [app :error] (or (ex-message t) (str (class t)))))))
           send! (fn [app names]
-                  (try (swap! state assoc app {:hosts (:hosts (supervisor/call-portal "app.hosts" {:app app :hosts names} deploy-timeout-ms))})
-                       (catch Throwable t (swap! state assoc-in [app :error] (or (ex-message t) (str (class t)))))))]
-      (doseq [{:keys [app hosts wanted]} live
-              :when (vector? wanted)
+                  (call! app #(:hosts (supervisor/call-portal "app.hosts" {:app app :hosts names} deploy-timeout-ms))))]
+      (doseq [{:keys [app hosts wanted tenant]} live
+              :when (and (vector? wanted) (not tenant))
               :let [keep (filterv (set wanted) (map :name hosts))]
               :when (< (count keep) (count hosts))]
         (send! app keep))
-      (doseq [{:keys [app wanted]} live
+      (doseq [{:keys [app pkg wanted tenant]} (sort-by (comp not :tenant) live)
               :when (and (vector? wanted) (not= (set wanted) (set (map :name (get-in @state [app :hosts])))))]
-        (send! app wanted))
+        (if tenant
+          (let [target [(:xid pkg) (set wanted)]]
+            (if-let [e (get @failed-renames target)]
+              (swap! state assoc-in [app :error] e)
+              (call! app #(try (rename-tenant! (:xid pkg))
+                               (catch Throwable t
+                                 (swap! failed-renames assoc target (or (ex-message t) (str (class t))))
+                                 (throw t))))))
+          (send! app wanted)))
+      (swap! failed-renames select-keys
+             (for [{:keys [pkg wanted]} live :when (vector? wanted)] [(:xid pkg) (set wanted)]))
       (doseq [{:keys [pkg hosts wanted]} live
               :when (vector? wanted)]
         (follow-hosts! (get-in pkg [:app :xid]) (map :name hosts) wanted))

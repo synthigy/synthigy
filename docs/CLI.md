@@ -462,7 +462,7 @@ Flags:
 
 #### `synthigy app logs`
 
-Show a deployed app's output, usage and events from the connected engine
+Show a deployed app's output and events from the connected engine
 
 ```
 synthigy app logs <client-id> [flags]
@@ -472,7 +472,7 @@ Examples:
 
 ```
   synthigy app logs shop
-  synthigy app logs shop --kind usage --since 1h
+  synthigy app logs shop --kind event --since 1h
   synthigy app logs shop --since 2026-11-23T10:00:00Z --json
 ```
 
@@ -480,7 +480,7 @@ Flags:
 
 ```
       --json           One JSON row per line, as the engine keeps it
-      --kind string    Only output, usage or event (default: all)
+      --kind string    Only output or event (default: all)
       --limit int      At most this many rows, the newest (max 1000) (default 200)
       --since string   From this long ago (1h, 30m) or an ISO time
       --until string   Up to this long ago or an ISO time

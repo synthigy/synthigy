@@ -47,6 +47,7 @@
 ## Build
 
 - [SDKs](SDKS.md) — five languages, connecting, code generation
+- [Apps](APPS.md) — pack, deploy and run your programs beside the engine
 - [Embedding](EMBEDDED.md) — your application and the engine in one jar
 
 ## Reference

@@ -581,7 +581,6 @@
             edit-errs (into [] (keep :error) edits)]
         (if (seq edit-errs)
           {:errors (vec (distinct edit-errs)) :code "PARAM_OPTIONAL_IN_OR"}
-          ;; one pass edits only clauses no other edit contains; `rewrite` runs again for the rest
           (let [applied (reduce (fn [acc e]
                                   (if (some #(and (< (:from e) (:to %)) (< (:from %) (:to e))) acc) acc (conj acc e)))
                                 [] (sort-by :from > edits))]

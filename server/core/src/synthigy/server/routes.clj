@@ -25,14 +25,13 @@
    [synthigy.server.health :as health]
    [synthigy.server.history :as history]
    [synthigy.server.info :as info]
+   [synthigy.server.negotiate :as negotiate]
    [synthigy.server.subscription :as subscription]))
 
-(defn module-unavailable [module-key]
-  {:status 404
-   :headers {"Content-Type" "application/json"}
-   :body (json/write-str
-          {:error {:code "MODULE_NOT_LOADED"
-                   :message (str "Module " module-key " is not running on this server.")}})})
+(defn module-unavailable [request module-key]
+  (negotiate/response request 404
+                      {:error {:code "MODULE_NOT_LOADED"
+                               :message (str "Module " module-key " is not running on this server.")}}))
 
 (defn gated
   "Wrap handler so requests 404 unless module-key is in the running lifecycle."
@@ -40,7 +39,7 @@
   (fn [request]
     (if (lifecycle/started? module-key)
       (handler request)
-      (module-unavailable module-key))))
+      (module-unavailable request module-key))))
 
 (defonce ^:private extensions
   (atom {}))
@@ -74,12 +73,10 @@
   [handler]
   (fn [request]
     (or (handler request)
-        {:status 404
-         :headers {"Content-Type" "application/json"}
-         :body (json/write-str {:error {:code "NOT_FOUND" :message "No matching route"}})})))
+        (negotiate/response request 404 {:error {:code "NOT_FOUND" :message "No matching route"}}))))
 
 (defn wrap-errors
-  "Turn an uncaught handler exception into a JSON 500 and a logged signal."
+  "Turn an uncaught handler exception into a 500 in the format Accept names, and a logged signal."
   [handler]
   (fn [request]
     (try
@@ -92,8 +89,8 @@
                             :method (:request-method request)
                             :uri (:uri request)}}
                     ex)
-        (data/json-response
-         500
+        (negotiate/response
+         request 500
          {:error (engine/with-request-id
                    {:code "INTERNAL_ERROR"
                     :message "Internal server error"})})))))

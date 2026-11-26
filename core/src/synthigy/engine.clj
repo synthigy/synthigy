@@ -18,6 +18,7 @@
    [clojure.string :as str]
    [synthigy.log :as log]
    [synthigy.traffic :as traffic]
+   [synthigy.supervisor :as supervisor]
    [synthigy.log.config :as log.config]
    [synthigy.log.query :as log.query]
    [synthigy.db :as db]
@@ -733,6 +734,49 @@
       (throw (ex-info (str "`traffic-stats` " (name k) " must be a string")
                       {:code "INVALID_LOG_FILTER" :field k}))))
   (assoc ctx :result (traffic/report {:since since :until until})))
+
+(defonce ^{:doc "Names the ranked Apps of a host-stats answer; set by the Apps module."} app-namer (atom nil))
+
+(defn host-stats
+  "The portal's per-minute host usage over the window, or `{:available false}` when no portal can answer."
+  [{:keys [since until columns app]}]
+  (doseq [[k v] [[:since since] [:until until] [:app app]]]
+    (when (and (some? v) (not (string? v)))
+      (throw (ex-info (str "`host-stats` " (name k) " must be a string")
+                      {:code "INVALID_LOG_FILTER" :field k}))))
+  (when-not (or (nil? columns) (and (sequential? columns) (every? string? columns)))
+    (throw (ex-info "`host-stats` columns must be a list of strings" {:code "INVALID_LOG_FILTER" :field :columns})))
+  (let [[from to] (traffic/resolve-window since until)
+        minute #(quot (.toEpochMilli ^java.time.Instant %) 60000)]
+    (try
+      (let [answer (supervisor/call-portal "host.report"
+                                           (cond-> {:from (minute from) :to (minute to)}
+                                             (seq columns) (assoc :columns (vec columns))
+                                             (string? app) (assoc :app (str/lower-case app)))
+                                           5000)
+            namer @app-namer]
+        (cond-> (assoc answer :available true)
+          (and namer (seq (:apps answer))) (update :apps namer)))
+      (catch Exception e
+        (if (= -32602 (get-in (ex-data e) [:rpc :code]))
+          (throw (ex-info (ex-message e) {:code "INVALID_LOG_FILTER" :field :columns}))
+          {:available false :reason (or (ex-message e) (str (class e)))})))))
+
+(defmethod execute-operation "host-stats"
+  [{:keys [app] :as ctx}]
+  (cond
+    (access/scope-allowed? "log:read")
+    (assoc ctx :result (host-stats ctx))
+
+    (and (string? app) (not (str/blank? app))
+         (try (dataset/get-entity :iam/app {:xid app} {:xid nil}) (catch clojure.lang.ExceptionInfo _ nil)))
+    (assoc ctx :result (select-keys (host-stats (assoc ctx :columns ["samples"]))
+                                    [:available :reason :step :window :kept :appRows]))
+
+    (string? app)
+    (throw (ex-info "No such App, or you may not read it" {:code "APP_NOT_FOUND"}))
+
+    :else (assert-scope! "log:read")))
 
 (defmethod execute-operation "log-config"
   [{:keys [action config] :as ctx}]

@@ -24,7 +24,7 @@
          compile-primary-expr compile-arg-predicate compile-pred-op
          compile-value compile-list-literal compile-meta-key
          compile-scalar-or compile-scalar-and compile-scalar-prim
-         throw-optional-in-or
+         throw-optional-in-or or-of
          merge-filters-into deep-merge-args)
 
 (def ^:private meta-keys #{:_limit :_offset :_order_by :_distinct :_join :_on})
@@ -251,10 +251,7 @@
     (if (= 1 (count ands))
       (compile-scalar-and (first ands) field)
       (let [ms (mapv #(compile-scalar-and % field) ands)]
-        (cond
-          (every? absent? ms) absent
-          (some absent? ms)   (throw-optional-in-or or-node ands ms)
-          :else               {:_or ms})))))
+        (or-of or-node ands ms)))))
 
 (defn compile-scalar-and [and-node field]
   (let [prims (ast/find-children and-node :scalar-prim)]
@@ -366,6 +363,14 @@
 
 (def aggregate-fns #{"count" "sum" "avg" "min" "max"})
 
+(def aggregate-field-types
+  {"sum" #{"number"}
+   "avg" #{"number"}
+   "min" #{"number" "timestamp" "string"}
+   "max" #{"number" "timestamp" "string"}})
+
+(def uncountable-types #{"json" "hashed" "encrypted"})
+
 (defn aggregate-parts
   "Alias, function, distinct flag, target path segments and filter of an :aggregate node."
   [agg-node]
@@ -403,16 +408,34 @@
     (= "count" f) "count"
     :else         {(keyword f) (second target)}))
 
+(defn filter-paths-on-relation?
+  "True when every filter path starts with `rel` and goes on to a field."
+  [filter rel]
+  (every? (fn [p] (let [segs (filterv #(= :identifier (:node %)) (:children p))]
+                    (and (= rel (:text (first segs))) (< 1 (count segs)))))
+          (filter-paths filter)))
+
+(defn aggregate-shape-ok?
+  "True when the target is `rel` for a plain count, `rel.field` otherwise, and every filter path is on `rel`."
+  [{f :fn :keys [target filter distinct?]} rel]
+  (and (if (and (= "count" f) (not distinct?))
+         (< (count target) 2)
+         (= 2 (count target)))
+       (filter-paths-on-relation? filter rel)))
+
 (defn compile-aggregate
   "Conj the aggregate's `{:alias :op :args?}` entry onto its relation key."
   [agg-node parent]
   (let [{:keys [alias filter] :as parts} (aggregate-parts agg-node)
-        rel  (aggregate-relation parts)
-        args (when filter (compile-or-expr (drop-path-heads filter)))]
+        rel  (aggregate-relation parts)]
+    (when (and alias rel (aggregate-fns (:fn parts)) (not (aggregate-shape-ok? parts rel)))
+      (throw (ex-info (str "`" alias ": " (:fn parts) "(…)` reads " rel ".<field>, filtered by paths that start with " rel)
+                      {:code "BAD_ARGS_SHAPE" :alias alias :span (:span agg-node)})))
     (if (and alias rel (aggregate-fns (:fn parts)))
-      (update parent (keyword rel) (fnil conj [])
-              (cond-> {:alias alias :op (aggregate-op parts)}
-                (and (map? args) (seq args)) (assoc :args args)))
+      (let [args (when filter (compile-or-expr (drop-path-heads filter)))]
+        (update parent (keyword rel) (fnil conj [])
+                (cond-> {:alias alias :op (aggregate-op parts)}
+                  (and (map? args) (seq args)) (assoc :args args))))
       parent)))
 
 (defn scope-aggregate-aliases
@@ -526,15 +549,20 @@
                          " — dropping a disjunct is ambiguous; supply the value or restructure")
                     {:code "PARAM_OPTIONAL_IN_OR" :span (:span node)}))))
 
+(defn or-of
+  "`{:_or ms}`, absent when every side is, an error when only some are."
+  [or-node sides ms]
+  (cond
+    (every? absent? ms) absent
+    (some absent? ms)   (throw-optional-in-or or-node sides ms)
+    :else               {:_or ms}))
+
 (defn compile-or-expr [or-node]
   (let [ands (ast/find-children or-node :and-expr)]
     (if (= 1 (count ands))
       (compile-and-expr (first ands))
       (let [ms (mapv compile-and-expr ands)]
-        (cond
-          (every? absent? ms) absent
-          (some absent? ms)   (throw-optional-in-or or-node ands ms)
-          :else               {:_or ms})))))
+        (or-of or-node ands ms)))))
 
 (defn compile-and-expr [and-node]
   (let [prims (ast/find-children and-node :primary-expr)]

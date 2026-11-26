@@ -13,6 +13,7 @@
   "App output and usage the portal sends, kept in the engine's log store under the App, and read back by the App's people."
   (:require
    [clojure.string :as str]
+   [synthigy.apps.deploy :as deploy]
    [synthigy.apps.volumes :as volumes]
    [synthigy.dataset :as dataset]
    [synthigy.engine :as engine]
@@ -73,21 +74,15 @@
                   (str lost " lines of output were dropped"))))))
 
 (defn usage!
-  "Log one usage sample of an App."
-  [{:keys [package at memoryBytes memoryLimitBytes cpuMillicores pids requests statuses] vols :volumes}]
+  "Keep the volume use from one usage sample of an App."
+  [{vols :volumes}]
   (when (seq vols)
-    (volumes/usage! vols))
-  (when-let [client (client-of package)]
-    (log/info {:id ::sample :data {:subject :app :app client :package package :at at
-                                   :memory-bytes memoryBytes :memory-limit-bytes memoryLimitBytes
-                                   :cpu-millicores cpuMillicores :pids pids
-                                   :requests (vec (take 50 requests)) :statuses statuses :volumes vols}}
-              "App usage")))
+    (volumes/usage! vols)))
 
-(def kinds {"output" :apps/output "usage" :apps/usage "event" :apps/event})
+(def kinds {"output" :apps/output "event" :apps/event})
 
 (defn app-logs
-  "An App's output, usage and events, for those who may read the App; newest first."
+  "An App's output and events, for those who may read the App; newest first."
   [{:keys [app kind since until limit]}]
   (when-not (and (string? app) (not (str/blank? app))
                  (dataset/get-entity :iam/app {:xid app} {:xid nil}))
@@ -101,13 +96,27 @@
                        since (assoc :since since)
                        until (assoc :until until)))))
 
+(defn name-apps
+  "Give each ranked App of a host report its name and xid when the caller may read it; the others keep only their key."
+  [ranked]
+  (let [readable (into {}
+                       (map (juxt (comp deploy/app-key :xid) identity))
+                       (dataset/search-entity :iam/app nil {:xid nil :name nil}))]
+    (mapv (fn [{:keys [app] :as r}]
+            (if-let [{:keys [xid name]} (readable app)]
+              (assoc r :xid xid :name name)
+              r))
+          ranked)))
+
 (defn register! []
   (supervisor/register-method! "app.output" (fn [params] (output! params) nil))
-  (supervisor/register-method! "app.usage" (fn [params] (usage! params) nil)))
+  (supervisor/register-method! "app.usage" (fn [params] (usage! params) nil))
+  (reset! engine/app-namer name-apps))
 
 (defn unregister! []
   (supervisor/unregister-method! "app.output")
-  (supervisor/unregister-method! "app.usage"))
+  (supervisor/unregister-method! "app.usage")
+  (reset! engine/app-namer nil))
 
 (defmethod engine/execute-operation "app-logs"
   [ctx]

@@ -821,7 +821,7 @@
                     {:code "TEMPLATE_ERROR" :errors errors}))))
 
 (def decoded-types
-  #{"boolean" "timestamp" "json"})
+  #{"boolean" "timestamp" "json" "enum"})
 
 (defn decode-rows
   "Decode result columns that are whole field select items through the dialect's TypeCodec, as every model read is."

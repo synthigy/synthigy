@@ -1482,28 +1482,6 @@ a { color: inherit; text-decoration: none; }
   min-height: 22px;
 }
 
-/* ---- Floating popups --------------------------------------------------
- * Tyrell paints a dropdown's header AND its options list with
- * `var(--input-bg, var(--ty-input-bg))` — the same variable as an inline
- * field. That is right when a field is inset in a panel and wrong the moment
- * it floats: `--ty-input-bg` resolves (via tyrell-brand.css) to
- * `--ty-surface-input`, a 4% white overlay, so the popup renders see-through
- * over the starfield with the page showing between its rows.
- *
- * `--input-bg` / `--input-border` are the per-instance escape hatch Tyrell
- * provides for exactly this. Setting them on the host inherits into the
- * shadow tree — including the <dialog>, which moves to the top LAYER but
- * stays put in the DOM tree, and custom properties follow the tree.
- *
- * Scoped to popup-bearing components rather than set globally, so inline
- * ty-input keeps its translucent inset look. */
-ty-select,
-ty-date-picker,
-ty-popup {
-  --input-bg: var(--sy-floating);
-  --input-border: var(--sy-floating-border);
-}
-
 /* Infinite-scroll sentinel inside a picker's option list. A plain div, so
    ty-select never mistakes it for an option; it scrolls into view, Datastar's
    intersect plugin fires, and the response replaces it with the next page

@@ -39,7 +39,8 @@
    [synthigy.json :as json]
    [synthigy.log :as log]
    [synthigy.oauth.authentication :as auth]
-   [synthigy.oauth.core :as oauth])
+   [synthigy.oauth.core :as oauth]
+   [synthigy.server.negotiate :as negotiate])
   (:import
    [java.net URLConnection URLDecoder URLEncoder]
    [java.nio.charset StandardCharsets]))
@@ -51,10 +52,17 @@
     (walk/postwalk #(if (map? %) (update-keys % (fn [k] (if (keyword? k) (dk/preserve-prefix kf k) k))) %) body)
     body))
 
+(def ^:dynamic *request* nil)
+
+(defn dated
+  "`body` with every Instant a Date, so transit and EDN carry real dates."
+  [body]
+  (walk/postwalk #(if (instance? java.time.Instant %) (java.util.Date/from %) %) body))
+
 (defn respond [status body]
-  {:status status
-   :headers {"Content-Type" "application/json"}
-   :body (json/write-str (cased body))})
+  (negotiate/response *request* status
+                      (cond-> (cased body)
+                        (#{"application/transit+json" "application/edn"} (negotiate/accept-type *request*)) dated)))
 
 (defn fail [status code message & [details]]
   (respond status {:error (cond-> {:code code :message message} details (assoc :details details))}))
@@ -114,7 +122,7 @@
       :name (get row (:name f))
       :size (get row (:size f))
       :hash (get row (:hash f))
-      :status (some-> (get row (:status f)) name)
+      :status (get row (:status f))
       :content_type (get row (:content-type f))
       :uploaded_at (get row (:uploaded-at f))
       :uploaded_by (get-in facts [(id/extract row) :uploader])
@@ -331,7 +339,7 @@
   (cond
     (nil? row) (fail 404 "FILE_NOT_FOUND" "No such file")
     (not= "READY" (some-> (get row (:status f)) name))
-    (fail 409 "FILE_NOT_READY" "The file is not ready for download" {:status (some-> (get row (:status f)) name)})
+    (fail 409 "FILE_NOT_READY" "The file is not ready for download" {:status (get row (:status f))})
     (nil? (:key facts)) (fail 404 "FILE_NOT_FOUND" "The file has no stored bytes")
     :else (serve store request {:key (:key facts) :size (get row (:size f)) :hash (get row (:hash f))
                                 :content-type (get row (:content-type f)) :file-name (get row (:name f))
@@ -798,7 +806,7 @@
                      (if-not top
                        [{:skip {:ref r :reason "folder not found"}}]
                        (let [tree (folders/subtree (:path top))
-                             parent (if (= "/" (:path top)) "/" (subs (:path top) 0 (inc (str/last-index-of (:path top) "/" (- (count (:path top)) 2)))))]
+                             parent (str/replace (:path top) #"[^/]+/$" "")]
                          (for [row (ready-rows f {:folders (map :xid tree)})]
                            {:row row :ref r
                             :entry (str (subs (get-in row [(:folder f) :path]) (count parent)) (get row (:name f)))}))))
@@ -961,9 +969,9 @@
 
 (defn event-of
   "The change a successful /files answer made, as the Logs tool's Files lens reads it; nil for reads and failures."
-  [{:keys [uri request-method query-params]} {:keys [status body] ::keys [action size] :as response}]
+  [{:keys [uri request-method query-params]} {:keys [status] ::keys [action size] :as response}]
   (when (and status (<= 200 status 299) (not= :head request-method))
-    (let [answer (delay (when (string? body) (try (json/read-str body) (catch Exception _ nil))))
+    (let [answer (delay (negotiate/read-body response))
           [file? xid tail version restore] (re-matches file-uri uri)
           [folders? folder-xid folder-tail] (re-matches folder-uri uri)
           link? (re-matches path-link uri)
@@ -1080,7 +1088,8 @@
 (defn handler
   "Ring handler for the /files prefix; without an Authorization header only public files download."
   [store-fn request]
-  (try
+  (binding [*request* request]
+   (try
     (if-let [acting (acting-as request)]
       (let [iam (auth/authenticate-request request engine/platform-audience)]
         (if-let [[status code message] (acting-refusal iam)]
@@ -1102,4 +1111,4 @@
       (log/error! {:id ::request-failed :msg "Files request failed"
                    :data {:action :failed :subject :files :uri (:uri request) :method (:request-method request)}}
                   t)
-      (fail 500 "INTERNAL_ERROR" (first (engine/safe-error-message t))))))
+      (fail 500 "INTERNAL_ERROR" (first (engine/safe-error-message t)))))))

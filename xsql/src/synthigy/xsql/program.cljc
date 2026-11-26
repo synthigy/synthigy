@@ -619,7 +619,8 @@
   (let [declared (when (string? returns)
                    (->> (str/split returns #",") (map #(str/trim (first (str/split % #":")))) (remove str/blank?) vec))
         actual   (sql-select-columns body)]
-    (when (and (seq declared) (seq actual) (not= (set declared) (set actual)))
+    (when (and (seq declared) (seq actual)
+               (not= (set (map str/lower-case declared)) (set (map str/lower-case actual))))
       [{:severity :warning
         :message (str "@returns lists " (str/join ", " declared) " but the SELECT returns " (str/join ", " actual))
         :from from :to to}])))
@@ -696,8 +697,8 @@
                        m    (:children stmt)
                        :when (= :meta-key (:node m))]
                    m)
-          key-of (fn [m] (some-> m :children first :text str/lower-case))
-          limit  (some #(when (= "limit" (key-of %)) %) metas)
+          key-of (fn [m] (some-> m :children first :text str/lower-case xparser/normalize-meta-kw))
+          limit  (some #(when (= "_limit" (key-of %)) %) metas)
           value  (some-> limit :children second)
           span   (fn [n] (let [[f t] (:span n)] {:from (+ body-offset f) :to (+ body-offset t)}))
           root   (or (:root-entity ast) {:span [0 0]})]
@@ -725,7 +726,7 @@
                  {:severity :warning
                   :message  (str "@claim limit over " (:sqlite claim-limit-caps) " is refused on SQLite engines (LOCK_LIMIT_TOO_LARGE).")
                   :hint     "Fine on Postgres; claim in smaller batches to run everywhere."})])
-       (for [m metas :when (= "distinct" (key-of m))]
+       (for [m metas :when (= "_distinct" (key-of m))]
          (merge (span m)
                 {:severity :error
                  :message  "@claim refuses distinct (LOCK_DISTINCT): it locks whole rows."}))))))
@@ -1101,11 +1102,12 @@
                  :else                   (recur (dec i) depth)))]
     (when (and open schema
                (re-find #"\?[a-z_][a-z0-9_]*\??(?::[a-zA-Z]+)?$" (subs body 0 open)))
-      (let [r     (complete-impl/complete {:source body :offset offset :schema schema
-                                           :root-entity nil :op op})
+      (let [tree  (xparser/parse body)
+            r     (complete-impl/complete {:source body :offset offset :schema schema
+                                           :root-entity nil :op op :tree tree})
             opts  (into (filterv #(= "attribute" (:type %)) (:options r))
                         (map (fn [a] {:label a :type "property" :section "Operations" :detail "operation"}))
-                        (sort (complete-impl/aliases-at body offset)))]
+                        (sort (complete-impl/aliases-at tree body offset)))]
         (when (seq opts)
           (assoc r :options opts))))))
 

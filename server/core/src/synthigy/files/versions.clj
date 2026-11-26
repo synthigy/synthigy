@@ -33,6 +33,11 @@
    :size (id/data :files.file/size)
    :type (id/data :files.file/content-type)})
 
+(defn instant [ts]
+  (if (string? ts)
+    (try (Instant/parse ts) (catch Exception _ ts))
+    ts))
+
 (defn writes
   "Writes of one record's `events` that stored a storage key, oldest first; size, hash and type carry forward."
   [events]
@@ -45,7 +50,7 @@
                    (when-let [k (get by-attr key)]
                      (let [{:keys [ts actor seq]} (first es)]
                        {:id seq
-                        :at ts
+                        :at (instant ts)
                         :by actor
                         :key k
                         :hash (get by-attr hash)

@@ -43,7 +43,8 @@ backend can run a request as one of its users with `"acting_as": "<user xid>"`
 | `acting_as` | Run as this user. Trusted confidential clients only. |
 
 Bodies may be `application/json`, `application/transit+json` or
-`application/edn`.
+`application/edn`. The answer comes in the format `Accept` names, and in JSON
+when `Accept` names neither of the other two.
 
 Entity names accept spaces, `_` or `-` in any letter case: `"Movie Actor"`,
 `movie_actor` and `movie-actor` are the same entity. camelCase is not split —
@@ -55,10 +56,11 @@ the result are the model's names in snake case (`"Birth Date"` → `birth_date`)
 | Type | On the wire |
 |---|---|
 | `xid` | a string of 22 letters and digits, URL-safe |
-| `string`, `enum` | a string |
+| `string` | a string |
+| `enum` | a string in JSON, `"READY"`; a keyword in transit and EDN, `:READY`. `sql-template` columns that are a whole enum field, `{file.status}`, answer the same way. |
 | `int`, `float` | a number |
 | `boolean` | `true` / `false` |
-| `timestamp` | an ISO 8601 string in UTC to the second, `"2026-10-04T14:30:00Z"`. Send any RFC 3339 date-time; it is stored and returned in UTC. |
+| `timestamp` | an ISO 8601 string in UTC to the second, `"2026-10-04T14:30:00Z"`; a date in transit and EDN. Send any RFC 3339 date-time; it is stored and returned in UTC. |
 | `json`, `encrypted` | any JSON value. An `encrypted` attribute arrives and leaves as plain JSON; only the database holds ciphertext. |
 | `hashed` | send the plain string; a hash is stored and the plain value is never returned |
 | `user`, `group`, `role` | a reference to one IAM record. Write it like a relation: `"owner": {"xid": "…"}` or `{"name": "…"}`. It reads as a label (see [References](#references)). |

@@ -51,5 +51,6 @@
                                             [r {:target      (get rdef "to")
                                                 :cardinality (get rdef "cardinality")}]))
                                   (get edef "relations"))}
-                     (get edef "writes") (assoc :writes (get edef "writes")))])))
+                     (get edef "writes") (assoc :writes (get edef "writes"))
+                     (contains? edef "lock") (assoc :lock (get edef "lock")))])))
          (get wire "entities"))})

@@ -26,7 +26,9 @@ Attributes classified as **secret** in the model are recorded as changed, but
 their values are withheld. Other classifications — `pii`, `phi`, `internal` —
 are labels for your own policies. History is never pruned automatically.
 
-Read it with `POST /history`, or through an SDK:
+Read it with `POST /history`, or through an SDK. The answer is JSON, or transit or EDN
+when `Accept` asks for `application/transit+json` or `application/edn`; recorded values
+come back as they were stored, so enum values are strings in every format.
 
 | SDK method | Returns |
 |---|---|

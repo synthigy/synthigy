@@ -28,6 +28,7 @@
    [synthigy.json :as json]
    [synthigy.oauth.core :as oauth]
    [synthigy.oauth.authentication :as auth]
+   [synthigy.server.negotiate :as negotiate]
    [synthigy.transit :as transit]
    [synthigy.wire :as wire]))
 
@@ -61,13 +62,6 @@
           str/trim
           str/lower-case))
 
-(defn accept-type [request]
-  (some-> (get-in request [:headers "accept"])
-          (str/split #",")
-          first
-          str/trim
-          str/lower-case))
-
 (defn read-body-str [request]
   (let [body (or (:raw-body request) (:body request))]
     (when body
@@ -95,22 +89,8 @@
   "Ring response with content negotiation based on Accept; top-level :error
    bodies get the request-id stamped on."
   [request status body]
-  (let [body (cond-> body
-               (map? (:error body)) (update :error engine/with-request-id))]
-    (case (accept-type request)
-    "application/transit+json"
-    {:status status
-     :headers {"Content-Type" "application/transit+json"}
-     :body (transit/->transit body)}
-
-    "application/edn"
-    {:status status
-     :headers {"Content-Type" "application/edn"}
-     :body (pr-str body)}
-
-    {:status status
-     :headers {"Content-Type" "application/json"}
-     :body (json/write-str body)})))
+  (negotiate/response request status (cond-> body
+                                       (map? (:error body)) (update :error engine/with-request-id))))
 
 (defn json-response
   "JSON Ring response, no content negotiation."
@@ -294,7 +274,7 @@
 
 (def ^:private observability-ops
   "Ops served by /logs, and only /logs."
-  #{"log-query" "log-histogram" "traffic-stats" "log-config" "app-logs"})
+  #{"log-query" "log-histogram" "traffic-stats" "host-stats" "log-config" "app-logs"})
 
 (defn endpoint-op-violation
   "Error map when one of operations is mounted on the other endpoint; nil when legal."

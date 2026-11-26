@@ -395,6 +395,16 @@
       k
       (throw (bad-order-by "_order_by direction must be \"asc\" or \"desc\"." d)))))
 
+(defn order-pairs->map
+  "Array-map of order pairs; repeated keys merge their nested maps in first-seen order."
+  [pairs]
+  (let [grouped (group-by first pairs)]
+    (apply array-map
+           (mapcat (fn [k]
+                     (let [vs (map second (grouped k))]
+                       [k (if (every? map? vs) (order-pairs->map (mapcat seq vs)) (last vs))]))
+                   (distinct (map first pairs))))))
+
 (defn order-by-map
   "A wire or XSQL `_order_by` (map, [field direction] pairs or a vector of maps) as the array-map of keyword directions the query layer reads."
   [order-by]
@@ -404,11 +414,11 @@
 
     (and (sequential? order-by)
          (every? #(or (map? %) (and (sequential? %) (= 2 (count %)) (lower-keyword (first %)))) order-by))
-    (apply array-map (mapcat (fn [item]
-                               (if (map? item)
-                                 (mapcat identity (order-by-map item))
-                                 [(dk/normalize-key (keyword (name (first item)))) (order-direction (second item))]))
-                             order-by))
+    (order-pairs->map (mapcat (fn [item]
+                                (if (map? item)
+                                  (seq (order-by-map item))
+                                  [[(dk/normalize-key (keyword (name (first item)))) (order-direction (second item))]]))
+                              order-by))
 
     :else
     (throw (bad-order-by "_order_by must be a map or a vector of [field direction] pairs." order-by))))

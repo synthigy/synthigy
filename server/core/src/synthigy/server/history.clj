@@ -19,7 +19,8 @@
     [synthigy.engine.history :as history]
     [synthigy.json :as json]
     [synthigy.log :as log]
-    [synthigy.oauth.authentication :as auth]))
+    [synthigy.oauth.authentication :as auth]
+    [synthigy.server.negotiate :as negotiate]))
 (defn parse-body
   "Parse the /history request body, keys preserved as strings so
    json/read-str-raw doesn't keywordize selection keys like \"Movie Actor\"."
@@ -36,18 +37,18 @@
       (log/warn {:id ::body-parse-failed} (.getMessage e))
       nil)))
 
-(defn json-response
-  [status body]
-  {:status status
-   :headers {"Content-Type" "application/json"}
-   :body (json/->json body)})
+(def ^:dynamic *request* nil)
+
+(defn respond [status body]
+  (negotiate/response *request* status body))
 
 (defn error
   [status code msg & [extra]]
-  (json-response status (merge {:error {:message msg :code code}} extra)))
+  (respond status (merge {:error {:message msg :code code}} extra)))
 
 (defn handler [request]
-  (let [iam-active? (lifecycle/started? :synthigy/iam)
+  (binding [*request* request]
+   (let [iam-active? (lifecycle/started? :synthigy/iam)
         iam         (when iam-active? (auth/authenticate-request request))]
     (cond
       (nil? audit/*audit-provider*)
@@ -67,7 +68,7 @@
 
           :else
           (try
-            (json-response 200 (history/execute body (:principal iam)))
+            (respond 200 (history/execute body (:principal iam)))
             (catch clojure.lang.ExceptionInfo e
               (let [d (ex-data e)
                     status (or (:status d) 400)]
@@ -79,4 +80,4 @@
             (catch Throwable e
               (log/error! {:id ::op-failed
                            :data {:action :running :subject :history :op op}} e)
-              (error 500 "INTERNAL_ERROR" (.getMessage e)))))))))
+              (error 500 "INTERNAL_ERROR" (.getMessage e))))))))))

@@ -3,6 +3,31 @@
 All notable changes to the Synthigy engine. Releases before 0.3.0 are
 described in their [GitHub release notes](https://github.com/synthigy/synthigy/releases).
 
+## [0.6.1] — 2026-11-26
+
+### Added
+- **Tenants: a whole Synthigy as an App.** An App whose App Configuration has Sandbox Type
+  `relaxed` may run containers of its own, so a Synthigy engine deployed as one (a tenant)
+  runs Apps of its own inside it. Its Apps are named under the tenant's host
+  (`web.xyz1.example.com`), its first superuser comes from the App's variables, and a
+  relaxed App cannot be nested in another. Admins only.
+- A tenant whose hostname changes is restarted under the new name, and so are the Apps
+  inside it.
+
+### Changed
+- **An App has one variable of each name**: a second one is refused at write
+  (`VARIABLE_TWICE`, rule `apps_variable`), where it used to fail the next deploy.
+- **`/files` and `/history` answer in the format `Accept` asks for**: `application/transit+json`
+  or `application/edn`, as `/data` already did; JSON otherwise. Errors follow it too. Over
+  transit, `/files` keeps the same keys, a file's `status` is a keyword (`:READY`), and times
+  (`uploaded_at`, link `expires_at`, version `at`) are dates. JSON answers are unchanged.
+- **`sql-template` returns enum values the way `search` does**: a column that is a whole enum
+  field, `{file.status}`, is a keyword in transit and EDN and a string in JSON.
+- "No matching route", "module not running" and unhandled 500 errors follow `Accept` as well.
+- `/data` reads `Accept` with parameters, so `application/transit+json; charset=utf-8` now
+  answers transit.
+- Dataset patch level 1.9.1, so clients can tell these answers apart.
+
 ## [0.6.0] — 2026-11-24
 
 ### Added

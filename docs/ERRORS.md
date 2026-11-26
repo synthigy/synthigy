@@ -102,6 +102,12 @@ An App's hostnames:
 | `HOSTNAME_INVALID` | A `name` that is not one lowercase DNS name: letters, digits, dots and dashes, no scheme, port or path | Send `app.example.com`, not `https://App.example.com/` |
 | `ROW_FORBIDDEN` | Giving a hostname to an App you may not change | Ask someone in the App's owner group, or an admin |
 
+### apps_variable
+
+`VARIABLE_TWICE`. An App has one variable of each name: a second variable
+with a name the App already has, or a rename onto one, is refused. Change
+the value of the variable that is there, or delete it first.
+
 ### apps_sensitive
 
 `SENSITIVE_STAYS`. A sensitive App Variable stays sensitive: setting

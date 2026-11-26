@@ -99,6 +99,17 @@
 
 (register-method! "ping" (fn [_] {:pong true}))
 
+(register-method! "host.alert"
+  (fn [{:keys [resource low availableBytes totalBytes at]}]
+    (let [data {:subject :host :resource (keyword resource) :state (if low :low :ok)
+                :available-bytes availableBytes :total-bytes totalBytes :at at}
+          msg (format "Host %s %s: %.1f GiB free of %.1f GiB" resource (if low "is running low" "is fine again")
+                      (/ (double (or availableBytes 0)) 1073741824.0) (/ (double (or totalBytes 0)) 1073741824.0))]
+      (if low
+        (log/warn {:id ::host-low :data data} msg)
+        (log/info {:id ::host-ok :data data} msg)))
+    nil))
+
 ;; --- db.probe: param-driven backend probes -------------------------------
 
 (defonce ^:private db-probes (atom {}))

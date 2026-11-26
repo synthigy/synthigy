@@ -264,14 +264,6 @@
 
 ;; ── Aggregate (`alias: count(rel)`) ────────────────────────────────────
 
-(def ^:private aggregate-field-types
-  {"sum" #{"number"}
-   "avg" #{"number"}
-   "min" #{"number" "timestamp" "string"}
-   "max" #{"number" "timestamp" "string"}})
-
-(def ^:private uncountable-types #{"json" "hashed" "encrypted"})
-
 (defn has-error-node? [n]
   (boolean (some #(= :error (:node %)) (tree-seq :children :children n))))
 
@@ -331,13 +323,6 @@
                     (= 1 (count segs))
                     (error-diag head (str "'" rel "' alone is not a field — " rel ".<field>")))))
               (compile-impl/filter-paths filter)))))))
-
-(defn filter-paths-on-relation?
-  "True when every filter path starts with `rel` and goes on to a field."
-  [filter rel]
-  (every? (fn [p] (let [segs (get-bare-identifiers p)]
-                    (and (= rel (:text (first segs))) (< 1 (count segs)))))
-          (compile-impl/filter-paths filter)))
 
 (defn or-list [xs]
   (let [xs (vec (sort xs))]
@@ -461,19 +446,19 @@
             (when-let [field-id (when (= 2 (count path-ids)) (second path-ids))]
               (let [field   (:text field-id)
                     attr    (get-in target-def [:attributes field])
-                    allowed (aggregate-field-types f)]
+                    allowed (compile-impl/aggregate-field-types f)]
                 (cond
                   (nil? attr)
                   (diag! field-id (str "Unknown attribute '" field "' on " (:target rel-def)))
 
                   distinct?
-                  (when (uncountable-types (:type attr))
+                  (when (compile-impl/uncountable-types (:type attr))
                     (diag! field-id (str "count(distinct …) can't compare " (:type attr) " attribute '" field "'")))
 
                   (and allowed (not (allowed (:type attr))))
                   (diag! field-id (str "`" f "` needs a " (or-list allowed) " attribute; '"
                                        field "' is " (:type attr))))))
-            (when (and filter (filter-paths-on-relation? filter rel-name))
+            (when (and filter (compile-impl/filter-paths-on-relation? filter rel-name))
               (lint-or-expr (compile-impl/drop-path-heads filter) target-def
                             (assoc ctx :path-prefix (str rel-name "."))))))))))
 
@@ -499,6 +484,34 @@
                                   (vswap! (:diags ctx) conj
                                           (error-diag alias-id (str "Duplicate key '" a "' at this scope — "
                                                                     "every operation needs its own alias"))))
+                                (conj seen a))
+                              seen))
+                          #{}
+                          stmts)))
+              (run! walk (:children node))))]
+    (walk tree)))
+
+(defn lint-relation-aliases
+  "A relation alias must not reuse a field, a bare relation or an earlier relation alias of its scope."
+  [tree ctx]
+  (letfn [(alias-id [inner]
+            (when (= :relation (:node inner))
+              (some-> (ast/find-child inner :alias) :children first)))
+          (walk [node]
+            (when (ast/container? node)
+              (when (#{:query :block} (:node node))
+                (let [stmts (keep #(when (= :statement (:node %)) (first (:children %))) (:children node))
+                      plain (into #{}
+                                  (keep #(when (and (#{:scalar :relation} (:node %)) (not (alias-id %)))
+                                           (:text (first (get-bare-identifiers %)))))
+                                  stmts)]
+                  (reduce (fn [seen inner]
+                            (if-let [id (alias-id inner)]
+                              (let [a (:text id)]
+                                (when (or (seen a) (plain a))
+                                  (vswap! (:diags ctx) conj
+                                          (error-diag id (str "Duplicate key '" a "' at this scope — "
+                                                              "give this relation its own alias"))))
                                 (conj seen a))
                               seen))
                           #{}
@@ -1181,6 +1194,7 @@
      ;; Duplicate detection is schema-independent — runs without root-def.
      (lint-duplicate-siblings tree ctx)
      (lint-aggregate-aliases tree ctx)
+     (lint-relation-aliases tree ctx)
      (lint-on-placement op tree ctx)
      (op-lint-rules op tree ctx)
      @diags)))

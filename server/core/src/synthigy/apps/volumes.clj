@@ -112,12 +112,18 @@
       (apply-reports! (access/with-principal nil (dataset/search-entity :apps/volume {:xid {:_in ids}} selection))
                       reports))))
 
+(defn sandbox
+  "The App's sandbox type, as the portal names it."
+  [client-xid]
+  (some-> (access/with-principal nil (dataset/get-entity :iam/app {:xid client-xid} {:configuration [{:selections {:sandbox_type nil}}]}))
+          :configuration :sandbox_type name))
+
 (defn sync!
   "Tell the portal an App's volumes and write back what it reports; a refusal fails them all."
   [client-xid app]
   (let [vols (live (of-app client-xid))]
     (try
-      (let [{reports :volumes} (supervisor/call-portal "app.volumes" {:app app :volumes (mapv #(select-keys % [:id :sizeMB]) (request vols))} timeout-ms)]
+      (let [{reports :volumes} (supervisor/call-portal "app.volumes" {:app app :sandbox (sandbox client-xid) :volumes (mapv #(select-keys % [:id :sizeMB]) (request vols))} timeout-ms)]
         (apply-reports! vols reports))
       (catch Throwable t
         (apply-reports! vols (for [v vols] {:id (:xid v) :state "failed" :error (or (ex-message t) (str (class t)))}))

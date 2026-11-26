@@ -19,15 +19,6 @@
 ;; ── Constants ────────────────────────────────────────────────────────────
 
 (def ^:private meta-keys ["limit" "offset" "order by" "distinct" "join"])
-(def ^:private operation-fns ["count" "sum" "avg" "min" "max"])
-
-(def ^:private operation-field-types
-  {"sum" #{"number"}
-   "avg" #{"number"}
-   "min" #{"number" "timestamp" "string"}
-   "max" #{"number" "timestamp" "string"}})
-
-(def ^:private uncountable-types #{"json" "hashed" "encrypted"})
 
 (def ^:private ops-by-type
   {"string"    ["=" "!=" "<" "<=" ">" ">=" "like" "ilike" "in" "not in" "is" "is not null"]
@@ -478,6 +469,16 @@
   [^String source offset]
   (peek (open-paren-stack source offset)))
 
+(defn relation-parens-stack
+  "Entity stack inside the header parens of the relation whose `(` is open at `offset`, or nil."
+  [tree source offset schema base-stack]
+  (some (fn [p]
+          (let [[_ anc] (innermost-with-ancestors tree (inc p) source)
+                rel (some #(when (= :relation (:node %)) %) (rseq anc))]
+            (when (= p (some-> rel (ast/find-child :parens) :span first))
+              (entity-stack-from-ancestors anc (inc p) source schema base-stack))))
+        (open-paren-stack source offset)))
+
 (def ^:private order-kw-re #"^\s*(?:_order_by|order\s+by)(?=\s|$)")
 (def ^:private order-spec-re #"^\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\s+(?:asc|desc))?\s*$")
 
@@ -524,10 +525,10 @@
              (#{"null" "true" "false"} (:text leaf))))))
 
 (defn value-slot
-  "Attribute path when `offset` sits where an `=`, `!=` or `in (…)` value goes, and whether inside an open quote."
+  "Attribute path when `offset` sits where a comparison or `in (…)` value goes, and whether inside an open quote."
   [source offset]
   (let [t (subs source (line-start-offset source offset) offset)
-        eq (re-find #"([A-Za-z_][A-Za-z0-9_.]*)\s*(?:!=|=)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)
+        eq (re-find #"([A-Za-z_][A-Za-z0-9_.]*)\s*(?:!=|<=|>=|=|<|>)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)
         in (re-find #"([A-Za-z_][A-Za-z0-9_.]*)\s+(?:not\s+)?in\s*\(((?:\s*(?:\"[^\"]*\"|[^\s,()\"]+)\s*,)*)\s*(\"[^\"]*|[A-Za-z0-9_]*)$" t)]
     (cond
       eq {:path (nth eq 1) :in-string? (str/starts-with? (nth eq 2) "\"")}
@@ -559,7 +560,7 @@
   [^String source offset]
   (some (fn [p]
           (when-let [[_ f] (re-matches call-head-re (subs source (line-start-offset source p) p))]
-            (when (some #{f} operation-fns) {:fn f :open p})))
+            (when (compile/aggregate-fns f) {:fn f :open p})))
         (rseq (open-paren-stack source offset))))
 
 (defn aggregate-fn-slot?
@@ -635,9 +636,8 @@
 
 (defn aliases-at
   "Aggregate aliases of the level whose parens hold `offset` in `source`."
-  [source offset]
-  (let [tree (parser/parse (or source ""))
-        [resolved ancestors] (innermost-with-ancestors tree offset (or source ""))]
+  [tree source offset]
+  (let [[resolved ancestors] (innermost-with-ancestors tree offset (or source ""))]
     (order-scope-aliases tree resolved ancestors)))
 
 (defn context-at
@@ -645,7 +645,8 @@
   (let [base-stack (cond-> []
                      (and schema root-entity (get-in schema [:entities root-entity]))
                      (conj (get-in schema [:entities root-entity])))
-        entity-stack (entity-stack-from-ancestors ancestors offset source schema base-stack)
+        entity-stack (or (relation-parens-stack tree source offset schema base-stack)
+                         (entity-stack-from-ancestors ancestors offset source schema base-stack))
         current-entity (peek entity-stack)
 
         prev-word (prev-word-at source offset)
@@ -874,10 +875,10 @@
 (defn operation-attr-options
   "Attributes of `target` that operation `f` can read."
   [target f distinct?]
-  (let [allowed (operation-field-types f)]
+  (let [allowed (compile/aggregate-field-types f)]
     (->> (:attributes target)
          (filter (fn [[_ a]] (if distinct?
-                               (not (uncountable-types (:type a)))
+                               (not (compile/uncountable-types (:type a)))
                                (and allowed (allowed (:type a))))))
          (map first)
          sort
@@ -937,7 +938,7 @@
                          (get-in schema [:entities root-entity])))
         marker (:marker-before ctx)]
     (case (:kind ctx)
-      :line-start-root
+      (:line-start-root :block-start)
       (cond
         marker
         (bare-relation-options entity-def (:siblings ctx))
@@ -953,19 +954,6 @@
       :root-entity-line
       (mapv (fn [e] {:label e :type "class" :section "Entities" :detail "root entity"})
             (sort (keys (:entities schema))))
-
-      :block-start
-      (cond
-        marker
-        (bare-relation-options entity-def (:siblings ctx))
-
-        (:none-scope ctx)
-        (none-scope-options entity-def (:siblings ctx))
-
-        :else
-        (when entity-def
-          (options-for-entity entity-def {:relation-prefix "->"
-                                          :siblings (:siblings ctx)})))
 
       :arg-list-start
       (concat
@@ -1058,7 +1046,6 @@
       [{:label "asc"  :type "constant" :detail "ascending"}
        {:label "desc" :type "constant" :detail "descending"}]
 
-      ;; Only single-parent self-relations of the root entity can be recursed.
       :on-relation
       (when entity-def
         (let [root-name (or root-entity
@@ -1136,10 +1123,10 @@
 ;; ── Public entry ─────────────────────────────────────────────────────────
 
 (defn complete
-  "Completion options at `offset` in `source`; `:op` applies op-specific filters."
-  [{:keys [source offset schema root-entity op]
+  "Completion options at `offset` in `source` (parsed as `tree` when given); `:op` applies op-specific filters."
+  [{:keys [source offset schema root-entity op tree]
     :or {offset 0}}]
-  (let [tree (parser/parse (or source ""))
+  (let [tree (or tree (parser/parse (or source "")))
         root-entity (or (some-> (:root-entity tree) :text) root-entity)
         [resolved ancestors] (innermost-with-ancestors tree offset (or source ""))
         ctx (-> (context-at tree resolved ancestors source offset schema root-entity)

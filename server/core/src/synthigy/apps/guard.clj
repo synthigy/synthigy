@@ -10,8 +10,9 @@
 ;   Commercial licensing: r.gersak@gmail.com  See COMMERCIAL.md.
 
 (ns synthigy.apps.guard
-  "App Package Status and Last Error are written by the engine alone; a person's rotation of an App's secret restarts the running App with one the engine mints; a sensitive App Variable's Value reads back only to its App."
+  "App Package Status and Last Error are written by the engine alone; a person's rotation of an App's secret restarts the running App with one the engine mints; a sensitive App Variable's Value reads back only to its App; a variable name is set once per App."
   (:require
+   [clojure.string :as str]
    [synthigy.apps.deploy :as deploy]
    [synthigy.apps.volumes :as volumes]
    [synthigy.apps.model]
@@ -147,8 +148,55 @@
                         {:code "SENSITIVE_STAYS" :rule "apps_sensitive" :variable k})))))
   analysis)
 
+(defn variable-ends
+  "[variable tmp id, client tmp id] for each link the write makes between a variable and its App."
+  [analysis variable-table]
+  (for [[{:keys [relation] :as r} pairs] (concat (:relations/one analysis) (:relations/many analysis))
+        :when (= relation (id/relation :apps/app->variables))
+        [from to] pairs]
+    (if (= variable-table (:from/table r)) [from to] [to from])))
+
+(defn assert-variable-names!
+  "Refuse a principal's write that leaves an App with two variables of one name."
+  [analysis]
+  (when-not (dataset/engine-write?)
+    (let [model (dataset/deployed-model)
+          table (some-> (core/get-entity model (id/entity :apps/variable)) naming/entity->table-name)
+          client-table (some-> (core/get-entity model (id/entity :iam/app)) naming/entity->table-name)
+          k (id/key)
+          rows (get-in analysis [:entity table])]
+      (when (seq rows)
+        (let [linked (into {} (for [[v c] (variable-ends analysis table)
+                                    :let [row (get-in analysis [:entity client-table c])
+                                          cx (or (get row k)
+                                                 (when-let [cid (:id row)]
+                                                   (get (access/with-principal nil (dataset/get-entity :iam/app {:id cid} {k nil})) k)))]
+                                    :when cx]
+                                [v cx]))
+              stored (fn [row]
+                       (when-let [x (get row k)]
+                         (access/with-principal nil
+                           (dataset/get-entity :apps/variable {k x} {:name nil :app [{:selections {k nil}}]}))))
+              written (for [[tmp row] rows
+                            :let [old (stored row)
+                                  app (or (linked tmp) (get-in old [:app k]))
+                                  n (if (contains? row :name) (:name row) (:name old))]
+                            :when (and app n)]
+                        {:app app :name n :id (get row k)})]
+          (doseq [[app ws] (group-by :app written)
+                  :let [mine (set (keep :id ws))
+                        others (remove #(mine (get % k))
+                                       (:variables (access/with-principal nil
+                                                     (dataset/get-entity :iam/app {k app} {:variables [{:selections {k nil :name nil}}]}))))
+                        named (set (map :name ws))
+                        twice (keep (fn [[n c]] (when (and (named n) (> c 1)) n)) (frequencies (concat (map :name ws) (keep :name others))))]
+                  :when (seq twice)]
+            (throw (ex-info (str "Variable " (str/join ", " twice) " is already set on this App; change that one or delete it")
+                            {:code "VARIABLE_TWICE" :rule "apps_variable" :client app :names (vec twice)})))))))
+  analysis)
+
 (defmethod enhance/write [Object (id/entity :apps/variable :xid)] [_ _ analysis _]
-  (assert-sensitive-stays! analysis))
+  (-> analysis assert-sensitive-stays! assert-variable-names!))
 
 (def volume-engine-columns #{:state :used_mb :last_error :delete_after})
 

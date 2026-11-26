@@ -22,7 +22,7 @@
   "The closed set of two-level topics (`parent/child`); a child never appears without its parent."
   #{:traffic/request :traffic/op :traffic/sse
     :traffic/subscription :traffic/delta
-    :apps/output :apps/usage :apps/event})
+    :apps/output :apps/event})
 
 (def all-topics
   "The closed vocabulary of topics a signal may be tagged with."
@@ -39,7 +39,6 @@
    :synthigy.server.data/op-completed #{:traffic/op}
    :synthigy.apps.output/line #{:apps/output}
    :synthigy.apps.output/dropped #{:apps/output}
-   :synthigy.apps.output/sample #{:apps/usage}
    :synthigy.apps.deploy/app-event #{:apps/event}})
 
 (def ^:private traffic-id-prefix->topic

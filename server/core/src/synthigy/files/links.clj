@@ -83,7 +83,7 @@
   {:xid (id/extract link)
    :file (some-> (get link (:file lf)) id/extract)
    :created_by (some-> (get link (:created-by lf)) id/extract)
-   :expires_at (some-> (get link (:expires-at lf)) instant str)
+   :expires_at (some-> (get link (:expires-at lf)) instant)
    :max_downloads (get link (:max-downloads lf))
    :downloads (or (get link (:downloads lf)) 0)
    :inline (inline? lf link)})

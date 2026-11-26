@@ -237,8 +237,6 @@
                       root-parens (assoc :root-parens root-parens))]
     [query (skip-silent st :eof)]))
 
-;; `_count` / `_agg` (removed): the header line and its indented block become one error.
-
 (defn parse-removed-block [st]
   (let [start (peek-tok st)
         node (error-node start (str "`" (:text start) "` was removed — write each operation as its own line: "

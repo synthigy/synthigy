@@ -156,6 +156,9 @@ confidential clients only, never with a browser's sign-in cookie (403
 `acting_as`, `:acting-as`).
 Errors are `{"error": {"code", "message"}}`. JSON answers are snake_case;
 `?key_format=camel`, `kebab` or `pascal` on any call cases their keys like `/data` does.
+Send `Accept: application/transit+json` (or `application/edn`) and answers and errors come
+in that format, with the same keys, the file `status` as a keyword (`:READY`) and times
+as dates. Downloads and zips are bytes either way.
 
 A folder is named by its xid or by its path: `/` is `ROOT`, and
 `/projects/acme` and `/projects/acme/` name the same folder. A path works
